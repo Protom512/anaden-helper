@@ -1,0 +1,45 @@
+[workspace]
+resolver = "2"
+members = [
+    "crates/anaden-core",
+    "crates/anaden-device",
+    "crates/anaden-vision",
+    "crates/anaden-engine",
+    "crates/anaden-strategies",
+    "crates/anaden-cli",
+]
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
+license = "MIT"
+
+[workspace.dependencies]
+# Internal crates
+anaden-core = { path = "crates/anaden-core" }
+anaden-device = { path = "crates/anaden-device" }
+anaden-vision = { path = "crates/anaden-vision" }
+anaden-engine = { path = "crates/anaden-engine" }
+anaden-strategies = { path = "crates/anaden-strategies" }
+
+# Image processing
+image = "0.25"
+imageproc = "0.25"
+
+# Async runtime
+tokio = { version = "1", features = ["full"] }
+
+# Serialization / Config
+serde = { version = "1", features = ["derive"] }
+toml = "0.8"
+
+# Logging
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+# Error handling
+thiserror = "2"
+anyhow = "1"
+
+# Testing
+tempfile = "3"

@@ -1,0 +1,9 @@
+[package]
+name = "anaden-strategies"
+description = "Mini-game strategy implementations"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anaden-core = { workspace = true }
+tracing = { workspace = true }

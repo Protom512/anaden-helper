@@ -1,0 +1,12 @@
+[package]
+name = "anaden-device"
+description = "ADB device communication layer"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anaden-core = { workspace = true }
+tokio = { workspace = true }
+image = { workspace = true }
+thiserror = { workspace = true }
+tracing = { workspace = true }

@@ -1,0 +1,5 @@
+docs/anaden-helper.wiki/
+target/
+templates/captures/
+*.log
+myeasylog.log

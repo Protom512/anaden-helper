@@ -1,0 +1,9 @@
+[package]
+name = "anaden-core"
+description = "Domain types and traits for Another Eden automation"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+serde = { workspace = true }
+thiserror = { workspace = true }

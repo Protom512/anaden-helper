@@ -1,0 +1,17 @@
+[package]
+name = "anaden-engine"
+description = "Sense-Think-Act automation orchestrator"
+version.workspace = true
+edition.workspace = true
+
+[dependencies]
+anaden-core = { workspace = true }
+anaden-device = { workspace = true }
+anaden-vision = { workspace = true }
+anaden-strategies = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+thiserror = { workspace = true }
+anyhow = { workspace = true }
+serde = { workspace = true }
+toml = { workspace = true }
