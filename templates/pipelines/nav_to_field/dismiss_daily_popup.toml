@@ -1,0 +1,12 @@
+name      = "DismissDailyPopup"
+state     = "DailyPopup"
+algorithm = "ccoeff"
+template  = "../../scenes/common/close_btn.png"
+# ROI: 幅1280基準座標系。日次ポップアップ右上の「×」閉じるボタン領域に限定。
+# ×中心は実測 raw(870,70) = 正規化座標 (464,37) 付近。旧ROI[1080,0,160,100]は
+# 右上永続HUD(設定/メニュー系円形アイコン)を写し誤マッチの原因だったため、
+# 実×を含む左寄り領域へ修正。
+roi       = [420, 0, 120, 90]
+threshold = 0.80
+action    = { type = "click_self" }
+next      = ["FieldHudTop"]

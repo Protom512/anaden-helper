@@ -1,0 +1,15 @@
+name      = "TapBottomStable"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "bottom_stable.png"
+# ROI: 幅1280基準座標系(実機 Pixel7a 2400x1080 → 正規化 1280x576)。
+# フィールド画面 下部UI帯(パーティステータス)。stable_region で5枚間 diff=0(完全安定)。
+# テンプレは正規化空間(80x64)で作成。5枚の field キャプチャで conf=0.9999-1.0000。
+# 変動に強い理由: 下部UI帯は固定UI(時間/天候/キャラ移動に無関係)、かつ
+# lumvar 高(テクスチャ豊富)で単色バー(既存 top.png の失敗 conf 0.5756)と違う。
+roi       = [820, 470, 200, 90]
+threshold = 0.80
+# click_self: 認識したUI帯(matched_region 中心)を scrcpy-touch でタップ。
+# 効果は発火前後キャプチャで誠実判定。
+action    = { type = "click_self" }
+next      = []

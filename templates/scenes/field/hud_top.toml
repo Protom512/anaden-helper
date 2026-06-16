@@ -1,0 +1,9 @@
+name      = "FieldHudTop"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "top.png"
+# ROI: 幅1280基準座標系(実機 Pixel7a 2400x1080 → 正規化 1280x576)。
+# 上部HUD帯の中央。実機2キャプチャでマッチ中心は (736,32) 固定(conf=1.0)。
+# テンプレ64x64 + 揺らぎ余裕で x:400..880, y:0..100 に設定(全面1280x576 の約5%へ局所化)。
+roi       = [400, 0, 480, 100]
+threshold = 0.80

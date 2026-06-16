@@ -9,9 +9,20 @@ anaden-core = { workspace = true }
 anaden-device = { workspace = true }
 anaden-vision = { workspace = true }
 anaden-strategies = { workspace = true }
+image = { workspace = true }
 tokio = { workspace = true }
 tracing = { workspace = true }
 thiserror = { workspace = true }
 anyhow = { workspace = true }
 serde = { workspace = true }
 toml = { workspace = true }
+async-trait = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[features]
+default = []
+# anaden-device の常駐 capture backend(scrcpy) を PipelineDriver の Capture 候補に加える。
+# 有効化すると anaden-device 側の `capture-scrcpy` も連鎖して有効になる。
+capture-scrcpy = ["anaden-device/capture-scrcpy"]

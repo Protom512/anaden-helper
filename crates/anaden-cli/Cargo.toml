@@ -26,3 +26,9 @@ toml = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 image = { workspace = true }
 imageproc = { workspace = true }
+
+[features]
+default = []
+# 常駐 capture(scrcpy) を CLI から利用可能にする。
+# anaden-engine / anaden-device の capture-scrcpy feature を連鎖有効化する。
+capture-scrcpy = ["anaden-engine/capture-scrcpy", "anaden-device/capture-scrcpy"]

@@ -177,7 +177,7 @@ impl TemplateStore {
 fn parse_state_from_dir_name(name: &str) -> GameState {
     match name.to_lowercase().as_str() {
         "title" | "title_screen" => GameState::TitleScreen,
-        "home" | "home_screen" => GameState::HomeScreen,
+        "home" | "home_screen" | "field" => GameState::Field,
         "loading" => GameState::Loading,
         "battle" | "in_battle" => GameState::InBattle(anaden_core::BattlePhase::PlayerTurn),
         "fishing" => GameState::MiniGame(anaden_core::MiniGameType::Fishing),

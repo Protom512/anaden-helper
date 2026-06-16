@@ -1,0 +1,24 @@
+[package]
+name = "anaden-studio"
+description = "Template authoring GUI for anaden vision pipeline"
+version.workspace = true
+edition.workspace = true
+
+[[bin]]
+name = "anaden-studio"
+path = "src/main.rs"
+
+[dependencies]
+anaden-core.workspace = true
+anaden-device.workspace = true
+anaden-vision.workspace = true
+anyhow.workspace = true
+eframe = "0.34.3"
+image.workspace = true
+rfd = "0.17.2"
+serde.workspace = true
+toml.workspace = true
+
+[dev-dependencies]
+ab_glyph = "0.2"
+tempfile.workspace = true

@@ -28,6 +28,11 @@ pub enum AdbError {
 /// 設計意図: ADB との通信をカプセル化し、`adb` コマンドの詳細を上位層から隠す。
 /// 将来的に `adb_client` crate（純 Rust ADB）に移行する際も、
 /// このモジュールの差し替えで対応できる。
+///
+/// `Clone` 可能: 保持するのはシリアル・adb パスのみで共有リソースを持たない。
+/// アプリ制御(`AppController::ensure_app_open`)が `'static` な非同期クロージャへ
+/// クライアントを持ち出すために使用する。
+#[derive(Clone)]
 pub struct AdbClient {
     /// デバイスのシリアル番号または接続先（例: "emulator-5554", "localhost:5555"）
     serial: String,
@@ -100,6 +105,20 @@ impl AdbClient {
     /// デバイスのシリアルを返す。
     pub fn serial(&self) -> &str {
         &self.serial
+    }
+
+    /// adb コマンドのパスを返す。
+    pub fn adb_path(&self) -> &str {
+        &self.adb_path
+    }
+
+    /// 指定した引数で adb コマンドを実行し、生の [`std::process::Output`] を返す。
+    ///
+    /// `push` / `forward` / サーバ起動(`app_process`)等、[`Self::shell`] 経由では表現できない
+    /// コマンドを必要とする上位モジュール(scrcpy capture 等)向けの公開エントリ。
+    /// シリアルの差し込みは呼び出し側の責務(`-s <serial>` を args に含める)。
+    pub async fn run_adb_raw(&self, args: &[&str]) -> Result<std::process::Output, AdbError> {
+        self.run_adb_command(args).await
     }
 
     /// adb コマンドを実行する内部メソッド。

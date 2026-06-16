@@ -1,0 +1,15 @@
+name      = "TapHudTr"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "hud_tr.png"
+# ROI: 幅1280基準座標系(実機 Pixel7a 2400x1080 → 正規化 1280x576)。
+# フィールド画面 右上HUD要素(ネイティブ 2114..2210, 392..488)。stable_region で
+# 3キャプチャ間 diff=0(完全安定)かつ lumvar=10522(テクスチャ豊富=認識しやすい)。
+# 単色バー(既存 top.png の失敗: conf 0.5756)と違い、特徴量豊富で変動に強い。
+# 3枚の field キャプチャで conf=0.9912 安定マッチ(閾値0.80 を大きく超える)。
+roi       = [1080, 150, 180, 150]
+threshold = 0.80
+# click_self: 認識したHUD要素(matched_region 中心)を scrcpy-touch でタップ。
+# 効果は発火前後キャプチャで誠実判定(シーン/画面内容の変化)。
+action    = { type = "click_self" }
+next      = []

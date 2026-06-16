@@ -1,0 +1,1144 @@
+//! 宣言的パイプラインのデバイス発火＋ライブループ層。
+//!
+//! [`crate::pipeline_runner`] の純粋 tick([`PipelineState::tick`]) を消費し、
+//! 実 capture(`ScreenshotCapture`)/input(`InputExecutor`) に接続して async ループを回す
+//! 最終マイル層。orchestrator(命令型 Strategy ループ) とは独立し、`GameState`/Strategy/
+//! Recovery には依存しない。テンプレ画像は caller が `&[TaskDef]` として渡す。
+//!
+//! 解像度モデル: device 側は生解像度(Pixel 7a なら 2400x1080 等)。capture した画像を
+//! [`ScreenScaler::normalize`] で基準幅(1280)へ縮小して tick に食わせ、発火座標は逆方向に
+//! [`rescale_command`] で実機座標へ戻す。`ScreenScaler::from_base` は幅ベース均一スケール
+//! なので X/Y 同一ファクタで動く。
+
+use std::future::Future;
+use std::pin::Pin;
+use std::time::Duration;
+
+use async_trait::async_trait;
+use image::DynamicImage;
+use tracing::{debug, info, warn};
+
+use anaden_core::InputAction;
+use anaden_device::{AdbError, InputExecutor, ScreenshotCapture};
+use anaden_vision::{ScreenScaler, TaskDef};
+
+use crate::pipeline_runner::{InputCommand, PipelineState};
+
+/// boxed async リカバリフック(`run_loop_with_recovery` で使用)。
+///
+/// NoMatch が `threshold` 回連続したときに呼ばれる。`Ok` ならリカバリ成功とみなし
+/// NoMatch 連続カウンタをリセットしてループを継続、`Err` なら IO エラーとして停止する。
+pub type RecoveryHook = Box<
+    dyn FnMut(u32) -> Pin<Box<dyn Future<Output = Result<(), AdbError>> + Send>> + Send,
+>;
+
+/// 720p 基準(幅1280)の [`InputCommand`] をデバイス実解像度(device_width)の座標へ変換する純関数。
+///
+/// [`ScreenScaler::from_base`] は幅ベースの均一スケール(scale_factor = 1280/src_width)を用いる。
+/// X と Y は同一ファクタで動くため、両軸とも `from_base(device_width, v)` に通せばよい。
+/// IO を持たないため単体テスト可能。
+pub fn rescale_command(cmd: InputCommand, scaler: &ScreenScaler, device_width: u32) -> InputCommand {
+    match cmd {
+        InputCommand::Tap { x, y } => InputCommand::Tap {
+            x: scaler.from_base(device_width, x),
+            y: scaler.from_base(device_width, y),
+        },
+        InputCommand::Swipe { from, to } => InputCommand::Swipe {
+            from: (
+                scaler.from_base(device_width, from.0),
+                scaler.from_base(device_width, from.1),
+            ),
+            to: (
+                scaler.from_base(device_width, to.0),
+                scaler.from_base(device_width, to.1),
+            ),
+        },
+    }
+}
+
+/// 画面キャプチャ能力の抽象。本番 impl([`ScreenshotCapture`]) とテスト用 fake を差し替える。
+#[async_trait]
+pub trait Capture: Send + Sync {
+    /// デバイスの画面をキャプチャして生解像度画像を返す。
+    async fn capture(&self) -> Result<DynamicImage, AdbError>;
+}
+
+/// 入力発火能力の抽象。本番 impl([`InputExecutor`]) とテスト用 fake を差し替える。
+#[async_trait]
+pub trait Input: Send + Sync {
+    /// 入力アクションを実行する。
+    async fn execute(&self, action: &InputAction) -> Result<(), AdbError>;
+}
+
+// ---- 本番 impl: anaden-device の具象型を trait に被せる ----
+
+#[async_trait]
+impl Capture for ScreenshotCapture {
+    async fn capture(&self) -> Result<DynamicImage, AdbError> {
+        ScreenshotCapture::capture(self).await
+    }
+}
+
+#[cfg(feature = "capture-scrcpy")]
+#[async_trait]
+impl Capture for anaden_device::ScrcpyCapture {
+    async fn capture(&self) -> Result<DynamicImage, AdbError> {
+        anaden_device::ScrcpyCapture::capture(self).await
+    }
+}
+
+/// `ScrcpySession`(video+control 2ソケット) を Capture バックエンドとして使う impl。
+/// `--capture scrcpy --input scrcpy` 時、capture も入力も同一セッションを共有する。
+#[cfg(feature = "capture-scrcpy")]
+#[async_trait]
+impl Capture for std::sync::Arc<anaden_device::ScrcpySession> {
+    async fn capture(&self) -> Result<DynamicImage, AdbError> {
+        anaden_device::ScrcpySession::capture(self).await
+    }
+}
+
+#[async_trait]
+impl Input for InputExecutor {
+    async fn execute(&self, action: &InputAction) -> Result<(), AdbError> {
+        InputExecutor::execute(self, action).await
+    }
+}
+
+// ---- scrcpy-touch 入力経路(capture-scrcpy feature 内) ----
+//
+// `ScrcpySession` は video+control 2ソケットを持ち、control ソケットへ
+// TYPE_INJECT_TOUCH_EVENT を送る(`send_touch`/`tap`/`swipe`)。`adb input tap` を
+// ゲーム(Another Eden)が無視する問題を、scrcpy 経由のタッチ注入で解決する経路。
+//
+// `ScrcpySession::tap_with`/`swipe_with` は内部で `std::thread::sleep` する同期 API なので、
+// async `Input::execute` からは `spawn_blocking` でワーカスレッドへ逃す(runtime 阻止回避)。
+// `ScrcpySession` は `Send + Sync`(Arc<Inner> + Mutex)なので `Arc::clone` して持ち出せる。
+#[cfg(feature = "capture-scrcpy")]
+#[async_trait]
+impl Input for std::sync::Arc<anaden_device::ScrcpySession> {
+    async fn execute(&self, action: &InputAction) -> Result<(), AdbError> {
+        let session = self.clone();
+        let action = action.clone();
+        tokio::task::spawn_blocking(move || match &action {
+            InputAction::Tap(p) => session.tap(p.x, p.y),
+            InputAction::Swipe {
+                from,
+                to,
+                duration_ms,
+            } => session.swipe(from.x, from.y, to.x, to.y, *duration_ms),
+            InputAction::LongPress(p, duration_ms) => {
+                session.long_press(p.x, p.y, *duration_ms)
+            }
+            InputAction::Wait(duration) => {
+                debug!("Waiting for {:?}", duration);
+                // spawn_blocking 上なので同期 sleep で OK。
+                std::thread::sleep(*duration);
+                Ok(())
+            }
+        })
+        .await
+        .map_err(|e| AdbError::CommandFailed {
+            message: format!("scrcpy-touch 入力タスク panic/中止: {e}"),
+        })?
+    }
+}
+
+/// 1 サイクルの実行結果。caller([`PipelineDriver::run_loop`]) が継続判定に使う。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum StepOutcome {
+    /// tick がマッチしコマンド発火済み。`next_current` があれば継続。
+    /// `fired` は実際に発火した(実機座標へ rescale 済み)コマンド。
+    Fired {
+        next_current: Option<String>,
+        fired: Option<InputCommand>,
+    },
+    /// tick したが発火コマンド無し(Stop/DoNothing/ClickSelf w/o region)。
+    /// `next_current` が [`None`] は停止指示。[`Some`] は遷移のみ。
+    NoFire {
+        next_current: Option<String>,
+    },
+    /// マッチせず(tick が [`None`])。current 不変。リトライ候補。
+    NoMatch,
+    /// capture/execute の IO エラー。
+    Error(String),
+}
+
+/// パイプライン実行ドライバ。純粋 tick + 実 capture/input を接続する。
+pub struct PipelineDriver<C: Capture, I: Input> {
+    capture: C,
+    input: I,
+    scaler: ScreenScaler,
+    state: PipelineState,
+    tasks: Vec<TaskDef>,
+    /// rescale 用デバイス実解像度の幅。
+    device_width: u32,
+    /// `InputCommand::Swipe` に duration が無いためのデフォルト(millisec)。
+    swipe_duration_ms: u64,
+}
+
+impl<C: Capture, I: Input> PipelineDriver<C, I> {
+    /// 各依存を指定して生成する。
+    ///
+    /// `device_width` は実機の横解像度(Pixel 7a なら 2400)。発火座標の基準→実機変換に用いる。
+    /// `swipe_duration_ms` は `Action::Swipe` が duration を持たないため発火時に注入する固定値。
+    pub fn new(
+        capture: C,
+        input: I,
+        state: PipelineState,
+        tasks: Vec<TaskDef>,
+        device_width: u32,
+        swipe_duration_ms: u64,
+    ) -> Self {
+        Self {
+            capture,
+            input,
+            scaler: ScreenScaler::new(),
+            state,
+            tasks,
+            device_width,
+            swipe_duration_ms,
+        }
+    }
+
+    /// スケーラへの参照(主にテスト・デバッグ用)。
+    pub fn scaler(&self) -> &ScreenScaler {
+        &self.scaler
+    }
+
+    /// 現在タスク名への参照。
+    pub fn current(&self) -> &str {
+        self.state.current()
+    }
+
+    /// 1 サイクル(capture → normalize → tick → rescale → execute)を実行する。
+    pub async fn run_once(&mut self) -> StepOutcome {
+        let t_cycle = std::time::Instant::now();
+        // 1. capture（生解像度画像）
+        let t_cap = std::time::Instant::now();
+        let screen = match self.capture.capture().await {
+            Ok(img) => img,
+            Err(e) => {
+                warn!("pipeline capture error: {e}");
+                return StepOutcome::Error(format!("capture: {e}"));
+            }
+        };
+        let capture_ms = t_cap.elapsed().as_secs_f64() * 1000.0;
+        let raw_w = screen.width();
+        let raw_h = screen.height();
+        // 2. normalize → 基準幅画像(tick は基準座標系前提)
+        let normalized = self.scaler.normalize(&screen);
+        let norm_w = normalized.width();
+        let norm_h = normalized.height();
+        // [DEBUG] 生フレーム寸法 + normalize 後寸法。向き/スケール乖離の診断用。
+        debug!(
+            "frame raw={raw_w}x{raw_h} normalized={norm_w}x{norm_h} (device_width={})",
+            self.device_width
+        );
+        // 3. tick（純粋計算 + current 遷移）
+        let t_rec = std::time::Instant::now();
+        let tick = match self.state.tick(&normalized, &self.tasks) {
+            Some(r) => r,
+            None => {
+                debug!(
+                    "cycle latency: capture={capture_ms:.2}ms recognize={:.2}ms e2e={:.2}ms (NoMatch) raw={raw_w}x{raw_h} norm={norm_w}x{norm_h}",
+                    t_rec.elapsed().as_secs_f64() * 1000.0,
+                    t_cycle.elapsed().as_secs_f64() * 1000.0
+                );
+                return StepOutcome::NoMatch;
+            }
+        };
+        let recognize_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
+        // 4. rescale + execute（command があれば発火）
+        if let Some(cmd) = tick.command {
+            let device_cmd = rescale_command(cmd, &self.scaler, self.device_width);
+            if let Err(e) = self.execute_command(&device_cmd).await {
+                warn!("pipeline execute error: {e}");
+                return StepOutcome::Error(format!("execute: {e}"));
+            }
+            debug!("fired: {:?}", device_cmd);
+            debug!(
+                "cycle latency: capture={capture_ms:.2}ms recognize={recognize_ms:.2}ms e2e={:.2}ms (Fired)",
+                t_cycle.elapsed().as_secs_f64() * 1000.0
+            );
+            StepOutcome::Fired {
+                next_current: tick.next_current,
+                fired: Some(device_cmd),
+            }
+        } else {
+            debug!(
+                "cycle latency: capture={capture_ms:.2}ms recognize={recognize_ms:.2}ms e2e={:.2}ms (NoFire)",
+                t_cycle.elapsed().as_secs_f64() * 1000.0
+            );
+            StepOutcome::NoFire {
+                next_current: tick.next_current,
+            }
+        }
+    }
+
+    /// [`InputCommand`] → [`InputAction`] 変換＋発火。Swipe に duration を注入する。
+    async fn execute_command(&self, cmd: &InputCommand) -> Result<(), AdbError> {
+        let action = match *cmd {
+            InputCommand::Tap { x, y } => InputAction::tap(x, y),
+            InputCommand::Swipe { from, to } => {
+                InputAction::swipe(from.0, from.1, to.0, to.1, self.swipe_duration_ms)
+            }
+        };
+        self.input.execute(&action).await
+    }
+}
+
+/// run_loop の停止理由。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LoopStopReason {
+    /// `Action::Stop` 到達(NoFire + next_current=None)。
+    Stop,
+    /// next_current が無い終端タスクへ到達(Fired 後 next_current=None)。
+    TerminalTask,
+    /// 最大イテレーション到達。
+    MaxIterations,
+    /// capture 失敗。
+    CaptureError,
+    /// execute 失敗。
+    ExecuteError,
+}
+
+/// run_loop の結果。
+#[derive(Debug, Clone)]
+pub struct LoopOutcome {
+    /// 実行したサイクル数。
+    pub iterations: u64,
+    /// 発火履歴(検証・デバッグ用)。実機座標へ rescale 済み。
+    pub fired_commands: Vec<InputCommand>,
+    /// 終端タスク名 or 停止理由文字列。
+    pub terminal: String,
+    /// 停止理由。
+    pub reason: LoopStopReason,
+}
+
+impl<C: Capture, I: Input> PipelineDriver<C, I> {
+    /// run_once を指定 interval で反復する。3つの停止条件:
+    /// (a) Stop(command 無 + next_current=None)、(b) 終端(next_current=None だが Fired)、
+    /// (c) max_iterations。
+    ///
+    /// IO エラーは即停止(簡易方針)。NoMatch は current 不変で次サイクルへ流す(リトライしない)。
+    /// リカバリ不要のエントリポイント。リカバリ付きは [`Self::run_loop_with_recovery`]。
+    pub async fn run_loop(&mut self, interval: Duration, max_iterations: u64) -> LoopOutcome {
+        self.run_loop_with_recovery(interval, max_iterations, 0, None)
+            .await
+    }
+
+    /// `run_loop` + NoMatch 連続時リカバリフック付き。
+    ///
+    /// `recover_nomatch_threshold > 0` かつ `recover` が [`Some`] のとき、
+    /// NoMatch が `threshold` 回連続するごとに `recover(current_streak)` を呼ぶ。
+    /// `Ok` なら連続カウンタをリセットしてループ継続。`Err` なら [`LoopStopReason::ExecuteError`]
+    /// で停止(re-launch の ADB 失敗等)。`threshold == 0` または `recover == None` なら
+    /// リカバリ無効(通常の [`Self::run_loop`] と等価)。
+    pub async fn run_loop_with_recovery(
+        &mut self,
+        interval: Duration,
+        max_iterations: u64,
+        recover_nomatch_threshold: u32,
+        mut recover: Option<RecoveryHook>,
+    ) -> LoopOutcome {
+        let mut iterations = 0u64;
+        let mut fired: Vec<InputCommand> = Vec::new();
+        let mut nomatch_streak: u32 = 0;
+        let recovery_enabled = recover_nomatch_threshold > 0 && recover.is_some();
+        loop {
+            iterations += 1;
+            if iterations > max_iterations {
+                return self.build_outcome(
+                    iterations - 1,
+                    fired,
+                    LoopStopReason::MaxIterations,
+                    "max_iterations",
+                );
+            }
+            match self.run_once().await {
+                StepOutcome::Fired {
+                    next_current,
+                    fired: just_fired,
+                } => {
+                    nomatch_streak = 0;
+                    if let Some(c) = just_fired {
+                        fired.push(c);
+                    }
+                    match next_current {
+                        None => {
+                            return self.build_outcome(
+                                iterations,
+                                fired,
+                                LoopStopReason::TerminalTask,
+                                self.current(),
+                            );
+                        }
+                        Some(name) => debug!("fired, advancing to {}", name),
+                    }
+                }
+                StepOutcome::NoFire { next_current } => {
+                    nomatch_streak = 0;
+                    match next_current {
+                        None => {
+                            return self.build_outcome(
+                                iterations,
+                                fired,
+                                LoopStopReason::Stop,
+                                "stop",
+                            );
+                        }
+                        Some(name) => debug!("no-fire, transitioning to {}", name),
+                    }
+                }
+                StepOutcome::NoMatch => {
+                    // current 不変。リトライせず次サイクルへ。
+                    nomatch_streak = nomatch_streak.saturating_add(1);
+                    if recovery_enabled && nomatch_streak >= recover_nomatch_threshold {
+                        info!(
+                            "NoMatch streak {} >= threshold {}; invoking recovery hook",
+                            nomatch_streak, recover_nomatch_threshold
+                        );
+                        if let Some(hook) = recover.as_mut() {
+                            match hook(nomatch_streak).await {
+                                Ok(()) => {
+                                    info!("recovery hook succeeded; resetting NoMatch streak");
+                                    nomatch_streak = 0;
+                                }
+                                Err(e) => {
+                                    warn!("recovery hook failed: {e}");
+                                    return self.build_outcome(
+                                        iterations - 1,
+                                        fired,
+                                        LoopStopReason::ExecuteError,
+                                        "recovery_failed",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                StepOutcome::Error(msg) => {
+                    let reason = if msg.starts_with("capture") {
+                        LoopStopReason::CaptureError
+                    } else {
+                        LoopStopReason::ExecuteError
+                    };
+                    return self.build_outcome(iterations - 1, fired, reason, "io_error");
+                }
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    fn build_outcome(
+        &self,
+        iterations: u64,
+        fired_commands: Vec<InputCommand>,
+        reason: LoopStopReason,
+        terminal: &str,
+    ) -> LoopOutcome {
+        LoopOutcome {
+            iterations,
+            fired_commands,
+            terminal: terminal.to_string(),
+            reason,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use anaden_core::ScreenRegion;
+    use anaden_vision::Action;
+    use image::{DynamicImage, GrayImage, Luma};
+    use std::collections::VecDeque;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::sync::{Arc, Mutex};
+
+    // ---- pipeline_runner.rs のテストヘルパ相当（複製） ----
+
+    fn gradient_needle(w: u32, h: u32) -> GrayImage {
+        let mut img = GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x + y) % 64) as u8;
+                img.put_pixel(x, y, Luma([v]));
+            }
+        }
+        img
+    }
+
+    fn embed(
+        haystack_w: u32,
+        haystack_h: u32,
+        needle: &GrayImage,
+        ox: u32,
+        oy: u32,
+        bg: u8,
+    ) -> GrayImage {
+        let mut img = GrayImage::from_pixel(haystack_w, haystack_h, Luma([bg]));
+        for y in 0..needle.height() {
+            for x in 0..needle.width() {
+                let p = needle.get_pixel(x, y)[0];
+                img.put_pixel(ox + x, oy + y, Luma([p]));
+            }
+        }
+        img
+    }
+
+    fn luma_dyn(img: GrayImage) -> DynamicImage {
+        DynamicImage::ImageLuma8(img)
+    }
+
+    fn write_template_persisted(needle: &GrayImage) -> PathBuf {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let p = tmp.path().join("needle.png");
+        needle.save(&p).expect("save png");
+        let _persisted = tmp.keep();
+        p
+    }
+
+    const FULL_W: u32 = 320;
+    const FULL_H: u32 = 180;
+
+    fn click_rect_task(name: &str, action: Action, next: Option<Vec<&str>>) -> TaskDef {
+        TaskDef {
+            name: name.into(),
+            state: name.into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: write_template_persisted(&gradient_needle(40, 40)),
+            roi: None,
+            threshold: 0.9,
+            base: None,
+            action: Some(action),
+            next: next.map(|v| v.into_iter().map(String::from).collect()),
+        }
+    }
+
+    // ---- (1) rescale 純関数 ----
+
+    #[test]
+    fn rescale_tap_pixel7a_2400_both_axes_uniform() {
+        let scaler = ScreenScaler::new();
+        // device_width=2400: scale_factor=1280/2400, 1/factor=1.875
+        // 640*1.875=1200, 360*1.875=675
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 2400);
+        assert_eq!(out, InputCommand::Tap { x: 1200, y: 675 });
+    }
+
+    #[test]
+    fn rescale_swipe_pixel7a_2400_both_axes() {
+        let scaler = ScreenScaler::new();
+        let cmd = InputCommand::Swipe {
+            from: (640, 360),
+            to: (0, 0),
+        };
+        let out = rescale_command(cmd, &scaler, 2400);
+        assert_eq!(
+            out,
+            InputCommand::Swipe {
+                from: (1200, 675),
+                to: (0, 0),
+            }
+        );
+    }
+
+    #[test]
+    fn rescale_identity_when_device_width_equals_base() {
+        let scaler = ScreenScaler::new();
+        // device_width=1280 (base と同値): scale_factor=1.0, from_base は恒等
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 1280);
+        assert_eq!(out, InputCommand::Tap { x: 640, y: 360 });
+    }
+
+    #[test]
+    fn rescale_downscale_small_device_width() {
+        let scaler = ScreenScaler::new();
+        // device_width=640: scale_factor=2.0, from_base は 1/2 へ縮小
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 640);
+        assert_eq!(out, InputCommand::Tap { x: 320, y: 180 });
+    }
+
+    // ---- (2) fake Capture/Input ----
+
+    struct FakeCapture {
+        frames: Arc<Mutex<VecDeque<DynamicImage>>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl Capture for FakeCapture {
+        async fn capture(&self) -> Result<DynamicImage, AdbError> {
+            if self.fail {
+                return Err(AdbError::CommandFailed {
+                    message: "fake capture failure".into(),
+                });
+            }
+            self.frames
+                .lock()
+                .expect("frames lock")
+                .pop_front()
+                .ok_or_else(|| AdbError::CommandFailed {
+                    message: "no more frames".into(),
+                })
+        }
+    }
+
+    /// 発火したアクションを [`InputCommand`] へ戻して記録する fake input。
+    struct FakeInput {
+        fired: Arc<Mutex<Vec<InputCommand>>>,
+        fail: bool,
+    }
+
+    #[async_trait]
+    impl Input for FakeInput {
+        async fn execute(&self, action: &InputAction) -> Result<(), AdbError> {
+            if self.fail {
+                return Err(AdbError::CommandFailed {
+                    message: "fake execute failure".into(),
+                });
+            }
+            let cmd = match action {
+                InputAction::Tap(p) => InputCommand::Tap { x: p.x, y: p.y },
+                InputAction::Swipe {
+                    from,
+                    to,
+                    duration_ms: _,
+                } => InputCommand::Swipe {
+                    from: (from.x, from.y),
+                    to: (to.x, to.y),
+                },
+                other => panic!("unexpected action in fake: {:?}", other),
+            };
+            self.fired.lock().expect("fired lock").push(cmd);
+            Ok(())
+        }
+    }
+
+    fn frames_of(images: Vec<DynamicImage>) -> Arc<Mutex<VecDeque<DynamicImage>>> {
+        Arc::new(Mutex::new(images.into_iter().collect()))
+    }
+
+    fn new_fired() -> Arc<Mutex<Vec<InputCommand>>> {
+        Arc::new(Mutex::new(Vec::new()))
+    }
+
+    // ---- (3) run_once 検証 ----
+
+    #[tokio::test]
+    async fn run_once_fires_rescaled_tap_on_click_rect() {
+        // ClickRect roi center は (640,360)（基準座標）。needle を埋めた基準画像を与える。
+        let needle = gradient_needle(40, 40);
+        let screen = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400, // device_width
+            300,
+        );
+
+        let out = driver.run_once().await;
+        match out {
+            StepOutcome::Fired {
+                next_current,
+                fired: just_fired,
+            } => {
+                assert_eq!(next_current.as_deref(), Some("LoadGame"));
+                // 基準 (640,360) → 実機 2400 で (1200,675)
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1200, y: 675 }));
+            }
+            other => panic!("expected Fired, got {other:?}"),
+        }
+        // fake input 側にも同じ座標が記録されている
+        assert_eq!(
+            fired.lock().expect("fired lock").as_slice(),
+            &[InputCommand::Tap { x: 1200, y: 675 }]
+        );
+        assert_eq!(driver.current(), "LoadGame");
+    }
+
+    #[tokio::test]
+    async fn run_once_stop_yields_nofire_none() {
+        let needle = gradient_needle(40, 40);
+        let screen = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let task = click_rect_task("Title", Action::Stop, Some(vec!["Ignored"]));
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        let out = driver.run_once().await;
+        assert_eq!(
+            out,
+            StepOutcome::NoFire {
+                next_current: None
+            }
+        );
+        assert!(fired.lock().expect("fired lock").is_empty(), "Stop must not fire any command");
+        assert_eq!(driver.current(), "Title");
+    }
+
+    #[tokio::test]
+    async fn run_once_no_match_keeps_current() {
+        // needle 無し画像 → tick None → NoMatch。current 不変。
+        let screen = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        let out = driver.run_once().await;
+        assert_eq!(out, StepOutcome::NoMatch);
+        assert!(fired.lock().expect("fired lock").is_empty());
+        assert_eq!(driver.current(), "Title");
+    }
+
+    #[tokio::test]
+    async fn run_once_capture_error_returns_error() {
+        let frames = frames_of(vec![]);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: true,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![],
+            2400,
+            300,
+        );
+
+        match driver.run_once().await {
+            StepOutcome::Error(msg) => assert!(msg.starts_with("capture")),
+            other => panic!("expected Error, got {other:?}"),
+        }
+        assert!(fired.lock().expect("fired lock").is_empty());
+    }
+
+    // ---- (4) run_loop 検証 ----
+
+    fn needle_screen(seed: u32) -> DynamicImage {
+        // seed でわずかに変化させた needle を埋めた画面。
+        let needle = gradient_needle(40, 40);
+        let _ = seed;
+        luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128))
+    }
+
+    #[tokio::test]
+    async fn run_loop_reaches_terminal_task() {
+        // Title(ClickRect) → LoadGame(ClickRect) → Terminal(ClickRect, next=None)
+        // 3 サイクル全てマッチ発火し、最後に next_current=None で TerminalTask 停止。
+        let frames = frames_of(vec![
+            needle_screen(0),
+            needle_screen(1),
+            needle_screen(2),
+        ]);
+        let fired = new_fired();
+
+        // next は next[0] のみ使われる。current 遷移を模擬するため 3 タスク定義。
+        let tasks = vec![
+            click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            ),
+            click_rect_task(
+                "LoadGame",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["Terminal"]),
+            ),
+            click_rect_task(
+                "Terminal",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                None, // 終端
+            ),
+        ];
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            tasks,
+            2400,
+            300,
+        );
+
+        let outcome = driver.run_loop(Duration::ZERO, 10).await;
+        assert_eq!(outcome.reason, LoopStopReason::TerminalTask);
+        assert_eq!(outcome.fired_commands.len(), 3);
+        // 全発火座標は rescale 済み (1200,675)
+        for c in &outcome.fired_commands {
+            assert_eq!(*c, InputCommand::Tap { x: 1200, y: 675 });
+        }
+        assert_eq!(driver.current(), "Terminal");
+    }
+
+    #[tokio::test]
+    async fn run_loop_stop_action() {
+        // Title(Stop) → NoFire(None) → Stop 停止。
+        let frames = frames_of(vec![needle_screen(0)]);
+        let fired = new_fired();
+
+        let tasks = vec![click_rect_task("Title", Action::Stop, Some(vec!["Ignored"]))];
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            tasks,
+            2400,
+            300,
+        );
+
+        let outcome = driver.run_loop(Duration::ZERO, 10).await;
+        assert_eq!(outcome.reason, LoopStopReason::Stop);
+        assert!(outcome.fired_commands.is_empty());
+    }
+
+    #[tokio::test]
+    async fn run_loop_no_match_hits_max_iterations() {
+        // 全フレーム NoMatch(needle 無) → max_iterations 到達。
+        let blank =
+            luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        // frames が枯渇すると capture エラーになるため、十分な枚数を用意。
+        let many = (0..20).map(|_| blank.clone()).collect();
+        let frames = frames_of(many);
+        let fired = new_fired();
+
+        let tasks = vec![click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        )];
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            tasks,
+            2400,
+            300,
+        );
+
+        let outcome = driver.run_loop(Duration::ZERO, 5).await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(outcome.iterations, 5);
+        assert!(outcome.fired_commands.is_empty());
+        assert_eq!(driver.current(), "Title");
+    }
+
+    #[tokio::test]
+    async fn run_loop_capture_error_stops_immediately() {
+        let frames = frames_of(vec![]);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: true,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![],
+            2400,
+            300,
+        );
+
+        let outcome = driver.run_loop(Duration::ZERO, 10).await;
+        assert_eq!(outcome.reason, LoopStopReason::CaptureError);
+        assert!(outcome.fired_commands.is_empty());
+    }
+
+    // ---- (5) run_loop_with_recovery 検証 ----
+
+    #[tokio::test]
+    async fn recovery_hook_fires_after_nomatch_threshold() {
+        // 全フレーム NoMatch(blank)。threshold=3 → 3 回目で hook 呼び出し成功 → streak リセット。
+        // その後 NoMatch 再蓄積するが max_iters=10 で MaxIterations 停止。
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let many = (0..30).map(|_| blank.clone()).collect();
+        let frames = frames_of(many);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let hook: RecoveryHook = Box::new(move |_streak| {
+            let c = calls_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 10, 3, Some(hook))
+            .await;
+        // threshold=3, max_iters=10 → NoMatch が 3,6,9 回目で hook 計 3 回起動。
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert!(outcome.fired_commands.is_empty());
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "recovery hook must fire at least once"
+        );
+    }
+
+    #[tokio::test]
+    async fn recovery_disabled_when_threshold_zero() {
+        // threshold=0 → hook 呼び出されず。
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let many = (0..20).map(|_| blank.clone()).collect();
+        let frames = frames_of(many);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let hook: RecoveryHook = Box::new(move |_| {
+            let c = calls_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 5, 0, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(calls.load(Ordering::SeqCst), 0, "hook must not fire when threshold=0");
+    }
+
+    #[tokio::test]
+    async fn recovery_hook_error_stops_loop() {
+        // hook が Err を返す → ExecuteError で即停止。
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let many = (0..20).map(|_| blank.clone()).collect();
+        let frames = frames_of(many);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+
+        let hook: RecoveryHook = Box::new(|_| {
+            Box::pin(async {
+                Err(AdbError::CommandFailed {
+                    message: "launch failed".into(),
+                })
+            })
+        });
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 100, 2, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::ExecuteError);
+        assert_eq!(outcome.terminal, "recovery_failed");
+    }
+
+    #[tokio::test]
+    async fn nomatch_streak_resets_on_fired() {
+        // NoMatch x2 → Fired(マッチ) で streak リセット → その後 NoMatch が 2 回でも
+        // threshold=3 未到達で hook 不発。MaxIterations で停止。
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+
+        // 順序: blank, blank, matched, blank, blank, blank, ...(MaxIterations まで)
+        let mut seq: Vec<DynamicImage> = vec![blank.clone(), blank.clone(), matched];
+        for _ in 0..20 {
+            seq.push(blank.clone());
+        }
+        let frames = frames_of(seq);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let hook: RecoveryHook = Box::new(move |_| {
+            let c = calls_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        // max_iters を十分に大きく: 最終的に NoMatch が 3 に到達して hook 1回発火後にリセット。
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 12, 3, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        // 最低1回の Fired がある(matched フレーム分)。
+        assert!(
+            outcome.fired_commands.len() >= 1,
+            "expected at least one fire from matched frame"
+        );
+    }
+}

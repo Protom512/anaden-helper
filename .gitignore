@@ -3,3 +3,14 @@ target/
 templates/captures/
 *.log
 myeasylog.log
+references
+
+# 作業スクラッチ・実行時成果物(プロジェクト本体ではない)
+.agent/
+*.lnk
+.claude/scheduled_tasks.lock
+templates/_*.png
+templates/_sanity/
+templates/fidelity/
+templates/anaden_screen*.png
+templates/test_capture.png

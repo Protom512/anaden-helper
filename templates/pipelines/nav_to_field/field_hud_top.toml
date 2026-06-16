@@ -1,0 +1,12 @@
+name      = "FieldHudTop"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "../../scenes/field/top.png"
+# ROI: 幅1280基準座標系(実機 Pixel7a 2400x1080 → 正規化 1280x576)。
+# 上部HUD帯の中央。実機2キャプチャでマッチ中心は (736,32) 固定(conf=1.0)。
+# 既存 templates/scenes/field/hud_top.toml と同一ROI・閾値。
+roi       = [400, 0, 480, 100]
+threshold = 0.80
+# field 到達 = 目標。ここで停止(発火しない)。
+action    = { type = "do_nothing" }
+next      = []

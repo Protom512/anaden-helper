@@ -10,3 +10,20 @@ tokio = { workspace = true }
 image = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
+# 常駐 capture(scrcpy クライアント)での H.264 デコード。feature gate でオプション依存。
+# `source` feature で openh264 をソースビルドし、外部 DLL 不要で自己完結する。
+openh264 = { version = "0.8", default-features = false, features = ["source"], optional = true }
+
+[features]
+default = []
+# scrcpy サーバ push + 常駐 H.264 受信 + openh264 デコードによる capture backend。
+# デフォルト OFF。`--features anaden-device/capture-scrcpy` で有効化。
+capture-scrcpy = ["dep:openh264"]
+
+[[example]]
+name = "scrcpy_session_probe"
+required-features = ["capture-scrcpy"]
+
+[[example]]
+name = "scrcpy_touch_probe"
+required-features = ["capture-scrcpy"]

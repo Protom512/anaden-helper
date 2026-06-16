@@ -1,7 +1,13 @@
 //! ゲーム画面の状態を表す型。
 //!
-//! ゲーム内の各画面は離散状態として定義する。テンプレートマッチングの結果は
-//! ここで定義された `GameState` のいずれかにマッピングされる。
+//! アナザーエデンの実際の画面遷移:
+//!   タイトル画面 → ロード → フィールド画面（前回の終了位置で再開）
+//!   フィールド画面 → 左下Menu → メニューバー
+//!   フィールド画面 → バトル遭遇 → 戦闘画面
+//!   フィールド画面 → 特定場所 → ミニゲーム（釣り等）
+//!   フィールド画面 → NPC会話 → 会話ダイアログ
+//!
+//! ※「ホーム画面」は存在しない。ゲームはフィールド画面（マップ上の探索）が基本状態。
 
 use serde::{Deserialize, Serialize};
 
@@ -10,17 +16,17 @@ use serde::{Deserialize, Serialize};
 /// 設計意図: 状態の追加はここに集約する。Strategy の分岐もこの型に基づく。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum GameState {
-    /// タイトル画面。「タップして始める」が表示されている
+    /// タイトル画面。「タップして始める」「ロードゲーム」等が表示されている
     TitleScreen,
-    /// ホーム画面（地図選択、キャラ一覧等）
-    HomeScreen,
+    /// フィールド画面。前回終了した場所から再開。マップ上の移動・探索状態
+    Field,
     /// バトル中。フェーズ（自ターン/敵ターン/勝利/敗北）を含む
     InBattle(BattlePhase),
-    /// メニュー画面。タブ（装備、スキル、編成等）を含む
+    /// メニューバー（左下のMenuから開く）。タブ（装備、スキル、編成等）を含む
     Menu(MenuTab),
     /// ミニゲーム中。種別を含む
     MiniGame(MiniGameType),
-    /// ダイアログ表示中（確認、報酬受け取り等）
+    /// ダイアログ表示中（NPC会話、確認、報酬受け取り等）
     Dialog(DialogType),
     /// ロード中（暗転画面、ローディングアイコン等）
     Loading,
@@ -41,14 +47,14 @@ pub enum BattlePhase {
     Defeat,
 }
 
-/// メニュー内のタブ種別。
+/// メニューバーのタブ種別。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum MenuTab {
     /// パーティ編成
     PartyFormation,
     /// 装備・強化
     Equipment,
-    /// スキルツリー
+    /// スキルツリー（VCボード等）
     SkillTree,
     /// アイテム一覧
     Items,
@@ -70,12 +76,12 @@ pub enum MiniGameType {
 /// ダイアログの種別。
 #[derive(Debug, Clone, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum DialogType {
+    /// NPC会話（ストーリー進行・雑貨屋等）
+    NpcConversation,
     /// 確認ダイアログ（はい/いいえ）
     Confirm,
     /// 報酬受け取り
     Reward,
-    /// ストーリー会話
-    Story,
     /// 不明なダイアログ
     Unknown,
 }
@@ -88,7 +94,7 @@ impl GameState {
     }
 
     /// この状態が安定状態（遷移可能）か。
-    /// `Unknown` は認識失敗を意味するため、リカバリーの対象になる。
+    /// `Unknown` は認識失敗、`Loading` は遷移中を意味する。
     pub fn is_stable(&self) -> bool {
         !matches!(self, GameState::Unknown | GameState::Loading)
     }
@@ -102,9 +108,10 @@ mod tests {
     fn game_state_clone_preserves_equality() {
         let states = vec![
             GameState::TitleScreen,
+            GameState::Field,
             GameState::InBattle(BattlePhase::PlayerTurn),
             GameState::MiniGame(MiniGameType::Fishing),
-            GameState::Dialog(DialogType::Confirm),
+            GameState::Dialog(DialogType::NpcConversation),
             GameState::Unknown,
         ];
         for state in &states {
@@ -118,20 +125,20 @@ mod tests {
         let mut set = HashSet::new();
         set.insert(GameState::TitleScreen.clone());
         set.insert(GameState::TitleScreen.clone());
-        set.insert(GameState::HomeScreen.clone());
+        set.insert(GameState::Field.clone());
         assert_eq!(set.len(), 2);
     }
 
     #[test]
     fn title_screen_is_terminal() {
         assert!(GameState::TitleScreen.is_terminal());
-        assert!(!GameState::HomeScreen.is_terminal());
+        assert!(!GameState::Field.is_terminal());
     }
 
     #[test]
     fn unknown_and_loading_are_not_stable() {
         assert!(!GameState::Unknown.is_stable());
         assert!(!GameState::Loading.is_stable());
-        assert!(GameState::HomeScreen.is_stable());
+        assert!(GameState::Field.is_stable());
     }
 }

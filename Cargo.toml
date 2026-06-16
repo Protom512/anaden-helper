@@ -7,6 +7,7 @@ members = [
     "crates/anaden-engine",
     "crates/anaden-strategies",
     "crates/anaden-cli",
+    "crates/anaden-studio",
 ]
 
 [workspace.package]
@@ -23,7 +24,9 @@ anaden-engine = { path = "crates/anaden-engine" }
 anaden-strategies = { path = "crates/anaden-strategies" }
 
 # Image processing
-image = "0.25"
+# default-features = false + png/bmp/jpeg で AVIF(rav1e) の重依存を除外。
+# 本プロジェクトは PNG スクショ/テンプレのみ扱うため AVIF/WebP デコード不要。
+image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg", "rayon"] }
 imageproc = "0.25"
 
 # Async runtime
@@ -40,6 +43,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 # Error handling
 thiserror = "2"
 anyhow = "1"
+
+# Async trait support (engine device abstraction)
+async-trait = "0.1"
 
 # Testing
 tempfile = "3"

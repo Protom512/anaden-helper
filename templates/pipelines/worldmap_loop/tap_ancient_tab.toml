@@ -1,0 +1,15 @@
+name      = "TapAncientTab"
+state     = "WorldMap"
+algorithm = "ccoeff"
+template  = "ancient_tab.png"
+# ROI: 幅1280基準座標系(実機 Pixel7a 2400x1080 → 正規化 1280x576)。
+# ワールドマップ画面の古代(こだい)タブエンブレム。明るい特徴点(x=374-398, y=40-112,
+# lum=230)を含む未選択タブ。3キャプチャで conf=1.0 安定マッチ。
+# 時代タブは位置・見た目固定(時間/天候無関係)で、単色バーと違い変動に強い。
+roi       = [340, 20, 100, 120]
+threshold = 0.80
+# click_self: 認識した古代タブ(matched_region 中心)を scrcpy-touch でタップ。
+# 効果: タブ選択状態が変化(古代タブがハイライト、現代タブが非選択) +
+# 地図の場所ピンが古代の場所へ切り替わる。発火前後キャプチャで判定。
+action    = { type = "click_self" }
+next      = []

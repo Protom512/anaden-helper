@@ -1,0 +1,9 @@
+name      = "FieldHudTopRight"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "r.png"
+# ROI: 幅1280基準座標系(実機 Pixel7a 2400x1080 → 正規化 1280x576)。
+# 右上HUD。実機2キャプチャでマッチ中心は (1248,32) 固定(conf=1.0)。
+# テンプレ64x64 + 揺らぎ余裕で x:1056..1280, y:0..100 に設定。
+roi       = [1056, 0, 224, 100]
+threshold = 0.80

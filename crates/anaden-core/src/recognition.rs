@@ -30,8 +30,8 @@ impl MatchConfidence {
     pub const MAX: Self = Self(1.0);
     /// 信頼度の最小値。
     pub const MIN: Self = Self(0.0);
-    /// テンプレートマッチのデフォルト閾値（85%）。
-    pub const DEFAULT_THRESHOLD: Self = Self(0.85);
+    /// テンプレートマッチのデフォルト閾値（95%）。
+    pub const DEFAULT_THRESHOLD: Self = Self(0.95);
 
     /// 新しい信頼度を作成。値は [0.0, 1.0] にクランプされる。
     pub fn new(value: f32) -> Self {
@@ -111,10 +111,10 @@ mod tests {
 
     #[test]
     fn threshold_check() {
-        let conf = MatchConfidence::new(0.87);
+        let conf = MatchConfidence::new(0.96);
         assert!(conf.exceeds_threshold(&MatchConfidence::DEFAULT_THRESHOLD));
 
-        let low = MatchConfidence::new(0.80);
+        let low = MatchConfidence::new(0.94);
         assert!(!low.exceeds_threshold(&MatchConfidence::DEFAULT_THRESHOLD));
     }
 
@@ -123,7 +123,7 @@ mod tests {
         let result = RecognitionResult {
             matches: vec![TemplateMatch {
                 region: ScreenRegion::new(0, 0, 100, 100),
-                confidence: MatchConfidence::new(0.92),
+                confidence: MatchConfidence::new(0.96),
                 state: GameState::TitleScreen,
             }],
             screen_size: (1080, 2400),

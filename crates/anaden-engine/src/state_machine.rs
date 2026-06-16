@@ -163,7 +163,7 @@ mod tests {
     fn loop_detection_alternating_states() {
         let mut sm = GameStateMachine::new(GameState::Unknown);
         let title = make_recognition(GameState::TitleScreen, 0.95);
-        let home = make_recognition(GameState::HomeScreen, 0.95);
+        let home = make_recognition(GameState::Field, 0.95);
         let threshold = MatchConfidence::DEFAULT_THRESHOLD;
 
         // Title ↔ Home を交互に遷移させる（A→B→A→B→...）
@@ -185,7 +185,7 @@ mod tests {
         // 多様な遷移: Unknown → Title → Home → Battle
         let states = vec![
             make_recognition(GameState::TitleScreen, 0.95),
-            make_recognition(GameState::HomeScreen, 0.95),
+            make_recognition(GameState::Field, 0.95),
             make_recognition(GameState::InBattle(BattlePhase::PlayerTurn), 0.95),
         ];
         for rec in &states {

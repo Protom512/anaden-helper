@@ -38,7 +38,7 @@ impl Default for AutomationConfig {
             device_serial: "localhost:5555".to_string(),
             template_dir: "./templates/scenes".to_string(),
             loop_interval_ms: 500,
-            confidence_threshold: 0.85,
+            confidence_threshold: 0.95,
             max_unknown_retries: 5,
             max_runtime_secs: 0,
         }
