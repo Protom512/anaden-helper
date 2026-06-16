@@ -161,6 +161,17 @@ pub enum StepOutcome {
     NoMatch,
     /// capture/execute の IO エラー。
     Error(String),
+    /// 発火はしたが事後検証で**対象が残存**した(テンプレがまだ高 conf でマッチ)。
+    /// アクションが効果を発揮していない疑いが強い「誤成功」状態。
+    /// `next_current` は tick 結果の next(検証失敗時は current を巻き戻すので基本 [`None`])。
+    /// `fired` は実際に発火したコマンド(記録/デバッグ用)。caller はこれを
+    /// 実質 NoMatch 相当(リトライ候補)として扱うべき([`PipelineDriver::run_loop_with_recovery`]
+    /// は NoMatch streak へ加算する)。
+    /// ([`PipelineDriver::run_once_verified`] でのみ発生。既定の [`PipelineDriver::run_once`] は返さない)
+    FiredUnverified {
+        next_current: Option<String>,
+        fired: Option<InputCommand>,
+    },
 }
 
 /// パイプライン実行ドライバ。純粋 tick + 実 capture/input を接続する。
@@ -174,6 +185,11 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     device_width: u32,
     /// `InputCommand::Swipe` に duration が無いためのデフォルト(millisec)。
     swipe_duration_ms: u64,
+    /// 発火後検証を有効化するか。既定 [`false`](検証しない=現状維持)。
+    /// [`Self::with_verify`] で [`true`] にしたとき、[`Self::run_loop`] /
+    /// [`Self::run_loop_with_recovery`] は内部で [`Self::run_once`] の代わりに
+    /// [`Self::run_once_verified`] を呼ぶ。
+    verify_after_fire: bool,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -197,7 +213,21 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             tasks,
             device_width,
             swipe_duration_ms,
+            verify_after_fire: false,
         }
+    }
+
+    /// 発火後検証(アクションが効果を発揮したかの事後検証)を有効化する。
+    ///
+    /// このビルダーを呼ぶと、[`Self::run_loop`] / [`Self::run_loop_with_recovery`] が
+    /// 内部で [`Self::run_once_verified`] を使うようになる。発火後フレームでテンプレが
+    /// まだマッチ(対象残存)すれば [`StepOutcome::FiredUnverified`] を返し、
+    /// [`Self::run_loop_with_recovery`] はこれを NoMatch streak 相当として扱う。
+    ///
+    /// 既定は検証 OFF(現状維持)。本メソッドを呼ばなければ [`Self::run_once`] 相当の挙動のまま。
+    pub fn with_verify(mut self, enabled: bool) -> Self {
+        self.verify_after_fire = enabled;
+        self
     }
 
     /// スケーラへの参照(主にテスト・デバッグ用)。
@@ -271,6 +301,92 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             );
             StepOutcome::NoFire {
                 next_current: tick.next_current,
+            }
+        }
+    }
+
+    /// 発火後検証付きの 1 サイクル([`Self::run_once`] + 事後検証)。
+    ///
+    /// [`Self::run_once`] と同じ capture→normalize→tick→rescale→execute を行った後、
+    /// **発火に成功した場合のみ** もう1回 capture→normalize→同タスクで再 tick し、
+    /// アクションが効果を発揮したか検証する。
+    ///
+    /// # 検証ロジック
+    /// 発火後フレームで **現在タスクのテンプレがまだ閾値以上でマッチ** すれば、対象が
+    /// 画面に残存している=アクション無効と判定し [`StepOutcome::FiredUnverified`] を返す。
+    /// これは「テンプレがマッチして発火した→成功」という偽の成功(close_btn 誤キャプチャ等)を防ぐ。
+    ///
+    /// 検証でテンプレが消失(非マッチ)すれば、アクションは効果を発揮したとみなし通常の
+    /// [`StepOutcome::Fired`] を返す。
+    ///
+    /// # current の巻き戻し
+    /// [`PipelineState::tick`] は内部で `current` を next[0] へ進める。検証失敗時は対象残存なので
+    /// next へ進むべきでない。本メソッドは [`FiredUnverified`][StepOutcome::FiredUnverified] 返却前に
+    /// `current` を発火前のタスク名へ巻き戻す(=caller は次サイクルで同じタスクを再試行できる)。
+    ///
+    /// 検証成功時は next へ進んだ状態を維持([`run_once`] と同じ)。
+    ///
+    /// # 戻り値
+    /// - 発火しなかった(NoMatch/NoFire/Error) → [`run_once`] と同じ結果をそのまま返す。
+    /// - 発火した → 事後検証を実施:
+    ///   - テンプレ消失/変化 → [`StepOutcome::Fired`]
+    ///   - テンプレ残存(高 conf で再マッチ) → [`StepOutcome::FiredUnverified`](current 巻き戻し済み)
+    ///   - 事後 capture IO エラー → [`StepOutcome::Error`](`"verify_capture: ..."`)
+    pub async fn run_once_verified(&mut self) -> StepOutcome {
+        let pre_task = self.state.current().to_string();
+        let fired = self.run_once().await;
+        match fired {
+            StepOutcome::Fired {
+                next_current,
+                fired: just_fired,
+            } => {
+                // 発火成功のみ事後検証。検証は pre_task(発火前タスク)で再マッチさせる。
+                self.verify_action_effect(&pre_task, just_fired, next_current)
+                    .await
+            }
+            // NoFire/NoMatch/Error は検証対象外(コマンド発火していない)。
+            other => other,
+        }
+    }
+
+    /// 発火後フレームで `task_name` がまだマッチするか検証する純粋寄りの async ヘルパ。
+    ///
+    /// capture→normalize→`run_step`(anaden_vision) で `task_name` を再認識し、
+    /// マッチ残存なら [`StepOutcome::FiredUnverified`](current を `task_name` へ巻き戻し)、
+    /// 消失なら [`StepOutcome::Fired`] を返す。capture IO エラーは [`StepOutcome::Error`]。
+    ///
+    /// ここでは [`PipelineState::tick`] を使わず `run_step` を直接呼ぶ(current をこれ以上
+    /// 動かさないため)。`run_step` は `task_name` が見つからない/テンプレ欠落で [`None`]
+    /// を返すが、これは検証上は「対象消失」と同義(発火前はマッチしていたタスクなので、
+    /// 欠落/不明になるケースは実運用上稀。安全側 = 検証成功扱いで Fired)。
+    async fn verify_action_effect(
+        &mut self,
+        task_name: &str,
+        just_fired: Option<InputCommand>,
+        next_current: Option<String>,
+    ) -> StepOutcome {
+        let screen = match self.capture.capture().await {
+            Ok(img) => img,
+            Err(e) => {
+                warn!("verify capture error: {e}");
+                return StepOutcome::Error(format!("verify_capture: {e}"));
+            }
+        };
+        let normalized = self.scaler.normalize(&screen);
+        // run_step を直接呼び、task_name で再認識。マッチ残存 → 対象残存 = 未検証。
+        let still_present = anaden_vision::run_step(&self.tasks, &normalized, task_name).is_some();
+        if still_present {
+            // current を発火前タスクへ巻き戻す(次サイクルで同じタスクを再試行)。
+            self.state.set_current(task_name.to_string());
+            StepOutcome::FiredUnverified {
+                // current は巻き戻したので next は伝搬させない(呼出側ログ用に残す)。
+                next_current,
+                fired: just_fired,
+            }
+        } else {
+            StepOutcome::Fired {
+                next_current,
+                fired: just_fired,
             }
         }
     }
@@ -355,7 +471,12 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     "max_iterations",
                 );
             }
-            match self.run_once().await {
+            let step = if self.verify_after_fire {
+                self.run_once_verified().await
+            } else {
+                self.run_once().await
+            };
+            match step {
                 StepOutcome::Fired {
                     next_current,
                     fired: just_fired,
@@ -402,6 +523,41 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                             match hook(nomatch_streak).await {
                                 Ok(()) => {
                                     info!("recovery hook succeeded; resetting NoMatch streak");
+                                    nomatch_streak = 0;
+                                }
+                                Err(e) => {
+                                    warn!("recovery hook failed: {e}");
+                                    return self.build_outcome(
+                                        iterations - 1,
+                                        fired,
+                                        LoopStopReason::ExecuteError,
+                                        "recovery_failed",
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                StepOutcome::FiredUnverified {
+                    next_current: _,
+                    fired: just_fired,
+                } => {
+                    // 発火したが対象残存(誤成功)。実質 NoMatch 相当として streak へ加算し、
+                    // next_current は無視(current は既に巻き戻されている)して次サイクルで再試行。
+                    // fired は記録に残す(検証失敗でも発火自体は起きた)。
+                    if let Some(c) = just_fired {
+                        fired.push(c);
+                    }
+                    nomatch_streak = nomatch_streak.saturating_add(1);
+                    if recovery_enabled && nomatch_streak >= recover_nomatch_threshold {
+                        info!(
+                            "FiredUnverified streak {} >= threshold {}; invoking recovery hook",
+                            nomatch_streak, recover_nomatch_threshold
+                        );
+                        if let Some(hook) = recover.as_mut() {
+                            match hook(nomatch_streak).await {
+                                Ok(()) => {
+                                    info!("recovery hook succeeded; resetting streak");
                                     nomatch_streak = 0;
                                 }
                                 Err(e) => {
@@ -1083,9 +1239,305 @@ mod tests {
         assert_eq!(outcome.terminal, "recovery_failed");
     }
 
+    // ---- (6) run_once_verified: アクション後検証 ----
+
+    #[tokio::test]
+    async fn verify_success_when_template_disappears() {
+        // 発火前フレーム: needle 埋込(マッチ→ClickRect 発火)。
+        // 発火後フレーム: 背景のみ(needle 消失) → 検証成功 → Fired。
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        // run_once が1枚目消費、verify_action_effect が2枚目消費。
+        let frames = frames_of(vec![matched, blank]);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        let out = driver.run_once_verified().await;
+        match out {
+            StepOutcome::Fired {
+                next_current,
+                fired: just_fired,
+            } => {
+                assert_eq!(next_current.as_deref(), Some("LoadGame"));
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1200, y: 675 }));
+            }
+            other => panic!("expected Fired (verified), got {other:?}"),
+        }
+        // current は next へ進む(検証成功なので)。
+        assert_eq!(driver.current(), "LoadGame");
+        assert_eq!(
+            fired.lock().expect("fired lock").as_slice(),
+            &[InputCommand::Tap { x: 1200, y: 675 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_fails_when_template_persists() {
+        // 発火前フレームも発火後フレームも needle 埋込 → 発火後もテンプレ残存 →
+        // FiredUnverified。close_btn 誤キャプチャ等の「偽成功」を防ぐ経路。
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let frames = frames_of(vec![matched.clone(), matched]);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        let out = driver.run_once_verified().await;
+        match out {
+            StepOutcome::FiredUnverified {
+                fired: just_fired,
+                next_current,
+            } => {
+                // 発火自体は起きた(記録用)。
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1200, y: 675 }));
+                // next_current は tick 結果を伝搬(ログ用)。
+                assert_eq!(next_current.as_deref(), Some("LoadGame"));
+            }
+            other => panic!("expected FiredUnverified, got {other:?}"),
+        }
+        // current は発火前タスクへ巻き戻される(対象残存なので next へ進まない)。
+        assert_eq!(
+            driver.current(),
+            "Title",
+            "current must be rolled back to pre-task on verify failure"
+        );
+        // 発火は起きたので fake input に記録される。
+        assert_eq!(
+            fired.lock().expect("fired lock").as_slice(),
+            &[InputCommand::Tap { x: 1200, y: 675 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_skipped_on_nofire_and_nomatch() {
+        // Stop(NoFire) は発火しないので検証スキップ → run_once と同じ NoFire(None)。
+        let needle = gradient_needle(40, 40);
+        let screen = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let task = click_rect_task("Title", Action::Stop, Some(vec!["Ignored"]));
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        let out = driver.run_once_verified().await;
+        assert_eq!(out, StepOutcome::NoFire { next_current: None });
+        assert!(fired.lock().expect("fired lock").is_empty());
+    }
+
+    #[tokio::test]
+    async fn verify_capture_error_returns_error() {
+        // 発火は成功(1枚目 matched)、事後 capture でフレーム枯渇 → Error(verify_capture)。
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        // 2枚目無し → verify_action_effect の capture が "no more frames" エラー。
+        let frames = frames_of(vec![matched]);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        match driver.run_once_verified().await {
+            StepOutcome::Error(msg) => {
+                assert!(msg.starts_with("verify_capture"), "got: {msg}");
+            }
+            other => panic!("expected Error(verify_capture), got {other:?}"),
+        }
+        // 発火は起きたので fake input に記録される。
+        assert_eq!(
+            fired.lock().expect("fired lock").as_slice(),
+            &[InputCommand::Tap { x: 1200, y: 675 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_loop_treats_fired_unverified_as_nomatch_streak() {
+        // with_verify(true) で run_loop_with_recovery が run_once_verified を使い、
+        // FiredUnverified が NoMatch streak に加算されること。
+        // 全フレーム matched(テンプレ残存) → 毎サイクル FiredUnverified → streak 蓄積 →
+        // threshold=2 で recovery hook 発火。current は Title に巻き戻り続ける。
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        // run_once(1) + verify(1) で1サイクル2枚消費。十分な枚数。
+        let many: Vec<DynamicImage> = (0..40).map(|_| matched.clone()).collect();
+        let frames = frames_of(many);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        )
+        .with_verify(true);
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let hook: RecoveryHook = Box::new(move |_| {
+            let c = calls_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        // threshold=2 で2サイクル目に hook 発火。current は Title に巻き戻り続けるため
+        // 終端には到達せず、最終的に MaxIterations で停止。
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 20, 2, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(
+            driver.current(),
+            "Title",
+            "current rolled back each FiredUnverified cycle"
+        );
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "recovery hook must fire on FiredUnverified streak"
+        );
+        // 発火は起きているので記録に残る(verify 失敗でも fired は蓄積)。
+        assert!(
+            !outcome.fired_commands.is_empty(),
+            "fired commands recorded even on verify failure"
+        );
+    }
+
+    #[tokio::test]
+    async fn verify_disabled_by_default_runs_run_once() {
+        // with_verify を呼ばない(デフォルト) → run_once と同等 → FiredUnverified は出ない。
+        // 1枚目 matched で発火、2枚目も matched だが検証しないので普通の Fired。
+        // run_loop は next へ進み、LoadGame タスクが無いので NoMatch ループ → MaxIterations。
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let many: Vec<DynamicImage> = (0..20).map(|_| matched.clone()).collect();
+        let frames = frames_of(many);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        ); // with_verify 省略 = デフォルト OFF
+
+        let outcome = driver.run_loop(Duration::ZERO, 20).await;
+        // デフォルト動作: Title で発火 → next=LoadGame へ進む(検証無し)。
+        assert_eq!(driver.current(), "LoadGame");
+        assert!(!outcome.fired_commands.is_empty());
+    }
+
     #[tokio::test]
     async fn nomatch_streak_resets_on_fired() {
-        // NoMatch x2 → Fired(マッチ) で streak リセット → その後 NoMatch が 2 回でも
         // threshold=3 未到達で hook 不発。MaxIterations で停止。
         let needle = gradient_needle(40, 40);
         let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
