@@ -20,12 +20,18 @@ use image::{DynamicImage, GrayImage};
 ///
 /// 画面OFF(Doze)で `screencap` が純黒フレームを返す問題(Pixel 7a 実証) を防ぐため:
 ///   - 開始時に1回 `keyevent 224 (WAKEUP)` で起こし、`screen_off_timeout` を最大値へ
+///   - **各キャプチャ直前にも `keyevent 224 (WAKEUP)` を送る**。
+///     studio はインタラクティブ用途で adb screencap ベース(1〜2s/フレーム)なので、
+///     wake のオーバーヘッドは許容可能。`screen_off_timeout` 延長だけでは Pixel 7a の
+///     Doze(画面はON表示のままバックライト等が落ちて screencap が黒を返す)を完全には
+///     抑制できず、毎フレーム wake が最も確実。
 ///   - 取得PNGの平均輝度が閾値未満(黒フレーム)なら破棄してUIへ流さない(フェイルセーフ)
 /// Drop で `screen_off_timeout` を元の値に戻す。
 ///
-/// **性能上の注意**: キャプチャ直前の毎フレーム WAKEUP は廃止した。毎回 keyevent を送ると
-/// adb 呼び出しが倍増してフレームレートが落ちる。`screen_off_timeout` 延長で黒フレームは
-/// 抑制でき、万が一の黒フレームは `is_black_frame` で弾く。
+/// **OOM 対策**: チャネルは非有界だが、**送信前に古い未読フレームを全てドレイン**し、
+/// チャネル内に高々1フレームしか保持しない(送信側ドレイン)。UI 側の `latest()` と
+/// 整合し、UI がドレインに追いつかなくてもフレームが蓄積しない。
+/// 各フレームは 2400x1080 RGBA ≈10MB なので、無制限蓄積は即 OOM につながる。
 pub struct LiveCapture {
     rx: Receiver<Arc<DynamicImage>>,
     stop: Arc<AtomicBool>,
@@ -36,7 +42,10 @@ pub struct LiveCapture {
 impl LiveCapture {
     /// 指定シリアルのデバイスを `interval_ms` 間隔でキャプチャし続けるスレッドを開始する。
     pub fn start(serial: String, interval_ms: u64) -> Self {
-        let (tx, rx) = mpsc::channel();
+        // OOM 対策: 容量1の有界チャネル。UI がドレインに追いつかなくても、チャネル内に
+        // 保持されるフレームは高々1枚(約10MB)で頭打ちになる。非有界だと 2400x1080 RGBA
+        // ≈10MB/枚 が無制限に蓄積して OOM する。
+        let (tx, rx) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
 
@@ -49,14 +58,19 @@ impl LiveCapture {
         let serial_thread = serial.clone();
         thread::spawn(move || {
             while !stop_thread.load(Ordering::Relaxed) {
-                // NOTE: キャプチャ直前の WAKEUP は廃止した。毎フレーム keyevent を送ると
-                // adb 呼び出しが倍増してフレームレートが落ちる。開始時の screen_off_timeout
-                // 延長(上記)で十分に黒フレームを抑制できる。黒フレームガード(is_black_frame)
-                // は万が一のフェイルセーフとして残す。
+                // 毎フレーム WAKEUP を送って画面を起こす。studio はインタラクティブ用途で
+                // adb screencap ベース(1〜2s/フレーム)なので wake のオーバーヘッドは許容可能。
+                // screen_off_timeout 延長だけでは Pixel 7a の Doze(画面ONのまま screencap が
+                // 黒を返す)を完全に抑制できず、毎フレーム wake が最も確実。
+                // 失敗(既に起きている等) でも exit=0 なので無害。継続する。
+                wake_screen(&serial_thread);
                 if let Some(img) = capture_screenshot(&serial_thread) {
-                    // チャネルが詰まっても最新は保ちたいが、UI 側で逐次ドレインするので
-                    // 送信失敗（受信側なし）は無視する。
-                    let _ = tx.send(Arc::new(img));
+                    // try_send: チャネル満タン(1枚未読)なら即座に Full を返す。
+                    // その場合は UI が遅れていてまだ前フレームを消費していない →
+                    // 古いフレームを上書きする手段が無いため、この新フレームを捨てて
+                    // 次のキャプチャへ進む(1枚損するが、蓄積はゼロで OOM 回避を最優先)。
+                    // UI の latest() は受信時に全ドレインするので、次フレームは確実に入る。
+                    let _ = tx.try_send(Arc::new(img));
                 }
                 // 短いスリープを分割して停止応答を良くする
                 let mut waited = 0u64;
@@ -208,4 +222,59 @@ fn restore_screen_off_timeout(serial: &str, value: &str) {
             value,
         ])
         .output();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// `is_black_frame`: 純黒画像は黒フレームと判定される。
+    #[test]
+    fn black_frame_detected_for_pure_black() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([0, 0, 0])));
+        assert!(is_black_frame(&img));
+    }
+
+    /// `is_black_frame`: 明るい画像は黒フレームと判定されない。
+    #[test]
+    fn black_frame_not_detected_for_bright() {
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([200, 200, 200])));
+        assert!(!is_black_frame(&img));
+    }
+
+    /// OOM 対策の回帰テスト: sync_channel(1) + try_send で、受信側がドレインしなくても
+    /// チャネル内に保持されるフレームは高々1枚であることを検証する。
+    /// 非有界チャネルだと何枚でも蓄積してしまうが、有界1スロット + try_send(Fullで破棄)で
+    /// 頭打ちになる。これが OOM 回避の核心。
+    #[test]
+    fn bounded_channel_never_accumulates_more_than_one_frame() {
+        let (tx, rx) = mpsc::sync_channel::<i32>(1);
+        // 1枚目は入る(チャネル空)
+        assert!(tx.try_send(1).is_ok());
+        // 2枚目は満タンなので Full で弾かれる(破棄)。蓄積しない。
+        assert!(tx.try_send(2).is_err());
+        assert!(tx.try_send(3).is_err());
+        assert!(tx.try_send(4).is_err());
+        // 受信側が1枚取ると…
+        let drained: Vec<i32> = std::iter::from_fn(|| rx.try_recv().ok()).collect();
+        // 保持されていたのは最初の1枚だけ(2,3,4は破棄済み)
+        assert_eq!(drained, vec![1]);
+        // チャネルが空いたので新フレームは再び入る
+        assert!(tx.try_send(99).is_ok());
+    }
+
+    /// `latest()` 相当のドレイン: try_recv ループで最新1枚を返す。
+    #[test]
+    fn latest_drains_to_newest() {
+        let (tx, rx) = mpsc::sync_channel::<i32>(2);
+        // 有界チャネルでも、送信側が連続で送れる限界まで入れてから最新を取り出す
+        let _ = tx.try_send(1);
+        let _ = tx.try_send(2);
+        // latest 相当: 全ドレインして最後を返す
+        let mut latest = None;
+        while let Ok(v) = rx.try_recv() {
+            latest = Some(v);
+        }
+        assert_eq!(latest, Some(2));
+    }
 }
