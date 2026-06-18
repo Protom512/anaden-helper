@@ -152,8 +152,16 @@ fn main() -> anyhow::Result<()> {
             let haystack_orig = image::open(&screenshot)?;
             let needle_orig = image::open(&template)?;
 
-            println!("Screenshot: {}x{}", haystack_orig.width(), haystack_orig.height());
-            println!("Template:   {}x{}", needle_orig.width(), needle_orig.height());
+            println!(
+                "Screenshot: {}x{}",
+                haystack_orig.width(),
+                haystack_orig.height()
+            );
+            println!(
+                "Template:   {}x{}",
+                needle_orig.width(),
+                needle_orig.height()
+            );
             println!("Scale:      1/{}", scale);
 
             // ダウンスケール
@@ -168,7 +176,11 @@ fn main() -> anyhow::Result<()> {
                 image::imageops::FilterType::Triangle,
             );
 
-            println!("Scaled screenshot: {}x{}", haystack.width(), haystack.height());
+            println!(
+                "Scaled screenshot: {}x{}",
+                haystack.width(),
+                haystack.height()
+            );
             println!("Scaled template:   {}x{}", needle.width(), needle.height());
 
             let haystack_gray = haystack.to_luma8();
@@ -206,13 +218,24 @@ fn main() -> anyhow::Result<()> {
             let orig_x = best_x * scale;
             let orig_y = best_y * scale;
             let confidence = 1.0 - best_sse;
-            println!("Best match (scaled): ({}, {}) → (original): ({}, {})", best_x, best_y, orig_x, orig_y);
+            println!(
+                "Best match (scaled): ({}, {}) → (original): ({}, {})",
+                best_x, best_y, orig_x, orig_y
+            );
             println!("SSE={:.6} Confidence={:.4}", best_sse, confidence);
 
             if confidence >= threshold {
-                println!("✅ MATCH (confidence {:.2}% >= threshold {:.2}%)", confidence * 100.0, threshold * 100.0);
+                println!(
+                    "✅ MATCH (confidence {:.2}% >= threshold {:.2}%)",
+                    confidence * 100.0,
+                    threshold * 100.0
+                );
             } else {
-                println!("❌ NO MATCH (confidence {:.2}% < threshold {:.2}%)", confidence * 100.0, threshold * 100.0);
+                println!(
+                    "❌ NO MATCH (confidence {:.2}% < threshold {:.2}%)",
+                    confidence * 100.0,
+                    threshold * 100.0
+                );
             }
         }
         Commands::Detect {
@@ -232,7 +255,14 @@ fn main() -> anyhow::Result<()> {
         }
         Commands::Launch { serial } => {
             let output = std::process::Command::new("adb")
-                .args(["-s", &serial, "shell", "am start", "-n", "net.wrightflyer.anothereden/net.wrightflyer.toybox.AppActivity"])
+                .args([
+                    "-s",
+                    &serial,
+                    "shell",
+                    "am start",
+                    "-n",
+                    "net.wrightflyer.anothereden/net.wrightflyer.toybox.AppActivity",
+                ])
                 .output()?;
             let stdout = String::from_utf8_lossy(&output.stdout);
             println!("{}", stdout.trim());
@@ -263,7 +293,12 @@ fn main() -> anyhow::Result<()> {
             start_task,
             algorithm,
         } => {
-            run_pipeline(&screenshot, &pipeline_dir, &start_task, algorithm.as_deref())?;
+            run_pipeline(
+                &screenshot,
+                &pipeline_dir,
+                &start_task,
+                algorithm.as_deref(),
+            )?;
         }
     }
 
@@ -271,9 +306,18 @@ fn main() -> anyhow::Result<()> {
 }
 
 /// `detect` サブコマンド: 全テンプレートで投票判定
-fn run_detect(screenshot_path: &PathBuf, template_dir: &PathBuf, threshold: f32) -> anyhow::Result<()> {
+fn run_detect(
+    screenshot_path: &PathBuf,
+    template_dir: &PathBuf,
+    threshold: f32,
+) -> anyhow::Result<()> {
     let screenshot = image::open(screenshot_path)?;
-    println!("📷 Screenshot: {}x{} {:?}", screenshot.width(), screenshot.height(), screenshot_path);
+    println!(
+        "📷 Screenshot: {}x{} {:?}",
+        screenshot.width(),
+        screenshot.height(),
+        screenshot_path
+    );
 
     // テンプレート読み込み
     let mut store = anaden_vision::TemplateStore::new();
@@ -297,15 +341,14 @@ fn run_detect(screenshot_path: &PathBuf, template_dir: &PathBuf, threshold: f32)
         let best = detector.match_single_template(&screenshot, template);
         match best {
             Some(m) => {
-                let mark = if m.confidence.exceeds_threshold(&threshold_conf) { "✅" } else { "❌" };
+                let mark = if m.confidence.exceeds_threshold(&threshold_conf) {
+                    "✅"
+                } else {
+                    "❌"
+                };
                 println!(
                     "  {} {:?} conf={:.4} ({}) at ({},{})",
-                    mark,
-                    template.state,
-                    m.confidence.0,
-                    template.name,
-                    m.region.x,
-                    m.region.y,
+                    mark, template.state, m.confidence.0, template.name, m.region.x, m.region.y,
                 );
             }
             None => {
@@ -345,9 +388,8 @@ fn run_pipeline(
     };
 
     // 1. スクリーンショット読込 + 正規化
-    let raw = image::open(screenshot_path).map_err(|e| {
-        anyhow::anyhow!("スクリーンショット読込失敗 {:?}: {e}", screenshot_path)
-    })?;
+    let raw = image::open(screenshot_path)
+        .map_err(|e| anyhow::anyhow!("スクリーンショット読込失敗 {:?}: {e}", screenshot_path))?;
     let (orig_w, orig_h) = (raw.width(), raw.height());
     let scaler = anaden_vision::ScreenScaler::new();
     let screenshot = scaler.normalize(&raw);
@@ -408,11 +450,20 @@ fn run_pipeline(
 }
 
 /// `explore` サブコマンド: 探索的テンプレート自動収集
-fn run_explore(serial: &str, output_dir: &PathBuf, interval: u64, duration: u64) -> anyhow::Result<()> {
+fn run_explore(
+    serial: &str,
+    output_dir: &PathBuf,
+    interval: u64,
+    duration: u64,
+) -> anyhow::Result<()> {
     println!("🔍 探索的テンプレート収集開始");
     println!("   デバイス: {}", serial);
     println!("   間隔: {}秒", interval);
-    println!("   時間: {}秒{}", duration, if duration == 0 { " (無制限)" } else { "" });
+    println!(
+        "   時間: {}秒{}",
+        duration,
+        if duration == 0 { " (無制限)" } else { "" }
+    );
     println!("   出力: {:?}", output_dir);
     println!();
     println!("💡 ゲームを操作して色々な画面を表示してください。");
@@ -432,41 +483,39 @@ fn run_explore(serial: &str, output_dir: &PathBuf, interval: u64, duration: u64)
         }
 
         match run_adb_exec_out(serial, "screencap -p") {
-            Ok(png_data) => {
-                match image::load_from_memory(&png_data) {
-                    Ok(img) => {
-                        let elapsed = start.elapsed().as_secs();
-                        let sim = if let Some(last) = captures.last() {
-                            anaden_vision::compute_similarity(last, &img)
-                        } else {
-                            1.0
-                        };
+            Ok(png_data) => match image::load_from_memory(&png_data) {
+                Ok(img) => {
+                    let elapsed = start.elapsed().as_secs();
+                    let sim = if let Some(last) = captures.last() {
+                        anaden_vision::compute_similarity(last, &img)
+                    } else {
+                        1.0
+                    };
 
-                        let change_mark = if sim < 0.80 {
-                            "🔄 画面変化!"
-                        } else if sim < 0.95 {
-                            "〜 遷移中..."
-                        } else {
-                            "  安定"
-                        };
+                    let change_mark = if sim < 0.80 {
+                        "🔄 画面変化!"
+                    } else if sim < 0.95 {
+                        "〜 遷移中..."
+                    } else {
+                        "  安定"
+                    };
 
-                        println!(
-                            "[{:3}s] キャプチャ {} ({}x{}) 類似度={:.3} {}",
-                            elapsed,
-                            captures.len() + 1,
-                            img.width(),
-                            img.height(),
-                            sim,
-                            change_mark,
-                        );
+                    println!(
+                        "[{:3}s] キャプチャ {} ({}x{}) 類似度={:.3} {}",
+                        elapsed,
+                        captures.len() + 1,
+                        img.width(),
+                        img.height(),
+                        sim,
+                        change_mark,
+                    );
 
-                        captures.push(img);
-                    }
-                    Err(e) => {
-                        eprintln!("⚠ 画像デコード失敗: {}", e);
-                    }
+                    captures.push(img);
                 }
-            }
+                Err(e) => {
+                    eprintln!("⚠ 画像デコード失敗: {}", e);
+                }
+            },
             Err(e) => {
                 eprintln!("⚠ ADB キャプチャ失敗: {}", e);
             }
@@ -476,7 +525,10 @@ fn run_explore(serial: &str, output_dir: &PathBuf, interval: u64, duration: u64)
     }
 
     if captures.len() < 3 {
-        anyhow::bail!("キャプチャ数が少なすぎます ({}枚)。ゲームを操作しながら再度実行してください。", captures.len());
+        anyhow::bail!(
+            "キャプチャ数が少なすぎます ({}枚)。ゲームを操作しながら再度実行してください。",
+            captures.len()
+        );
     }
 
     println!("\n📊 {} 枚キャプチャ完了。グループ化中...", captures.len());
@@ -486,18 +538,11 @@ fn run_explore(serial: &str, output_dir: &PathBuf, interval: u64, duration: u64)
     println!("   → {} グループに分割", groups.len());
 
     for g in &groups {
-        println!(
-            "   グループ {}: {} 枚",
-            g.index,
-            g.captures.len()
-        );
+        println!("   グループ {}: {} 枚", g.index, g.captures.len());
     }
 
     // 十分なグループがあるか確認
-    let usable_groups: Vec<_> = groups
-        .iter()
-        .filter(|g| g.captures.len() >= 3)
-        .collect();
+    let usable_groups: Vec<_> = groups.iter().filter(|g| g.captures.len() >= 3).collect();
 
     if usable_groups.is_empty() {
         anyhow::bail!(
@@ -553,7 +598,11 @@ fn run_explore(serial: &str, output_dir: &PathBuf, interval: u64, duration: u64)
         }
     }
 
-    println!("\n✅ 完了: {} グループから {} テンプレートを保存", results.len(), total_saved);
+    println!(
+        "\n✅ 完了: {} グループから {} テンプレートを保存",
+        results.len(),
+        total_saved
+    );
     println!("   保存先: {:?}", output_dir);
     println!();
     println!("📌 次のステップ:");

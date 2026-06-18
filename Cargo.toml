@@ -49,3 +49,34 @@ async-trait = "0.1"
 
 # Testing
 tempfile = "3"
+
+# Windows API bindings (windows-rs). PC版プローブ(入力/キャプチャ/起動)で使用。
+# ワークスペース単位で features を固定し、各 crate は target.'cfg(windows)' で参照する。
+# Linux でもワークスペース全体がビルド崩れしないよう、依存自体は常に宣言しつつ
+# windows-rs は cfg(windows) 以外でコンパイル対象にならない設計。
+# version/feature 名は docs.rs の windows 0.62.2 で確認済み。
+windows = { version = "0.62", features = [
+    # 共通基盤
+    "Win32_Foundation",
+    # 入力プローブ(マウス/キーボード合成入力 + ウィンドウ列挙/メッセージ)
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+    # キャプチャプローブ: DPI アウェア化(4K 環境で論理ピクセル問題を回避)
+    "Win32_UI_HiDpi",
+    # キャプチャプローブ主軸: PrintWindow / BitBlt / GDI
+    # ※ windows 0.62 では PrintWindow は Win32::Graphics::Gdi ではなく
+    #    Win32::Storage::Xps に存在する(フラグ型は PRINT_WINDOW_FLAGS)。
+    #    これが無いと probe_windows_capture.rs がコンパイル不可。
+    "Win32_Graphics_Gdi",
+    "Win32_Storage_Xps",
+    # キャプチャプローブ fallback: Windows.Graphics.Capture(WGC) + D3D11 interop
+    "Graphics_Capture",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Dxgi",
+    "Win32_System_WinRT",
+    "Win32_System_WinRT_Direct3D11",
+    "Win32_System_WinRT_Graphics_Capture",
+    # 起動/プロセスプローブ: CreateProcess / プロセス・スナップショット列挙
+    "Win32_System_Threading",
+    "Win32_System_Diagnostics_ToolHelp",
+] }

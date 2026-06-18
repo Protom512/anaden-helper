@@ -61,7 +61,13 @@ impl ConfusionMatrix {
             return 0.0;
         }
         let diag: usize = (0..self.labels.len())
-            .map(|i| self.matrix.get(i).and_then(|r| r.get(i)).copied().unwrap_or(0))
+            .map(|i| {
+                self.matrix
+                    .get(i)
+                    .and_then(|r| r.get(i))
+                    .copied()
+                    .unwrap_or(0)
+            })
             .sum();
         diag as f32 / self.total as f32
     }
@@ -107,9 +113,7 @@ pub fn evaluate(
         let predicted = scores
             .iter()
             .enumerate()
-            .max_by(|a, b| {
-                a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal)
-            })
+            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
             .and_then(|(idx, &best_score)| {
                 if best_score >= threshold {
                     Some(templates[idx].spec.state.clone())
@@ -120,7 +124,10 @@ pub fn evaluate(
             .unwrap_or_else(|| "unknown".to_string());
         per_image_scores.push(scores);
 
-        let ti = labels.iter().position(|l| *l == test.true_label).unwrap_or(n - 1);
+        let ti = labels
+            .iter()
+            .position(|l| *l == test.true_label)
+            .unwrap_or(n - 1);
         let pi = labels.iter().position(|l| *l == predicted).unwrap_or(n - 1);
         matrix[ti][pi] += 1;
     }
@@ -148,7 +155,11 @@ pub fn evaluate(
             }
         }
         let sensitivity = if pos > 0 { tp as f32 / pos as f32 } else { 0.0 };
-        let specificity = if neg > 0 { 1.0 - (fp as f32 / neg as f32) } else { 1.0 };
+        let specificity = if neg > 0 {
+            1.0 - (fp as f32 / neg as f32)
+        } else {
+            1.0
+        };
         per_template.push(TemplateReport {
             name: t.spec.name.clone(),
             state: t.spec.state.clone(),
@@ -219,7 +230,10 @@ pub fn load_test_set(test_dir: &Path) -> Vec<TestImage> {
         for f in files.flatten() {
             let p = f.path();
             if matches!(
-                p.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+                p.extension()
+                    .and_then(|e| e.to_str())
+                    .map(|e| e.to_lowercase())
+                    .as_deref(),
                 Some("png") | Some("jpg") | Some("jpeg") | Some("bmp")
             ) {
                 if let Ok(image) = image::open(&p) {
@@ -283,8 +297,14 @@ mod tests {
             image: black_template(),
         }];
         let tests = vec![
-            TestImage { true_label: "title".into(), image: Arc::new(screen_with_square(30, 40)) },
-            TestImage { true_label: "field".into(), image: Arc::new(white_image()) },
+            TestImage {
+                true_label: "title".into(),
+                image: Arc::new(screen_with_square(30, 40)),
+            },
+            TestImage {
+                true_label: "field".into(),
+                image: Arc::new(white_image()),
+            },
         ];
         let cm = evaluate(&engine(), &templates, &tests, 0.5);
         assert_eq!(cm.total, 2);
@@ -304,7 +324,11 @@ mod tests {
         // 白画面に黒テンプレ → 低スコア → 閾値超えず unknown
         let tests = vec![TestImage {
             true_label: "field".into(),
-            image: Arc::new(DynamicImage::ImageLuma8(GrayImage::from_pixel(100, 100, Luma([255])))),
+            image: Arc::new(DynamicImage::ImageLuma8(GrayImage::from_pixel(
+                100,
+                100,
+                Luma([255]),
+            ))),
         }];
         let cm = evaluate(&engine(), &templates, &tests, 0.99);
         let unk = cm.index_of("unknown").unwrap();
@@ -321,9 +345,22 @@ mod tests {
         }];
         // 正例2枚(黒四角含む) + 負例1枚(白)
         let tests = vec![
-            TestImage { true_label: "title".into(), image: Arc::new(screen_with_square(30, 40)) },
-            TestImage { true_label: "title".into(), image: Arc::new(screen_with_square(10, 10)) },
-            TestImage { true_label: "field".into(), image: Arc::new(DynamicImage::ImageLuma8(GrayImage::from_pixel(100, 100, Luma([255])))) },
+            TestImage {
+                true_label: "title".into(),
+                image: Arc::new(screen_with_square(30, 40)),
+            },
+            TestImage {
+                true_label: "title".into(),
+                image: Arc::new(screen_with_square(10, 10)),
+            },
+            TestImage {
+                true_label: "field".into(),
+                image: Arc::new(DynamicImage::ImageLuma8(GrayImage::from_pixel(
+                    100,
+                    100,
+                    Luma([255]),
+                ))),
+            },
         ];
         let cm = evaluate(&engine(), &templates, &tests, 0.5);
         assert_eq!(cm.per_template.len(), 1);

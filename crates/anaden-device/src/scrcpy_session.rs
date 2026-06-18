@@ -273,15 +273,12 @@ impl ScrcpySession {
         screen_h: u32,
     ) -> Result<(), AdbError> {
         let msg = build_touch_msg(action.as_byte(), x, y, screen_w, screen_h);
-        let mut guard = self
-            .control
-            .lock()
-            .map_err(|_| AdbError::CommandFailed { message: "control lock poisoned".into() })?;
-        let sock = guard
-            .as_mut()
-            .ok_or_else(|| AdbError::CommandFailed {
-                message: "control ソケット未確立".into(),
-            })?;
+        let mut guard = self.control.lock().map_err(|_| AdbError::CommandFailed {
+            message: "control lock poisoned".into(),
+        })?;
+        let sock = guard.as_mut().ok_or_else(|| AdbError::CommandFailed {
+            message: "control ソケット未確立".into(),
+        })?;
         use std::io::Write;
         sock.write_all(&msg).map_err(|e| AdbError::CommandFailed {
             message: format!("control write 失敗: {e}"),
@@ -289,7 +286,10 @@ impl ScrcpySession {
         sock.flush().map_err(|e| AdbError::CommandFailed {
             message: format!("control flush 失敗: {e}"),
         })?;
-        debug!("send_touch: action={:?} ({},{}) {}x{}", action, x, y, screen_w, screen_h);
+        debug!(
+            "send_touch: action={:?} ({},{}) {}x{}",
+            action, x, y, screen_w, screen_h
+        );
         Ok(())
     }
 
@@ -486,7 +486,11 @@ fn launch_server_background(client: &AdbClient, args: &[String]) -> Result<(), A
     let bg = format!(
         "nohup env {classpath_token} {rest} >/data/local/tmp/scrcpy_srv.log 2>&1 < /dev/null &"
     );
-    debug!("scrcpy server bg cmd: adb -s {} shell \"{}\"", client.serial(), bg);
+    debug!(
+        "scrcpy server bg cmd: adb -s {} shell \"{}\"",
+        client.serial(),
+        bg
+    );
     // MSYS_NO_PATHCONV を立てて bash のパス変換を抑止(C:\.. が /c/.. に化けるのを防ぐ)。
     let out = std::process::Command::new(client.adb_path())
         .args(["-s", client.serial(), "shell", &bg])
@@ -582,10 +586,7 @@ fn connect_video_with_dummy(local_addr: &str) -> Result<TcpStream, AdbError> {
                         return Ok(s);
                     }
                     Err(e) => {
-                        last_err = Some(format!(
-                            "dummy byte 読込失敗(試行={}): {e}",
-                            attempt + 1
-                        ));
+                        last_err = Some(format!("dummy byte 読込失敗(試行={}): {e}", attempt + 1));
                         std::thread::sleep(CONNECT_RETRY_INTERVAL);
                     }
                 }
@@ -800,7 +801,10 @@ mod tests {
             POINTER_ID_VIRTUAL_FINGER
         );
         // x = 540
-        assert_eq!(u32::from_be_bytes([msg[10], msg[11], msg[12], msg[13]]), 540);
+        assert_eq!(
+            u32::from_be_bytes([msg[10], msg[11], msg[12], msg[13]]),
+            540
+        );
         // y = 1700
         assert_eq!(
             u32::from_be_bytes([msg[14], msg[15], msg[16], msg[17]]),

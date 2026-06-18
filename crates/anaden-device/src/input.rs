@@ -40,9 +40,7 @@ impl InputExecutor {
     /// 指定座標をタップする。
     async fn tap(&self, x: u32, y: u32) -> Result<(), AdbError> {
         debug!("Tap: ({}, {})", x, y);
-        self.client
-            .shell(&format!("input tap {} {}", x, y))
-            .await?;
+        self.client.shell(&format!("input tap {} {}", x, y)).await?;
         Ok(())
     }
 
@@ -55,7 +53,10 @@ impl InputExecutor {
         y2: u32,
         duration_ms: u64,
     ) -> Result<(), AdbError> {
-        debug!("Swipe: ({},{}) -> ({},{}) in {}ms", x1, y1, x2, y2, duration_ms);
+        debug!(
+            "Swipe: ({},{}) -> ({},{}) in {}ms",
+            x1, y1, x2, y2, duration_ms
+        );
         self.client
             .shell(&format!(
                 "input swipe {} {} {} {} {}",

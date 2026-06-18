@@ -24,12 +24,17 @@ struct Cli {
 enum Commands {
     /// 宣言的パイプラインを ADB 実機でライブ実行する
     Run {
-        /// ADB デバイスシリアル(例: localhost:5555, R3CN...)
-        serial: String,
+        /// 実行ターゲット: `android`(ADB、既定) または `windows`(PC版 Win32)。
+        /// `windows` 指定時は capture/input を Win32 バックエンドへ自動切替え(serial 不要)。
+        #[arg(long, default_value = "android")]
+        target: String,
         /// `*.toml` を格納したパイプラインディレクトリ
         pipeline_dir: PathBuf,
         /// 開始タスク名(PipelineState の初期 current)
         start_task: String,
+        /// ADB デバイスシリアル(例: localhost:5555, R3CN...)。省略可(位置引数 `[SERIAL]`)。
+        /// `--target windows` 時は未指定(None)可(PC版は ADB 不要)。`--target android` 時は必須。
+        serial: Option<String>,
         /// algorithm 上書き。未指定時は TOML の algorithm を尊重
         #[arg(long)]
         algorithm: Option<String>,
@@ -61,7 +66,10 @@ enum Commands {
         #[arg(long, default_value = "screencap")]
         capture: String,
         /// scrcpy サーバ jar のローカルパス(`--capture scrcpy` 時)。
-        #[arg(long, default_value = r"C:\Users\black\scoop\apps\scrcpy\current\scrcpy-server")]
+        #[arg(
+            long,
+            default_value = r"C:\Users\black\scoop\apps\scrcpy\current\scrcpy-server"
+        )]
         scrcpy_jar: String,
         /// 入力方式: `adb`(adb input tap、既定) または `scrcpy`(scrcpy control ソケット経由
         /// TYPE_INJECT_TOUCH_EVENT)。`scrcpy` はゲーム(Another Eden)が adb input を無視する
@@ -112,7 +120,7 @@ fn resolve_algorithm(value: &str) -> Result<anaden_vision::Algorithm> {
 ///
 /// いかなる異常系でも panic せず anyhow エラーを返してプロセス非ゼロ終了する。
 async fn run_pipeline_live(
-    serial: &str,
+    serial: Option<&str>,
     pipeline_dir: &PathBuf,
     start_task: &str,
     algorithm: Option<&str>,
@@ -126,7 +134,35 @@ async fn run_pipeline_live(
     capture_mode: &str,
     scrcpy_jar: &str,
     input_mode: &str,
+    target: &str,
 ) -> Result<()> {
+    // ---- (0) 実行ターゲット解決 ----
+    // `--target windows` なら ADB 経由を一切使わず Win32 バックエンドへ切替え。
+    // `--target android` なら従来通り(serial 必須)。
+    match target {
+        "windows" => {
+            return run_with_windows(
+                start_task,
+                pipeline_dir,
+                algorithm,
+                interval,
+                max_iters,
+                width,
+                ensure_open,
+                ensure_open_wait_secs,
+                recover_launch,
+                recover_nomatch_threshold,
+            )
+            .await;
+        }
+        "android" => {}
+        other => anyhow::bail!("--target は `android` または `windows` です(指定値: {other})"),
+    }
+
+    // android パスは serial 必須。
+    let serial = serial
+        .ok_or_else(|| anyhow::anyhow!("--target android 時は ADB シリアル(serial)が必須です"))?;
+
     // ---- (1) パイプライン読込 + algorithm 上書き ----
     let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
         .map_err(|e| anyhow::anyhow!("パイプライン読込失敗 {pipeline_dir:?}: {e}"))?;
@@ -200,8 +236,7 @@ async fn run_pipeline_live(
     // ---- NoMatch 連続時のゲーム再起動リカバリ ----
     // recover_launch が有効なら、NoMatch が閾値に達したときゲームを再 launch する。
     let recovery: Option<anaden_engine::RecoveryHook> = if recover_launch {
-        let controller =
-            anaden_device::AppController::new(anaden_device::AdbClient::new(serial));
+        let controller = anaden_device::AppController::new(anaden_device::AdbClient::new(serial));
         Some(Box::new(move |_streak| {
             let ctrl = controller.clone();
             Box::pin(async move {
@@ -218,32 +253,36 @@ async fn run_pipeline_live(
     // 入力経路の解決。`--input scrcpy` は scrcpy control ソケット経由のタッチ注入を使い、
     // capture も同一セッション(video+control 2ソケット)へ一本化される。
     match input_mode {
-        "scrcpy" => run_with_scrcpy_session(
-            serial,
-            start_task,
-            tasks,
-            width,
-            scrcpy_jar,
-            interval_dur,
-            max_iters,
-            recover_nomatch_threshold,
-            recovery,
-        )
-        .await,
-        "adb" => match capture_mode {
-            "scrcpy" => run_with_capture_scrcpy(
+        "scrcpy" => {
+            run_with_scrcpy_session(
                 serial,
                 start_task,
                 tasks,
                 width,
-                input,
                 scrcpy_jar,
                 interval_dur,
                 max_iters,
                 recover_nomatch_threshold,
                 recovery,
             )
-            .await,
+            .await
+        }
+        "adb" => match capture_mode {
+            "scrcpy" => {
+                run_with_capture_scrcpy(
+                    serial,
+                    start_task,
+                    tasks,
+                    width,
+                    input,
+                    scrcpy_jar,
+                    interval_dur,
+                    max_iters,
+                    recover_nomatch_threshold,
+                    recovery,
+                )
+                .await
+            }
             "screencap" => {
                 let capture =
                     anaden_device::ScreenshotCapture::new(anaden_device::AdbClient::new(serial));
@@ -255,10 +294,9 @@ async fn run_pipeline_live(
                         w
                     }
                     None => {
-                        let probe = capture
-                            .capture()
-                            .await
-                            .map_err(|e| anyhow::anyhow!("初回キャプチャ失敗(device_width 実測不可): {e}"))?;
+                        let probe = capture.capture().await.map_err(|e| {
+                            anyhow::anyhow!("初回キャプチャ失敗(device_width 実測不可): {e}")
+                        })?;
                         let w = probe.width();
                         info!("device_width 実測: {w}(height={})", probe.height());
                         w
@@ -281,14 +319,145 @@ async fn run_pipeline_live(
                 )
                 .await
             }
-            other => anyhow::bail!(
-                "--capture は `screencap` または `scrcpy` です(指定値: {other})"
-            ),
+            other => {
+                anyhow::bail!("--capture は `screencap` または `scrcpy` です(指定値: {other})")
+            }
         },
-        other => anyhow::bail!(
-            "--input は `adb` または `scrcpy` です(指定値: {other})"
-        ),
+        other => anyhow::bail!("--input は `adb` または `scrcpy` です(指定値: {other})"),
     }
+}
+
+/// `--target windows` 時の構築パス。PC版(Windows) Win32 バックエンドへ一本化する。
+///
+/// ADB/シリアルに依存せず、`Win32Capture` / `Win32InputExecutor` を PipelineDriver へ渡す。
+/// 起動保証と NoMatch リカバリは ADB の `AppController` ではなく `Win32Launch` を使う。
+/// `windows` 専用なので `#[cfg(windows)]` で gating する(非 Windows ビルドでは対となる
+/// フォールバック関数が bail する)。
+#[cfg(windows)]
+async fn run_with_windows(
+    start_task: &str,
+    pipeline_dir: &PathBuf,
+    algorithm: Option<&str>,
+    interval: u64,
+    max_iters: u64,
+    width: Option<u32>,
+    ensure_open: bool,
+    ensure_open_wait_secs: u64,
+    recover_launch: bool,
+    recover_nomatch_threshold: u32,
+) -> Result<()> {
+    // ---- (1) パイプライン読込 + algorithm 上書き ----
+    let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
+        .map_err(|e| anyhow::anyhow!("パイプライン読込失敗 {pipeline_dir:?}: {e}"))?;
+    if tasks.is_empty() {
+        anyhow::bail!("パイプラインが空です: {pipeline_dir:?}");
+    }
+
+    if let Some(a) = algorithm {
+        let algo = resolve_algorithm(a)?;
+        for t in tasks.iter_mut() {
+            if t.name == start_task {
+                t.algorithm = algo;
+            }
+        }
+    }
+
+    info!(
+        "パイプライン読込(PC版): {} タスク {:?} (開始: {})",
+        tasks.len(),
+        pipeline_dir,
+        start_task,
+    );
+
+    // ---- (2) 起動保証(Win32Launch) ----
+    let launcher = anaden_device::Win32Launch::default_paths();
+    if ensure_open {
+        let outcome = launcher
+            .ensure_open(Duration::from_secs(ensure_open_wait_secs))
+            .await
+            .map_err(|e| anyhow::anyhow!("ゲーム起動保証(Win32)に失敗: {e}"))?;
+        match outcome {
+            anaden_device::EnsureOutcome::AlreadyOpen => info!("ゲームは既に起動中(起動不要)"),
+            anaden_device::EnsureOutcome::Launched => info!("ゲームを起動し生存を確認"),
+            anaden_device::EnsureOutcome::Timeout => warn!(
+                "ゲーム起動がタイムアウト({}s)。そのまま続行するが初回 NoMatch が増える可能性あり",
+                ensure_open_wait_secs
+            ),
+        }
+    }
+
+    // ---- (3) capture/input 構築(Win32) ----
+    let capture = anaden_device::Win32Capture::default_process();
+    let input = anaden_device::Win32InputExecutor::new(anaden_device::DEFAULT_PROCESS_NAME);
+
+    // ---- (4) device_width: --width > 初回 capture の width 実測 ----
+    // PC版クライアント生サイズ(1258x708 想定)をそのまま device_width へ採用する。
+    // 手動 --width 指定は非推奨(座標ズレの元)。未指定で実測させるのが正解。
+    let device_width = match width {
+        Some(w) => {
+            warn!("device_width 手動指定: {w} (PC版では実測推奨。座標ズレに注意)");
+            w
+        }
+        None => {
+            let probe = capture.capture().await.map_err(|e| {
+                anyhow::anyhow!("初回キャプチャ失敗(Win32, device_width 実測不可): {e}")
+            })?;
+            let w = probe.width();
+            info!("device_width 実測(PC版): {w}(height={})", probe.height());
+            w
+        }
+    };
+
+    // ---- (5) NoMatch リカバリフック(Win32Launch::launch_app) ----
+    let recovery: Option<anaden_engine::RecoveryHook> = if recover_launch {
+        let launcher = launcher.clone();
+        Some(Box::new(move |_streak| {
+            let l = launcher.clone();
+            Box::pin(async move {
+                info!("NoMatch 継続(PC版): ゲームを再起動します");
+                l.launch_app().await
+            })
+        }))
+    } else {
+        None
+    };
+
+    let interval_dur = Duration::from_secs(interval);
+
+    run_driver(
+        anaden_engine::PipelineDriver::new(
+            capture,
+            input,
+            anaden_engine::PipelineState::new(start_task),
+            tasks,
+            device_width,
+            300,
+        ),
+        interval_dur,
+        max_iters,
+        recover_nomatch_threshold,
+        recovery,
+    )
+    .await
+}
+
+/// `--target windows` 指定だが非 Windows ビルド時のフォールバック(コンパイルエラー回避)。
+#[cfg(not(windows))]
+async fn run_with_windows(
+    _start_task: &str,
+    _pipeline_dir: &PathBuf,
+    _algorithm: Option<&str>,
+    _interval: u64,
+    _max_iters: u64,
+    _width: Option<u32>,
+    _ensure_open: bool,
+    _ensure_open_wait_secs: u64,
+    _recover_launch: bool,
+    _recover_nomatch_threshold: u32,
+) -> Result<()> {
+    anyhow::bail!(
+        "`--target windows` は Windows ビルドでのみ利用可能です。このバイナリは Windows 向けではないため PC版バックエンドを使用できません"
+    )
 }
 
 /// `run_loop_with_recovery` を呼び出し、結果を人間可読出力する共通末尾。
@@ -303,7 +472,10 @@ where
     C: anaden_engine::Capture,
     I: anaden_engine::Input,
 {
-    info!("run_loop 開始: interval={:?} max_iters={}", interval, max_iters);
+    info!(
+        "run_loop 開始: interval={:?} max_iters={}",
+        interval, max_iters
+    );
     let outcome = driver
         .run_loop_with_recovery(interval, max_iters, recover_nomatch_threshold, recovery)
         .await;
@@ -347,12 +519,10 @@ where
 {
     let mut config = anaden_device::ScrcpyConfig::default();
     config.local_jar_path = scrcpy_jar.to_string();
-    let capture = anaden_device::ScrcpyCapture::start(
-        anaden_device::AdbClient::new(serial),
-        config,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("scrcpy capture 起動失敗: {e}"))?;
+    let capture =
+        anaden_device::ScrcpyCapture::start(anaden_device::AdbClient::new(serial), config)
+            .await
+            .map_err(|e| anyhow::anyhow!("scrcpy capture 起動失敗: {e}"))?;
 
     // device_width: --width 指定 > 初回 capture の width 実測
     let device_width = match width {
@@ -361,10 +531,9 @@ where
             w
         }
         None => {
-            let probe = capture
-                .capture()
-                .await
-                .map_err(|e| anyhow::anyhow!("初回 scrcpy キャプチャ失敗(device_width 実測不可): {e}"))?;
+            let probe = capture.capture().await.map_err(|e| {
+                anyhow::anyhow!("初回 scrcpy キャプチャ失敗(device_width 実測不可): {e}")
+            })?;
             let w = probe.width();
             info!("device_width 実測: {w}(height={})", probe.height());
             w
@@ -408,12 +577,10 @@ async fn run_with_scrcpy_session(
     let mut config = anaden_device::ScrcpySessionConfig::default();
     // jar パスは scoop 既定と同じだが、CLI 引数で上書き可能にする。
     config.local_jar_path = scrcpy_jar.to_string();
-    let session = anaden_device::ScrcpySession::start(
-        anaden_device::AdbClient::new(serial),
-        config,
-    )
-    .await
-    .map_err(|e| anyhow::anyhow!("scrcpy session 起動失敗: {e}"))?;
+    let session =
+        anaden_device::ScrcpySession::start(anaden_device::AdbClient::new(serial), config)
+            .await
+            .map_err(|e| anyhow::anyhow!("scrcpy session 起動失敗: {e}"))?;
 
     if !session.control_ready() {
         anyhow::bail!("scrcpy session の control ソケットが未確立(タッチ注入不可)");
@@ -427,10 +594,9 @@ async fn run_with_scrcpy_session(
             w
         }
         None => {
-            let probe = session
-                .capture()
-                .await
-                .map_err(|e| anyhow::anyhow!("初回 scrcpy キャプチャ失敗(device_width 実測不可): {e}"))?;
+            let probe = session.capture().await.map_err(|e| {
+                anyhow::anyhow!("初回 scrcpy キャプチャ失敗(device_width 実測不可): {e}")
+            })?;
             let w = probe.width();
             info!("device_width 実測: {w}(height={})", probe.height());
             w
@@ -555,6 +721,7 @@ async fn main() -> Result<()> {
     match cli.command {
         Commands::Run {
             serial,
+            target,
             pipeline_dir,
             start_task,
             algorithm,
@@ -570,7 +737,7 @@ async fn main() -> Result<()> {
             input,
         } => {
             run_pipeline_live(
-                &serial,
+                serial.as_deref(),
                 &pipeline_dir,
                 &start_task,
                 algorithm.as_deref(),
@@ -584,6 +751,7 @@ async fn main() -> Result<()> {
                 &capture,
                 &scrcpy_jar,
                 &input,
+                &target,
             )
             .await
         }
@@ -595,7 +763,9 @@ async fn main() -> Result<()> {
             timeout,
             config,
         } => {
-            if let Err(e) = run_legacy(device, templates, interval, threshold, timeout, config).await {
+            if let Err(e) =
+                run_legacy(device, templates, interval, threshold, timeout, config).await
+            {
                 warn!("legacy 実行エラー: {e}");
                 return Err(e);
             }

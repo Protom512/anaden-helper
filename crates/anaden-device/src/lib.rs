@@ -7,11 +7,23 @@ mod app_control;
 mod client;
 mod display;
 mod input;
-mod screenshot;
 #[cfg(feature = "capture-scrcpy")]
 mod scrcpy;
 #[cfg(feature = "capture-scrcpy")]
 mod scrcpy_session;
+mod screenshot;
+// PC版(Windows) Win32 バックエンド。capture/input/launch の3モジュール。
+// 全体を cfg(windows) で gating し、Linux ではコンパイル対象外とする。
+#[cfg(windows)]
+mod win32_capture;
+#[cfg(windows)]
+mod win32_input;
+#[cfg(windows)]
+mod win32_launch;
+// PC版(Windows) プロセス列挙の共通ヘルパ。capture/input/launch から参照。
+// cfg(windows) で gating し、Linux ではコンパイル対象外とする。
+#[cfg(windows)]
+mod win32_proc;
 
 pub use app_control::{
     AppController, EnsureOutcome, GAME_ACTIVITY, GAME_PACKAGE, build_launch_command,
@@ -20,10 +32,18 @@ pub use app_control::{
 pub use client::{AdbClient, AdbError};
 pub use display::DisplayController;
 pub use input::InputExecutor;
-pub use screenshot::ScreenshotCapture;
 #[cfg(feature = "capture-scrcpy")]
 pub use scrcpy::{ScrcpyCapture, ScrcpyConfig};
 #[cfg(feature = "capture-scrcpy")]
 pub use scrcpy_session::{
-    ScrcpySession, ScrcpySessionConfig, TouchAction, ACTION_DOWN, ACTION_MOVE, ACTION_UP,
+    ACTION_DOWN, ACTION_MOVE, ACTION_UP, ScrcpySession, ScrcpySessionConfig, TouchAction,
+};
+pub use screenshot::ScreenshotCapture;
+#[cfg(windows)]
+pub use win32_capture::{DEFAULT_PROCESS_NAME, Win32Capture};
+#[cfg(windows)]
+pub use win32_input::{InputMethod, Win32InputExecutor};
+#[cfg(windows)]
+pub use win32_launch::{
+    DEFAULT_CHILD, DEFAULT_LAUNCHER, DEFAULT_WAIT, DEFAULT_WORKDIR, Win32Launch,
 };

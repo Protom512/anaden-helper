@@ -55,10 +55,7 @@ impl DisplayController {
     pub async fn restore_screen_off_timeout(&self, value: &str) -> Result<(), AdbError> {
         debug!("restoring screen_off_timeout -> {}", value);
         self.client
-            .shell(&format!(
-                "settings put system screen_off_timeout {}",
-                value
-            ))
+            .shell(&format!("settings put system screen_off_timeout {}", value))
             .await?;
         Ok(())
     }

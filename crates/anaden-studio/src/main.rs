@@ -15,8 +15,88 @@ mod source;
 use eframe::egui;
 
 use crate::app::StudioApp;
+use crate::source::Target;
+
+/// コマンドライン引数。
+struct CliArgs {
+    /// キャプチャバックエンド(android|windows)。既定 android。
+    target: Target,
+    /// PC版(Windows)対象プロセスの exe 名。未指定時は GUI 既定値(AnotherEden.exe)。
+    exe: Option<String>,
+}
+
+/// 手動でコマンドライン引数をパースする(clap 依存を避けるため)。
+///
+/// 対応フラグ:
+/// - `--target <android|windows>`: キャプチャバックエンド(既定 android)。
+/// - `--exe <name>`: Windows バックエンドの対象 exe 名。
+/// - `-h` / `--help`: ヘルプを表示して終了。
+///
+/// 後方互換: 引数未指定時は target=android で従来通り。
+fn parse_args() -> CliArgs {
+    let mut args = CliArgs {
+        target: Target::default(),
+        exe: None,
+    };
+    let mut iter = std::env::args().skip(1);
+    while let Some(arg) = iter.next() {
+        match arg.as_str() {
+            "--target" => {
+                if let Some(v) = iter.next() {
+                    match v.as_str() {
+                        "android" => args.target = Target::Android,
+                        "windows" => {
+                            // Target::Windows は Windows ビルドでのみ存在。
+                            #[cfg(windows)]
+                            {
+                                args.target = Target::Windows;
+                            }
+                            // Windows 以外のビルドで --target windows が渡された場合は
+                            // android へフォールバック(Target::Windows バリアントが無い)。
+                            #[cfg(not(windows))]
+                            {
+                                eprintln!(
+                                    "anaden-studio: このビルドでは windows バックエンドを利用できません。android を使用します。"
+                                );
+                            }
+                        }
+                        other => {
+                            eprintln!(
+                                "anaden-studio: 未知の --target 値 \"{other}\" です。android を使用します。"
+                            );
+                        }
+                    }
+                }
+            }
+            "--exe" => {
+                if let Some(v) = iter.next() {
+                    args.exe = Some(v);
+                }
+            }
+            "-h" | "--help" => {
+                println!("anaden-studio — テンプレート作成GUI");
+                println!();
+                println!("USAGE: anaden-studio [--target android|windows] [--exe <name>]");
+                println!();
+                println!("OPTIONS:");
+                println!("  --target <android|windows>  キャプチャバックエンド(既定: android)");
+                println!("      windows は Windows ビルドでのみ有効。Linux では無視されます。");
+                println!("  --exe <name>                Windows バックエンドの対象 exe 名");
+                println!("                              (既定: AnotherEden.exe)");
+                println!("  -h, --help                  このヘルプを表示");
+                std::process::exit(0);
+            }
+            other => {
+                eprintln!("anaden-studio: 未知の引数 \"{other}\" を無視します。");
+            }
+        }
+    }
+    args
+}
 
 fn main() -> eframe::Result {
+    let cli = parse_args();
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]),
         ..Default::default()
@@ -24,12 +104,15 @@ fn main() -> eframe::Result {
     eframe::run_native(
         "anaden-studio — テンプレート作成",
         options,
-        Box::new(|cc| {
+        Box::new(move |cc| {
             // egui のデフォルトフォントは日本語グリフを含まないため文字化け（□豆腐）する。
             // かつて .ttc（フォントコレクション）の面選択で実機文字化けが残った実績があるため、
             // 日本語グリフを含むシングルフェースの .ttf をバンドルして include_bytes! で読む。
             setup_japanese_fonts(&cc.egui_ctx);
-            Ok(Box::new(StudioApp::default()))
+            // CLI で指定された target/exe を初期値として StudioApp へ渡す。
+            Ok(Box::new(StudioApp::with_initial_target(
+                cli.target, cli.exe,
+            )))
         }),
     )
 }
@@ -95,8 +178,7 @@ mod tests {
 
         let glyph_id = font.glyph_id('あ');
         assert_ne!(
-            glyph_id.0,
-            0,
+            glyph_id.0, 0,
             "フォントが「あ」(U+3042) のグリフを持ちません (glyph_id={glyph_id:?})。\
              日本語未対応フォントの可能性があります。"
         );

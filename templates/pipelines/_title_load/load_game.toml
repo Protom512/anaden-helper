@@ -1,0 +1,11 @@
+name      = "LoadGame"
+state     = "Title"
+algorithm = "ccoeff"
+# テンプレート: タイトルロゴ(正規化)。threshold を極低(0.01)にして
+# CCOEFF マッチをほぼ常に成立させ、ClickRect を確実発火させる。
+# 目的: scrcpy-touch で「ロードゲーム」位置をタップしゲームをロード。
+template  = "title_logo.png"
+roi       = [400, 200, 480, 160]
+threshold = 0.01
+action    = { type = "click_rect", roi = [625, 273, 30, 30] }
+next      = []

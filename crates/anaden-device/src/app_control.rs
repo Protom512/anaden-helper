@@ -119,8 +119,7 @@ pub fn parse_foreground_package(dumpsys: &str) -> Option<String> {
     // (2) window manager 系フォーカス行。
     for line in dumpsys.lines() {
         let trimmed = line.trim();
-        let key_hits =
-            trimmed.contains("mCurrentFocus") || trimmed.contains("mFocusedApp");
+        let key_hits = trimmed.contains("mCurrentFocus") || trimmed.contains("mFocusedApp");
         if key_hits {
             if let Some(pkg) = extract_package_from_line(trimmed) {
                 return Some(pkg);

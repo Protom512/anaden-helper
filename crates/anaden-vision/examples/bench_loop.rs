@@ -23,9 +23,7 @@ use std::process::Command;
 use std::time::Instant;
 
 use anaden_core::MatchConfidence;
-use anaden_vision::{
-    CcoeffVisionEngine, ScreenScaler, SseVisionEngine, VisionEngine,
-};
+use anaden_vision::{CcoeffVisionEngine, ScreenScaler, SseVisionEngine, VisionEngine};
 use image::{DynamicImage, GenericImageView};
 
 /// 計測繰り返し回数（中央値算出用）。
@@ -211,12 +209,20 @@ fn main() {
     }
 
     // 機械可読サマリ（最終行）。
-    println!("\n===SUMMARY=== capture={:.2} normalize={:.2} tap={:.2}", capture_ms, normalize_ms, tap_ms);
+    println!(
+        "\n===SUMMARY=== capture={:.2} normalize={:.2} tap={:.2}",
+        capture_ms, normalize_ms, tap_ms
+    );
     for r in &recognition_results {
         let total = capture_ms + normalize_ms + r.median_ms + tap_ms;
         println!(
             "===RESULT=== {} {} ds={} med={:.2} total={:.2} meets={}",
-            r.engine, r.scope, r.downscale, r.median_ms, total, total < 1000.0
+            r.engine,
+            r.scope,
+            r.downscale,
+            r.median_ms,
+            total,
+            total < 1000.0
         );
     }
 }
@@ -290,7 +296,15 @@ fn adb_screencap(serial: &str) -> Vec<u8> {
 /// adb shell input tap の完了を待つ（ブロッキング）。
 fn adb_tap(serial: &str, x: u32, y: u32) -> std::process::ExitStatus {
     Command::new("adb")
-        .args(["-s", serial, "shell", "input", "tap", &x.to_string(), &y.to_string()])
+        .args([
+            "-s",
+            serial,
+            "shell",
+            "input",
+            "tap",
+            &x.to_string(),
+            &y.to_string(),
+        ])
         .status()
         .unwrap_or_else(|e| {
             eprintln!("adb tap failed: {}", e);

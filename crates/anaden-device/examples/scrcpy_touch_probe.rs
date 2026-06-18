@@ -70,7 +70,8 @@ struct Args {
 }
 
 fn parse_args() -> Result<Args, String> {
-    let mut serial = std::env::var("ANADEN_SERIAL").unwrap_or_else(|_| "33291JEHN27041".to_string());
+    let mut serial =
+        std::env::var("ANADEN_SERIAL").unwrap_or_else(|_| "33291JEHN27041".to_string());
     let mut local_jar = r"C:\Users\black\scoop\apps\scrcpy\current\scrcpy-server".to_string();
     let mut x: u32 = 970;
     let mut y: u32 = 170;
@@ -93,37 +94,43 @@ fn parse_args() -> Result<Args, String> {
                 i += 2;
             }
             "--x" => {
-                x = args.get(i + 1)
+                x = args
+                    .get(i + 1)
                     .and_then(|v| v.parse().ok())
                     .ok_or("--x needs number")?;
                 i += 2;
             }
             "--y" => {
-                y = args.get(i + 1)
+                y = args
+                    .get(i + 1)
                     .and_then(|v| v.parse().ok())
                     .ok_or("--y needs number")?;
                 i += 2;
             }
             "--screen-w" => {
-                screen_w = args.get(i + 1)
+                screen_w = args
+                    .get(i + 1)
                     .and_then(|v| v.parse().ok())
                     .ok_or("--screen-w needs number")?;
                 i += 2;
             }
             "--screen-h" => {
-                screen_h = args.get(i + 1)
+                screen_h = args
+                    .get(i + 1)
                     .and_then(|v| v.parse().ok())
                     .ok_or("--screen-h needs number")?;
                 i += 2;
             }
             "--hold-ms" => {
-                hold_ms = args.get(i + 1)
+                hold_ms = args
+                    .get(i + 1)
                     .and_then(|v| v.parse().ok())
                     .ok_or("--hold-ms needs number")?;
                 i += 2;
             }
             "--settle-ms" => {
-                settle_ms = args.get(i + 1)
+                settle_ms = args
+                    .get(i + 1)
                     .and_then(|v| v.parse().ok())
                     .ok_or("--settle-ms needs number")?;
                 i += 2;
@@ -162,7 +169,10 @@ fn main() {
     };
     println!("=== scrcpy control-touch probe ===");
     println!("serial={} jar={}", args.serial, args.local_jar);
-    println!("target=({}, {}) screen={}x{}", args.x, args.y, args.screen_w, args.screen_h);
+    println!(
+        "target=({}, {}) screen={}x{}",
+        args.x, args.y, args.screen_w, args.screen_h
+    );
 
     let local_addr;
 
@@ -265,7 +275,12 @@ fn main() {
     println!("\n--- control: adb shell input tap (known to be ignored) ---");
     let md5_pre_input = screencap_md5(&args.serial);
     let _ = Command::new("adb")
-        .args(["-s", &args.serial, "shell", &format!("input tap {} {}", args.x, args.y)])
+        .args([
+            "-s",
+            &args.serial,
+            "shell",
+            &format!("input tap {} {}", args.x, args.y),
+        ])
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .status();
@@ -335,10 +350,7 @@ fn push_jar(args: &Args) {
         .args(["-s", &args.serial, "shell", &format!("ls -la {REMOTE_JAR}")])
         .output()
         .expect("adb shell ls");
-    println!(
-        "verify: {}",
-        String::from_utf8_lossy(&chk.stdout).trim()
-    );
+    println!("verify: {}", String::from_utf8_lossy(&chk.stdout).trim());
 }
 
 fn build_server_command() -> Vec<String> {
@@ -386,7 +398,11 @@ fn spawn_server(serial: &str, args: &[String]) -> (Child, std::fs::File) {
     std::thread::sleep(Duration::from_millis(400));
     // プロセス生存確認
     let alive = Command::new("adb")
-        .args([serial, "shell", "pgrep -f com.genymobile.scrcpy.Server || echo NONE"])
+        .args([
+            serial,
+            "shell",
+            "pgrep -f com.genymobile.scrcpy.Server || echo NONE",
+        ])
         .output();
     if let Ok(o) = alive {
         println!(
@@ -423,11 +439,11 @@ fn connect_and_handshake(local_addr: &str) -> Result<TcpStream, String> {
         let (tx, rx) = std::sync::mpsc::channel::<Result<TcpStream, String>>();
         std::thread::spawn(move || {
             let inner = (|| -> Result<TcpStream, String> {
-                let mut s = TcpStream::connect(addr2)
-                    .map_err(|e| format!("connect: {e}"))?;
+                let mut s = TcpStream::connect(addr2).map_err(|e| format!("connect: {e}"))?;
                 let _ = s.set_nodelay(true);
                 let mut b = [0u8; 1];
-                s.read_exact(&mut b).map_err(|e| format!("dummy read: {e}"))?;
+                s.read_exact(&mut b)
+                    .map_err(|e| format!("dummy read: {e}"))?;
                 eprintln!("[video] dummy byte received: {:#x}", b[0]);
                 Ok(s)
             })();
@@ -480,7 +496,10 @@ fn wait_for_listen(serial: &str, scid: &str) {
         }
         std::thread::sleep(Duration::from_millis(100));
     }
-    eprintln!("[warn] listen ソケット {} が15秒以内に確認できませんでした", needle);
+    eprintln!(
+        "[warn] listen ソケット {} が15秒以内に確認できませんでした",
+        needle
+    );
 }
 
 /// mpsc::Receiver のタイムアウト付き受信(std の recv_timeout のラッパ)。
@@ -592,8 +611,8 @@ fn md5_compute(input: &[u8]) -> [u8; 16] {
     // 定数
     let s: [u32; 64] = [
         7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 7, 12, 17, 22, 5, 9, 14, 20, 5, 9, 14, 20, 5,
-        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6,
-        10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
+        9, 14, 20, 5, 9, 14, 20, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 4, 11, 16, 23, 6, 10,
+        15, 21, 6, 10, 15, 21, 6, 10, 15, 21, 6, 10, 15, 21,
     ];
     let k: [u32; 64] = [
         0xd76aa478, 0xe8c7b756, 0x242070db, 0xc1bdceee, 0xf57c0faf, 0x4787c62a, 0xa8304613,

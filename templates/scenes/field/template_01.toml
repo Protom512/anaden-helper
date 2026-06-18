@@ -1,0 +1,10 @@
+name = "template_01"
+state = "field"
+threshold = 0.9900000095367432
+method = "sse"
+
+[roi]
+x = 254
+y = 606
+width = 86
+height = 91

@@ -5,6 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
+use std::sync::mpsc::{self, Receiver};
 
 use eframe::egui;
 use image::DynamicImage;
@@ -28,14 +29,7 @@ const HEATMAP_DOWNSCALE: u32 = 4;
 
 /// テンプレート保存時の状態選択肢。TemplateStore の parse_state_from_dir_name と整合。
 const STATE_OPTIONS: &[&str] = &[
-    "title",
-    "field",
-    "loading",
-    "battle",
-    "fishing",
-    "menu",
-    "dialog",
-    "unknown",
+    "title", "field", "loading", "battle", "fishing", "menu", "dialog", "unknown",
 ];
 
 /// GUI のモード。
@@ -60,6 +54,17 @@ impl Default for EngineKind {
     fn default() -> Self {
         // よりロバストな方をデフォルト。
         EngineKind::Ccoeff
+    }
+}
+
+impl EngineKind {
+    /// TemplateSpec.method / 実行エンジンの方式文字列へ変換する。
+    /// library::TemplateSpec の method 文字列仕様（"sse" / "ccoeff"）と完全一致。
+    fn method_str(self) -> &'static str {
+        match self {
+            EngineKind::Sse => "sse",
+            EngineKind::Ccoeff => "ccoeff",
+        }
     }
 }
 
@@ -107,18 +112,51 @@ pub struct StudioApp {
     batch_result: Option<ConfusionMatrix>,
     /// ADB デバイスシリアル（ライブキャプチャ用）。
     adb_serial: String,
+    /// ライブキャプチャの取得元バックエンド(android/windows)。
+    target: crate::source::Target,
+    /// PC版(Windows)バックエンドの対象 exe 名。
+    win_exe: String,
     /// ライブキャプチャ（稼働中のみ）。
     live: Option<LiveCapture>,
     /// 720p 基準への解像度正規化スケーラ（TASK-009）。
     scaler: ScreenScaler,
     /// ROI自動提案の候補リスト（💡ボタン押下で生成）。
     proposals: Vec<Proposal>,
+    /// ROI候補提案の計算中フラグ（別スレッドで propose 実行中）。
+    proposing: bool,
+    /// 別スレッドでの propose 計算結果を受信する channel。
+    /// 計算未依頼時・受信済み時は空（Option で所有権の有無を表現）。
+    proposal_rx: Option<Receiver<Vec<Proposal>>>,
     /// ステータスメッセージ。
     status: String,
 }
 
 impl Default for StudioApp {
     fn default() -> Self {
+        Self::with_initial_target(crate::source::Target::default(), None)
+    }
+}
+
+/// PC版(Windows)バックエンドの既定 exe 名を返す。
+///
+/// Windows ビルドでは anaden-device の DEFAULT_PROCESS_NAME("AnotherEden.exe") を使い、
+/// Linux ビルドでは同定数が存在しないため同一の固定文字列を使う(Linux では windows
+/// バックエンドが選択できないので実行されることはなく、GUI 表示用の初期値のみ)。
+fn default_win_exe() -> String {
+    #[cfg(windows)]
+    {
+        crate::source::DEFAULT_PROCESS_NAME.to_string()
+    }
+    #[cfg(not(windows))]
+    {
+        "AnotherEden.exe".to_string()
+    }
+}
+
+impl StudioApp {
+    /// CLI 指定の target/exe を初期値として StudioApp を構築する。
+    /// target 未指定時(default) は android。exe 未指定時は既定 exe 名。
+    pub fn with_initial_target(target: crate::source::Target, exe: Option<String>) -> Self {
         // engine は engine_kind（デフォルト CCOEFF）から構築。閾値0・ダウンスケール2。
         let default_kind = EngineKind::default();
         Self {
@@ -146,9 +184,13 @@ impl Default for StudioApp {
             batch_threshold: 0.5,
             batch_result: None,
             adb_serial: String::new(),
+            target,
+            win_exe: exe.unwrap_or_else(default_win_exe),
             live: None,
             scaler: ScreenScaler::new(),
             proposals: vec![],
+            proposing: false,
+            proposal_rx: None,
             status: String::from("スクリーンショットと正例/負例フォルダを読み込んでください"),
         }
     }
@@ -163,10 +205,7 @@ impl StudioApp {
                 MatchConfidence::new(0.0),
                 2,
             ))),
-            EngineKind::Ccoeff => Box::new(CcoeffVisionEngine::new(
-                MatchConfidence::new(0.0),
-                2,
-            )),
+            EngineKind::Ccoeff => Box::new(CcoeffVisionEngine::new(MatchConfidence::new(0.0), 2)),
         }
     }
 
@@ -253,9 +292,9 @@ impl StudioApp {
             state: STATE_OPTIONS[self.tpl_state_idx].to_string(),
             roi,
             threshold,
-            // TODO(第2段): engine_kind に連動させる（Sse => "sse", Ccoeff => "ccoeff"）。
-            // TemplateStore 側の method 文字列仕様に依存するため、第一段では固定。
-            method: "sse".to_string(),
+            // engine_kind に連動（Sse => "sse", Ccoeff => "ccoeff"）。
+            // library::TemplateSpec の method 文字列仕様と一致。
+            method: self.engine_kind.method_str().to_string(),
         };
         match library::save_template(&self.save_dir, &spec, &crop) {
             Ok(p) => self.status = format!("保存: {}", p.display()),
@@ -265,24 +304,46 @@ impl StudioApp {
 
     /// 現在のスクリーンショットからROI候補を提案する。
     ///
-    /// heatmap_engine を転用（閾値0・1/4ダウンスケール・score_map 使用可）。
-    /// propose は同期的に走る（ヒートマップ計算と同様。初版はこれでよい）。
+    /// propose は match_template 総当たりで重く、PC版(1280x699)画像では
+    /// UI スレッドを数秒ブロックしてフリーズする。そのため別スレッドで計算し、
+    /// 結果を mpsc channel で UI へ返す（update で try_recv で非ブロッキング受信）。
+    ///
+    /// - Box<dyn VisionEngine> はデフォルトで Send を要求しないため、スレッドへは
+    ///   engine_kind（Copy）と screenshot（Arc）だけを渡し、スレッド内で
+    ///   build_engine(kind) から再構築して使う。heatmap_engine と同等（閾値0・
+    ///   1/4ダウンスケール）のエンジンを build できないため、propose 専用に
+    ///   downscale=HEATMAP_DOWNSCALE の SSE エンジンを構築して渡す。
+    /// - 計算中フラグ(self.proposing)を立て、二重起動を防ぐ。ボタンは UI 側で無効化。
     fn run_proposals(&mut self) {
+        if self.proposing {
+            return; // 二重起動防止
+        }
         let Some(img) = self.screenshot.clone() else {
             self.status = "スクリーンショットを先に読み込んでください".to_string();
             return;
         };
+        self.proposing = true;
         self.status = "ROI候補を計算中…".to_string();
-        let ps = proposals::propose(
-            self.heatmap_engine.as_ref(),
-            &img,
-            96, // tile_w
-            96, // tile_h
-            96, // step（ノーオーバーラップ）
-            12, // max_n
-        );
-        self.status = format!("ROI候補: {} 件（スコア順）", ps.len());
-        self.proposals = ps;
+
+        let (tx, rx) = mpsc::channel::<Vec<Proposal>>();
+        self.proposal_rx = Some(rx);
+
+        // 提案計算は heatmap_engine と同等（閾値0・1/4ダウンスケール）のエンジンで
+        // 行う。heatmap_engine は Send を要求しない Box<dyn VisionEngine> なので
+        // スレッドへは渡せず、スレッド内で同条件の SSE エンジンを新規構築する。
+        let downscale = HEATMAP_DOWNSCALE;
+        std::thread::spawn(move || {
+            let engine =
+                SseVisionEngine::new(TemplateMatcher::new(MatchConfidence::new(0.0), downscale));
+            let ps = proposals::propose(
+                &engine, &img, 96, // tile_w
+                96, // tile_h
+                96, // step（ノーオーバーラップ）
+                12, // max_n
+            );
+            // 受信側が破棄されていてもエラーは無視（アプリ終了時等）。
+            let _ = tx.send(ps);
+        });
     }
 
     /// 候補ROIをドラッグROI編集状態に読み込む。
@@ -307,8 +368,7 @@ impl eframe::App for StudioApp {
             if let Some(img) = &self.screenshot {
                 let rgba = img.to_rgba8();
                 let size = [rgba.width() as usize, rgba.height() as usize];
-                let color_image =
-                    egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
                 self.screenshot_tex = Some(ui.ctx().load_texture(
                     "studio-screenshot",
                     color_image,
@@ -328,6 +388,19 @@ impl eframe::App for StudioApp {
             });
 
         if matches!(self.mode, AppMode::Authoring) {
+            // 別スレッドでの propose 計算結果を非ブロッキング受信。
+            // 完了時: proposing を下ろし、結果を self.proposals へ反映・status 更新。
+            if self.proposing {
+                if let Some(rx) = &self.proposal_rx {
+                    if let Ok(ps) = rx.try_recv() {
+                        self.proposals = ps;
+                        self.proposing = false;
+                        self.proposal_rx = None;
+                        self.status = format!("ROI候補: {} 件（スコア順）", self.proposals.len());
+                    }
+                }
+            }
+
             // ライブADBキャプチャの最新フレームを取り込む（表示更新のみ。ROIは保持）
             if let Some(live) = &self.live {
                 if let Some(frame) = live.latest() {
@@ -339,256 +412,326 @@ impl eframe::App for StudioApp {
 
             // 左サイドパネル: 操作 + 識別力サマリ
             egui::Panel::left("controls")
-            .resizable(true)
-            .default_size(320.0)
-            .show_inside(ui, |ui| {
-                ui.heading("anaden-studio");
-                ui.label("テンプレート作成");
-                ui.separator();
+                .resizable(true)
+                .default_size(320.0)
+                .show_inside(ui, |ui| {
+                    ui.heading("anaden-studio");
+                    ui.label("テンプレート作成");
+                    ui.separator();
 
-                ui.label("データ");
-                if ui.button("📸 スクリーンショットを開く").clicked() {
-                    self.open_screenshot();
-                }
-                ui.horizontal(|ui| {
-                    if ui.button("✅ 正例フォルダ").clicked() {
-                        self.load_positives();
+                    ui.label("データ");
+                    if ui.button("📸 スクリーンショットを開く").clicked() {
+                        self.open_screenshot();
                     }
-                    ui.label(format!("{}枚", self.positives.len()));
-                });
-                ui.horizontal(|ui| {
-                    if ui.button("❌ 負例フォルダ").clicked() {
-                        self.load_negatives();
-                    }
-                    ui.label(format!("{}枚", self.negatives.len()));
-                });
-                ui.separator();
+                    ui.horizontal(|ui| {
+                        if ui.button("✅ 正例フォルダ").clicked() {
+                            self.load_positives();
+                        }
+                        ui.label(format!("{}枚", self.positives.len()));
+                    });
+                    ui.horizontal(|ui| {
+                        if ui.button("❌ 負例フォルダ").clicked() {
+                            self.load_negatives();
+                        }
+                        ui.label(format!("{}枚", self.negatives.len()));
+                    });
+                    ui.separator();
 
-                // 認識エンジン切替（ライブ比較）
-                ui.heading("認識エンジン");
-                ui.horizontal(|ui| {
-                    ui.label("方式:");
-                    // 借用回避: new_kind は self から Copy した値。
-                    // 変更があればループ外（closure 脱出後）で switch する。
-                    let mut new_kind = self.engine_kind;
-                    egui::ComboBox::from_id_salt("engine_kind_combo")
-                        .selected_text(match self.engine_kind {
-                            EngineKind::Sse => "SSE（輝度差）",
-                            EngineKind::Ccoeff => "CCOEFF（ロバスト）",
-                        })
-                        .show_ui(ui, |ui| {
-                            ui.selectable_value(&mut new_kind, EngineKind::Sse, "SSE（輝度差）");
-                            ui.selectable_value(
-                                &mut new_kind,
-                                EngineKind::Ccoeff,
-                                "CCOEFF（ロバスト）",
-                            );
-                        });
-                    if new_kind != self.engine_kind {
-                        self.switch_engine(new_kind);
-                    }
-                });
-                ui.separator();
-
-                // ライブADBキャプチャ
-                ui.heading("ライブADB");
-                ui.horizontal(|ui| {
-                    ui.label("serial:");
-                    ui.add(
-                        egui::TextEdit::singleline(&mut self.adb_serial).desired_width(140.0),
-                    );
-                });
-                if self.live.is_some() {
-                    if ui.button("⏹ 停止（この画面で固定）").clicked() {
-                        self.live = None;
-                        self.status = "ライブ停止: 現在の画面で固定しました".to_string();
-                    }
-                } else {
-                    let serial = self.adb_serial.trim().to_string();
-                    ui.add_enabled_ui(!serial.is_empty(), |ui| {
-                        if ui.button("▶ ライブ開始").clicked() {
-                            self.live = Some(LiveCapture::start(serial, 800));
-                            self.status = "ライブキャプチャ中…".to_string();
+                    // 認識エンジン切替（ライブ比較）
+                    ui.heading("認識エンジン");
+                    ui.horizontal(|ui| {
+                        ui.label("方式:");
+                        // 借用回避: new_kind は self から Copy した値。
+                        // 変更があればループ外（closure 脱出後）で switch する。
+                        let mut new_kind = self.engine_kind;
+                        egui::ComboBox::from_id_salt("engine_kind_combo")
+                            .selected_text(match self.engine_kind {
+                                EngineKind::Sse => "SSE（輝度差）",
+                                EngineKind::Ccoeff => "CCOEFF（ロバスト）",
+                            })
+                            .show_ui(ui, |ui| {
+                                ui.selectable_value(
+                                    &mut new_kind,
+                                    EngineKind::Sse,
+                                    "SSE（輝度差）",
+                                );
+                                ui.selectable_value(
+                                    &mut new_kind,
+                                    EngineKind::Ccoeff,
+                                    "CCOEFF（ロバスト）",
+                                );
+                            });
+                        if new_kind != self.engine_kind {
+                            self.switch_engine(new_kind);
                         }
                     });
-                }
-                ui.separator();
+                    ui.separator();
 
-                // ROI自動提案
-                ui.heading("ROI候補");
-                let can_propose = self.screenshot.is_some();
-                ui.add_enabled_ui(can_propose, |ui| {
-                    if ui.button("💡 ROI候補を提案").clicked() {
-                        self.run_proposals();
-                    }
-                });
-                if !self.proposals.is_empty() {
-                    ui.label("クリックでROIに読込（その後スコアで検証）:");
-                    // 借用チェック: ループ内で self.proposals を借用しつつ
-                    // self.apply_proposal は呼べないため、クリック対象を退避し
-                    // ループ外で適用する（canvas のドラッグROI更新と同パターン）。
-                    let mut clicked: Option<ScreenRegion> = None;
-                    for (i, p) in self.proposals.iter().enumerate() {
-                        if ui
-                            .small_button(format!(
-                                "[{i}] score {:.2}  ({},{}) {}x{}",
-                                p.score, p.roi.x, p.roi.y, p.roi.width, p.roi.height
-                            ))
-                            .clicked()
-                        {
-                            clicked = Some(p.roi);
+                    // ライブキャプチャ(android 実機 / PC版 Windows)
+                    ui.heading("ライブキャプチャ");
+                    // バックエンド選択。Windows バックエンドは Windows ビルドでのみ選択可能。
+                    ui.horizontal(|ui| {
+                        ui.label("取得元:");
+                        ui.selectable_value(
+                            &mut self.target,
+                            crate::source::Target::Android,
+                            "📱 Android(adb)",
+                        );
+                        #[cfg(windows)]
+                        ui.selectable_value(
+                            &mut self.target,
+                            crate::source::Target::Windows,
+                            "🖥 Windows(PC版)",
+                        );
+                    });
+                    // android は serial、windows は exe 名を入力。
+                    match self.target {
+                        crate::source::Target::Android => {
+                            ui.horizontal(|ui| {
+                                ui.label("serial:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.adb_serial)
+                                        .desired_width(140.0),
+                                );
+                            });
+                        }
+                        #[cfg(windows)]
+                        crate::source::Target::Windows => {
+                            ui.horizontal(|ui| {
+                                ui.label("exe名:");
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.win_exe)
+                                        .desired_width(160.0),
+                                );
+                            });
                         }
                     }
-                    if let Some(roi) = clicked {
-                        self.apply_proposal(roi);
-                    }
-                }
-                ui.separator();
-
-                // 識別力サマリ
-                ui.heading("識別力");
-                if let Some(d) = &self.discrimination {
-                    let (verdict, color) = if d.margin() > 0.1 {
-                        ("識別可能", egui::Color32::from_rgb(60, 180, 75))
-                    } else if d.margin() > 0.0 {
-                        ("微妙（要調整）", egui::Color32::from_rgb(230, 160, 30))
+                    if self.live.is_some() {
+                        if ui.button("⏹ 停止（この画面で固定）").clicked() {
+                            self.live = None;
+                            self.status = "ライブ停止: 現在の画面で固定しました".to_string();
+                        }
                     } else {
-                        ("識別不可", egui::Color32::from_rgb(220, 60, 60))
-                    };
-                    ui.colored_label(color, format!("判定: {verdict}"));
-                    ui.colored_label(
-                        egui::Color32::from_rgb(60, 180, 75),
-                        format!("正例最低: {:.3}", d.own_min),
-                    );
-                    ui.colored_label(
-                        egui::Color32::from_rgb(220, 60, 60),
-                        format!("負例最高: {:.3}", d.other_max),
-                    );
-                    ui.label(format!("マージン: {:+.3}", d.margin()));
-                    ui.separator();
-                    ui.label("正例スコア:");
-                    for (i, s) in d.own_scores.iter().enumerate() {
-                        ui.monospace(format!("  [{i}] {s:.3}"));
-                    }
-                    ui.label("負例スコア:");
-                    for (i, s) in d.other_scores.iter().enumerate() {
-                        ui.monospace(format!("  [{i}] {s:.3}"));
-                    }
-                } else if let Some(r) = self.roi.rect() {
-                    ui.label(format!(
-                        "ROI: ({},{}) {}x{}",
-                        r.x, r.y, r.width, r.height
-                    ));
-                    ui.label("（評価中、または正例/負例未設定）");
-                } else {
-                    ui.label("画面上でドラッグしてROIを選択");
-                }
-                ui.separator();
-
-                // テンプレート保存
-                ui.heading("保存");
-                ui.horizontal(|ui| {
-                    ui.label("名前:");
-                    ui.text_edit_singleline(&mut self.tpl_name);
-                });
-                ui.horizontal(|ui| {
-                    ui.label("状態:");
-                    egui::ComboBox::from_id_salt("state_combo")
-                        .selected_text(STATE_OPTIONS[self.tpl_state_idx])
-                        .show_ui(ui, |ui| {
-                            for (i, s) in STATE_OPTIONS.iter().enumerate() {
-                                ui.selectable_value(&mut self.tpl_state_idx, i, *s);
+                        // 開始可否: android は serial 必須、windows は exe 名必須。
+                        let can_start = match self.target {
+                            crate::source::Target::Android => !self.adb_serial.trim().is_empty(),
+                            #[cfg(windows)]
+                            crate::source::Target::Windows => !self.win_exe.trim().is_empty(),
+                        };
+                        ui.add_enabled_ui(can_start, |ui| {
+                            if ui.button("▶ ライブ開始").clicked() {
+                                // android は serial、windows は exe 名を渡してバックエンドを分岐。
+                                let serial = self.adb_serial.trim().to_string();
+                                self.live = Some(LiveCapture::start(
+                                    serial,
+                                    800,
+                                    self.target,
+                                    self.win_exe.trim(),
+                                ));
+                                self.status = match self.target {
+                                    crate::source::Target::Android => {
+                                        "ライブキャプチャ中…".to_string()
+                                    }
+                                    #[cfg(windows)]
+                                    crate::source::Target::Windows => {
+                                        format!("PC版キャプチャ中… ({})", self.win_exe.trim())
+                                    }
+                                };
                             }
                         });
-                });
-                ui.label(format!("保存先: {}", self.save_dir.display()));
-                if ui.button("📁 保存先変更").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        self.save_dir = dir;
                     }
-                }
-                let can_save = self.roi.rect().is_some() && self.screenshot.is_some();
-                let mut save_clicked = false;
-                ui.add_enabled_ui(can_save, |ui| {
-                    if ui.button("💾 テンプレート保存").clicked() {
-                        save_clicked = true;
-                    }
-                });
-                if save_clicked {
-                    self.save_current_template();
-                }
-                ui.separator();
-                ui.label(&self.status);
-            });
+                    ui.separator();
 
-        // 中央: キャンバス
-        egui::CentralPanel::default().show_inside(ui, |ui| {
-            if let (Some(tex), Some(img)) = (&self.screenshot_tex, &self.screenshot) {
-                let (w, h) = (img.width(), img.height());
-
-                // 既存のヒートマップを描画に渡す（ROI解放時に更新される）
-                let heatmap_view = self.heatmap_tex.as_ref().map(|t| canvas::HeatmapView {
-                    tex: t.id(),
-                    search: self.heatmap_search,
-                });
-                let best_match = self.best_match;
-                canvas::show(ui, tex, w, h, &mut self.roi, heatmap_view.as_ref(), best_match);
-
-                // ROIが安定して変化したら識別力とヒートマップを再評価
-                if let Some(roi_rect) = self.roi.rect() {
-                    if !self.roi.dragging && Some(roi_rect) != self.scored_roi {
-                        let crop =
-                            img.crop_imm(roi_rect.x, roi_rect.y, roi_rect.width, roi_rect.height);
-                        self.discrimination = Some(scoring::discrimination(
-                            self.engine.as_ref(),
-                            &crop,
-                            &self.positives,
-                            &self.negatives,
-                        ));
-
-                        // ヒートマップ（スコアマップ全体）と最良マッチ位置
-                        if let Some(sm) = self.heatmap_engine.score_map(img, &crop) {
-                            let mut bx = 0u32;
-                            let mut by = 0u32;
-                            let mut bv = 0u8;
-                            for y in 0..sm.height() {
-                                for x in 0..sm.width() {
-                                    let v = sm.get_pixel(x, y)[0];
-                                    if v > bv {
-                                        bv = v;
-                                        bx = x;
-                                        by = y;
-                                    }
-                                }
+                    // ROI自動提案
+                    ui.heading("ROI候補");
+                    // 計算中(self.proposing)はボタンを無効化（二重起動・多重ブロック防止）。
+                    let can_propose = self.screenshot.is_some() && !self.proposing;
+                    ui.add_enabled_ui(can_propose, |ui| {
+                        let label = if self.proposing {
+                            "💡 ROI候補を計算中…"
+                        } else {
+                            "💡 ROI候補を提案"
+                        };
+                        if ui.button(label).clicked() {
+                            self.run_proposals();
+                        }
+                    });
+                    if !self.proposals.is_empty() {
+                        ui.label("クリックでROIに読込（その後スコアで検証）:");
+                        // 借用チェック: ループ内で self.proposals を借用しつつ
+                        // self.apply_proposal は呼べないため、クリック対象を退避し
+                        // ループ外で適用する（canvas のドラッグROI更新と同パターン）。
+                        let mut clicked: Option<ScreenRegion> = None;
+                        for (i, p) in self.proposals.iter().enumerate() {
+                            if ui
+                                .small_button(format!(
+                                    "[{i}] score {:.2}  ({},{}) {}x{}",
+                                    p.score, p.roi.x, p.roi.y, p.roi.width, p.roi.height
+                                ))
+                                .clicked()
+                            {
+                                clicked = Some(p.roi);
                             }
-                            let d = HEATMAP_DOWNSCALE;
-                            self.best_match = Some(ScreenRegion::new(
-                                bx * d,
-                                by * d,
+                        }
+                        if let Some(roi) = clicked {
+                            self.apply_proposal(roi);
+                        }
+                    }
+                    ui.separator();
+
+                    // 識別力サマリ
+                    ui.heading("識別力");
+                    if let Some(d) = &self.discrimination {
+                        let (verdict, color) = if d.margin() > 0.1 {
+                            ("識別可能", egui::Color32::from_rgb(60, 180, 75))
+                        } else if d.margin() > 0.0 {
+                            ("微妙（要調整）", egui::Color32::from_rgb(230, 160, 30))
+                        } else {
+                            ("識別不可", egui::Color32::from_rgb(220, 60, 60))
+                        };
+                        ui.colored_label(color, format!("判定: {verdict}"));
+                        ui.colored_label(
+                            egui::Color32::from_rgb(60, 180, 75),
+                            format!("正例最低: {:.3}", d.own_min),
+                        );
+                        ui.colored_label(
+                            egui::Color32::from_rgb(220, 60, 60),
+                            format!("負例最高: {:.3}", d.other_max),
+                        );
+                        ui.label(format!("マージン: {:+.3}", d.margin()));
+                        ui.separator();
+                        ui.label("正例スコア:");
+                        for (i, s) in d.own_scores.iter().enumerate() {
+                            ui.monospace(format!("  [{i}] {s:.3}"));
+                        }
+                        ui.label("負例スコア:");
+                        for (i, s) in d.other_scores.iter().enumerate() {
+                            ui.monospace(format!("  [{i}] {s:.3}"));
+                        }
+                    } else if let Some(r) = self.roi.rect() {
+                        ui.label(format!("ROI: ({},{}) {}x{}", r.x, r.y, r.width, r.height));
+                        ui.label("（評価中、または正例/負例未設定）");
+                    } else {
+                        ui.label("画面上でドラッグしてROIを選択");
+                    }
+                    ui.separator();
+
+                    // テンプレート保存
+                    ui.heading("保存");
+                    ui.horizontal(|ui| {
+                        ui.label("名前:");
+                        ui.text_edit_singleline(&mut self.tpl_name);
+                    });
+                    ui.horizontal(|ui| {
+                        ui.label("状態:");
+                        egui::ComboBox::from_id_salt("state_combo")
+                            .selected_text(STATE_OPTIONS[self.tpl_state_idx])
+                            .show_ui(ui, |ui| {
+                                for (i, s) in STATE_OPTIONS.iter().enumerate() {
+                                    ui.selectable_value(&mut self.tpl_state_idx, i, *s);
+                                }
+                            });
+                    });
+                    ui.label(format!("保存先: {}", self.save_dir.display()));
+                    if ui.button("📁 保存先変更").clicked() {
+                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
+                            self.save_dir = dir;
+                        }
+                    }
+                    let can_save = self.roi.rect().is_some() && self.screenshot.is_some();
+                    let mut save_clicked = false;
+                    ui.add_enabled_ui(can_save, |ui| {
+                        if ui.button("💾 テンプレート保存").clicked() {
+                            save_clicked = true;
+                        }
+                    });
+                    if save_clicked {
+                        self.save_current_template();
+                    }
+                    ui.separator();
+                    ui.label(&self.status);
+                });
+
+            // 中央: キャンバス
+            egui::CentralPanel::default().show_inside(ui, |ui| {
+                if let (Some(tex), Some(img)) = (&self.screenshot_tex, &self.screenshot) {
+                    let (w, h) = (img.width(), img.height());
+
+                    // 既存のヒートマップを描画に渡す（ROI解放時に更新される）
+                    let heatmap_view = self.heatmap_tex.as_ref().map(|t| canvas::HeatmapView {
+                        tex: t.id(),
+                        search: self.heatmap_search,
+                    });
+                    let best_match = self.best_match;
+                    canvas::show(
+                        ui,
+                        tex,
+                        w,
+                        h,
+                        &mut self.roi,
+                        heatmap_view.as_ref(),
+                        best_match,
+                    );
+
+                    // ROIが安定して変化したら識別力とヒートマップを再評価
+                    if let Some(roi_rect) = self.roi.rect() {
+                        if !self.roi.dragging && Some(roi_rect) != self.scored_roi {
+                            let crop = img.crop_imm(
+                                roi_rect.x,
+                                roi_rect.y,
                                 roi_rect.width,
                                 roi_rect.height,
-                            ));
-                            self.heatmap_search = ScreenRegion::new(
-                                0,
-                                0,
-                                img.width().saturating_sub(roi_rect.width),
-                                img.height().saturating_sub(roi_rect.height),
                             );
-                            let color_img = canvas::score_map_to_heatmap(&sm);
-                            self.heatmap_tex = Some(ui.ctx().load_texture(
-                                "heatmap",
-                                color_img,
-                                egui::TextureOptions::LINEAR,
+                            self.discrimination = Some(scoring::discrimination(
+                                self.engine.as_ref(),
+                                &crop,
+                                &self.positives,
+                                &self.negatives,
                             ));
-                        }
 
-                        self.scored_roi = Some(roi_rect);
+                            // ヒートマップ（スコアマップ全体）と最良マッチ位置
+                            if let Some(sm) = self.heatmap_engine.score_map(img, &crop) {
+                                let mut bx = 0u32;
+                                let mut by = 0u32;
+                                let mut bv = 0u8;
+                                for y in 0..sm.height() {
+                                    for x in 0..sm.width() {
+                                        let v = sm.get_pixel(x, y)[0];
+                                        if v > bv {
+                                            bv = v;
+                                            bx = x;
+                                            by = y;
+                                        }
+                                    }
+                                }
+                                let d = HEATMAP_DOWNSCALE;
+                                self.best_match = Some(ScreenRegion::new(
+                                    bx * d,
+                                    by * d,
+                                    roi_rect.width,
+                                    roi_rect.height,
+                                ));
+                                self.heatmap_search = ScreenRegion::new(
+                                    0,
+                                    0,
+                                    img.width().saturating_sub(roi_rect.width),
+                                    img.height().saturating_sub(roi_rect.height),
+                                );
+                                let color_img = canvas::score_map_to_heatmap(&sm);
+                                self.heatmap_tex = Some(ui.ctx().load_texture(
+                                    "heatmap",
+                                    color_img,
+                                    egui::TextureOptions::LINEAR,
+                                ));
+                            }
+
+                            self.scored_roi = Some(roi_rect);
+                        }
                     }
+                } else {
+                    ui.heading("「スクリーンショットを開く」で画像を読み込んでください");
                 }
-            } else {
-                ui.heading("「スクリーンショットを開く」で画像を読み込んでください");
-            }
-        });
+            });
         } else {
             self.batch_ui(ui);
         }
@@ -630,7 +773,11 @@ impl StudioApp {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             if let Some(cm) = &self.batch_result {
                 ui.heading(format!("混同行列（正答率 {:.1}%）", cm.accuracy() * 100.0));
-                ui.label(format!("テスト画像 {} 枚 / 状態 {} 種", cm.total, cm.labels.len()));
+                ui.label(format!(
+                    "テスト画像 {} 枚 / 状態 {} 種",
+                    cm.total,
+                    cm.labels.len()
+                ));
                 ui.separator();
 
                 egui::Grid::new("confusion")
@@ -666,20 +813,22 @@ impl StudioApp {
 
                 ui.separator();
                 ui.heading("テンプレート別");
-                egui::Grid::new("per_template").striped(true).show(ui, |ui| {
-                    ui.strong("名前");
-                    ui.strong("状態");
-                    ui.strong("感度");
-                    ui.strong("特異性");
-                    ui.end_row();
-                    for r in &cm.per_template {
-                        ui.label(&r.name);
-                        ui.label(&r.state);
-                        ui.monospace(format!("{:.2}", r.sensitivity));
-                        ui.monospace(format!("{:.2}", r.specificity));
+                egui::Grid::new("per_template")
+                    .striped(true)
+                    .show(ui, |ui| {
+                        ui.strong("名前");
+                        ui.strong("状態");
+                        ui.strong("感度");
+                        ui.strong("特異性");
                         ui.end_row();
-                    }
-                });
+                        for r in &cm.per_template {
+                            ui.label(&r.name);
+                            ui.label(&r.state);
+                            ui.monospace(format!("{:.2}", r.sensitivity));
+                            ui.monospace(format!("{:.2}", r.specificity));
+                            ui.end_row();
+                        }
+                    });
             } else {
                 ui.heading("「▶ 実行」でバッチ評価を行います");
                 ui.label("テンプレート元フォルダ（PNG+TOML）と、");
@@ -705,7 +854,12 @@ impl StudioApp {
             templates.len(),
             tests.len()
         );
-        let cm = batch::evaluate(self.engine.as_ref(), &templates, &tests, self.batch_threshold);
+        let cm = batch::evaluate(
+            self.engine.as_ref(),
+            &templates,
+            &tests,
+            self.batch_threshold,
+        );
         self.status = format!(
             "完了: 正答率 {:.1}% ({} テンプレ × {} テスト)",
             cm.accuracy() * 100.0,
@@ -734,7 +888,10 @@ fn load_folder(path: &Path) -> Vec<Arc<DynamicImage>> {
 
 fn is_image(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref(),
         Some("png") | Some("jpg") | Some("jpeg") | Some("bmp")
     )
 }

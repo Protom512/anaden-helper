@@ -1,0 +1,10 @@
+name = "map"
+state = "field"
+threshold = 0.9900000095367432
+method = "sse"
+
+[roi]
+x = 427
+y = 611
+width = 81
+height = 87

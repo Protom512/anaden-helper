@@ -19,11 +19,9 @@
 use std::path::PathBuf;
 use std::time::Instant;
 
-use anaden_vision::{
-    CcoeffVisionEngine, ScreenScaler, SseVisionEngine, VisionEngine,
-};
 use anaden_core::MatchConfidence;
-use image::{DynamicImage, GrayImage, GenericImageView};
+use anaden_vision::{CcoeffVisionEngine, ScreenScaler, SseVisionEngine, VisionEngine};
+use image::{DynamicImage, GenericImageView, GrayImage};
 
 /// 計測繰り返し回数。
 const ITERS: usize = 30;
@@ -74,7 +72,10 @@ fn main() {
     let base = scaler.normalize(&raw);
     let bw = base.width();
     let bh = base.height();
-    println!("# raw: {}x{}  base(normalized): {}x{}", raw_w, raw_h, bw, bh);
+    println!(
+        "# raw: {}x{}  base(normalized): {}x{}",
+        raw_w, raw_h, bw, bh
+    );
 
     // 2) 特徴的テンプレートをデータ駆動で選択:
     //    base 画像全体をグレースケールの窓分散で走査し、最も分散が大きい領域を
@@ -105,7 +106,9 @@ fn main() {
         "# haystacks: full={}x{}  roi={}x{} (crop @ base {},{} downscaled inside engine)",
         bw, bh, ROI_W, ROI_H, roi_x, roi_y
     );
-    println!("# warning: ROI template may exceed ROI haystack at downscale>=4; such cells report N/A.");
+    println!(
+        "# warning: ROI template may exceed ROI haystack at downscale>=4; such cells report N/A."
+    );
 
     // 4) 設定マトリクスで計測。
     let engines = ["sse", "ccoeff"];
@@ -116,7 +119,10 @@ fn main() {
     let mut results: Vec<Row> = Vec::new();
 
     println!();
-    println!("{:<8} {:<6} {:>10} {:>14} {:>14}", "engine", "scope", "downscale", "median_ms", "confidence");
+    println!(
+        "{:<8} {:<6} {:>10} {:>14} {:>14}",
+        "engine", "scope", "downscale", "median_ms", "confidence"
+    );
     println!("{}", "-".repeat(56));
 
     // 閾値は低く（0.0）して必ず最良マッチを返させる＝計測の安定化。
@@ -153,9 +159,8 @@ fn main() {
 
                 let (median_ms, conf) = match engine {
                     "sse" => {
-                        let eng = SseVisionEngine::new(
-                            anaden_vision::TemplateMatcher::new(thr, ds),
-                        );
+                        let eng =
+                            SseVisionEngine::new(anaden_vision::TemplateMatcher::new(thr, ds));
                         measure(&eng, &hay, &big_dyn, ITERS)
                     }
                     "ccoeff" => {
@@ -180,8 +185,14 @@ fn main() {
 
     // 5) small テンプレ(80x80)の代表セルも追加計測（テンプレートサイズ効果の比較）。
     println!();
-    println!("# supplementary: small template {}x{} (downscale=2)", TPL_W_SMALL, TPL_H_SMALL);
-    println!("{:<8} {:<6} {:>10} {:>14} {:>14}", "engine", "scope", "downscale", "median_ms", "confidence");
+    println!(
+        "# supplementary: small template {}x{} (downscale=2)",
+        TPL_W_SMALL, TPL_H_SMALL
+    );
+    println!(
+        "{:<8} {:<6} {:>10} {:>14} {:>14}",
+        "engine", "scope", "downscale", "median_ms", "confidence"
+    );
     println!("{}", "-".repeat(56));
     for &engine in &engines {
         for &scope in &scopes {
@@ -193,9 +204,7 @@ fn main() {
             let ds = 2u32;
             let (median_ms, conf) = match engine {
                 "sse" => {
-                    let eng = SseVisionEngine::new(
-                        anaden_vision::TemplateMatcher::new(thr, ds),
-                    );
+                    let eng = SseVisionEngine::new(anaden_vision::TemplateMatcher::new(thr, ds));
                     measure(&eng, &hay, &small_dyn, ITERS)
                 }
                 "ccoeff" => {
@@ -228,7 +237,12 @@ fn main() {
         };
         eprintln!(
             "  {{\"engine\":\"{}\",\"scope\":\"{}\",\"downscale\":{},\"template_size\":\"{}\",\"median_ms\":{},\"confidence\":\"{}\"}}{}",
-            r.engine, r.scope, r.downscale, r.template_size, med, r.confidence,
+            r.engine,
+            r.scope,
+            r.downscale,
+            r.template_size,
+            med,
+            r.confidence,
             if i + 1 < results.len() { "," } else { "" }
         );
     }
@@ -317,11 +331,9 @@ fn pick_high_variance_crop(gray: &GrayImage, w: u32, h: u32) -> GrayImage {
             let ys = y as usize;
             let xe = xs + w as usize;
             let ye = ys + h as usize;
-            let s = sum[ye * stride + xe] - sum[ys * stride + xe]
-                - sum[ye * stride + xs]
+            let s = sum[ye * stride + xe] - sum[ys * stride + xe] - sum[ye * stride + xs]
                 + sum[ys * stride + xs];
-            let s2 = sum2[ye * stride + xe] - sum2[ys * stride + xe]
-                - sum2[ye * stride + xs]
+            let s2 = sum2[ye * stride + xe] - sum2[ys * stride + xe] - sum2[ye * stride + xs]
                 + sum2[ys * stride + xs];
             let mean = s as f64 / n;
             let var = s2 as f64 / n - mean * mean;

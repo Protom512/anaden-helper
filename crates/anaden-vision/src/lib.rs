@@ -12,15 +12,16 @@ mod scale;
 mod scene_detector;
 mod template_store;
 
-pub use collector::{
-    ScreenGroup, TileCandidate, VerifyResult,
-    collect_templates, compute_similarity, extract_stable_tiles,
-    group_captures, verify_templates,
-};
 pub use ccoeff::CcoeffVisionEngine;
+pub use collector::{
+    ScreenGroup, TileCandidate, VerifyResult, collect_templates, compute_similarity,
+    extract_stable_tiles, group_captures, verify_templates,
+};
 pub use engine::{SseVisionEngine, VisionEngine};
 pub use matcher::{MatchResult, TemplateMatcher};
-pub use pipeline::{Action, Algorithm, StepOutcome, TaskDef, TaskDefError, load_pipeline, run_step};
+pub use pipeline::{
+    Action, Algorithm, StepOutcome, TaskDef, TaskDefError, load_pipeline, run_step,
+};
 pub use scale::ScreenScaler;
 pub use scene_detector::SceneDetector;
 pub use template_store::{TemplateEntry, TemplateStore};

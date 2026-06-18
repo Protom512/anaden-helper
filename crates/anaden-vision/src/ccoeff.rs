@@ -61,7 +61,11 @@ pub struct CcoeffVisionEngine {
 impl CcoeffVisionEngine {
     /// 閾値とダウンスケール倍率を指定して作成する。
     pub fn new(threshold: MatchConfidence, downscale_factor: u32) -> Self {
-        let factor = if downscale_factor == 0 { 1 } else { downscale_factor };
+        let factor = if downscale_factor == 0 {
+            1
+        } else {
+            downscale_factor
+        };
         Self {
             threshold,
             downscale_factor: factor,
@@ -122,7 +126,11 @@ impl CcoeffVisionEngine {
 }
 
 impl VisionEngine for CcoeffVisionEngine {
-    fn match_template(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<MatchResult> {
+    fn match_template(
+        &self,
+        haystack: &DynamicImage,
+        needle: &DynamicImage,
+    ) -> Option<MatchResult> {
         let (h, n) = self.downscale_images(haystack, needle)?;
         let hg = h.to_luma8();
         let ng = n.to_luma8();
@@ -364,7 +372,14 @@ mod tests {
     }
 
     /// haystack 中央 (ox, oy) に needle を埋め込んだ画像。
-    fn embed(haystack_w: u32, haystack_h: u32, needle: &GrayImage, ox: u32, oy: u32, bg: u8) -> GrayImage {
+    fn embed(
+        haystack_w: u32,
+        haystack_h: u32,
+        needle: &GrayImage,
+        ox: u32,
+        oy: u32,
+        bg: u8,
+    ) -> GrayImage {
         let mut img = GrayImage::from_pixel(haystack_w, haystack_h, Luma([bg]));
         for y in 0..needle.height() {
             for x in 0..needle.width() {
@@ -460,7 +475,10 @@ mod tests {
             .score_map(&luma_dyn(haystack.clone()), &luma_dyn(needle.clone()))
             .expect("score map should exist");
         for p in map.pixels() {
-            assert_eq!(p[0], 0, "uniform-window positions must yield 0, not NaN/Inf garbage");
+            assert_eq!(
+                p[0], 0,
+                "uniform-window positions must yield 0, not NaN/Inf garbage"
+            );
         }
         // match_all も一様窓では空（閾値0でも r=0 は 0.0 >= 0.0 で受理されるが、
         // CCOEFF は denomI=0 で 0 を返すので confidence=0。閾値0で受理される点を確認）。
@@ -540,8 +558,12 @@ mod tests {
         let sse = SseVisionEngine::new(TemplateMatcher::threshold_only(MatchConfidence(0.0)));
         let cc = CcoeffVisionEngine::threshold_only(MatchConfidence(0.0));
 
-        let sse_m = sse.match_template(&haystack_dyn, &needle_dyn).expect("sse match");
-        let cc_m = cc.match_template(&haystack_dyn, &needle_dyn).expect("ccoeff match");
+        let sse_m = sse
+            .match_template(&haystack_dyn, &needle_dyn)
+            .expect("sse match");
+        let cc_m = cc
+            .match_template(&haystack_dyn, &needle_dyn)
+            .expect("ccoeff match");
 
         assert_eq!(sse_m.region.x, cc_m.region.x, "x position must agree");
         assert_eq!(sse_m.region.y, cc_m.region.y, "y position must agree");

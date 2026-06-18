@@ -62,9 +62,21 @@ pub fn show(
         display.y = display.x / aspect;
     }
 
-    let (rect, response) = ui.allocate_exact_size(display, egui::Sense::drag());
+    // Image widget で画像を描画（uv=[0,0]..[1,1] の安全な経路）。
+    // fit_to_exact_size(display) + maintain_aspect_ratio(false) で、
+    // 既存手計算の display 矩形に一致させ、オーバーレイ座標(img_to_screen)とピクセル単位で合わせる。
+    // sense(drag) で ROIドラッグの response を得る。
+    let img_widget = egui::Image::from_texture(egui::load::SizedTexture::new(
+        tex.id(),
+        [img_w as f32, img_h as f32],
+    ))
+    .fit_to_exact_size(display)
+    .maintain_aspect_ratio(false)
+    .tint(egui::Color32::WHITE)
+    .sense(egui::Sense::drag());
+    let response = ui.add(img_widget);
+    let rect = response.rect;
     let painter = ui.painter_at(rect);
-    painter.image(tex.id(), rect, egui::Rect::EVERYTHING, egui::Color32::WHITE);
 
     roi.dragging = response.dragged();
 
@@ -75,7 +87,10 @@ pub fn show(
         }
         let fx = ((p.x - rect.left()) / rect.width()).clamp(0.0, 1.0) * img_w as f32;
         let fy = ((p.y - rect.top()) / rect.height()).clamp(0.0, 1.0) * img_h as f32;
-        Some((fx.min(img_w as f32 - 1.0) as u32, fy.min(img_h as f32 - 1.0) as u32))
+        Some((
+            fx.min(img_w as f32 - 1.0) as u32,
+            fy.min(img_h as f32 - 1.0) as u32,
+        ))
     };
 
     if response.drag_started() {
@@ -89,13 +104,14 @@ pub fn show(
     }
 
     // ヒートマップオーバーレイ（探索領域に合わせて引き伸ばし）
+    // uv は [0,0]..[1,1] を明示的に渡す（Rect::EVERYTHING は絶対NG）。
     if let Some(hm) = heatmap {
         let tl = img_to_screen(rect, img_w, img_h, (hm.search.x, hm.search.y));
         let br = img_to_screen(rect, img_w, img_h, (hm.search.right(), hm.search.bottom()));
         painter.image(
             hm.tex,
             egui::Rect::from_two_pos(tl, br),
-            egui::Rect::EVERYTHING,
+            egui::Rect::from_min_max(egui::pos2(0.0, 0.0), egui::pos2(1.0, 1.0)),
             egui::Color32::WHITE,
         );
     }

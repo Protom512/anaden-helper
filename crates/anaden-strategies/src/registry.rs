@@ -25,10 +25,7 @@ impl StrategyRegistry {
     }
 
     /// 指定したゲーム状態を処理できる戦略を検索する。
-    pub fn find_for_state(
-        &self,
-        state: &GameState,
-    ) -> Option<&dyn anaden_core::MiniGameStrategy> {
+    pub fn find_for_state(&self, state: &GameState) -> Option<&dyn anaden_core::MiniGameStrategy> {
         for strategy in self.strategies.values() {
             if let Some(_actions) = strategy.decide_actions(state) {
                 debug!("Found strategy '{}' for state {:?}", strategy.name(), state);

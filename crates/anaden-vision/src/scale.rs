@@ -5,7 +5,7 @@
 //! これにより異なる解像度の端末（Pixel 7a 2400x1080 等）で同じ ROI/座標定義が使える。
 //! テンプレート画像・ROI はすべてこの基準座標系で定義・保存する。
 
-use image::{imageops::FilterType, DynamicImage};
+use image::{DynamicImage, imageops::FilterType};
 
 /// 基準幅（MAA AsstTypes.h:28 WindowWidthDefault=1280 と同一）。
 pub const BASE_WIDTH: u32 = 1280;

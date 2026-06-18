@@ -56,6 +56,13 @@ fn main() {
     println!("tile={} top{} (score desc):", tile, topn);
     println!("rank  x    y    diff_avg  lumvar");
     for (i, (_, x, y, diff, var)) in rows.iter().take(topn).enumerate() {
-        println!("{:>3}   {:>4} {:>4}  {:>7.2}  {:>8.1}", i + 1, x, y, diff, var);
+        println!(
+            "{:>3}   {:>4} {:>4}  {:>7.2}  {:>8.1}",
+            i + 1,
+            x,
+            y,
+            diff,
+            var
+        );
     }
 }

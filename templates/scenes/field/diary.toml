@@ -1,0 +1,10 @@
+name = "diary"
+state = "field"
+threshold = 0.9900000095367432
+method = "sse"
+
+[roi]
+x = 337
+y = 604
+width = 89
+height = 94

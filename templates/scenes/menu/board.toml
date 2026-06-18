@@ -1,0 +1,10 @@
+name = "board"
+state = "menu"
+threshold = 0.9900000095367432
+method = "sse"
+
+[roi]
+x = 297
+y = 556
+width = 98
+height = 116

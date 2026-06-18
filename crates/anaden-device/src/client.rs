@@ -57,9 +57,7 @@ impl AdbClient {
 
     /// デバイスに接続できるか確認する。
     pub async fn check_connection(&self) -> Result<(), AdbError> {
-        let output = self
-            .run_adb_command(&["devices"])
-            .await?;
+        let output = self.run_adb_command(&["devices"]).await?;
 
         let stdout = String::from_utf8_lossy(&output.stdout);
         let connected = stdout

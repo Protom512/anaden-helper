@@ -1,0 +1,10 @@
+name = "bag"
+state = "menu"
+threshold = 0.9900000095367432
+method = "sse"
+
+[roi]
+x = 519
+y = 563
+width = 107
+height = 98

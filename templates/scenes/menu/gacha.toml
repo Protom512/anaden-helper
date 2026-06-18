@@ -1,0 +1,10 @@
+name = "gacha"
+state = "menu"
+threshold = 0.9900000095367432
+method = "sse"
+
+[roi]
+x = 409
+y = 564
+width = 104
+height = 103

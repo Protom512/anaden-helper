@@ -51,22 +51,11 @@ impl TemplateStore {
     }
 
     /// テンプレート画像を手動で登録する。
-    pub fn register(
-        &mut self,
-        name: impl Into<String>,
-        image: DynamicImage,
-        state: GameState,
-    ) {
+    pub fn register(&mut self, name: impl Into<String>, image: DynamicImage, state: GameState) {
         let name = name.into();
         debug!("Registered template '{}' for state {:?}", name, state);
-        self.templates.insert(
-            name.clone(),
-            TemplateEntry {
-                image,
-                state,
-                name,
-            },
-        );
+        self.templates
+            .insert(name.clone(), TemplateEntry { image, state, name });
     }
 
     /// 指定ディレクトリからテンプレート画像を一括読み込みする。
@@ -83,10 +72,7 @@ impl TemplateStore {
     /// ```
     ///
     /// 各サブディレクトリ名を GameState の識別子として使用する。
-    pub fn load_from_directory(
-        &mut self,
-        base_dir: &Path,
-    ) -> Result<usize, TemplateStoreError> {
+    pub fn load_from_directory(&mut self, base_dir: &Path) -> Result<usize, TemplateStoreError> {
         let mut loaded_count = 0;
 
         if !base_dir.exists() {
@@ -94,9 +80,9 @@ impl TemplateStore {
             return Ok(0);
         }
 
-        for entry in std::fs::read_dir(base_dir).unwrap_or_else(|e| {
-            panic!("Failed to read template directory {:?}: {}", base_dir, e)
-        }) {
+        for entry in std::fs::read_dir(base_dir)
+            .unwrap_or_else(|e| panic!("Failed to read template directory {:?}: {}", base_dir, e))
+        {
             let entry = entry.unwrap();
             let path = entry.path();
 
@@ -104,17 +90,13 @@ impl TemplateStore {
                 continue;
             }
 
-            let state_name = path
-                .file_name()
-                .unwrap()
-                .to_string_lossy()
-                .to_string();
+            let state_name = path.file_name().unwrap().to_string_lossy().to_string();
             let state = parse_state_from_dir_name(&state_name);
 
             // ディレクトリ内の画像ファイルを読み込む
-            for img_entry in std::fs::read_dir(&path).unwrap_or_else(|e| {
-                panic!("Failed to read state directory {:?}: {}", path, e)
-            }) {
+            for img_entry in std::fs::read_dir(&path)
+                .unwrap_or_else(|e| panic!("Failed to read state directory {:?}: {}", path, e))
+            {
                 let img_entry = img_entry.unwrap();
                 let img_path = img_entry.path();
 
@@ -122,23 +104,14 @@ impl TemplateStore {
                     continue;
                 }
 
-                let img = image::open(&img_path).map_err(|e| {
-                    TemplateStoreError::LoadFailed {
-                        path: img_path.clone(),
-                        reason: e.to_string(),
-                    }
+                let img = image::open(&img_path).map_err(|e| TemplateStoreError::LoadFailed {
+                    path: img_path.clone(),
+                    reason: e.to_string(),
                 })?;
 
-                let template_name = img_path
-                    .file_stem()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
+                let template_name = img_path.file_stem().unwrap().to_string_lossy().to_string();
 
-                info!(
-                    "Loaded template '{}' -> {:?}",
-                    template_name, state
-                );
+                info!("Loaded template '{}' -> {:?}", template_name, state);
 
                 self.register(template_name, img, state.clone());
                 loaded_count += 1;
@@ -188,7 +161,10 @@ fn parse_state_from_dir_name(name: &str) -> GameState {
 /// 画像ファイルの拡張子かどうか。
 fn is_image_file(path: &Path) -> bool {
     matches!(
-        path.extension().and_then(|e| e.to_str()).map(|e| e.to_lowercase()).as_deref(),
+        path.extension()
+            .and_then(|e| e.to_str())
+            .map(|e| e.to_lowercase())
+            .as_deref(),
         Some("png") | Some("jpg") | Some("jpeg") | Some("bmp")
     )
 }
@@ -213,10 +189,7 @@ mod tests {
 
     #[test]
     fn parse_state_from_dir_name_variants() {
-        assert_eq!(
-            parse_state_from_dir_name("title"),
-            GameState::TitleScreen
-        );
+        assert_eq!(parse_state_from_dir_name("title"), GameState::TitleScreen);
         assert_eq!(
             parse_state_from_dir_name("Title_Screen"),
             GameState::TitleScreen

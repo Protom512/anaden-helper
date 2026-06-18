@@ -23,21 +23,13 @@ impl ScreenshotCapture {
     pub async fn capture(&self) -> Result<DynamicImage, AdbError> {
         debug!("Capturing screenshot from device {}", self.client.serial());
 
-        let png_data = self
-            .client
-            .exec_out("screencap -p")
-            .await?;
+        let png_data = self.client.exec_out("screencap -p").await?;
 
-        let image = image::load_from_memory(&png_data)
-            .map_err(|e| AdbError::CommandFailed {
-                message: format!("Failed to decode screenshot PNG: {}", e),
-            })?;
+        let image = image::load_from_memory(&png_data).map_err(|e| AdbError::CommandFailed {
+            message: format!("Failed to decode screenshot PNG: {}", e),
+        })?;
 
-        debug!(
-            "Screenshot captured: {}x{}",
-            image.width(),
-            image.height()
-        );
+        debug!("Screenshot captured: {}x{}", image.width(), image.height());
 
         Ok(image)
     }

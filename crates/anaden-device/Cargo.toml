@@ -14,6 +14,11 @@ tracing = { workspace = true }
 # `source` feature で openh264 をソースビルドし、外部 DLL 不要で自己完結する。
 openh264 = { version = "0.8", default-features = false, features = ["source"], optional = true }
 
+# PC版 Windows API プローブ(入力/キャプチャ/起動)。features はルート [workspace.dependencies]
+# で一括定義。Windows 専用コードは cfg(windows) で囲む。Linux ビルドには依存しない。
+[target.'cfg(windows)'.dependencies]
+windows = { workspace = true }
+
 [features]
 default = []
 # scrcpy サーバ push + 常駐 H.264 受信 + openh264 デコードによる capture backend。

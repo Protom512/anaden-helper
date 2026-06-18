@@ -1,7 +1,6 @@
 //! 認識失敗時の回復戦略。
 //!
 /// 画面が `Unknown` 状態になった場合の回復アクションを定義する。
-
 use tracing::{info, warn};
 
 use anaden_core::InputAction;

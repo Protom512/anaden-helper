@@ -84,10 +84,7 @@ impl Orchestrator {
     }
 
     /// 戦略を登録する。
-    pub fn register_strategy(
-        &mut self,
-        strategy: Box<dyn anaden_core::MiniGameStrategy>,
-    ) {
+    pub fn register_strategy(&mut self, strategy: Box<dyn anaden_core::MiniGameStrategy>) {
         info!("Registered strategy: {}", strategy.name());
         self.strategies.register(strategy);
     }
@@ -127,9 +124,7 @@ impl Orchestrator {
             let elapsed = start.elapsed().as_secs_f64();
 
             // === タイムアウトチェック ===
-            if self.config.max_runtime_secs > 0
-                && elapsed > self.config.max_runtime_secs as f64
-            {
+            if self.config.max_runtime_secs > 0 && elapsed > self.config.max_runtime_secs as f64 {
                 info!("Max runtime reached ({}s)", self.config.max_runtime_secs);
                 return Ok(self.build_summary(
                     total_loops,
@@ -150,9 +145,7 @@ impl Orchestrator {
             };
 
             let recognition = detector.detect_scene(&screen);
-            let current_state = self
-                .state_machine
-                .transition(&recognition, &self.threshold);
+            let current_state = self.state_machine.transition(&recognition, &self.threshold);
 
             // 状態カウントの更新
             let state_name = format!("{:?}", current_state);
@@ -222,17 +215,11 @@ impl Orchestrator {
         match state {
             GameState::TitleScreen => {
                 // タイトル画面なら中央をタップして開始
-                vec![
-                    InputAction::wait_secs(2),
-                    InputAction::tap(540, 1200),
-                ]
+                vec![InputAction::wait_secs(2), InputAction::tap(540, 1200)]
             }
             GameState::Dialog(_) => {
                 // ダイアログなら「はい」付近をタップ
-                vec![
-                    InputAction::wait_ms(500),
-                    InputAction::tap(750, 1500),
-                ]
+                vec![InputAction::wait_ms(500), InputAction::tap(750, 1500)]
             }
             GameState::Loading => {
                 // ロード中は待機

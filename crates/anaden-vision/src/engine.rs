@@ -15,7 +15,8 @@ use crate::matcher::{MatchResult, TemplateMatcher};
 /// 認識を行うことで、マッチ方式の差し替えが上位層に影響しない。
 pub trait VisionEngine: Send + Sync {
     /// 最も信頼度の高いマッチを1件返す。閾値未満・テンプレートが大きすぎる場合は `None`。
-    fn match_template(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<MatchResult>;
+    fn match_template(&self, haystack: &DynamicImage, needle: &DynamicImage)
+    -> Option<MatchResult>;
 
     /// マッチスコアの全体マップ（ヒートマップ用）。テンプレートが大きすぎる場合は `None`。
     fn score_map(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<GrayImage>;
@@ -42,7 +43,11 @@ impl SseVisionEngine {
 }
 
 impl VisionEngine for SseVisionEngine {
-    fn match_template(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<MatchResult> {
+    fn match_template(
+        &self,
+        haystack: &DynamicImage,
+        needle: &DynamicImage,
+    ) -> Option<MatchResult> {
         self.matcher.find_best_match(haystack, needle)
     }
 
@@ -77,7 +82,9 @@ mod tests {
         let needle = solid_image(20, 20, Luma([0]));
 
         let engine = SseVisionEngine::new(TemplateMatcher::threshold_only(MatchConfidence(0.5)));
-        let m = engine.match_template(&haystack, &needle).expect("should match");
+        let m = engine
+            .match_template(&haystack, &needle)
+            .expect("should match");
 
         assert!(m.region.x <= 35 && m.region.x >= 25);
         assert!(m.region.y <= 45 && m.region.y >= 35);
@@ -95,7 +102,9 @@ mod tests {
         let needle = solid_image(20, 20, Luma([0]));
 
         let engine = SseVisionEngine::new(TemplateMatcher::threshold_only(MatchConfidence(0.0)));
-        let map = engine.score_map(&haystack, &needle).expect("score map should exist");
+        let map = engine
+            .score_map(&haystack, &needle)
+            .expect("score map should exist");
 
         // ダウンスケール1（threshold_only）なので (100-20+1)^2
         assert_eq!(map.dimensions(), (81, 81));

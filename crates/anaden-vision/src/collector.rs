@@ -95,8 +95,12 @@ pub fn compute_similarity(img1: &DynamicImage, img2: &DynamicImage) -> f32 {
     let w = (img1.width().max(img2.width()) / GROUP_COMPARE_DOWNSCALE).max(1);
     let h = (img1.height().max(img2.height()) / GROUP_COMPARE_DOWNSCALE).max(1);
 
-    let g1 = img1.resize_exact(w, h, image::imageops::FilterType::Triangle).to_luma8();
-    let g2 = img2.resize_exact(w, h, image::imageops::FilterType::Triangle).to_luma8();
+    let g1 = img1
+        .resize_exact(w, h, image::imageops::FilterType::Triangle)
+        .to_luma8();
+    let g2 = img2
+        .resize_exact(w, h, image::imageops::FilterType::Triangle)
+        .to_luma8();
 
     let total_pixels = (w * h) as f32;
     if total_pixels == 0.0 {
@@ -171,7 +175,11 @@ pub fn group_captures(captures: Vec<DynamicImage>) -> Vec<ScreenGroup> {
         "Grouped {} captures into {} groups (sizes: {})",
         captures.len(),
         groups.len(),
-        groups.iter().map(|g| g.captures.len().to_string()).collect::<Vec<_>>().join(", ")
+        groups
+            .iter()
+            .map(|g| g.captures.len().to_string())
+            .collect::<Vec<_>>()
+            .join(", ")
     );
 
     groups
@@ -196,11 +204,7 @@ pub fn extract_stable_tiles(group: &ScreenGroup) -> Vec<TileCandidate> {
     let (img_w, img_h) = (ref_img.width(), ref_img.height());
 
     // グレースケールに変換
-    let grays: Vec<GrayImage> = group
-        .captures
-        .iter()
-        .map(|img| img.to_luma8())
-        .collect();
+    let grays: Vec<GrayImage> = group.captures.iter().map(|img| img.to_luma8()).collect();
 
     let mut candidates: Vec<TileCandidate> = Vec::new();
 
@@ -346,9 +350,7 @@ pub fn verify_templates(
 ///
 /// 返り値: (グループインデックス, 検証結果) のリスト。
 /// 検証通過したものだけが含まれる。
-pub fn collect_templates(
-    groups: &[ScreenGroup],
-) -> Vec<(usize, Vec<VerifyResult>)> {
+pub fn collect_templates(groups: &[ScreenGroup]) -> Vec<(usize, Vec<VerifyResult>)> {
     let matcher = TemplateMatcher::with_defaults();
     let mut results = Vec::new();
 
@@ -363,7 +365,11 @@ pub fn collect_templates(
             continue;
         }
 
-        info!("Processing group {} ({} captures)...", group.index, group.captures.len());
+        info!(
+            "Processing group {} ({} captures)...",
+            group.index,
+            group.captures.len()
+        );
 
         let candidates = extract_stable_tiles(group);
 
@@ -396,12 +402,7 @@ pub fn collect_templates(
 ///
 /// 安定性: グループ内全キャプチャ間でのピクセル分散の逆。
 /// エッジ密度: 隣接ピクセル差分の平均（高いほど識別的）。
-fn compute_tile_metrics(
-    grays: &[GrayImage],
-    x: u32,
-    y: u32,
-    size: u32,
-) -> (f32, f32) {
+fn compute_tile_metrics(grays: &[GrayImage], x: u32, y: u32, size: u32) -> (f32, f32) {
     let n = grays.len() as f32;
     if n < MIN_GROUP_SIZE as f32 {
         return (0.0, 0.0);
@@ -560,10 +561,7 @@ mod tests {
         for _ in 0..5 {
             captures.push(white_image(600, 270));
         }
-        let group = ScreenGroup {
-            captures,
-            index: 0,
-        };
+        let group = ScreenGroup { captures, index: 0 };
         let _tiles = extract_stable_tiles(&group);
         // 真っ白画像はエッジ密度がほぼゼロなので、候補が少ないはず
         // （edge_density > 0.01 の条件で除外される）
@@ -584,10 +582,7 @@ mod tests {
             }
             captures.push(DynamicImage::ImageRgb8(img));
         }
-        let group = ScreenGroup {
-            captures,
-            index: 0,
-        };
+        let group = ScreenGroup { captures, index: 0 };
         let tiles = extract_stable_tiles(&group);
         // 黒い四角を含むタイルが候補として抽出されるはず
         assert!(
@@ -627,15 +622,13 @@ mod tests {
             edge_density: 0.5,
         };
 
-        let results = verify_templates(
-            vec![candidate],
-            &group_a,
-            &[&group_b],
-            &matcher,
-        );
+        let results = verify_templates(vec![candidate], &group_a, &[&group_b], &matcher);
 
         // 黒いタイルは白い画像にマッチしない → 特異性OK → 通過するはず
         assert_eq!(results.len(), 1, "Should have 1 result");
-        assert!(results[0].passed, "Black tile should pass on black group, not match white group");
+        assert!(
+            results[0].passed,
+            "Black tile should pass on black group, not match white group"
+        );
     }
 }

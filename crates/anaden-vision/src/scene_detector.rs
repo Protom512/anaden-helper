@@ -94,10 +94,7 @@ impl SceneDetector {
         // Step 2: 状態ごとにグループ化して投票
         let mut state_groups: HashMap<GameState, Vec<&TemplateMatch>> = HashMap::new();
         for m in &all_best {
-            state_groups
-                .entry(m.state.clone())
-                .or_default()
-                .push(m);
+            state_groups.entry(m.state.clone()).or_default().push(m);
         }
 
         // Step 3: 投票数が閾値を満たす状態だけを候補とする
@@ -105,8 +102,11 @@ impl SceneDetector {
 
         for (state, matches) in &state_groups {
             let templates_available = self.store.templates_for_state(state).len();
-            let min_required =
-                if templates_available < self.min_votes { 1 } else { self.min_votes };
+            let min_required = if templates_available < self.min_votes {
+                1
+            } else {
+                self.min_votes
+            };
 
             if matches.len() < min_required {
                 debug!(
@@ -255,7 +255,11 @@ mod tests {
         // 黒い画面 → title_a だけマッチ（1票 < 2票要件）→ Unknown
         let screenshot = black_image(200, 200);
         let state = detector.detect_state(&screenshot);
-        assert_eq!(state, GameState::Unknown, "1 template match should not be enough when 3 templates are registered");
+        assert_eq!(
+            state,
+            GameState::Unknown,
+            "1 template match should not be enough when 3 templates are registered"
+        );
     }
 
     #[test]
@@ -270,7 +274,11 @@ mod tests {
         // 黒い画面 → 両方マッチ（2票 ≥ 2票要件）→ TitleScreen
         let screenshot = black_image(200, 200);
         let state = detector.detect_state(&screenshot);
-        assert_eq!(state, GameState::TitleScreen, "2 matching templates should confirm the state");
+        assert_eq!(
+            state,
+            GameState::TitleScreen,
+            "2 matching templates should confirm the state"
+        );
     }
 
     #[test]
@@ -284,6 +292,10 @@ mod tests {
         // 白い画面 → 黒いテンプレートにマッチしない → Unknown
         let screenshot = white_image(200, 200);
         let state = detector.detect_state(&screenshot);
-        assert_eq!(state, GameState::Unknown, "non-matching screen should return Unknown");
+        assert_eq!(
+            state,
+            GameState::Unknown,
+            "non-matching screen should return Unknown"
+        );
     }
 }

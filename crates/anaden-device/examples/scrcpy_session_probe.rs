@@ -16,7 +16,8 @@ use image::GenericImageView;
 
 #[tokio::main]
 async fn main() {
-    let mut serial = std::env::var("ANADEN_SERIAL").unwrap_or_else(|_| "33291JEHN27041".to_string());
+    let mut serial =
+        std::env::var("ANADEN_SERIAL").unwrap_or_else(|_| "33291JEHN27041".to_string());
     let mut x: u32 = 540;
     let mut y: u32 = 170;
     let args: Vec<String> = std::env::args().collect();
@@ -55,7 +56,11 @@ async fn main() {
             std::process::exit(1);
         }
     };
-    println!("session established in {:?} (control_ready={})", start.elapsed(), session.control_ready());
+    println!(
+        "session established in {:?} (control_ready={})",
+        start.elapsed(),
+        session.control_ready()
+    );
 
     // (2) video フレーム到着確認
     println!("waiting for first video frame...");
@@ -97,7 +102,10 @@ async fn main() {
         sig
     };
     let sig_dist = |a: &[u8], b: &[u8]| -> usize {
-        a.iter().zip(b.iter()).map(|(x, y)| (*x as isize - *y as isize).unsigned_abs() as usize).sum()
+        a.iter()
+            .zip(b.iter())
+            .map(|(x, y)| (*x as isize - *y as isize).unsigned_abs() as usize)
+            .sum()
     };
 
     // タップ前のベースライン: 5フレーム取得してばらつき(自然変動)を計測
@@ -120,9 +128,15 @@ async fn main() {
     } else {
         0
     };
-    println!("pre-tap baseline max variance (natural motion) = {}", baseline_variance);
+    println!(
+        "pre-tap baseline max variance (natural motion) = {}",
+        baseline_variance
+    );
 
-    let pre_last = pre_sigs.last().cloned().unwrap_or_else(|| fingerprint(&first));
+    let pre_last = pre_sigs
+        .last()
+        .cloned()
+        .unwrap_or_else(|| fingerprint(&first));
 
     // (3) tap 送信
     println!("sending tap ({},{}) via control socket...", x, y);
@@ -159,14 +173,21 @@ async fn main() {
     println!(
         "threshold={} (3x baseline or 400 min) => {}",
         threshold,
-        if changed { "SCREEN CHANGED (content)" } else { "no decisive change" }
+        if changed {
+            "SCREEN CHANGED (content)"
+        } else {
+            "no decisive change"
+        }
     );
 
     println!("\n=== SUMMARY ===");
     println!("video_frames_ok=true");
     println!("control_ready={}", session.control_ready());
     println!("content_changed={}", changed);
-    println!("baseline_variance={} max_change={}", baseline_variance, max_change);
+    println!(
+        "baseline_variance={} max_change={}",
+        baseline_variance, max_change
+    );
 
     drop(session);
     println!("session dropped (server cleanup).");

@@ -1,0 +1,10 @@
+name = "party"
+state = "menu"
+threshold = 0.9900000095367432
+method = "sse"
+
+[roi]
+x = 48
+y = 565
+width = 116
+height = 102

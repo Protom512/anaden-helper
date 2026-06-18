@@ -8,13 +8,44 @@
 //! ここでは CLI と同じく生の同期 Command を直接使う。
 
 use std::process::Command;
+use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
-use std::sync::Arc;
 use std::thread;
 use std::time::Duration;
 
 use image::{DynamicImage, GrayImage};
+
+// PC版(Windows) Win32 キャプチャバックエンド。#[cfg(windows)] で gating し、
+// Linux では参照しないことで cargo check --workspace が通るようにする。
+// DEFAULT_PROCESS_NAME は GUI の既定 exe 名として app.rs で参照するため再エクスポート。
+#[cfg(windows)]
+pub use anaden_device::DEFAULT_PROCESS_NAME;
+#[cfg(windows)]
+use anaden_device::Win32Capture;
+
+/// ライブキャプチャの取得元バックエンド。
+///
+/// - `Android`: 従来の adb screencap(実機 20:9)。serial 必須。
+/// - `Windows`: PC版 Win32Capture(PrintWindow)。exe 名でウィンドウを解決するため serial 不要。
+///
+/// `Windows` は `#[cfg(windows)]` でのみ存在し、Linux では `Android` のみ選択可能。
+/// これにより studio は Linux でもコンパイル可能(遵守ルール: cargo check --workspace)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Target {
+    /// Android 実機: adb screencap。
+    Android,
+    /// PC版(Windows): Win32Capture。
+    #[cfg(windows)]
+    Windows,
+}
+
+impl Default for Target {
+    fn default() -> Self {
+        // 後方互換: target 未指定時は従来通り adb(android)。
+        Target::Android
+    }
+}
 
 /// 別スレッドで動くライブキャプチャ。停止フラグで終了させる。
 ///
@@ -35,13 +66,22 @@ use image::{DynamicImage, GrayImage};
 pub struct LiveCapture {
     rx: Receiver<Arc<DynamicImage>>,
     stop: Arc<AtomicBool>,
-    serial: String,
+    /// screen_off_timeout 復元用(android のみ)。windows バックエンドでは None。
+    serial: Option<String>,
     original_screen_off_timeout: Option<String>,
 }
 
 impl LiveCapture {
-    /// 指定シリアルのデバイスを `interval_ms` 間隔でキャプチャし続けるスレッドを開始する。
-    pub fn start(serial: String, interval_ms: u64) -> Self {
+    /// 指定バックエンドで `interval_ms` 間隔のキャプチャを繰り返すスレッドを開始する。
+    ///
+    /// - `target == Android`: `serial` は必須。adb screencap を使う。画面OFF/Doze 対策の
+    ///   WAKEUP + screen_off_timeout 延長を行う。
+    /// - `target == Windows`: `serial` は無視される(空でよい)。`exe` でプロセスを解決し
+    ///   Win32Capture(PrintWindow)でキャプチャする。画面OFF系の adb 処理は一切行わない。
+    ///
+    /// 後方互換: target 未指定相当(adb)は [`LiveCapture::start_android`] を使うこと。
+    #[cfg_attr(not(windows), allow(unused_variables))]
+    pub fn start(serial: String, interval_ms: u64, target: Target, exe: &str) -> Self {
         // OOM 対策: 容量1の有界チャネル。UI がドレインに追いつかなくても、チャネル内に
         // 保持されるフレームは高々1枚(約10MB)で頭打ちになる。非有界だと 2400x1080 RGBA
         // ≈10MB/枚 が無制限に蓄積して OOM する。
@@ -49,6 +89,32 @@ impl LiveCapture {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
 
+        match target {
+            Target::Android => {
+                Self::start_android_inner(rx, tx, stop, stop_thread, serial, interval_ms)
+            }
+            #[cfg(windows)]
+            Target::Windows => {
+                Self::start_windows_inner(rx, tx, stop, stop_thread, exe, interval_ms)
+            }
+        }
+    }
+
+    /// android(adb) バックエンド用の互換コンストラクタ。target 未指定の従来呼び出し。
+    #[allow(dead_code)]
+    pub fn start_android(serial: String, interval_ms: u64) -> Self {
+        Self::start(serial, interval_ms, Target::Android, "")
+    }
+
+    // ---- android(adb) バックエンドのスレッド起動 ----
+    fn start_android_inner(
+        rx: Receiver<Arc<DynamicImage>>,
+        tx: mpsc::SyncSender<Arc<DynamicImage>>,
+        stop: Arc<AtomicBool>,
+        stop_thread: Arc<AtomicBool>,
+        serial: String,
+        interval_ms: u64,
+    ) -> Self {
         // ---- 開始時の画面ON確保 + タイムアウト延長 ----
         // 先に WAKEUP を送っておく(非ブロッキング、失敗は継続)。
         wake_screen(&serial);
@@ -72,20 +138,14 @@ impl LiveCapture {
                     // UI の latest() は受信時に全ドレインするので、次フレームは確実に入る。
                     let _ = tx.try_send(Arc::new(img));
                 }
-                // 短いスリープを分割して停止応答を良くする
-                let mut waited = 0u64;
-                while waited < interval_ms && !stop_thread.load(Ordering::Relaxed) {
-                    let step = waited.saturating_add(50).min(interval_ms) - waited;
-                    thread::sleep(Duration::from_millis(step));
-                    waited += step;
-                }
+                sleep_until_next(&stop_thread, interval_ms);
             }
         });
 
         LiveCapture {
             rx,
             stop,
-            serial,
+            serial: Some(serial),
             original_screen_off_timeout,
         }
     }
@@ -105,12 +165,78 @@ impl LiveCapture {
     }
 }
 
+/// 停止フラグをポーリングしながら `interval_ms` まで分割スリープする。
+/// 共通ユーティリティ(android/windows 両バックエンドで使用)。
+fn sleep_until_next(stop: &AtomicBool, interval_ms: u64) {
+    let mut waited = 0u64;
+    while waited < interval_ms && !stop.load(Ordering::Relaxed) {
+        let step = waited.saturating_add(50).min(interval_ms) - waited;
+        thread::sleep(Duration::from_millis(step));
+        waited += step;
+    }
+}
+
+// ---- Windows(Win32Capture) バックエンド ----
+// studio は tokio ランタイムを持たない std::thread モデル(source.rs ヘッダコメント参照)。
+// Win32Capture::capture は async(内部 tokio::spawn_blocking)だが、同期ラッパ
+// capture_blocking() が追加済み(win32_capture.rs)なので、これを直接呼んで tokio 依存を回避する。
+#[cfg(windows)]
+impl LiveCapture {
+    // ---- windows(Win32Capture) バックエンドのスレッド起動 ----
+    fn start_windows_inner(
+        rx: Receiver<Arc<DynamicImage>>,
+        tx: mpsc::SyncSender<Arc<DynamicImage>>,
+        stop: Arc<AtomicBool>,
+        stop_thread: Arc<AtomicBool>,
+        exe: &str,
+        interval_ms: u64,
+    ) -> Self {
+        let capture = Arc::new(Win32Capture::new_without_dpi(exe));
+        let capture_thread = capture.clone();
+
+        // Win32Capture は serial 不要(exe 名→PID→HWND で解決)。画面OFF系の adb 処理も不要。
+        thread::spawn(move || {
+            while !stop_thread.load(Ordering::Relaxed) {
+                if let Some(img) = capture_windows(&capture_thread) {
+                    // try_send: チャネル満タン(1枚未読)なら Full で破棄(OOM 回避。android 側と同一方針)。
+                    let _ = tx.try_send(Arc::new(img));
+                }
+                // ウィンドウ未検出(最小化/未起動)時は Err になり capture_windows が None を返す。
+                // 無限ループで CPU を食わないよう、interval の分割スリープは必ず機能させる。
+                sleep_until_next(&stop_thread, interval_ms);
+            }
+        });
+
+        LiveCapture {
+            rx,
+            stop,
+            serial: None,
+            original_screen_off_timeout: None,
+        }
+    }
+}
+
+#[cfg(windows)]
+/// Win32Capture で1枚キャプチャする(同期)。失敗・黒フレーム時は None。
+///
+/// 真っ白問題の原因は `from_raw` ではなく canvas.rs の `Rect::EVERYTHING` であり、
+/// Image widget で解決済み。そのため PNG エンコード→デコードの回避経路は不要で、
+/// `capture_blocking()` の `DynamicImage` をそのまま返す。
+fn capture_windows(capture: &Win32Capture) -> Option<DynamicImage> {
+    let img = capture.capture_blocking().ok()?;
+    // Win32Capture の戻り値も DynamicImage なので、黒フレーム判定は adb と共通流用可能。
+    if is_black_frame(&img) {
+        return None;
+    }
+    Some(img)
+}
+
 impl Drop for LiveCapture {
     fn drop(&mut self) {
         self.stop();
-        // セッション終了で screen_off_timeout を元に戻す。
-        if let Some(orig) = &self.original_screen_off_timeout {
-            restore_screen_off_timeout(&self.serial, orig);
+        // セッション終了で screen_off_timeout を元に戻す(android のみ)。
+        if let (Some(orig), Some(serial)) = (&self.original_screen_off_timeout, &self.serial) {
+            restore_screen_off_timeout(serial, orig);
         }
     }
 }
@@ -238,7 +364,11 @@ mod tests {
     /// `is_black_frame`: 明るい画像は黒フレームと判定されない。
     #[test]
     fn black_frame_not_detected_for_bright() {
-        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([200, 200, 200])));
+        let img = DynamicImage::ImageRgb8(image::RgbImage::from_pixel(
+            8,
+            8,
+            image::Rgb([200, 200, 200]),
+        ));
         assert!(!is_black_frame(&img));
     }
 

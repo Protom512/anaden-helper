@@ -28,16 +28,19 @@ use crate::pipeline_runner::{InputCommand, PipelineState};
 ///
 /// NoMatch が `threshold` 回連続したときに呼ばれる。`Ok` ならリカバリ成功とみなし
 /// NoMatch 連続カウンタをリセットしてループを継続、`Err` なら IO エラーとして停止する。
-pub type RecoveryHook = Box<
-    dyn FnMut(u32) -> Pin<Box<dyn Future<Output = Result<(), AdbError>> + Send>> + Send,
->;
+pub type RecoveryHook =
+    Box<dyn FnMut(u32) -> Pin<Box<dyn Future<Output = Result<(), AdbError>> + Send>> + Send>;
 
 /// 720p 基準(幅1280)の [`InputCommand`] をデバイス実解像度(device_width)の座標へ変換する純関数。
 ///
 /// [`ScreenScaler::from_base`] は幅ベースの均一スケール(scale_factor = 1280/src_width)を用いる。
 /// X と Y は同一ファクタで動くため、両軸とも `from_base(device_width, v)` に通せばよい。
 /// IO を持たないため単体テスト可能。
-pub fn rescale_command(cmd: InputCommand, scaler: &ScreenScaler, device_width: u32) -> InputCommand {
+pub fn rescale_command(
+    cmd: InputCommand,
+    scaler: &ScreenScaler,
+    device_width: u32,
+) -> InputCommand {
     match cmd {
         InputCommand::Tap { x, y } => InputCommand::Tap {
             x: scaler.from_base(device_width, x),
@@ -104,6 +107,27 @@ impl Input for InputExecutor {
     }
 }
 
+// ---- 本番 impl: PC版(Windows) Win32 バックエンド ----
+//
+// `Win32Capture` / `Win32InputExecutor` は anaden-device 側の cfg(windows) 型。
+// engine 側は型名を参照するだけで windows-rs API には触れないため、engine/Cargo.toml
+// への windows 依存追加は不要(Linux ビルド維持)。実体は device 側へ委譲する薄い impl。
+#[cfg(windows)]
+#[async_trait]
+impl Capture for anaden_device::Win32Capture {
+    async fn capture(&self) -> Result<DynamicImage, AdbError> {
+        anaden_device::Win32Capture::capture(self).await
+    }
+}
+
+#[cfg(windows)]
+#[async_trait]
+impl Input for anaden_device::Win32InputExecutor {
+    async fn execute(&self, action: &InputAction) -> Result<(), AdbError> {
+        anaden_device::Win32InputExecutor::execute(self, action).await
+    }
+}
+
 // ---- scrcpy-touch 入力経路(capture-scrcpy feature 内) ----
 //
 // `ScrcpySession` は video+control 2ソケットを持ち、control ソケットへ
@@ -126,9 +150,7 @@ impl Input for std::sync::Arc<anaden_device::ScrcpySession> {
                 to,
                 duration_ms,
             } => session.swipe(from.x, from.y, to.x, to.y, *duration_ms),
-            InputAction::LongPress(p, duration_ms) => {
-                session.long_press(p.x, p.y, *duration_ms)
-            }
+            InputAction::LongPress(p, duration_ms) => session.long_press(p.x, p.y, *duration_ms),
             InputAction::Wait(duration) => {
                 debug!("Waiting for {:?}", duration);
                 // spawn_blocking 上なので同期 sleep で OK。
@@ -154,9 +176,7 @@ pub enum StepOutcome {
     },
     /// tick したが発火コマンド無し(Stop/DoNothing/ClickSelf w/o region)。
     /// `next_current` が [`None`] は停止指示。[`Some`] は遷移のみ。
-    NoFire {
-        next_current: Option<String>,
-    },
+    NoFire { next_current: Option<String> },
     /// マッチせず(tick が [`None`])。current 不変。リトライ候補。
     NoMatch,
     /// capture/execute の IO エラー。
@@ -859,13 +879,11 @@ mod tests {
         );
 
         let out = driver.run_once().await;
-        assert_eq!(
-            out,
-            StepOutcome::NoFire {
-                next_current: None
-            }
+        assert_eq!(out, StepOutcome::NoFire { next_current: None });
+        assert!(
+            fired.lock().expect("fired lock").is_empty(),
+            "Stop must not fire any command"
         );
-        assert!(fired.lock().expect("fired lock").is_empty(), "Stop must not fire any command");
         assert_eq!(driver.current(), "Title");
     }
 
@@ -945,11 +963,7 @@ mod tests {
     async fn run_loop_reaches_terminal_task() {
         // Title(ClickRect) → LoadGame(ClickRect) → Terminal(ClickRect, next=None)
         // 3 サイクル全てマッチ発火し、最後に next_current=None で TerminalTask 停止。
-        let frames = frames_of(vec![
-            needle_screen(0),
-            needle_screen(1),
-            needle_screen(2),
-        ]);
+        let frames = frames_of(vec![needle_screen(0), needle_screen(1), needle_screen(2)]);
         let fired = new_fired();
 
         // next は next[0] のみ使われる。current 遷移を模擬するため 3 タスク定義。
@@ -1008,7 +1022,11 @@ mod tests {
         let frames = frames_of(vec![needle_screen(0)]);
         let fired = new_fired();
 
-        let tasks = vec![click_rect_task("Title", Action::Stop, Some(vec!["Ignored"]))];
+        let tasks = vec![click_rect_task(
+            "Title",
+            Action::Stop,
+            Some(vec!["Ignored"]),
+        )];
 
         let mut driver = PipelineDriver::new(
             FakeCapture {
@@ -1033,8 +1051,7 @@ mod tests {
     #[tokio::test]
     async fn run_loop_no_match_hits_max_iterations() {
         // 全フレーム NoMatch(needle 無) → max_iterations 到達。
-        let blank =
-            luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
         // frames が枯渇すると capture エラーになるため、十分な枚数を用意。
         let many = (0..20).map(|_| blank.clone()).collect();
         let frames = frames_of(many);
@@ -1192,7 +1209,11 @@ mod tests {
             .run_loop_with_recovery(Duration::ZERO, 5, 0, Some(hook))
             .await;
         assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
-        assert_eq!(calls.load(Ordering::SeqCst), 0, "hook must not fire when threshold=0");
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "hook must not fire when threshold=0"
+        );
     }
 
     #[tokio::test]

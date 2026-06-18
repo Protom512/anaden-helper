@@ -24,15 +24,9 @@ use anaden_vision::{Action, StepOutcome, TaskDef, run_step};
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum InputCommand {
     /// 指定座標をタップ。
-    Tap {
-        x: u32,
-        y: u32,
-    },
+    Tap { x: u32, y: u32 },
     /// `from` から `to` へスワイプ。
-    Swipe {
-        from: (u32, u32),
-        to: (u32, u32),
-    },
+    Swipe { from: (u32, u32), to: (u32, u32) },
 }
 
 /// アクションから入力コマンドへ変換する。
@@ -45,7 +39,10 @@ pub enum InputCommand {
 ///
 /// `action` は参照で受け Clone 回避。戻り値 [`Option<InputCommand>`]: [`None`] は
 /// 「この tick では入力を発火しない」を意味し、caller は状態遷移だけ進める。
-pub fn action_to_command(action: &Action, matched_region: Option<ScreenRegion>) -> Option<InputCommand> {
+pub fn action_to_command(
+    action: &Action,
+    matched_region: Option<ScreenRegion>,
+) -> Option<InputCommand> {
     match action {
         Action::ClickSelf => match matched_region {
             Some(r) => {
@@ -140,7 +137,10 @@ impl PipelineState {
         if let Some(next) = &next_current {
             self.current = next.clone();
         }
-        Some(TickResult { command, next_current })
+        Some(TickResult {
+            command,
+            next_current,
+        })
     }
 }
 
@@ -163,7 +163,14 @@ mod tests {
     }
 
     /// 背景の上に needle を `(ox, oy)` に埋め込んだ画像。
-    fn embed(haystack_w: u32, haystack_h: u32, needle: &GrayImage, ox: u32, oy: u32, bg: u8) -> GrayImage {
+    fn embed(
+        haystack_w: u32,
+        haystack_h: u32,
+        needle: &GrayImage,
+        ox: u32,
+        oy: u32,
+        bg: u8,
+    ) -> GrayImage {
         let mut img = GrayImage::from_pixel(haystack_w, haystack_h, Luma([bg]));
         for y in 0..needle.height() {
             for x in 0..needle.width() {
@@ -386,7 +393,11 @@ mod tests {
         let mut state = PipelineState::new("NoSuch");
         let result = state.tick(&screenshot, &tasks);
         assert!(result.is_none(), "unknown current must yield None");
-        assert_eq!(state.current(), "NoSuch", "current unchanged on unknown task");
+        assert_eq!(
+            state.current(),
+            "NoSuch",
+            "current unchanged on unknown task"
+        );
     }
 
     #[test]

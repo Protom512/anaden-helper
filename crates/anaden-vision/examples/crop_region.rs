@@ -25,5 +25,13 @@ fn main() {
     let c: &DynamicImage = &cropped;
     let _ = c;
     cropped.save(Path::new(out)).expect("save output");
-    println!("crop: [{},{},{},{}] -> {}x{} saved", x, y, w, h, cropped.width(), cropped.height());
+    println!(
+        "crop: [{},{},{},{}] -> {}x{} saved",
+        x,
+        y,
+        w,
+        h,
+        cropped.width(),
+        cropped.height()
+    );
 }

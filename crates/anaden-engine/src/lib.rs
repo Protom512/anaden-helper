@@ -11,6 +11,8 @@ pub use pipeline_driver::{
     Capture, Input, LoopOutcome, LoopStopReason, PipelineDriver, RecoveryHook, StepOutcome,
     rescale_command,
 };
-pub use pipeline_runner::{InputCommand, PipelineState, TickResult, action_to_command, advance_next};
+pub use pipeline_runner::{
+    InputCommand, PipelineState, TickResult, action_to_command, advance_next,
+};
 pub use recovery::RecoveryPolicy;
 pub use state_machine::GameStateMachine;

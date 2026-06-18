@@ -167,9 +167,7 @@ impl<'de> Deserialize<'de> for Action {
                     to: def.to,
                 })
             }
-            other => Err(D::Error::custom(format!(
-                "unknown action type `{other}`"
-            ))),
+            other => Err(D::Error::custom(format!("unknown action type `{other}`"))),
         }
     }
 }
@@ -265,7 +263,9 @@ impl TaskDef {
             // ユーザが「テンプレを埋めれば確実にマッチする」ことを期待するため、正確性を
             // 優先して downscale=1 とする。全面走査の性能は将来スライスで ROI/解像度前提を
             // 併用して最適化する。
-            Algorithm::Ccoeff => CcoeffVisionEngine::threshold_only(thr).match_template(&work, &needle),
+            Algorithm::Ccoeff => {
+                CcoeffVisionEngine::threshold_only(thr).match_template(&work, &needle)
+            }
         };
 
         // 4. ROI オフセット戻し（cropping した場合、局所→元座標へ）
@@ -514,10 +514,7 @@ mod tests {
         assert_eq!(d.next.as_deref(), Some(&["LoadGame".to_string()][..]));
         // template が親ディレクトリ基準で絶対化されている
         assert!(d.template.is_absolute(), "template must be absolute");
-        assert_eq!(
-            d.template,
-            tmp.path().join("scenes/title/title_center.png")
-        );
+        assert_eq!(d.template, tmp.path().join("scenes/title/title_center.png"));
     }
 
     #[test]
@@ -814,7 +811,9 @@ mod tests {
             threshold: achievable + 0.05,
             ..low_task
         };
-        let high = high_task.detect(&screenshot, tmp.path()).expect("detect ok");
+        let high = high_task
+            .detect(&screenshot, tmp.path())
+            .expect("detect ok");
         assert!(
             high.is_none(),
             "threshold above achievable confidence ({achievable}) must yield None"
@@ -838,7 +837,9 @@ mod tests {
             next: None,
         };
 
-        let err = task.detect(&screenshot, Path::new("/tmp")).expect_err("missing template");
+        let err = task
+            .detect(&screenshot, Path::new("/tmp"))
+            .expect_err("missing template");
         assert!(matches!(err, TaskDefError::TemplateLoadFailed { .. }));
     }
 
@@ -944,7 +945,9 @@ mod tests {
 
         let defs = load_pipeline(tmp.path()).expect("load ok");
         assert_eq!(defs.len(), 2);
-        let dn = defs.iter().find(|d| d.name == "T" && d.action == Some(Action::DoNothing));
+        let dn = defs
+            .iter()
+            .find(|d| d.name == "T" && d.action == Some(Action::DoNothing));
         assert!(dn.is_some(), "do_nothing variant parsed");
         let st = defs.iter().find(|d| d.action == Some(Action::Stop));
         assert!(st.is_some(), "stop variant parsed");
@@ -1073,7 +1076,11 @@ mod tests {
 
         let out = run_step(&tasks, &screenshot, "Title").expect("should match");
         assert_eq!(out.matched_task, "Title");
-        assert_eq!(out.action, Action::DoNothing, "omitted action defaults to DoNothing");
+        assert_eq!(
+            out.action,
+            Action::DoNothing,
+            "omitted action defaults to DoNothing"
+        );
         assert!(out.next.is_empty(), "omitted next defaults to empty Vec");
 
         let _ = std::fs::remove_file(&tpl);
@@ -1186,7 +1193,10 @@ mod tests {
         }];
 
         let out = run_step(&tasks, &screenshot, "Title");
-        assert!(out.is_none(), "missing template (Err path) must yield None, not propagate Err");
+        assert!(
+            out.is_none(),
+            "missing template (Err path) must yield None, not propagate Err"
+        );
     }
 
     // ---- テスト8: ドキュメント推奨 TOML 例との同期 ----

@@ -1,0 +1,10 @@
+name = "info"
+state = "menu"
+threshold = 0.9900000095367432
+method = "sse"
+
+[roi]
+x = 761
+y = 570
+width = 92
+height = 83

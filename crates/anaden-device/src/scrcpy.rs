@@ -255,13 +255,7 @@ async fn push_jar(client: &AdbClient, local_jar: &str) -> Result<(), AdbError> {
         });
     }
     client
-        .run_adb_raw(&[
-            "-s",
-            client.serial(),
-            "push",
-            local_jar,
-            REMOTE_JAR,
-        ])
+        .run_adb_raw(&["-s", client.serial(), "push", local_jar, REMOTE_JAR])
         .await?;
     debug!("scrcpy-server jar pushed: {local_jar} -> {REMOTE_JAR}");
     Ok(())
@@ -348,18 +342,12 @@ fn connect_and_handshake(local_addr: &str) -> Result<TcpStream, AdbError> {
                         // 以降はブロック読みで OK(タイムアウト解除)。
                         let _ = s.set_read_timeout(None);
                         complete_handshake(&mut s)?;
-                        debug!(
-                            "video ソケット確立(dummy byte 受信、試行={})",
-                            attempt + 1
-                        );
+                        debug!("video ソケット確立(dummy byte 受信、試行={})", attempt + 1);
                         return Ok(s);
                     }
                     Err(e) => {
                         // 接続は成立したがサーバが未accept/即切断。破棄してリトライ。
-                        last_err = Some(format!(
-                            "dummy byte 読込失敗(試行={}): {e}",
-                            attempt + 1
-                        ));
+                        last_err = Some(format!("dummy byte 読込失敗(試行={}): {e}", attempt + 1));
                         std::thread::sleep(CONNECT_RETRY_INTERVAL);
                     }
                 }
@@ -385,12 +373,7 @@ fn complete_handshake(stream: &mut TcpStream) -> Result<(), AdbError> {
 
     // codec id(4, big-endian)。
     let codec_buf = read_exact(stream, 4)?;
-    let codec_id = u32::from_be_bytes([
-        codec_buf[0],
-        codec_buf[1],
-        codec_buf[2],
-        codec_buf[3],
-    ]);
+    let codec_id = u32::from_be_bytes([codec_buf[0], codec_buf[1], codec_buf[2], codec_buf[3]]);
     if codec_id != CODEC_ID_H264 {
         // 特殊値(0x00 / 0x01)もここで捕捉される。
         return Err(AdbError::CommandFailed {

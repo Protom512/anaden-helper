@@ -35,7 +35,11 @@ pub struct TemplateMatcher {
 impl TemplateMatcher {
     /// 指定閾値とダウンスケール倍率でマッチャーを作成する。
     pub fn new(threshold: MatchConfidence, downscale_factor: u32) -> Self {
-        let factor = if downscale_factor == 0 { 1 } else { downscale_factor };
+        let factor = if downscale_factor == 0 {
+            1
+        } else {
+            downscale_factor
+        };
         Self {
             threshold,
             downscale_factor: factor,
@@ -111,11 +115,7 @@ impl TemplateMatcher {
     ///
     /// **注意**: これは全画素走査するため `find_best_match` より遅い。
     /// NMS（非最大抑制）が必要な場合のみ使用する。
-    pub fn find_matches(
-        &self,
-        haystack: &DynamicImage,
-        needle: &DynamicImage,
-    ) -> Vec<MatchResult> {
+    pub fn find_matches(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Vec<MatchResult> {
         let (haystack_work, needle_work) = match self.downscale_images(haystack, needle) {
             Some(imgs) => imgs,
             None => return vec![],
@@ -163,11 +163,7 @@ impl TemplateMatcher {
     /// 戻り値は各テンプレート開始位置の信頼度を 0-255 にスケールしたグレースケア画像。
     /// サイズは `(画面幅 - テンプレート幅 + 1) × (画面高 - テンプレート高 + 1)`（ダウンスケール空間）。
     /// テンプレートが画面より大きい場合は `None`。
-    pub fn score_map(
-        &self,
-        haystack: &DynamicImage,
-        needle: &DynamicImage,
-    ) -> Option<GrayImage> {
+    pub fn score_map(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<GrayImage> {
         let (haystack_work, needle_work) = self.downscale_images(haystack, needle)?;
 
         let haystack_gray = haystack_work.to_luma8();
@@ -213,7 +209,10 @@ impl TemplateMatcher {
             if n.width() > h.width() || n.height() > h.height() {
                 debug!(
                     "Template ({}x{}) larger than screen ({}x{}), skipping",
-                    n.width(), n.height(), h.width(), h.height()
+                    n.width(),
+                    n.height(),
+                    h.width(),
+                    h.height()
                 );
                 return None;
             }

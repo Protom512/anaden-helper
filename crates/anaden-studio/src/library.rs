@@ -42,8 +42,8 @@ pub fn save_template(
         .save(&png_path)
         .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     let toml_path = dir.join(format!("{}.toml", spec.name));
-    let toml_str = toml::to_string(spec)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let toml_str =
+        toml::to_string(spec).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
     std::fs::write(&toml_path, toml_str)?;
     Ok(png_path)
 }
