@@ -453,8 +453,11 @@ mod tests {
             .expect("ClickSelf with matched region must emit a Tap");
         match tap {
             InputCommand::Tap { x, y } => {
-                assert!(x >= 148 && x <= 172, "tap.x near matched center: got {x}");
-                assert!(y >= 73 && y <= 97, "tap.y near matched center: got {y}");
+                assert!(
+                    (148..=172).contains(&x),
+                    "tap.x near matched center: got {x}"
+                );
+                assert!((73..=97).contains(&y), "tap.y near matched center: got {y}");
             }
             other => panic!("expected Tap, got {other:?}"),
         }

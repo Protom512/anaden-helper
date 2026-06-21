@@ -91,10 +91,10 @@ fn main() {
     while i < args.len() {
         match args[i].as_str() {
             "--wait" => {
-                if let Some(v) = args.get(i + 1) {
-                    if let Ok(n) = v.parse() {
-                        wait_secs = n;
-                    }
+                if let Some(v) = args.get(i + 1)
+                    && let Ok(n) = v.parse()
+                {
+                    wait_secs = n;
                 }
                 i += 2;
             }

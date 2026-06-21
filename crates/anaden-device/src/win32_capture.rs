@@ -3,7 +3,7 @@
 //!
 //! `probe_windows_capture.rs` で動作検証済みの PrintWindow(PW_RENDERFULLCONTENT=0x2)
 //! + GDI 連鎖(GetDIBits/BGRA→RGBA)をそのまま活かす。BitBlt 単体は cocos2d-x OpenGL
-//! 描画を拾えず黒画像になるため使用しない(プローブ実証済み)。
+//!   描画を拾えず黒画像になるため使用しない(プローブ実証済み)。
 //!
 //! 概要:
 //! - `Win32Capture::new("AnotherEden.exe")` で生成(DPI アウェア化を冪等に実施)。
@@ -400,7 +400,7 @@ pub(crate) fn capture_via_printwindow(hwnd: HWND, w: u32, h: u32) -> Result<Vec<
             mem_dc,
             bmp,
             0,
-            h as u32,
+            h,
             Some(pixels.as_mut_ptr() as *mut _),
             &mut bi,
             DIB_RGB_COLORS,

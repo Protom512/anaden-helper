@@ -97,10 +97,10 @@ pub fn show(
         roi.anchor = response.interact_pointer_pos().and_then(to_img);
         roi.current = roi.anchor;
     }
-    if response.dragged() {
-        if let Some(pos) = response.interact_pointer_pos().and_then(to_img) {
-            roi.current = Some(pos);
-        }
+    if response.dragged()
+        && let Some(pos) = response.interact_pointer_pos().and_then(to_img)
+    {
+        roi.current = Some(pos);
     }
 
     // ヒートマップオーバーレイ（探索領域に合わせて引き伸ばし）

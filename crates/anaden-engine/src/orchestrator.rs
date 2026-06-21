@@ -205,10 +205,10 @@ impl Orchestrator {
     /// 現在の状態に基づいて取るべき行動を決定する。
     fn decide_actions(&self, state: &GameState) -> Vec<InputAction> {
         // まず登録済みの戦略に問い合わせる
-        if let Some(strategy) = self.strategies.find_for_state(state) {
-            if let Some(actions) = strategy.decide_actions(state) {
-                return actions;
-            }
+        if let Some(strategy) = self.strategies.find_for_state(state)
+            && let Some(actions) = strategy.decide_actions(state)
+        {
+            return actions;
         }
 
         // デフォルトの行動: 状態に応じた汎用対応

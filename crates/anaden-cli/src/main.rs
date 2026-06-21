@@ -77,6 +77,15 @@ enum Commands {
         /// 2ソケット)へ一本化される(`--capture` は無視される)。`capture-scrcpy` feature 必須。
         #[arg(long, default_value = "adb")]
         input: String,
+        /// 発火後検証(誠実検証)を有効化する(デフォルト true)。
+        ///
+        /// 有効時、発火成功後にもう1回 capture して同タスクのテンプレがまだマッチするか検証し、
+        /// 残存(アクション無効)なら FiredUnverified(実質 NoMatch 相当)を返す。これにより
+        /// 「テンプレがマッチして発火した→成功」という偽成功(close_btn 誤キャプチャ等)を弾く。
+        /// TASKS.md 誠実検証基準: E2E 効果は単発 MD5 ではなく画面内容のシーン変化(発火前後の
+        /// テンプレ消失/領域マッチ変化)で判定する。明示的に無効化する場合のみ `false` を指定。
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        verify_after_fire: bool,
     },
     /// 旧来の Orchestrator(命令型 Strategy ループ) を実行する
     Legacy {
@@ -119,6 +128,7 @@ fn resolve_algorithm(value: &str) -> Result<anaden_vision::Algorithm> {
 ///   (3) PipelineDriver 構築 → run_loop → LoopOutcome を人間可読出力
 ///
 /// いかなる異常系でも panic せず anyhow エラーを返してプロセス非ゼロ終了する。
+#[allow(clippy::too_many_arguments)]
 async fn run_pipeline_live(
     serial: Option<&str>,
     pipeline_dir: &PathBuf,
@@ -135,6 +145,7 @@ async fn run_pipeline_live(
     scrcpy_jar: &str,
     input_mode: &str,
     target: &str,
+    verify_after_fire: bool,
 ) -> Result<()> {
     // ---- (0) 実行ターゲット解決 ----
     // `--target windows` なら ADB 経由を一切使わず Win32 バックエンドへ切替え。
@@ -152,6 +163,7 @@ async fn run_pipeline_live(
                 ensure_open_wait_secs,
                 recover_launch,
                 recover_nomatch_threshold,
+                verify_after_fire,
             )
             .await;
         }
@@ -264,6 +276,7 @@ async fn run_pipeline_live(
                 max_iters,
                 recover_nomatch_threshold,
                 recovery,
+                verify_after_fire,
             )
             .await
         }
@@ -280,6 +293,7 @@ async fn run_pipeline_live(
                     max_iters,
                     recover_nomatch_threshold,
                     recovery,
+                    verify_after_fire,
                 )
                 .await
             }
@@ -311,7 +325,8 @@ async fn run_pipeline_live(
                         tasks,
                         device_width,
                         300,
-                    ),
+                    )
+                    .with_verify(verify_after_fire),
                     interval_dur,
                     max_iters,
                     recover_nomatch_threshold,
@@ -334,6 +349,7 @@ async fn run_pipeline_live(
 /// `windows` 専用なので `#[cfg(windows)]` で gating する(非 Windows ビルドでは対となる
 /// フォールバック関数が bail する)。
 #[cfg(windows)]
+#[allow(clippy::too_many_arguments)]
 async fn run_with_windows(
     start_task: &str,
     pipeline_dir: &PathBuf,
@@ -345,6 +361,7 @@ async fn run_with_windows(
     ensure_open_wait_secs: u64,
     recover_launch: bool,
     recover_nomatch_threshold: u32,
+    verify_after_fire: bool,
 ) -> Result<()> {
     // ---- (1) パイプライン読込 + algorithm 上書き ----
     let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
@@ -432,7 +449,8 @@ async fn run_with_windows(
             tasks,
             device_width,
             300,
-        ),
+        )
+        .with_verify(verify_after_fire),
         interval_dur,
         max_iters,
         recover_nomatch_threshold,
@@ -454,6 +472,7 @@ async fn run_with_windows(
     _ensure_open_wait_secs: u64,
     _recover_launch: bool,
     _recover_nomatch_threshold: u32,
+    _verify_after_fire: bool,
 ) -> Result<()> {
     anyhow::bail!(
         "`--target windows` は Windows ビルドでのみ利用可能です。このバイナリは Windows 向けではないため PC版バックエンドを使用できません"
@@ -513,6 +532,7 @@ async fn run_with_capture_scrcpy<I>(
     max_iters: u64,
     recover_nomatch_threshold: u32,
     recovery: Option<anaden_engine::RecoveryHook>,
+    verify_after_fire: bool,
 ) -> Result<()>
 where
     I: anaden_engine::Input,
@@ -548,7 +568,8 @@ where
             tasks,
             device_width,
             300,
-        ),
+        )
+        .with_verify(verify_after_fire),
         interval,
         max_iters,
         recover_nomatch_threshold,
@@ -573,6 +594,7 @@ async fn run_with_scrcpy_session(
     max_iters: u64,
     recover_nomatch_threshold: u32,
     recovery: Option<anaden_engine::RecoveryHook>,
+    verify_after_fire: bool,
 ) -> Result<()> {
     let mut config = anaden_device::ScrcpySessionConfig::default();
     // jar パスは scoop 既定と同じだが、CLI 引数で上書き可能にする。
@@ -612,7 +634,8 @@ async fn run_with_scrcpy_session(
             tasks,
             device_width,
             300,
-        ),
+        )
+        .with_verify(verify_after_fire),
         interval,
         max_iters,
         recover_nomatch_threshold,
@@ -623,6 +646,7 @@ async fn run_with_scrcpy_session(
 
 /// `--input scrcpy` 指定だが feature 無効時のフォールバック(コンパイルエラー回避)。
 #[cfg(not(feature = "capture-scrcpy"))]
+#[allow(clippy::too_many_arguments)]
 async fn run_with_scrcpy_session(
     _serial: &str,
     _start_task: &str,
@@ -633,6 +657,7 @@ async fn run_with_scrcpy_session(
     _max_iters: u64,
     _recover_nomatch_threshold: u32,
     _recovery: Option<anaden_engine::RecoveryHook>,
+    _verify_after_fire: bool,
 ) -> Result<()> {
     anyhow::bail!(
         "`--input scrcpy` は `capture-scrcpy` feature 無効では使用できません。`--features anaden-cli/capture-scrcpy` でビルドしてください"
@@ -641,6 +666,7 @@ async fn run_with_scrcpy_session(
 
 /// `--capture scrcpy` 指定だが feature 無効時のフォールバック(コンパイルエラー回避)。
 #[cfg(not(feature = "capture-scrcpy"))]
+#[allow(clippy::too_many_arguments)]
 async fn run_with_capture_scrcpy<I>(
     _serial: &str,
     _start_task: &str,
@@ -652,6 +678,7 @@ async fn run_with_capture_scrcpy<I>(
     _max_iters: u64,
     _recover_nomatch_threshold: u32,
     _recovery: Option<anaden_engine::RecoveryHook>,
+    _verify_after_fire: bool,
 ) -> Result<()>
 where
     I: anaden_engine::Input,
@@ -735,6 +762,7 @@ async fn main() -> Result<()> {
             capture,
             scrcpy_jar,
             input,
+            verify_after_fire,
         } => {
             run_pipeline_live(
                 serial.as_deref(),
@@ -752,6 +780,7 @@ async fn main() -> Result<()> {
                 &scrcpy_jar,
                 &input,
                 &target,
+                verify_after_fire,
             )
             .await
         }

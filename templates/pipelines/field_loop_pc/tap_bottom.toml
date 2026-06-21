@@ -1,0 +1,22 @@
+name      = "TapBottomStablePc"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "bottom_stable.png"
+# PC版(Windows 16:9)フィールドループ slice (T5)。実機20:9 (templates/pipelines/field_loop/)
+# とは独立した pc-scoped 名前空間。上書きしないこと(T7 の 20:9→16:9 劣化検証が共存を前提とする)。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。
+# ScreenScaler は width<=1280 で非変換(RAW 通過)なので、ROI・テンプレとも
+# 1280-base 正規化空間ではなく RAW 1258 空間で直接記述する。
+# 20:9 版(tap_bottom.toml, ROI=[820,470,200,90] は1280基準)をそのまま流用すると
+# アスペクト比差でオフセット/NoMatch になるため RAW 再導出している。
+#
+# ROI: フィールド画面 下部UI帯(パーティステータス)。PC版 16:9 レイアウトでは
+# 画面下部 y=560..680, x=800..1160 に位置する固定UI帯(時間/天候/キャラ移動に無関係)。
+# テンプレ(200x64)はこの ROI 内に収まる。
+roi       = [800, 560, 360, 120]
+threshold = 0.80
+# click_self: 認識したUI帯(matched_region 中心)を Win32InputExecutor(SendInput) でタップ。
+# 効果は発火前後キャプチャのシーン変化で誠実判定(T6 run_once_verified / pre-post diff)。
+action    = { type = "click_self" }
+next      = []

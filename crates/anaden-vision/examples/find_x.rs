@@ -29,7 +29,7 @@ fn main() {
             }
         }
     }
-    best.sort_by(|a, b| b.2.cmp(&a.2));
+    best.sort_by_key(|x| std::cmp::Reverse(x.2));
     eprintln!("=== bright blocks in top-right (x>1080, y<120) ===");
     for (bx, by, mean) in best.iter().take(20) {
         eprintln!("  block px({},{}) size8 mean_lum={}", bx, by, mean);

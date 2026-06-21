@@ -21,7 +21,7 @@ use std::time::Instant;
 
 use anaden_core::MatchConfidence;
 use anaden_vision::{CcoeffVisionEngine, ScreenScaler, SseVisionEngine, VisionEngine};
-use image::{DynamicImage, GenericImageView, GrayImage};
+use image::{DynamicImage, GrayImage};
 
 /// 計測繰り返し回数。
 const ITERS: usize = 30;
@@ -49,7 +49,7 @@ fn main() {
     } else {
         default_paths
             .iter()
-            .map(|s| PathBuf::from(s))
+            .map(PathBuf::from)
             .filter(|p| p.exists())
             .collect()
     };
@@ -196,7 +196,7 @@ fn main() {
     println!("{}", "-".repeat(56));
     for &engine in &engines {
         for &scope in &scopes {
-            let (hay, hay_w, hay_h): (DynamicImage, u32, u32) = match scope {
+            let (hay, _hay_w, _hay_h): (DynamicImage, u32, u32) = match scope {
                 "full" => (full_dyn.clone(), bw, bh),
                 "roi" => (roi_dyn.clone(), ROI_W, ROI_H),
                 _ => unreachable!(),

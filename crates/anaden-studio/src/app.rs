@@ -42,19 +42,13 @@ enum AppMode {
 }
 
 /// 識別力評価に使うマッチエンジン。コンボでライブ切替する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum EngineKind {
     /// imageproc 正規化SSE（絶対輝度差）。現行ベースライン。
     Sse,
     /// TM_CCOEFF_NORMED（輝度シフトにロバスト）。
+    #[default]
     Ccoeff,
-}
-
-impl Default for EngineKind {
-    fn default() -> Self {
-        // よりロバストな方をデフォルト。
-        EngineKind::Ccoeff
-    }
 }
 
 impl EngineKind {
@@ -364,17 +358,17 @@ impl StudioApp {
 impl eframe::App for StudioApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         // スクリーンショットのテクスチャ生成（未生成時）
-        if self.screenshot_tex.is_none() {
-            if let Some(img) = &self.screenshot {
-                let rgba = img.to_rgba8();
-                let size = [rgba.width() as usize, rgba.height() as usize];
-                let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                self.screenshot_tex = Some(ui.ctx().load_texture(
-                    "studio-screenshot",
-                    color_image,
-                    egui::TextureOptions::default(),
-                ));
-            }
+        if self.screenshot_tex.is_none()
+            && let Some(img) = &self.screenshot
+        {
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+            self.screenshot_tex = Some(ui.ctx().load_texture(
+                "studio-screenshot",
+                color_image,
+                egui::TextureOptions::default(),
+            ));
         }
 
         // モード切替バー
@@ -390,24 +384,23 @@ impl eframe::App for StudioApp {
         if matches!(self.mode, AppMode::Authoring) {
             // 別スレッドでの propose 計算結果を非ブロッキング受信。
             // 完了時: proposing を下ろし、結果を self.proposals へ反映・status 更新。
-            if self.proposing {
-                if let Some(rx) = &self.proposal_rx {
-                    if let Ok(ps) = rx.try_recv() {
-                        self.proposals = ps;
-                        self.proposing = false;
-                        self.proposal_rx = None;
-                        self.status = format!("ROI候補: {} 件（スコア順）", self.proposals.len());
-                    }
-                }
+            if self.proposing
+                && let Some(rx) = &self.proposal_rx
+                && let Ok(ps) = rx.try_recv()
+            {
+                self.proposals = ps;
+                self.proposing = false;
+                self.proposal_rx = None;
+                self.status = format!("ROI候補: {} 件（スコア順）", self.proposals.len());
             }
 
             // ライブADBキャプチャの最新フレームを取り込む（表示更新のみ。ROIは保持）
-            if let Some(live) = &self.live {
-                if let Some(frame) = live.latest() {
-                    let normalized = self.scaler.normalize(&frame);
-                    self.screenshot = Some(Arc::new(normalized));
-                    self.screenshot_tex = None;
-                }
+            if let Some(live) = &self.live
+                && let Some(frame) = live.latest()
+            {
+                let normalized = self.scaler.normalize(&frame);
+                self.screenshot = Some(Arc::new(normalized));
+                self.screenshot_tex = None;
             }
 
             // 左サイドパネル: 操作 + 識別力サマリ
@@ -633,10 +626,10 @@ impl eframe::App for StudioApp {
                             });
                     });
                     ui.label(format!("保存先: {}", self.save_dir.display()));
-                    if ui.button("📁 保存先変更").clicked() {
-                        if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                            self.save_dir = dir;
-                        }
+                    if ui.button("📁 保存先変更").clicked()
+                        && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                    {
+                        self.save_dir = dir;
                     }
                     let can_save = self.roi.rect().is_some() && self.screenshot.is_some();
                     let mut save_clicked = false;
@@ -674,59 +667,56 @@ impl eframe::App for StudioApp {
                     );
 
                     // ROIが安定して変化したら識別力とヒートマップを再評価
-                    if let Some(roi_rect) = self.roi.rect() {
-                        if !self.roi.dragging && Some(roi_rect) != self.scored_roi {
-                            let crop = img.crop_imm(
-                                roi_rect.x,
-                                roi_rect.y,
-                                roi_rect.width,
-                                roi_rect.height,
-                            );
-                            self.discrimination = Some(scoring::discrimination(
-                                self.engine.as_ref(),
-                                &crop,
-                                &self.positives,
-                                &self.negatives,
-                            ));
+                    if let Some(roi_rect) = self.roi.rect()
+                        && !self.roi.dragging
+                        && Some(roi_rect) != self.scored_roi
+                    {
+                        let crop =
+                            img.crop_imm(roi_rect.x, roi_rect.y, roi_rect.width, roi_rect.height);
+                        self.discrimination = Some(scoring::discrimination(
+                            self.engine.as_ref(),
+                            &crop,
+                            &self.positives,
+                            &self.negatives,
+                        ));
 
-                            // ヒートマップ（スコアマップ全体）と最良マッチ位置
-                            if let Some(sm) = self.heatmap_engine.score_map(img, &crop) {
-                                let mut bx = 0u32;
-                                let mut by = 0u32;
-                                let mut bv = 0u8;
-                                for y in 0..sm.height() {
-                                    for x in 0..sm.width() {
-                                        let v = sm.get_pixel(x, y)[0];
-                                        if v > bv {
-                                            bv = v;
-                                            bx = x;
-                                            by = y;
-                                        }
+                        // ヒートマップ（スコアマップ全体）と最良マッチ位置
+                        if let Some(sm) = self.heatmap_engine.score_map(img, &crop) {
+                            let mut bx = 0u32;
+                            let mut by = 0u32;
+                            let mut bv = 0u8;
+                            for y in 0..sm.height() {
+                                for x in 0..sm.width() {
+                                    let v = sm.get_pixel(x, y)[0];
+                                    if v > bv {
+                                        bv = v;
+                                        bx = x;
+                                        by = y;
                                     }
                                 }
-                                let d = HEATMAP_DOWNSCALE;
-                                self.best_match = Some(ScreenRegion::new(
-                                    bx * d,
-                                    by * d,
-                                    roi_rect.width,
-                                    roi_rect.height,
-                                ));
-                                self.heatmap_search = ScreenRegion::new(
-                                    0,
-                                    0,
-                                    img.width().saturating_sub(roi_rect.width),
-                                    img.height().saturating_sub(roi_rect.height),
-                                );
-                                let color_img = canvas::score_map_to_heatmap(&sm);
-                                self.heatmap_tex = Some(ui.ctx().load_texture(
-                                    "heatmap",
-                                    color_img,
-                                    egui::TextureOptions::LINEAR,
-                                ));
                             }
-
-                            self.scored_roi = Some(roi_rect);
+                            let d = HEATMAP_DOWNSCALE;
+                            self.best_match = Some(ScreenRegion::new(
+                                bx * d,
+                                by * d,
+                                roi_rect.width,
+                                roi_rect.height,
+                            ));
+                            self.heatmap_search = ScreenRegion::new(
+                                0,
+                                0,
+                                img.width().saturating_sub(roi_rect.width),
+                                img.height().saturating_sub(roi_rect.height),
+                            );
+                            let color_img = canvas::score_map_to_heatmap(&sm);
+                            self.heatmap_tex = Some(ui.ctx().load_texture(
+                                "heatmap",
+                                color_img,
+                                egui::TextureOptions::LINEAR,
+                            ));
                         }
+
+                        self.scored_roi = Some(roi_rect);
                     }
                 } else {
                     ui.heading("「スクリーンショットを開く」で画像を読み込んでください");
@@ -750,10 +740,10 @@ impl StudioApp {
                 ui.separator();
                 ui.label(format!("テンプレート元: {}", self.save_dir.display()));
                 ui.label(format!("テスト元: {}", self.test_dir.display()));
-                if ui.button("📁 テスト元変更").clicked() {
-                    if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-                        self.test_dir = dir;
-                    }
+                if ui.button("📁 テスト元変更").clicked()
+                    && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                {
+                    self.test_dir = dir;
                 }
                 ui.horizontal(|ui| {
                     ui.label("閾値:");
@@ -876,10 +866,10 @@ fn load_folder(path: &Path) -> Vec<Arc<DynamicImage>> {
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
             let p: PathBuf = entry.path();
-            if is_image(&p) {
-                if let Ok(img) = image::open(&p) {
-                    out.push(Arc::new(img));
-                }
+            if is_image(&p)
+                && let Ok(img) = image::open(&p)
+            {
+                out.push(Arc::new(img));
             }
         }
     }

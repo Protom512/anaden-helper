@@ -1,0 +1,18 @@
+name      = "MenuPcParty"
+state     = "menu_pc"
+algorithm = "sse"
+template  = "party.png"
+# PC版(Windows 16:9) menu シーン参照テンプレ (Task #28 / Issue #6 / 親 Issue #5)。
+# pc-scoped 名前空間(scenes/menu_pc/)。20:9 既存 templates/scenes/menu/party.toml
+# (旧 schema: method=sse + [roi] サブテーブル, 20:9 座標 x=48,y=565) は PC 16:9 フレーム上で
+# 位置がズレるため共存(非破壊)。本テンプレは PC RAW 1258x708 空間で再導出。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。
+# ScreenScaler は width<=1280 で非変換(RAW 通過)のため RAW 空間で記述。
+#
+# ROI 導出: menu_pc_probe.png(1258x708) の下部アイコンバーを決定論的列分散解析で
+# 検出した7アイコン(右クラスタ x=703..1213, y=579..652)のうち party(最左)。
+# legacy 20:9 座標(x=48,y=565)のコピペは物理位置がズレるため禁止(analyze_menu_bar 例参照)。
+# template party.png はこの ROI と同サイズの RGBA 自己クロップ → conf>=0.95(自己一致)。
+roi       = [703, 579, 69, 73]
+threshold = 0.95

@@ -428,6 +428,9 @@ fn crop_imm(img: &DynamicImage, r: ScreenRegion) -> DynamicImage {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use image::{DynamicImage, GrayImage, ImageBuffer, Luma};
@@ -736,10 +739,13 @@ mod tests {
 
         // 両者とも埋込位置を発見
         for (label, x) in [("sse", sse_m.region.x), ("ccoeff", cc_m.region.x)] {
-            assert!(x >= 148 && x <= 152, "{label} region.x at embed: got {x}");
+            assert!(
+                (148..=152).contains(&x),
+                "{label} region.x at embed: got {x}"
+            );
         }
         for (label, y) in [("sse", sse_m.region.y), ("ccoeff", cc_m.region.y)] {
-            assert!(y >= 73 && y <= 77, "{label} region.y at embed: got {y}");
+            assert!((73..=77).contains(&y), "{label} region.y at embed: got {y}");
         }
         // 両者とも閾値を超える（完全一致埋込）
         assert!(
@@ -1323,5 +1329,587 @@ mod tests {
         "#;
         let err = toml::from_str::<TaskDef>(toml_body);
         assert!(err.is_err(), "namespace [task.X] must be rejected");
+    }
+
+    // ---- PC版(Windows, 16:9)パイプラインスライス(T5) ----
+    //
+    // 実機(20:9)テンプレ templates/pipelines/field_loop/*, nav_to_field/* を上書きせず、
+    // PC版は pc-scoped 名前空間(field_loop_pc/, nav_to_field_pc/, scenes/field_pc/)へ隔離する
+    // (T7 の 20:9→16:9 劣化検証は両者の共存を前提とするため)。
+    // 全 ROI は RAW 1258x708 ピクセル空間(ScreenScaler は width<=1280 で非変換=RAW 通過)。
+
+    /// workspace の `templates/` ルートを返す。
+    /// anaden-vision クレート(crates/anaden-vision)からは `../../templates`。
+    fn workspace_templates_root() -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("templates")
+    }
+
+    /// ROI の全要素が 1258x708 キャンバスに収まり、かつ幅/高さが 0 でないことを検証。
+    fn assert_roi_within_1258x708(roi: [u32; 4], label: &str) {
+        let [x, y, w, h] = roi;
+        assert!(
+            w > 0 && h > 0,
+            "{label}: width/height must be > 0, got {roi:?}"
+        );
+        assert!(
+            x + w <= 1258 && y + h <= 708,
+            "{label}: ROI {roi:?} exceeds RAW 1258x708 PC capture space"
+        );
+    }
+
+    #[test]
+    fn pc_field_loop_pipeline_loads_with_click_self_actions() {
+        let dir = workspace_templates_root()
+            .join("pipelines")
+            .join("field_loop_pc");
+        let defs = load_pipeline(&dir).expect("field_loop_pc must load");
+        // tap_bottom + tap_hud_tr の 2 タスク。
+        assert_eq!(
+            defs.len(),
+            2,
+            "field_loop_pc must contain tap_bottom + tap_hud_tr"
+        );
+
+        let by_name: std::collections::HashMap<&str, &TaskDef> =
+            defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+        let bottom = by_name
+            .get("TapBottomStablePc")
+            .expect("TapBottomStablePc task present");
+        assert_eq!(bottom.algorithm, Algorithm::Ccoeff);
+        assert_eq!(bottom.action, Some(Action::ClickSelf));
+        assert_eq!(
+            bottom.next.as_deref(),
+            Some(&[][..]),
+            "field loop task is terminal (next=[])"
+        );
+        assert_eq!(bottom.state, "Field");
+        let bottom_roi = bottom.roi.expect("TapBottomStablePc has ROI");
+        assert_roi_within_1258x708(bottom_roi, "TapBottomStablePc");
+        assert!(
+            bottom.template.is_absolute(),
+            "template path must be absolute"
+        );
+        assert!(
+            bottom.template.exists(),
+            "template PNG must exist at {:?}",
+            bottom.template
+        );
+
+        let hud = by_name.get("TapHudTrPc").expect("TapHudTrPc task present");
+        assert_eq!(hud.algorithm, Algorithm::Ccoeff);
+        assert_eq!(hud.action, Some(Action::ClickSelf));
+        assert_eq!(hud.next.as_deref(), Some(&[][..]));
+        let hud_roi = hud.roi.expect("TapHudTrPc has ROI");
+        assert_roi_within_1258x708(hud_roi, "TapHudTrPc");
+        assert!(hud.template.exists(), "hud template PNG must exist");
+    }
+
+    #[test]
+    fn pc_nav_to_field_points_at_pc_field_hud_template() {
+        let dir = workspace_templates_root()
+            .join("pipelines")
+            .join("nav_to_field_pc");
+        let defs = load_pipeline(&dir).expect("nav_to_field_pc must load");
+        assert!(
+            defs.iter().any(|d| d.name == "FieldHudTopPc"),
+            "nav_to_field_pc must contain FieldHudTopPc"
+        );
+
+        let nav = defs
+            .iter()
+            .find(|d| d.name == "FieldHudTopPc")
+            .expect("FieldHudTopPc present");
+        assert_eq!(nav.algorithm, Algorithm::Ccoeff);
+        assert_eq!(
+            nav.action,
+            Some(Action::DoNothing),
+            "nav target = stop (do_nothing)"
+        );
+        assert_eq!(nav.next.as_deref(), Some(&[][..]));
+        let nav_roi = nav.roi.expect("FieldHudTopPc has ROI");
+        assert_roi_within_1258x708(nav_roi, "FieldHudTopPc");
+        // field 到達 = 目標なので発火しない。テンプレは scenes/field_pc/ へ参照する。
+        assert!(
+            nav.template.exists(),
+            "nav template PNG must exist at {:?}",
+            nav.template
+        );
+        assert!(
+            nav.template.to_string_lossy().contains("field_pc"),
+            "nav FieldHudTopPc must reference the pc-scoped field scene, got {:?}",
+            nav.template
+        );
+    }
+
+    #[test]
+    fn pc_pipeline_namespace_does_not_collide_with_20x9_field_loop() {
+        // T7 の劣化検証が両者共存を前提とするため、PC 名前空間は 20:9 を上書きしない。
+        let pc = workspace_templates_root()
+            .join("pipelines")
+            .join("field_loop_pc");
+        let legacy = workspace_templates_root()
+            .join("pipelines")
+            .join("field_loop");
+        assert!(pc.exists(), "field_loop_pc namespace must exist");
+        assert!(
+            legacy.exists(),
+            "legacy field_loop must still exist (not clobbered)"
+        );
+
+        let pc_names: Vec<String> = load_pipeline(&pc)
+            .expect("pc load")
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        let legacy_names: Vec<String> = load_pipeline(&legacy)
+            .expect("legacy load")
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        // 名前空間が分離済み(同名タスクの衝突無し)。
+        for n in &pc_names {
+            assert!(
+                !legacy_names.contains(n),
+                "PC task '{n}' collides with legacy 20:9 namespace"
+            );
+        }
+    }
+
+    // ---- PC版 field_pc シーンテンプレスライス (Task#3 / Issue#5) ----
+    //
+    // templates/scenes/field_pc/ に PC版(16:9, RAW 1258x708) 参照テンプレ3つ
+    // (template_01, hud_top, hud_topright) を新設する。
+    // 20:9 既存 templates/scenes/field/* は PC の 16:9 フレーム上で劣化し(conf 0.6723 < 0.80)
+    // field_loop が --target windows でマッチしない現状を、pc-scoped 名前空間で解除する。
+    // 全 ROI は RAW 1258x708 空間。TOML は TaskDef スキーマ(algorithm+template+平坦 roi)。
+    //
+    // TaskDef::detect で capture_probe.png(T7 PrintWindow 実機フレーム) 上の
+    // 各 PC テンプレが threshold(0.95) 以上でマッチすることを E2E 検証する。
+
+    fn field_pc_dir() -> PathBuf {
+        workspace_templates_root().join("scenes").join("field_pc")
+    }
+
+    /// field_pc/ の3 TOML が TaskDef スキーマで parse でき、PNG が存在し、
+    /// ROI が RAW 1258x708 に収まることを検証。
+    #[test]
+    fn pc_field_pc_scene_templates_load_and_validate() {
+        let dir = field_pc_dir();
+        let defs = load_pipeline(&dir).expect("field_pc scene dir must load");
+        // template_01 + hud_top + hud_topright の3タスク。
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.len() >= 3,
+            "field_pc must contain template_01 + hud_top + hud_topright, got {names:?}"
+        );
+
+        for d in &defs {
+            // TaskDef スキーマ(legacy method+[roi] は deny_unknown_fields で弾かれる)。
+            assert_eq!(
+                d.algorithm,
+                Algorithm::Ccoeff,
+                "{}: PC field templates must use ccoeff",
+                d.name
+            );
+            assert!(
+                d.template.is_absolute(),
+                "{}: template path must be absolute",
+                d.name
+            );
+            assert!(
+                d.template.exists(),
+                "{}: template PNG must exist at {:?}",
+                d.name,
+                d.template
+            );
+            assert!(
+                d.template
+                    .parent()
+                    .map(|p| p.ends_with("field_pc"))
+                    .unwrap_or(false),
+                "{}: template must live under scenes/field_pc/, got {:?}",
+                d.name,
+                d.template
+            );
+            let roi = d.roi.unwrap_or_else(|| {
+                panic!("{}: PC field template must have an explicit ROI", d.name)
+            });
+            assert_roi_within_1258x708(roi, &d.name);
+            assert!(
+                d.threshold >= 0.95,
+                "{}: ticket requires threshold>=0.95, got {}",
+                d.name,
+                d.threshold
+            );
+        }
+    }
+
+    /// field_pc ネームスペースは 20:9 scenes/field と名前衝突しない
+    /// (pc-scoped ACL 隔離。T7 劣化検証が共存を前提とする)。
+    ///
+    /// 注: legacy scenes/field/*.toml は旧 schema(`method=` + `[roi]` サブテーブル)で
+    /// TaskDef の deny_unknown_fields と非互換(toml::from_str が ParseFailed)のため、
+    /// ここでは legacy TOML をパースせず、TaskDef 名と legacy *ファイル名* の重複を
+    /// 比較する(名前空間分離の本質は同名衝突の回避であり、schema 非互換とは無関係)。
+    #[test]
+    fn pc_field_pc_namespace_does_not_collide_with_scenes_field() {
+        let pc_dir = field_pc_dir();
+        let legacy_dir = workspace_templates_root().join("scenes").join("field");
+        assert!(pc_dir.exists(), "scenes/field_pc namespace must exist");
+        assert!(
+            legacy_dir.exists(),
+            "legacy scenes/field must still exist (not clobbered)"
+        );
+
+        let pc_names: Vec<String> = load_pipeline(&pc_dir)
+            .expect("field_pc load")
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        // legacy scenes/field の *.toml ファイル名(stem)を名前空間識別子として使う。
+        let legacy_stems: Vec<String> = std::fs::read_dir(&legacy_dir)
+            .expect("read scenes/field")
+            .filter_map(|e| e.ok())
+            .filter_map(|e| {
+                let p = e.path();
+                let is_toml = p
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("toml"))
+                    .unwrap_or(false);
+                if is_toml {
+                    p.file_stem()?.to_str().map(String::from)
+                } else {
+                    None
+                }
+            })
+            .collect();
+        for n in &pc_names {
+            assert!(
+                !legacy_stems.contains(n),
+                "PC scene task '{n}' collides with legacy 20:9 scenes/field namespace"
+            );
+        }
+        // field_pc の 3 TaskDef 名が legacy stem(template_01/hud_top/hud_topright)と
+        // 衝突しないことを具体的に保証(FieldPc* 接頭辞で分離済み)。
+        assert!(
+            !pc_names.iter().any(|n| legacy_stems.contains(n)),
+            "no PC task name may equal a legacy scenes/field filename stem"
+        );
+    }
+
+    /// field_pc 用キャプチャプローブのパスを解決する。
+    /// 優先順位(menu_pc_probe_path と同じ規約):
+    ///   1. `templates/captures/field_pc_probe.png`(規約位置・tracked)
+    ///   2. workspace ルート直下 `capture_probe.png`(開発時の暫定プローブ)
+    ///
+    /// Why not 旧インライン resolver: 旧実装は workspace ルートの `capture_probe.png`
+    /// (`.gitignore:17` で除外) のみを見ており、fresh clone では存在せず absence-skip で
+    /// 偽 green になっていた。規約位置の tracked プローブを primary にすることで再現性を保証し、
+    /// menu_pc と同じ primary/fallback 構造に揃えて drift を防ぐ(Issue #9)。
+    ///
+    /// 見つからなければ None(CI フォーク等では検証をスキップ)。
+    fn field_pc_probe_path() -> Option<PathBuf> {
+        let primary = workspace_templates_root()
+            .join("captures")
+            .join("field_pc_probe.png");
+        if primary.exists() {
+            return Some(primary);
+        }
+        let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("capture_probe.png");
+        if fallback.exists() {
+            return Some(fallback);
+        }
+        None
+    }
+
+    /// E2E: field_pc_probe.png(T7 PrintWindow 実機 1258x708 field フレーム) 上で
+    /// 各 PC field テンプレが threshold 以上の confidence でマッチする。
+    /// これが --target windows で field_loop がアンブロックされる直接証明。
+    #[test]
+    fn pc_field_pc_templates_match_real_capture_above_threshold() {
+        let dir = field_pc_dir();
+        let probe_path = match field_pc_probe_path() {
+            Some(p) => p,
+            None => {
+                // プローブ未整備の環境(CI フォーク等)では検証をスキップ。
+                eprintln!(
+                    "skip: field_pc_probe.png not found \
+                     (neither templates/captures/ nor workspace-root capture_probe.png)"
+                );
+                return;
+            }
+        };
+        let defs = load_pipeline(&dir).expect("field_pc load");
+        let screenshot = image::open(&probe_path).expect("open field_pc_probe.png");
+
+        for d in &defs {
+            let m = d
+                .detect(&screenshot, Path::new(""))
+                .unwrap_or_else(|e| panic!("{} detect error: {e}", d.name));
+            let m = m.unwrap_or_else(|| {
+                panic!(
+                    "{}: must match field_pc_probe.png at threshold {} (got None)",
+                    d.name, d.threshold
+                )
+            });
+            assert!(
+                m.confidence.0 >= d.threshold,
+                "{}: confidence {} below threshold {} on real PC capture",
+                d.name,
+                m.confidence.0,
+                d.threshold
+            );
+            assert_roi_within_1258x708(
+                [m.region.x, m.region.y, m.region.width, m.region.height],
+                &format!("{} match region", d.name),
+            );
+            println!(
+                "{}: conf={:.4} region=[{},{},{},{}] (threshold {:.2})",
+                d.name,
+                m.confidence.0,
+                m.region.x,
+                m.region.y,
+                m.region.width,
+                m.region.height,
+                d.threshold
+            );
+        }
+    }
+
+    // ---- PC版 menu_pc シーンテンプレスライス (Task#2 / Issue#6 / 親 Issue#5) ----
+    //
+    // templates/scenes/menu_pc/ に PC版(16:9, RAW 1258x708) 参照テンプレ7件
+    // (bag/board/gacha/grasta/info/party/record) を新設する。20:9 既存 templates/scenes/menu/*
+    // は PC の 16:9 フレーム上で劣化するため、pc-scoped 名前空間(menu_pc)で隔離する。
+    // 全 ROI は RAW 1258x708 空間(ScreenScaler は width<=1280 で非変換=RAW 通過)。
+    // TOML は TaskDef スキーマ(algorithm=sse + template + 平坦 roi)。20:9 legacy menu は
+    // 旧 schema(method + [roi] サブテーブル)で TaskDef と非互換のため共存(非破壊)。
+
+    fn menu_pc_dir() -> PathBuf {
+        workspace_templates_root().join("scenes").join("menu_pc")
+    }
+
+    /// menu_pc/ の7 TOML が TaskDef スキーマで parse でき、PNG が存在し、
+    /// ROI が RAW 1258x708 に収まり、全て SSE アルゴリズム・threshold>=0.95 であることを検証。
+    #[test]
+    fn pc_menu_pc_scene_templates_load_and_validate() {
+        let dir = menu_pc_dir();
+        let defs = load_pipeline(&dir).expect("menu_pc scene dir must load");
+        // bag + board + gacha + grasta + info + party + record の7タスク。
+        assert_eq!(
+            defs.len(),
+            7,
+            "menu_pc must contain bag/board/gacha/grasta/info/party/record (7 tasks), got {}",
+            defs.len()
+        );
+
+        for d in &defs {
+            // TaskDef スキーマ(legacy method+[roi] は deny_unknown_fields で弾かれる)。
+            assert_eq!(
+                d.algorithm,
+                Algorithm::Sse,
+                "{}: PC menu templates must use sse",
+                d.name
+            );
+            assert_eq!(
+                d.state, "menu_pc",
+                "{}: PC menu task state must be 'menu_pc'",
+                d.name
+            );
+            assert!(
+                d.template.is_absolute(),
+                "{}: template path must be absolute",
+                d.name
+            );
+            assert!(
+                d.template.exists(),
+                "{}: template PNG must exist at {:?}",
+                d.name,
+                d.template
+            );
+            assert!(
+                d.template
+                    .parent()
+                    .map(|p| p.ends_with("menu_pc"))
+                    .unwrap_or(false),
+                "{}: template must live under scenes/menu_pc/, got {:?}",
+                d.name,
+                d.template
+            );
+            let roi = d.roi.unwrap_or_else(|| {
+                panic!("{}: PC menu template must have an explicit ROI", d.name)
+            });
+            assert_roi_within_1258x708(roi, &d.name);
+            assert!(
+                d.threshold >= 0.95,
+                "{}: ticket requires threshold>=0.95, got {}",
+                d.name,
+                d.threshold
+            );
+        }
+    }
+
+    /// menu_pc ネームスペースは 20:9 legacy scenes/field および scenes/menu と
+    /// 名前衝突しない(pc-scoped ACL 隔離。非破壊共存の前提)。
+    ///
+    /// 注: legacy scenes/{field,menu}/*.toml は旧 schema(`method=` + `[roi]` サブテーブル)で
+    /// TaskDef の deny_unknown_fields と非互換(toml::from_str が ParseFailed)のため、
+    /// ここでは legacy TOML をパースせず、TaskDef 名と legacy *ファイル名* の重複を比較する
+    /// (名前空間分離の本質は同名衝突の回避であり、schema 非互換とは無関係)。
+    #[test]
+    fn pc_menu_pc_namespace_does_not_collide_with_scenes_field_or_menu() {
+        let pc_dir = menu_pc_dir();
+        assert!(pc_dir.exists(), "scenes/menu_pc namespace must exist");
+
+        let pc_names: Vec<String> = load_pipeline(&pc_dir)
+            .expect("menu_pc load")
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+
+        // legacy scenes/field と scenes/menu の *.toml ファイル名(stem)を名前空間識別子として使う。
+        for legacy_seg in ["field", "menu"] {
+            let legacy_dir = workspace_templates_root().join("scenes").join(legacy_seg);
+            assert!(
+                legacy_dir.exists(),
+                "legacy scenes/{legacy_seg} must still exist (not clobbered)"
+            );
+            let legacy_stems: Vec<String> = std::fs::read_dir(&legacy_dir)
+                .unwrap_or_else(|e| panic!("read scenes/{legacy_seg}: {e}"))
+                .filter_map(|e| e.ok())
+                .filter_map(|e| {
+                    let p = e.path();
+                    let is_toml = p
+                        .extension()
+                        .and_then(|x| x.to_str())
+                        .map(|x| x.eq_ignore_ascii_case("toml"))
+                        .unwrap_or(false);
+                    if is_toml {
+                        p.file_stem()?.to_str().map(String::from)
+                    } else {
+                        None
+                    }
+                })
+                .collect();
+            for n in &pc_names {
+                assert!(
+                    !legacy_stems.contains(n),
+                    "PC menu task '{n}' collides with legacy 20:9 scenes/{legacy_seg} namespace"
+                );
+            }
+        }
+        // menu_pc の全 TaskDef 名が legacy field/menu stem と衝突しないことを保証。
+        assert!(
+            !pc_names.is_empty(),
+            "menu_pc must define at least one task for namespace isolation check"
+        );
+    }
+
+    /// menu_pc 用キャプチャプローブのパスを解決する。
+    /// 優先順位:
+    ///   1. `templates/captures/menu_pc_probe.png`(規約位置)
+    ///   2. workspace ルート直下 `menu_pc_probe.png`
+    ///
+    /// 見つからなければ None(CI フォーク等では検証をスキップ)。
+    fn menu_pc_probe_path() -> Option<PathBuf> {
+        let primary = workspace_templates_root()
+            .join("captures")
+            .join("menu_pc_probe.png");
+        if primary.exists() {
+            return Some(primary);
+        }
+        let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("menu_pc_probe.png");
+        if fallback.exists() {
+            return Some(fallback);
+        }
+        None
+    }
+
+    /// E2E: menu_pc_probe.png(16:9 PC RAW 1258x708 メニューフレーム) 上で
+    /// 各 menu_pc テンプレ 7 件(bag/board/gacha/grasta/info/party/record)が
+    /// threshold(>=0.95) 以上の confidence でマッチし、かつ ROI が 1258x708 に
+    /// 収まることを検証する。これが conf>=0.95 acceptance gate。
+    ///
+    /// `pc_field_pc_templates_match_real_capture_above_threshold`(pipeline.rs:1609)
+    /// と同じ absence-skip パターンを採用し、プローブ or menu_pc ネームスペースが
+    /// 未整備の環境(CI フォーク等)では検証をスキップしてビルドを壊さない。
+    #[test]
+    fn pc_menu_pc_templates_match_real_capture_above_threshold() {
+        let dir = menu_pc_dir();
+        if !dir.exists() {
+            eprintln!("skip: menu_pc namespace not found at {:?}", dir);
+            return;
+        }
+        let probe_path = match menu_pc_probe_path() {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "skip: menu_pc_probe.png not found \
+                     (neither templates/captures/ nor workspace root)"
+                );
+                return;
+            }
+        };
+
+        let defs = load_pipeline(&dir).expect("menu_pc load");
+        // menu 底部 7 アイコン(bag/board/gacha/grasta/info/party/record)。
+        assert!(
+            defs.len() >= 7,
+            "menu_pc must contain 7 bottom-bar icon tasks, got {}",
+            defs.len()
+        );
+
+        let screenshot = image::open(&probe_path).expect("open menu_pc_probe.png");
+
+        for d in &defs {
+            let m = d
+                .detect(&screenshot, Path::new(""))
+                .unwrap_or_else(|e| panic!("{} detect error: {e}", d.name));
+            let m = m.unwrap_or_else(|| {
+                panic!(
+                    "{}: must match menu_pc_probe.png at threshold {} (got None)",
+                    d.name, d.threshold
+                )
+            });
+            // acceptance gate: threshold 自体も >=0.95 を要求(acceptance 地盤)。
+            assert!(
+                d.threshold >= 0.95,
+                "{}: threshold {} below menu_pc acceptance floor 0.95",
+                d.name,
+                d.threshold
+            );
+            assert!(
+                m.confidence.0 >= d.threshold,
+                "{}: confidence {} below threshold {} on real PC menu capture",
+                d.name,
+                m.confidence.0,
+                d.threshold
+            );
+            assert_roi_within_1258x708(
+                [m.region.x, m.region.y, m.region.width, m.region.height],
+                &format!("{} match region", d.name),
+            );
+            println!(
+                "{}: conf={:.4} region=[{},{},{},{}] (threshold {:.2})",
+                d.name,
+                m.confidence.0,
+                m.region.x,
+                m.region.y,
+                m.region.width,
+                m.region.height,
+                d.threshold
+            );
+        }
     }
 }

@@ -15,3 +15,6 @@ templates/fidelity/
 templates/anaden_screen*.png
 templates/test_capture.png
 capture_probe.png
+.claude/
+target
+

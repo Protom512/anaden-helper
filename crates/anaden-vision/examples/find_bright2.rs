@@ -32,7 +32,7 @@ fn main() {
             best.push((bx, by, sum / cnt.max(1)));
         }
     }
-    best.sort_by(|a, b| b.2.cmp(&a.2));
+    best.sort_by_key(|x| std::cmp::Reverse(x.2));
     eprintln!("=== brightest blocks in [{},{},{},{}] ===", x0, y0, x1, y1);
     for (bx, by, mean) in best.iter().take(15) {
         eprintln!("  px({},{}) lum={}", bx, by, mean);

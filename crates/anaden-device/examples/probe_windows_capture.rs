@@ -38,6 +38,7 @@
 //!   2. `Direct3D11CaptureFramePool::Create(d3d11device, format, size)` で pool 作成
 //!   3. `frame_pool.CreateCaptureSession(item)` → `session.StartCapture()`
 //!   4. `FrameArrived` で `Direct3DSurface` を取り出し CPU 側へ copy → RGBA へ
+//!
 //! Cargo.toml の WGC features(Graphics_Capture / Win32_Graphics_Direct3D11 /
 //! Win32_Graphics_Dxgi / Win32_System_WinRT / Win32_System_WinRT_Direct3D11 /
 //! Win32_System_WinRT_Graphics_Capture)は既に定義済み。本プローブでは
@@ -289,7 +290,7 @@ fn find_pid_by_name(exe: &str) -> Option<u32> {
                     let _ = windows::Win32::Foundation::CloseHandle(snap);
                     return Some(entry.th32ProcessID);
                 }
-                if !Process32NextW(snap, &mut entry).is_ok() {
+                if Process32NextW(snap, &mut entry).is_err() {
                     break;
                 }
             }
@@ -438,7 +439,7 @@ fn capture_via_printwindow(hwnd: HWND, w: u32, h: u32) -> Result<Vec<u8>, i32> {
             mem_dc,
             bmp,
             0,
-            h as u32,
+            h,
             Some(pixels.as_mut_ptr() as *mut _),
             &mut bi,
             DIB_RGB_COLORS,

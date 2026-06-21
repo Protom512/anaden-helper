@@ -11,13 +11,15 @@ pub struct RecoveryPolicy {
     max_retries: u32,
 }
 
+impl Default for RecoveryPolicy {
+    fn default() -> Self {
+        Self { max_retries: 5 }
+    }
+}
+
 impl RecoveryPolicy {
     pub fn new(max_retries: u32) -> Self {
         Self { max_retries }
-    }
-
-    pub fn default() -> Self {
-        Self { max_retries: 5 }
     }
 
     /// 連続 Unknown 回数に応じた回復アクションを返す。
@@ -71,6 +73,9 @@ pub enum RecoveryAction {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
 
@@ -98,5 +103,51 @@ mod tests {
     fn give_up_at_max_retries() {
         let policy = RecoveryPolicy::new(5);
         assert!(matches!(policy.recover_actions(6), RecoveryAction::GiveUp));
+    }
+
+    // ---- verify_after_fire wiring 前提: Default trait impl の保存 ----
+    // かつて RecoveryPolicy は inherent `pub fn default()` を持っていたが、
+    // Generic コンテキスト(derive Default の伝播や `T: Default` 境界)で使えるよう
+    // trait Default へ移行した。移行で変えてはならない不変量:
+    //   (1) Default::default() の max_retries == 5 (旧 inherent と同値)
+    //   (2) default() == new(5) (意味的に等価)
+    // これが崩れると Orchestrator::default 経由でのリカバリ上限が暗黙に変わり、
+    // Unknown streak の GiveUp タイミングがズレる(偽成功防止とは別の安全弁の退行)。
+    #[test]
+    fn default_trait_impl_preserves_max_retries_five() {
+        // trait Default 経由で構築。inherent method ではないことを型レベルで担保:
+        // RecoveryPolicy: Default 境界を通る関数へ渡して確認。
+        fn require_default<T: Default>(v: T) -> T {
+            v
+        }
+        let policy = require_default(RecoveryPolicy::default());
+
+        // max_retries == 5 の契約: streak 4 までは回復アクション(Actions)を返し、
+        // streak >= 5 で GiveUp になる。recover_actions は streak == max_retries(5) を
+        // match の `_` アームで GiveUp 扱いする(早期 `> max_retries` は 6+ の安全網)。
+        // この境界を default が保存していなければ、Orchestrator の安全弁タイミングがズレる。
+        assert!(
+            matches!(policy.recover_actions(4), RecoveryAction::Actions(_)),
+            "streak 4 は max_retries(5) 未満なので回復アクションのはず"
+        );
+        assert!(
+            matches!(policy.recover_actions(5), RecoveryAction::GiveUp),
+            "streak 5 == max_retries で GiveUp になるはず"
+        );
+    }
+
+    #[test]
+    fn default_is_equivalent_to_new_five() {
+        // default() と new(5) は観測可能な振る舞いで等価(同じ streak 入力 → 同じアクション)。
+        let from_default = RecoveryPolicy::default();
+        let from_new = RecoveryPolicy::new(5);
+
+        for streak in 0..=8 {
+            assert_eq!(
+                matches!(from_default.recover_actions(streak), RecoveryAction::GiveUp),
+                matches!(from_new.recover_actions(streak), RecoveryAction::GiveUp),
+                "streak {streak} で GiveUp 判定が default と new(5) で不一致"
+            );
+        }
     }
 }

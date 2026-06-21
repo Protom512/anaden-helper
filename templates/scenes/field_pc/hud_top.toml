@@ -1,0 +1,15 @@
+name      = "FieldPcHudTop"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "hud_top.png"
+# PC版(Windows 16:9) field シーン参照テンプレ (Task #27 / Issue #5)。
+# pc-scoped 名前空間(scenes/field_pc/)。実機20:9 (templates/scenes/field/hud_top.toml:
+# algorithm=ccoeff, ROI[400,0,480,100]) と同名だが state/name が異なるため衝突しない。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。ScreenScaler RAW 通過。
+#
+# ROI: 上部HUD帯の中央。PC版 16:9 レイアウトでは x=400..880, y=0..100。
+# 旧 field_pc/hud_top.png(200x80 grayscale) は capture_probe.png で conf=0.0088 と劣化していたため
+# 本スライスで RGBA 自己クロップ(480x100, ROI全面)へ再導出 → conf=1.0000(実測)。
+roi       = [400, 0, 480, 100]
+threshold = 0.95

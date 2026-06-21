@@ -31,20 +31,14 @@ use anaden_device::Win32Capture;
 ///
 /// `Windows` は `#[cfg(windows)]` でのみ存在し、Linux では `Android` のみ選択可能。
 /// これにより studio は Linux でもコンパイル可能(遵守ルール: cargo check --workspace)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Target {
     /// Android 実機: adb screencap。
+    #[default]
     Android,
     /// PC版(Windows): Win32Capture。
     #[cfg(windows)]
     Windows,
-}
-
-impl Default for Target {
-    fn default() -> Self {
-        // 後方互換: target 未指定時は従来通り adb(android)。
-        Target::Android
-    }
 }
 
 /// 別スレッドで動くライブキャプチャ。停止フラグで終了させる。
@@ -57,6 +51,7 @@ impl Default for Target {
 ///     Doze(画面はON表示のままバックライト等が落ちて screencap が黒を返す)を完全には
 ///     抑制できず、毎フレーム wake が最も確実。
 ///   - 取得PNGの平均輝度が閾値未満(黒フレーム)なら破棄してUIへ流さない(フェイルセーフ)
+///
 /// Drop で `screen_off_timeout` を元の値に戻す。
 ///
 /// **OOM 対策**: チャネルは非有界だが、**送信前に古い未読フレームを全てドレイン**し、
@@ -406,5 +401,53 @@ mod tests {
             latest = Some(v);
         }
         assert_eq!(latest, Some(2));
+    }
+
+    // ---- T6: 黒フレーム除外の誠実検証 ----
+
+    /// 黒フレーム閾値が 10.0 に固定されていることをピン留め。
+    ///
+    /// PC版 E2E (T6) の前提: `capture_windows` は `is_black_frame` が真のとき None を返し、
+    /// ライブループは黒キャプチャを NoMatch 相当ではなく「フレーム無し」として扱う。
+    /// 閾値が 10.0 であることは `is_black_frame` の挙動(TASKS.md 誠実検証基準)に直結するため、
+    /// 意図せぬ変更を検出する回帰テストとして値を固定する。
+    #[test]
+    fn black_frame_threshold_is_pinned_to_10() {
+        assert_eq!(BLACK_FRAME_MEAN_THRESHOLD, 10.0);
+    }
+
+    /// `is_black_frame`: 閾値境界ギリギリ(means=9)は黒フレーム、閾値以上(means=11)は非黒。
+    ///
+    /// 閾値 10.0 が `<` 比較であることを検証(境界値 10.0 丁度は非黒)。これにより
+    /// 「純黒のスクリーキャップ(Doze)や PrintWindow 失敗黒画像」は確実に除外され、
+    /// 通常の暗いゲームシーンは誤って除外されないことを保証する。
+    #[test]
+    fn black_frame_boundary_strictly_below_threshold() {
+        // means=9 (一様輝度9) < 10.0 → 黒フレーム
+        let dark =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([9, 9, 9])));
+        assert!(is_black_frame(&dark), "mean=9 must be black (below 10.0)");
+
+        // means=10 (一様輝度10) == 10.0 → `<` 比較なので非黒(境界は含まない)
+        let edge =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([10, 10, 10])));
+        assert!(
+            !is_black_frame(&edge),
+            "mean=10 must NOT be black (strictly below)"
+        );
+
+        // means=11 > 10.0 → 非黒
+        let bright =
+            DynamicImage::ImageRgb8(image::RgbImage::from_pixel(8, 8, image::Rgb([11, 11, 11])));
+        assert!(!is_black_frame(&bright), "mean=11 must not be black");
+    }
+
+    /// `is_black_frame`: 空画像(0ピクセル)は黒フレーム扱い(ゼロ除算回避 + 安全側)。
+    ///
+    /// `capture_windows` が異常サイズ画像を受け取った際のフェイルセーフ経路。
+    #[test]
+    fn black_frame_for_empty_image() {
+        let empty = DynamicImage::ImageRgb8(image::RgbImage::new(0, 0));
+        assert!(is_black_frame(&empty));
     }
 }
