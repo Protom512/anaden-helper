@@ -1,0 +1,14 @@
+name      = "MenuPcBag"
+state     = "menu_pc"
+algorithm = "sse"
+template  = "bag.png"
+# PC版(Windows 16:9) menu シーン参照テンプレ (Task #28 / Issue #6 / 親 Issue #5)。
+# pc-scoped 名前空間(scenes/menu_pc/)。20:9 既存 templates/scenes/menu/bag.toml
+# (旧 schema, 20:9 座標 x=519,y=563) は共存(非破壊)。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
+#
+# ROI 導出: menu_pc_probe.png の下部アイコンバー右クラスタ7アイコンのうち bag(左から2番目)。
+# legacy 20:9 座標(x=519,y=563)のコピペ禁止。template bag.png は同サイズ RGBA 自己クロップ。
+roi       = [778, 579, 68, 73]
+threshold = 0.95

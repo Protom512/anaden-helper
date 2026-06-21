@@ -323,10 +323,10 @@ fn pick_first_device() -> Option<String> {
             continue;
         }
         let mut it = line.split_whitespace();
-        if let Some(serial) = it.next() {
-            if it.next() == Some("device") {
-                return Some(serial.to_string());
-            }
+        if let Some(serial) = it.next()
+            && it.next() == Some("device")
+        {
+            return Some(serial.to_string());
         }
     }
     None

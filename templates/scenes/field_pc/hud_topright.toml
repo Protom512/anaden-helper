@@ -1,0 +1,15 @@
+name      = "FieldPcHudTopRight"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "hud_topright.png"
+# PC版(Windows 16:9) field シーン参照テンプレ (Task #27 / Issue #5)。
+# pc-scoped 名前空間(scenes/field_pc/)。実機20:9 (templates/scenes/field/hud_topright.toml:
+# algorithm=ccoeff, ROI[1056,0,224,100] は1280基準) を上書きしない。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。ScreenScaler RAW 通過。
+#
+# ROI: 右上HUD帯。20:9 legacy の1280基準 ROI[1056,0,224,100] は x+w=1280 > 1258 で RAW キャンバスを
+# はみ出すため、RAW 1258x708 空間へ clamp: x=1056, width=202 → x+w=1258(上限一杯)。
+# hud_topright.png はこの ROI と同サイズ(202x100)の RGBA 自己クロップ → conf=1.0000(実測)。
+roi       = [1056, 0, 202, 100]
+threshold = 0.95

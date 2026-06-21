@@ -109,10 +109,8 @@ pub fn parse_foreground_package(dumpsys: &str) -> Option<String> {
         let key_hits = trimmed.contains("ResumedActivity")
             || trimmed.contains("mResumedActivity")
             || trimmed.contains("topResumedActivity");
-        if key_hits {
-            if let Some(pkg) = extract_package_from_line(trimmed) {
-                return Some(pkg);
-            }
+        if key_hits && let Some(pkg) = extract_package_from_line(trimmed) {
+            return Some(pkg);
         }
     }
 
@@ -120,10 +118,8 @@ pub fn parse_foreground_package(dumpsys: &str) -> Option<String> {
     for line in dumpsys.lines() {
         let trimmed = line.trim();
         let key_hits = trimmed.contains("mCurrentFocus") || trimmed.contains("mFocusedApp");
-        if key_hits {
-            if let Some(pkg) = extract_package_from_line(trimmed) {
-                return Some(pkg);
-            }
+        if key_hits && let Some(pkg) = extract_package_from_line(trimmed) {
+            return Some(pkg);
         }
     }
 

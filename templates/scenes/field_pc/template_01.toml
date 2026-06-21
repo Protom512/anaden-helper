@@ -1,0 +1,16 @@
+name      = "FieldPcTemplate01"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "template_01.png"
+# PC版(Windows 16:9) field シーン参照テンプレ (Task #27 / Issue #5)。
+# pc-scoped 名前空間(scenes/field_pc/)。実機20:9 (templates/scenes/field/template_01.toml:
+# method=sse, ROI[254,606,86,91]) を上書きしない(legacy schema は TaskDef と非互換のため共存)。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。
+# ScreenScaler は width<=1280 で非変換(RAW 通過)なので、1280 基準ではなく RAW 1258 空間で記述。
+#
+# ROI: フィールド画面 左下UI要素(キャラ/メニュー誘導帯)。20:9 legacy と同じ RAW 座標
+# [254,606,86,91] を PC 16:9 フレームで再検証 → ccoeff 自己クロップで conf=1.0000(実測)。
+# lumvar 十分(テクスチャ豊富)で安定。template_01.png はこの ROI と同サイズの RGBA 自己クロップ。
+roi       = [254, 606, 86, 91]
+threshold = 0.95

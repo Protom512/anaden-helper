@@ -1610,7 +1610,7 @@ mod tests {
         assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
         // 最低1回の Fired がある(matched フレーム分)。
         assert!(
-            outcome.fired_commands.len() >= 1,
+            !outcome.fired_commands.is_empty(),
             "expected at least one fire from matched frame"
         );
     }

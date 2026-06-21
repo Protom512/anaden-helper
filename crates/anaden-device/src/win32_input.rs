@@ -62,18 +62,13 @@ const FOREGROUND_SETTLE_MS: u64 = 150;
 ///
 /// `SendInput` は物理マウス同等(主軸)。`PostMessage` は合成ウィンドウメッセージで
 /// 背面送信可能だが、一部ゲームは synthetic フラグで弾く(fallback 扱い)。
-#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+#[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum InputMethod {
     /// SendInput(INPUT_MOUSE)。アンチチート wfsdrv を突破実証済みの主軸。
+    #[default]
     SendInput,
     /// PostMessageW(WM_LBUTTONDOWN/UP)。背面送信可能な fallback。
     PostMessage,
-}
-
-impl Default for InputMethod {
-    fn default() -> Self {
-        Self::SendInput
-    }
 }
 
 /// Win32 で InputAction を実行する入力 executor。

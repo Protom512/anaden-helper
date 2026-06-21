@@ -235,13 +235,12 @@ pub fn load_test_set(test_dir: &Path) -> Vec<TestImage> {
                     .map(|e| e.to_lowercase())
                     .as_deref(),
                 Some("png") | Some("jpg") | Some("jpeg") | Some("bmp")
-            ) {
-                if let Ok(image) = image::open(&p) {
-                    out.push(TestImage {
-                        true_label: label.clone(),
-                        image: Arc::new(image),
-                    });
-                }
+            ) && let Ok(image) = image::open(&p)
+            {
+                out.push(TestImage {
+                    true_label: label.clone(),
+                    image: Arc::new(image),
+                });
             }
         }
     }

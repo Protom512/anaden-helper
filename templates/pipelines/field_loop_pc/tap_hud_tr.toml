@@ -1,0 +1,19 @@
+name      = "TapHudTrPc"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "hud_tr.png"
+# PC版(Windows 16:9)フィールドループ slice (T5)。pc-scoped 名前空間(field_loop_pc/)。
+# 実機20:9 (templates/pipelines/field_loop/tap_hud_tr.toml) を上書きしない。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。
+# ScreenScaler は width<=1280 で RAW 通過のため、1280基準ではなく RAW 1258 空間で記述。
+# 20:9 版(ROI=[1080,150,180,150] は1280基準)の流用はアスペクト比差で劣化(実績: conf 0.99→0.67)。
+#
+# ROI: フィールド画面 右上HUD要素。PC版 16:9 レイアウトでは右上 x=1090..1230, y=20..150。
+# テンプレ(140x110)はこの ROI 内に収まる。lumvar 高(テクスチャ豊富)で変動に強い。
+roi       = [1090, 20, 140, 130]
+threshold = 0.80
+# click_self: 認識したHUD要素(matched_region 中心)を SendInput でタップ。
+# 効果は発火前後キャプチャのシーン変化で誠実判定(T6 pre/post scene diff)。
+action    = { type = "click_self" }
+next      = []

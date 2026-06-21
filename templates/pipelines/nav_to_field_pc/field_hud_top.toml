@@ -1,0 +1,18 @@
+name      = "FieldHudTopPc"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "../../scenes/field_pc/hud_top.png"
+# PC版(Windows 16:9) nav_to_field slice (T5)。pc-scoped 名前空間(nav_to_field_pc/)。
+# 実機20:9 (templates/pipelines/nav_to_field/field_hud_top.toml) を上書きしない。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。
+# ScreenScaler は width<=1280 で RAW 通過のため、1280基準ではなく RAW 1258 空間で記述。
+#
+# template 参照先も pc-scoped: scenes/field_pc/hud_top.png(20:9 版 scenes/field/ ではない)。
+# ROI: 上部HUD帯の中央。PC版 16:9 レイアウトでは x=400..880, y=0..100。
+# テンプレ(200x80)はこの ROI 内に収まる。
+roi       = [400, 0, 480, 100]
+threshold = 0.80
+# field 到達 = 目標。ここで停止(発火しない)。
+action    = { type = "do_nothing" }
+next      = []

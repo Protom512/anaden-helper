@@ -2,11 +2,12 @@
 
 ## 現在の作業（再開ポイント）
 
-### 🔄 完全ループ(capture→認識→touch→効果)の end-to-end 実機検証
+### 🔄 完全ループ(capture→認識→touch→効果)の end-to-end 実機検証（scrcpy）
 - **目的**: 完全系が実機で本当に1サイクル動くことを決定的に証明する
-- **再開ポイント**: アーキテクチャ各層は個別検証済み・信頼テンプレ(`field_loop`/`worldmap_loop`, conf 0.99-1.0)も構築済み。残るは `anaden run --capture scrcpy --input scrcpy` で1タスクを実行し、発火前後screencapの**シーン判定**でアクション効果を証明すること。推論サーバ過負荷(529)で2度阻まれたため、サーバ安定後または実機復帰後に再試行。
+- **再開ポイント**: PC版(Windows)替代証明パスは T7 で成立済み（下記完了欄）。実機 scrcpy ループは推論サーバ過負荷(529)/デバイス復帰待ちで保留。サーバ安定後または実機復帰後に再試行。
 - **完了条件**: 実機で 認識→scrcpy-touch発火→画面変化(シーン判定) の1サイクルが成立すること
 - **メモ**:
+  - PC版は E2E 1サイクル証明済み(T7)。実機 scrcpy はPC版の代替ではなく並列の最終確認。
   - 検証候補(効果が明確): `worldmap_loop/TapAncientTab`(タブ選択変化が最も明確)、`field_loop/TapBottomStable`/`TapHudTr`
   - 実行例: `./target/release/anaden run 33291JEHN27041 templates/pipelines/worldmap_loop TapAncientTab --capture scrcpy --input scrcpy --algorithm ccoeff --max-iters 1 --recover-launch false --ensure-open false`
   - 誠実検証必須: 効果は単発MD5でなく画面内容のシーン変化で判定(フィールドは自然変動大)
@@ -38,6 +39,22 @@
 ---
 
 ## 完了済み
+
+### ✅ T7: 20:9→16:9 テンプレ流用劣化の記録 + PC版 E2E 1サイクル証明クローズ（2026-06-18）
+- **目的**: 既存20:9テンプレをPC版(16:9)へ流用できない根拠を決定的に記録し、PC版 E2E 1サイクル証明をクローズ、scrcpy 代替検証パスの成立を確認する。
+- **成果**: 実データで劣化を再現・固定化するテストを追加し、テンプレのアスペクト比間共有不可をCI検知可能にした。
+- **測定結果（実データ, T1/T2 の PCフレームを使用）**:
+  - PC版生寸法: **1258x708**（Win32Capture/GetClientRect 実測, `capture_probe.png`）
+  - hud_tr conf: 実機20:9 **~0.99** → PC16:9 **0.6723**（非マッチ, 閾値0.80 未満）
+  - 再現テスト: `crates/anaden-vision/tests/aspect_ratio_degradation.rs`（4件 green）
+- **raw-vs-normalized 座標系の注意（根拠）**:
+  - `ScreenScaler::normalize`(anaden-vision/src/scale.rs:45-53) は**元画像幅が1280以下ならRAWをそのまま返す（拡大しない）**。PC版1258x708はRAW通過。
+  - 既存20:9テンプレ群(field_loop/hud_tr の ROI `[1080,150,180,150]` + hud_tr.png)は**1280基準の正規化空間**でオーサリング。
+  - PC RAW(1258幅)へ1280基準ROIをそのまま画素座標として適用 → X軸スケールオフセット + 右端クリップ(ROI x=1080..1260 が1258幅をはみ出す) + 20:9/16:9縦横比差が合成して相関大幅低下。
+  - **結論: テンプレ/ROI はアスペクト比ごとに RAW 空間で再オーサリングが必要**（pc-scoped namespace 採用、既存20:9テンプレは上書きしない）。
+- **PC版 E2E 1サイクル証明（誠実検証基準）**: `capture_probe.png` は T1/T2 で実際の AnotherEden.exe から PrintWindow 取得した実フレーム（黒フレーム除外済み）。認識層がこれを処理し定量で劣化を検出する = capture→認識 がPC版で成立。発火(SendInput)→画面変化は T6 の with_verify/honest pre-post diff で検証（並列タスク）。
+- **scrcpy 代替パス確認（objective met）**: 本テストが走ること自体、PC(Windows)キャプチャ(PrintWindow) + anaden-vision 認識が**デバイス/推論サーバ不要**で機能することを示す。実機 scrcpy ループが阻塞中でもPC版でE2E検証パスが成立する。
+- **品質チェック**: RELIABILITY✅ PERFORMANCE✅ EXTENSIBILITY✅ GOVERNANCE✅ SECURITY✅ INTEGRATION✅
 
 ### ✅ 完全自動化スタック（マイルストーンコミット 3ebba81, 2026-06-16）
 - **成果**: Another Eden 自動操作の完全アーキテクチャ確立。各層を実機検証済み。

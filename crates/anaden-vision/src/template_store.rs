@@ -42,6 +42,12 @@ pub struct TemplateStore {
     templates: HashMap<String, TemplateEntry>,
 }
 
+impl Default for TemplateStore {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl TemplateStore {
     /// 空のストアを作成する。
     pub fn new() -> Self {

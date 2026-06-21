@@ -349,31 +349,31 @@ fn parse_args() -> Args {
                 }
             }
             "--x" => {
-                if let Some(v) = next() {
-                    if let Ok(n) = v.parse() {
-                        a.x = n;
-                    }
+                if let Some(v) = next()
+                    && let Ok(n) = v.parse()
+                {
+                    a.x = n;
                 }
             }
             "--y" => {
-                if let Some(v) = next() {
-                    if let Ok(n) = v.parse() {
-                        a.y = n;
-                    }
+                if let Some(v) = next()
+                    && let Ok(n) = v.parse()
+                {
+                    a.y = n;
                 }
             }
             "--hold-ms" => {
-                if let Some(v) = next() {
-                    if let Ok(n) = v.parse() {
-                        a.hold_ms = n;
-                    }
+                if let Some(v) = next()
+                    && let Ok(n) = v.parse()
+                {
+                    a.hold_ms = n;
                 }
             }
             "--settle-ms" => {
-                if let Some(v) = next() {
-                    if let Ok(n) = v.parse() {
-                        a.settle_ms = n;
-                    }
+                if let Some(v) = next()
+                    && let Ok(n) = v.parse()
+                {
+                    a.settle_ms = n;
                 }
             }
             "--method" => {

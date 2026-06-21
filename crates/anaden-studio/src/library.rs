@@ -38,12 +38,9 @@ pub fn save_template(
     let dir = base_dir.join(&spec.state);
     std::fs::create_dir_all(&dir)?;
     let png_path = dir.join(format!("{}.png", spec.name));
-    image
-        .save(&png_path)
-        .map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    image.save(&png_path).map_err(std::io::Error::other)?;
     let toml_path = dir.join(format!("{}.toml", spec.name));
-    let toml_str =
-        toml::to_string(spec).map_err(|e| std::io::Error::new(std::io::ErrorKind::Other, e))?;
+    let toml_str = toml::to_string(spec).map_err(std::io::Error::other)?;
     std::fs::write(&toml_path, toml_str)?;
     Ok(png_path)
 }
@@ -65,12 +62,11 @@ pub fn load_library(base_dir: &Path) -> Vec<TemplateSpec> {
         };
         for f in files.flatten() {
             let p = f.path();
-            if p.extension().and_then(|e| e.to_str()) == Some("toml") {
-                if let Ok(content) = std::fs::read_to_string(&p) {
-                    if let Ok(spec) = toml::from_str::<TemplateSpec>(&content) {
-                        out.push(spec);
-                    }
-                }
+            if p.extension().and_then(|e| e.to_str()) == Some("toml")
+                && let Ok(content) = std::fs::read_to_string(&p)
+                && let Ok(spec) = toml::from_str::<TemplateSpec>(&content)
+            {
+                out.push(spec);
             }
         }
     }
