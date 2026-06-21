@@ -1445,6 +1445,200 @@ mod tests {
         );
     }
 
+    // ---- T3: nav_to_field_pc コールドスタート中間スライス (title_pc 小テンプレ化) ----
+    //
+    // T3 の核心: title コールドスタートの未知ブロッカー(TASKS.md:30-33 既知)を解消する。
+    // 既存 _title_load/load_game.toml は threshold=0.01 のハックで実シーン変動に弱い。
+    // また legacy title_center/load_game_area(大型テンプレ) は背景差・点滅アニメに弱い。
+    //
+    // 解決策: 点滅("Tap to Start" 正規化(930,488)) に巻き込まれない固定テクスチャ
+    // (version_label / title_logo_corner, scenes/title_pc/) で **安定検出** し、
+    // click_rect で点滅位置を静的タップする。認識テンプレ≠タップ対象のため点滅フレームの
+    // 非安定性に影響されず認識が成立する(T3 設計の要点)。
+    //
+    // 全座標は RAW 1258x708 空間(ScreenScaler は width<=1280 で RAW 通過)。
+    // template 参照先は pc-scoped(scenes/title_pc/)。
+
+    /// nav_to_field_pc が T3 の中間スライス(TapToStartPc, LoadGamePc)を含み、
+    /// それぞれが click_rect 発火 + pc-scoped title_pc テンプレ参照であることを検証する。
+    /// legacy _title_load(threshold=0.01 ハック) に代わる安定検出スライスの存在証明。
+    #[test]
+    fn pc_nav_to_field_contains_t3_cold_start_slices() {
+        let dir = workspace_templates_root()
+            .join("pipelines")
+            .join("nav_to_field_pc");
+        let defs = load_pipeline(&dir).expect("nav_to_field_pc must load");
+        let by_name: std::collections::HashMap<&str, &TaskDef> =
+            defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+        // TapToStartPc: title 検出(version_label) → click_rect で "Tap to Start" をタップ。
+        let tap = by_name
+            .get("TapToStartPc")
+            .expect("TapToStartPc (T3 title cold-start slice) must exist");
+        assert_eq!(tap.algorithm, Algorithm::Ccoeff);
+        // 点滅位置は click_rect(静的矩形)で発火。認識は別テンプレで行う。
+        let action = tap
+            .action
+            .as_ref()
+            .expect("TapToStartPc must have a click_rect action");
+        assert!(
+            matches!(action, Action::ClickRect { .. }),
+            "TapToStartPc action must be click_rect (static tap on flickering Tap-to-Start), \
+             got {:?}",
+            action
+        );
+        // 検出テンプレは pc-scoped title_pc 小テンプレ(大型 title_center ではない)。
+        assert!(
+            tap.template.exists(),
+            "TapToStartPc template PNG must exist at {:?}",
+            tap.template
+        );
+        assert!(
+            tap.template.to_string_lossy().contains("title_pc"),
+            "TapToStartPc must reference pc-scoped title_pc scene, got {:?}",
+            tap.template
+        );
+        // threshold は 0.01 ハックではなく実用的値(>= 0.5)。ハック回帰防止。
+        assert!(
+            tap.threshold >= 0.5,
+            "TapToStartPc threshold {} must not be the legacy 0.01 hack (>= 0.5 expected)",
+            tap.threshold
+        );
+        let tap_roi = tap.roi.expect("TapToStartPc has detection ROI");
+        assert_roi_within_1258x708(tap_roi, "TapToStartPc");
+        // click_rect.roi も 1258x708 収容。
+        if let Action::ClickRect { roi } = action {
+            assert_roi_within_1258x708(
+                [roi.x, roi.y, roi.width, roi.height],
+                "TapToStartPc click_rect.roi",
+            );
+            // "Tap to Start" 正規化(930,488) → RAW 換算で画面中央よりやや右下に位置する。
+            // x が画面右半分(>600)であることを緩く検証(点滅ボタン中央の回帰防止)。
+            assert!(
+                roi.x > 600,
+                "TapToStartPc click_rect x={} should be in right half (~Tap-to-Start col 930)",
+                roi.x
+            );
+        }
+
+        // LoadGamePc: title ロゴ検出(logo_corner) → click_rect で "Load" ボタンをタップ。
+        let load = by_name
+            .get("LoadGamePc")
+            .expect("LoadGamePc (T3 title cold-start slice) must exist");
+        let load_action = load
+            .action
+            .as_ref()
+            .expect("LoadGamePc must have a click_rect action");
+        assert!(
+            matches!(load_action, Action::ClickRect { .. }),
+            "LoadGamePc action must be click_rect, got {:?}",
+            load_action
+        );
+        assert!(
+            load.template.exists(),
+            "LoadGamePc template PNG must exist at {:?}",
+            load.template
+        );
+        assert!(
+            load.template.to_string_lossy().contains("title_pc"),
+            "LoadGamePc must reference pc-scoped title_pc scene, got {:?}",
+            load.template
+        );
+        assert!(
+            load.threshold >= 0.5,
+            "LoadGamePc threshold {} must not be the legacy 0.01 hack (>= 0.5 expected)",
+            load.threshold
+        );
+        let load_roi = load.roi.expect("LoadGamePc has detection ROI");
+        assert_roi_within_1258x708(load_roi, "LoadGamePc");
+        // 検出テンプレが TapToStartPc と別(version_label≠logo_corner)で重複検出を避ける。
+        assert_ne!(
+            tap.template, load.template,
+            "TapToStartPc and LoadGamePc must use distinct title_pc sub-templates \
+             (avoids duplicate detection across cold-start steps)"
+        );
+    }
+
+    // ---- T1: nav_to_field_pc コールドスタート next チェーン接続 (Task#1 / Issue#5) ----
+    //
+    // T3(title_pc sub-templating) が作成する中間スライス(tap_to_start / load_game)と、
+    // 既存の終点 FieldHudTopPc を `next` で繋いだ「walkable な状態機械」を検証する。
+    // T1 は「接続の仕上げ」: T3 が TOML ファイルを置いた後、各スライスの `next` が
+    //   TapToStartPc -> LoadGamePc -> FieldHudTopPc(next=[]) の単方向チェーンを形成する
+    // ことを保証する。これが無いと cold-start 自動化が最初のスライスで停止する。
+    //
+    // 座標系: 全スライスとも RAW 1258x708 空間(T7/docs:pc-capture-dimensions.md §2 の不変条件)。
+    // template 参照先も pc-scoped(scenes/title_pc/, scenes/field_pc/)。
+    //
+    // 本テストは T3 のスライス作成後に GREEN になる。T3 未完了時はチェーンが途切れて
+    // RED になることが期待される(依存関係を CI で可視化する意図)。
+
+    /// nav_to_field_pc の全タスクが「next で辿れる閉じた有向グラフ」を形成し、
+    /// 起点(TapToStartPc, indegree=0)から終点(FieldHudTopPc, next=[])まで到達可能である
+    /// ことを検証する T1 の中核テスト。中間スライスが未作成(T3 未完了)なら RED。
+    #[test]
+    fn pc_nav_to_field_cold_start_chain_is_walkable_to_field() {
+        let dir = workspace_templates_root()
+            .join("pipelines")
+            .join("nav_to_field_pc");
+        let defs = load_pipeline(&dir).expect("nav_to_field_pc must load");
+        assert!(
+            !defs.is_empty(),
+            "nav_to_field_pc must contain at least FieldHudTopPc"
+        );
+
+        let by_name: std::collections::HashMap<&str, &TaskDef> =
+            defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+        // 1. 終点: FieldHudTopPc は必須・field 到達なので next=[] で停止。
+        let terminal = by_name
+            .get("FieldHudTopPc")
+            .expect("FieldHudTopPc (terminal) must exist in nav_to_field_pc");
+        assert_eq!(
+            terminal.next.as_deref(),
+            Some(&[][..]),
+            "FieldHudTopPc is the field-arrival terminal: next must be empty"
+        );
+
+        // 2. 中間スライス(T3 作成対象)が存在するなら、全スライスの next 参照先が
+        //    nav_to_field_pc 内に存在する(名前解決不能な next は cold-start 停止原因)。
+        for d in &defs {
+            let next = d.next.clone().unwrap_or_default();
+            for target in &next {
+                assert!(
+                    by_name.contains_key(target.as_str()),
+                    "{}: next target '{}' does not exist in nav_to_field_pc \
+                     (dangling chain link blocks cold-start)",
+                    d.name,
+                    target
+                );
+            }
+        }
+
+        // 3. チェーン整合性: FieldHudTopPc を指すスライスが少なくとも1つ存在する
+        //    (load -> field の接続が物理的にあること)。FieldHudTopPc 単独の場合は
+        //    中間スライス未作成(T3 未完了)なので、この時点では cold-start 不可。
+        let points_at_field = defs.iter().any(|d| {
+            d.next
+                .as_ref()
+                .map(|n| n.iter().any(|t| t == "FieldHudTopPc"))
+                .unwrap_or(false)
+        });
+        assert!(
+            points_at_field,
+            "no slice transitions into FieldHudTopPc: the title->load->field chain is \
+             incomplete (T3 title_pc/load_game slices not yet wired). Cold-start cannot \
+             reach Field until an intermediate slice lists FieldHudTopPc in its next."
+        );
+
+        // 4. 全 ROI は RAW 1258x708 空間(docs:pc-capture-dimensions.md §2 不変条件)。
+        for d in &defs {
+            if let Some(roi) = d.roi {
+                assert_roi_within_1258x708(roi, &d.name);
+            }
+        }
+    }
+
     #[test]
     fn pc_pipeline_namespace_does_not_collide_with_20x9_field_loop() {
         // T7 の劣化検証が両者共存を前提とするため、PC 名前空間は 20:9 を上書きしない。
@@ -1892,6 +2086,212 @@ mod tests {
             assert!(
                 m.confidence.0 >= d.threshold,
                 "{}: confidence {} below threshold {} on real PC menu capture",
+                d.name,
+                m.confidence.0,
+                d.threshold
+            );
+            assert_roi_within_1258x708(
+                [m.region.x, m.region.y, m.region.width, m.region.height],
+                &format!("{} match region", d.name),
+            );
+            println!(
+                "{}: conf={:.4} region=[{},{},{},{}] (threshold {:.2})",
+                d.name,
+                m.confidence.0,
+                m.region.x,
+                m.region.y,
+                m.region.width,
+                m.region.height,
+                d.threshold
+            );
+        }
+    }
+
+    // ---- T3: PC版 title_pc シーン小テンプレスライス (title コールドスタート blk 解消) ----
+    //
+    // templates/scenes/title_pc/ に PC版(16:9, RAW 1258x708) title 検出用 **小テンプレ** 2件
+    // (version_label, title_logo_corner) を新設する。TASKS.md:30-33 既知ブロッカー:
+    //   - templates/scenes/title/ は PNG 9個・TOML 0個(スキーマ未定義)
+    //   - title_center.png(800x300, 306KB) / load_game_area.png(600x150) は大型で背景差に弱い
+    // 本スライスはこれを解消: 点滅("Tap to Start") 非依存の固定テクスチャ(右下 version 帯,
+    //   左上 ロゴ角)を小テンプレ化し nav_to_field_pc/TapToStartPc・LoadGamePc の検出に供する。
+    // 全 ROI は RAW 1258x708 空間(ScreenScaler は width<=1280 で RAW 通過)。
+    // TOML は TaskDef スキーマ(algorithm=ccoeff + template + 平坦 roi)。
+
+    fn title_pc_dir() -> PathBuf {
+        workspace_templates_root().join("scenes").join("title_pc")
+    }
+
+    /// title_pc/ の小テンプレ TOML が TaskDef スキーマで parse でき、PNG が存在し、
+    /// ROI が RAW 1258x708 に収まることを検証。state は全て 'title_pc' で一貫。
+    #[test]
+    fn pc_title_pc_scene_templates_load_and_validate() {
+        let dir = title_pc_dir();
+        assert!(dir.exists(), "scenes/title_pc namespace must exist (T3)");
+        let defs = load_pipeline(&dir).expect("title_pc scene dir must load");
+        // version_label + title_logo_corner の2小テンプレ。
+        let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
+        assert!(
+            names.contains(&"TitlePcVersionLabel"),
+            "title_pc must contain TitlePcVersionLabel, got {names:?}"
+        );
+        assert!(
+            names.contains(&"TitlePcLogoCorner"),
+            "title_pc must contain TitlePcLogoCorner, got {names:?}"
+        );
+
+        for d in &defs {
+            // TaskDef スキーマ(legacy 20:9 title/ は TOML 0個で未定義のため共存)。
+            assert_eq!(
+                d.algorithm,
+                Algorithm::Ccoeff,
+                "{}: PC title templates must use ccoeff",
+                d.name
+            );
+            assert_eq!(
+                d.state, "title_pc",
+                "{}: PC title task state must be 'title_pc'",
+                d.name
+            );
+            assert!(
+                d.template.is_absolute(),
+                "{}: template path must be absolute",
+                d.name
+            );
+            assert!(
+                d.template.exists(),
+                "{}: template PNG must exist at {:?}",
+                d.name,
+                d.template
+            );
+            // template PNG は scenes/title_pc/ 配下に存在(20:9 scenes/title/ ではない)。
+            // is_absolute + exists で実在は保証済み。ここでは pc-scoped 配下であることを念押し。
+            assert!(
+                d.template.to_string_lossy().contains("title_pc"),
+                "{}: template must live under scenes/title_pc/, got {:?}",
+                d.name,
+                d.template
+            );
+            let roi = d.roi.expect("title_pc template must have an ROI");
+            assert_roi_within_1258x708(roi, &d.name);
+            // 小テンプレ要件(TASKS.md: 小テンプレ化): 各辺 50..=120 程度。
+            // 大型(title_center 800x300 相当)だと背景差に弱くなるため寸法上限で縛る。
+            assert!(
+                roi[2] <= 130 && roi[3] <= 130,
+                "{}: sub-template ROI {:?} exceeds small-template ceiling (~130px) \
+                 (large templates are background-diff sensitive per TASKS.md:30-33)",
+                d.name,
+                roi
+            );
+        }
+    }
+
+    /// title_pc ネームスペースは 20:9 legacy scenes/title および scenes/field/menu と
+    /// 名前衝突しない(T7 の 20:9→16:9 劣化検証が共存を前提とするため非破壊が必須)。
+    #[test]
+    fn pc_title_pc_namespace_does_not_collide() {
+        let pc_dir = title_pc_dir();
+        assert!(pc_dir.exists(), "scenes/title_pc namespace must exist");
+        let pc_names: Vec<String> = load_pipeline(&pc_dir)
+            .expect("title_pc load")
+            .into_iter()
+            .map(|d| d.name)
+            .collect();
+        assert!(
+            !pc_names.is_empty(),
+            "title_pc must define at least one task for namespace isolation check"
+        );
+        // legacy 20:9 scenes/title/ は TOML 0個(load_pipeline は空 Vec を返す)。
+        // それでも将来追加された際の衝突を防ぐため、既知の 20:9 大型テンプレ名
+        // (title_center, load_game_area) との重複を明示的に拒否する。
+        let forbidden = [
+            "title_center",
+            "load_game_area",
+            "TitleCenter",
+            "LoadGameArea",
+        ];
+        for n in &pc_names {
+            assert!(
+                !forbidden.contains(&n.as_str()),
+                "title_pc task '{n}' collides with legacy 20:9 large-template namespace"
+            );
+        }
+        // state も pc-scoped('title_pc')。20:9 の 'Title' と衝突しない。
+        for d in load_pipeline(&pc_dir).expect("title_pc reload") {
+            assert_ne!(
+                d.state, "Title",
+                "title_pc task {} state must be pc-scoped 'title_pc', not legacy 'Title'",
+                d.name
+            );
+        }
+    }
+
+    /// title_pc 用キャプチャプローブのパスを解決する(field_pc/menu_pc と同じ規約)。
+    ///   1. `templates/captures/title_pc_probe.png`(規約位置・tracked 想定)
+    ///   2. workspace ルート直下 `title_pc_probe.png`
+    ///
+    /// 見つからなければ None(CI フォークや実機プローブ未整備時は検証をスキップ)。
+    fn title_pc_probe_path() -> Option<PathBuf> {
+        let primary = workspace_templates_root()
+            .join("captures")
+            .join("title_pc_probe.png");
+        if primary.exists() {
+            return Some(primary);
+        }
+        let fallback = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("title_pc_probe.png");
+        if fallback.exists() {
+            return Some(fallback);
+        }
+        None
+    }
+
+    /// E2E: title_pc_probe.png(PC 実機 1258x708 title フレーム) 上で各 title_pc 小テンプレが
+    /// threshold 以上の confidence でマッチすることを検証する。これが T3 コールドスタート
+    /// 検出の最終証明(Tap-to-Start 点滅に巻き込まれない固定テクスチャで安定マッチ)。
+    ///
+    /// absence-skip: title_pc_probe.png は実機 PrintWindow キャプチャであり、CI フォークや
+    /// 実機未接続環境では存在しない。その場合は検証をスキップしビルドを壊さない
+    /// (field_pc/menu_pc と同じパターン)。プローブ整備後(T1 実機 1 サイクル検証時)に
+    /// 本テストが実効検証となり、ROI/threshold の実測再調整を促す。
+    #[test]
+    fn pc_title_pc_templates_match_real_capture_above_threshold() {
+        let dir = title_pc_dir();
+        if !dir.exists() {
+            eprintln!("skip: title_pc namespace not found at {:?}", dir);
+            return;
+        }
+        let probe_path = match title_pc_probe_path() {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "skip: title_pc_probe.png not found \
+                     (neither templates/captures/ nor workspace root). \
+                     T3 title_pc sub-templates are provisionally placed in RAW-1258 space; \
+                     real-probe E2E is deferred until a PC title-frame capture is captured (T1)."
+                );
+                return;
+            }
+        };
+        let defs = load_pipeline(&dir).expect("title_pc load");
+        let screenshot = image::open(&probe_path).expect("open title_pc_probe.png");
+
+        for d in &defs {
+            let m = d
+                .detect(&screenshot, Path::new(""))
+                .unwrap_or_else(|e| panic!("{} detect error: {e}", d.name));
+            let m = m.unwrap_or_else(|| {
+                panic!(
+                    "{}: must match title_pc_probe.png at threshold {} (got None)",
+                    d.name, d.threshold
+                )
+            });
+            assert!(
+                m.confidence.0 >= d.threshold,
+                "{}: confidence {} below threshold {} on real PC title capture \
+                 (ROI/threshold may need re-derivation against the real probe)",
                 d.name,
                 m.confidence.0,
                 d.threshold

@@ -1,0 +1,19 @@
+name      = "TitlePcLogoCorner"
+state     = "title_pc"
+algorithm = "ccoeff"
+template  = "title_logo_corner.png"
+# PC版(Windows 16:9) title コールドスタート用 小テンプレ (Task #5 / T3 / 親 Issue #5)。
+# pc-scoped 名前空間(scenes/title_pc/)。title_center.png(800x300, 306KB) のような大型テンプレは
+# 背景差に弱い(TASKS.md:30-33 既知ブロッカー)。本テンプレは title ロゴの固定角マークを
+# 小テンプレ化し、version_label とは別の固定テクスチャで二重検出を可能にする。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
+#
+# ROI 導出(決定論的): analyze_title_regions.rs で実 title キャプチャ(1280x576) の
+# 上部ロゴ帯 y=60..160 を解析 → 固定マーク run x=143..159 を検出。PC 16:9 (1258x708)
+# では左上オフセットを維持して x=140,y=60,w=60,h=60 に配置。
+#
+# ⚠ version_label.toml と同様、title_pc_probe.png 未整備のため暫定配置。
+# 実機プローブ整備後に実測 conf で再調整(absence-skip)。
+roi       = [140, 60, 60, 60]
+threshold = 0.80

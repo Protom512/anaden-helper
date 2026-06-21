@@ -1,0 +1,25 @@
+name      = "TitlePcVersionLabel"
+state     = "title_pc"
+algorithm = "ccoeff"
+template  = "version_label.png"
+# PC版(Windows 16:9) title コールドスタート用 小テンプレ (Task #5 / T3 / 親 Issue #5)。
+# pc-scoped 名前空間(scenes/title_pc/)。実機20:9 (templates/scenes/title/ 配下の
+# title_center.png 800x300 / load_game_area.png 600x150 等の大型テンプレ) は
+# 背景差・点滅アニメーションに弱く TASKS.md:30-33 既知ブロッカー。本テンプレは
+# その解決策: 点滅("Tap to Start" 正規化(930,488)) に巻き込まれない固定テクスチャ
+# (右下 version/copyright 表示帯) を小テンプレ化して安定検出する。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
+#
+# ROI 導出(決定論的): analyze_title_regions.rs(列分散手法, analyze_menu_bar.rs の再利用) で
+# 実 title キャプチャ(templates/captures/nav_step0_norm.png, 1280x576) の右下帯 y=545..572 を
+# 解析 → version 表示の安定 run x=1077..1189 w=112 を検出。corner-anchored 要素のため
+# PC 16:9 (1258x708) では右下オフセットを維持して x=1046,y=668,w=112,h=28 に配置。
+#
+# ⚠ 未解決リスク: templates/captures/title_pc_probe.png (PC 実機 title フレーム) が未整備。
+# 現 PNG は 20:9 キャプチャからの自己クロップで比例配置した暫定マーカ。
+# pipeline.rs の probe E2E テスト(pc_title_pc_templates_match_real_capture_above_threshold) は
+# プローブ不在時スキップし、実機プローブ整備後に閾値以上マッチで再検証する(absence-skip)。
+# T1 で実機 1 サイクル検証時に本 ROI/テンプレを実測 conf で再調整すること。
+roi       = [1046, 668, 112, 28]
+threshold = 0.80

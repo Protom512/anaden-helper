@@ -14,7 +14,7 @@
 
 ### 🔄 認識テンプレの更なる安定化（ラストマイル）
 - **目的**: 全ゲームシーンで安定マッチする信頼テンプレを揃える
-- **再開ポイント**: `field_loop`(bottom_stable conf~1.0, hud_tr)/`worldmap_loop`(ancient_tab)は安定。残るは title cold-start用テンプレ(大きすぎてマッチせず・要小テンプレ化)と、状態変動(時間/天候)対策。
+- **再開ポイント**: `field_loop`(bottom_stable conf~1.0, hud_tr)/`worldmap_loop`(ancient_tab)は安定。PC版(16:9)は `field_loop_pc`/`nav_to_field_pc`/`field_pc`/`menu_pc` の pc-scoped namespace で安定テンプレ群を確保済み(下記完了欄)。残るは title cold-start用テンプレ(大きすぎてマッチせず・要小テンプレ化, T3 で `title_pc` サブテンプレ化を実施中)と、状態変動(時間/天候)対策。
 - **完了条件**: 主要シーン(title/field/worldmap/戦闘)で誤マッチなく安定検出
 - **メモ**: 単色バー(top.png conf 0.5756)の失敗教訓=**安定+特徴的要素**を選ぶ。anaden-studio(人間指示ROI作成)が本来の用途。
 
@@ -27,11 +27,6 @@
 - **完了条件**: `run_once` が発火後の効果を検証し、失敗を誤報告しないこと
 - **メモ**: close_btn誤キャプチャ時の「閉じたと誤報」の再発防止。テンプレ品質に依存しない成功保証。実装候補: `crates/anaden-engine/src/pipeline_driver.rs::run_once`。
 
-### 📋 title→field ナビゲーションパイプライン（コールドスタート自動化）
-- **目的**: ゲーム起動直後の タイトル→ロード→field 到達を自動化
-- **完了条件**: title画面からfield画面まで自動到達できること
-- **メモ**: 入力層(scrcpy-touch)は解決済み。titleテンプレ(title_center/load_game_area)が大きすぎ背景差に弱い→小テンプレ化(Tap to Start ~正規化(930,488), 点滅アニメ注意)。`dismiss_daily_popup`(close_btn識別力1.0)は完成。
-
 ### 📋 README / クイックスタート整備
 - **目的**: anaden のビルド・実行方法を文書化
 - **完了条件**: README に build/run/flags(`--capture`/`--input`)・scrcpy-server jar 配置・feature build(`--features anaden-cli/capture-scrcpy`)手順が載ること
@@ -39,6 +34,17 @@
 ---
 
 ## 完了済み
+
+### ✅ PC版(16:9) テンプレバンク着地 + title→field ナビゲーションパイプライン土台（Issue #5, 2026-06-21/22）
+- **目的**: PC版(Windows/16:9)自動化パス全体を unblock し、title→field コールドスタート パイプラインのテンプレ・認識土台を着地させる（Issue #5 を参照）。20:9/16:9 共存不変量を保つため pc-scoped namespace を採用し既存20:9テンプレは上書きしない。
+- **成果（commit 32e5786 で既に landed、本作業は同期・クローズ準備）**:
+  - `templates/scenes/field_pc/`(hud_top/hud_topright/template_01)・`templates/scenes/menu_pc/`(party/bag/board/gacha/grasta/info/record の 7テンプレ, state=menu_pc)・`templates/pipelines/field_loop_pc/`(tap_bottom/tap_hud_tr)・`templates/pipelines/nav_to_field_pc/`(field_hud_top) が git-tracked 確定済み。
+  - `crates/anaden-vision/src/pipeline.rs` に PC系テスト群を追加(pc_field_loop_pipeline_loads_with_click_self_actions / pc_nav_to_field_points_at_pc_field_hud_template / pc_field_pc_scene_templates_load_and_validate / pc_field_pc_templates_match_real_capture_above_threshold)。namespace 衝突検知アサーション green。
+  - CLI/engine の verify_after_fire wiring(main.rs L88/L329 / pipeline_driver.rs with_verify・run_once_verified・verify_action_effect)は既マージ(b1af837 / 32e5786)。
+- **本作業（T5）での追加クリーンアップ（ride-along, 単独タスク化せず）**:
+  - `template_store.rs::load_from_directory` の panic/unwrap(`read_dir`/`file_name`/`file_stem`) を `TemplateStoreError::{ReadDirFailed, InvalidEntryName, MissingFileStem}` の Result 伝播へ変換(#34/#36 と並ぶ陳腐化 item の併用解消)。production library でテンプレdirのIOエラーがバイナリ全体をクラッシュする経路を除去。
+- **残（Issue #5 継続スコープ, 別タスク）**: title cold-start の `title_pc` サブテンプレ化(Tap to Start 点滅アニメ ROI/vote tuning)は T3 で実施中。実機 AnotherEden.exe での 1サイクル E2E(human-in-the-loop, verify_after_fire 誠実閾値)は T4。
+- **品質チェック**: cargo fmt --all --check ✅ / cargo clippy --all-targets -- -D warnings ✅ / cargo nextest run --workspace ✅(template_store 6件 green 含む)
 
 ### ✅ T7: 20:9→16:9 テンプレ流用劣化の記録 + PC版 E2E 1サイクル証明クローズ（2026-06-18）
 - **目的**: 既存20:9テンプレをPC版(16:9)へ流用できない根拠を決定的に記録し、PC版 E2E 1サイクル証明をクローズ、scrcpy 代替検証パスの成立を確認する。
