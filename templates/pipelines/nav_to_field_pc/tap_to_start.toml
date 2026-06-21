@@ -21,4 +21,8 @@ threshold = 0.80
 #   点滅アニメは認識対象ではない(認識は version_label)ため、発火タイミングの
 #   フレーム依存性は低い。vote(min_votes) 連続一致で点滅 off フレームを弁別可能(T1 調整)。
 action    = { type = "click_rect", roi = [900, 466, 30, 30] }
-next      = []
+# T1 接続仕上げ(親 Issue #5 / Issue #11): 起点エッジ修復。
+#   旧 next=[] は cold-start 有向グラフの切れ目。LoadGamePc が indegree=0 で孤立し、
+#   TapToStartPc -> LoadGamePc -> FieldHudTopPc の歩行可能性が壊れていた。
+#   LoadGamePc.next=["FieldHudTopPc"](load_game.toml) と接続し完全な状態機械とする。
+next      = ["LoadGamePc"]

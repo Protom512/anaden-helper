@@ -1615,6 +1615,110 @@ mod tests {
             }
         }
 
+        // 2.5 到達性不変条件(起点 -> 終点の完全歩行可能性)。
+        //     step2(名前解決)は next=[] を vacuous に通過し、step3(points_at_field)は
+        //     兄弟スライス(LoadGamePc -> FieldHudTopPc)だけで満たされるため、
+        //     起点エッジの欠落(next=[])が GREEN を装うギャップがあった。
+        //     本表明はそれを閉じる: (a) indegree=0 の起点を厳密に1つ特定し、
+        //     (b) next エッジを辿る到達性ウォーク(visited で cycle-safe)で
+        //     起点から終点 FieldHudTopPc まで到達可能なことを表明する。
+        //     起点の next が空(切れ目)なら起点から終点へ到達不能となり RED。
+        //
+        // (a) indegree 計算: 各ノードの被参照回数を数え、indegree=0 を起点候補とする。
+        let mut indegree: std::collections::HashMap<&str, usize> =
+            defs.iter().map(|d| (d.name.as_str(), 0usize)).collect();
+        for d in &defs {
+            for target in d.next.as_deref().unwrap_or(&[]) {
+                // 参照先は step2 で存在検証済み。自己ループは indegree に含めない(起点性不変)。
+                if *target != d.name
+                    && let Some(slot) = indegree.get_mut(target.as_str())
+                {
+                    *slot += 1;
+                }
+            }
+        }
+        let starts: Vec<&str> = indegree
+            .iter()
+            .filter(|(_, deg)| **deg == 0)
+            .map(|(&name, _)| name)
+            .collect();
+        assert_eq!(
+            starts.len(),
+            1,
+            "nav_to_field_pc must have exactly one start (indegree=0); found {:?}. \
+             Multiple starts make cold-start entry ambiguous.",
+            starts
+        );
+        assert_eq!(
+            starts[0], "TapToStartPc",
+            "the sole start must be TapToStartPc (title cold-start entry)"
+        );
+
+        // (b) 到達性ウォーク: 起点 TapToStartPc から next エッジを BFS で辿り、
+        //     終点 FieldHudTopPc に到達できることを表明。visited で cycle-safe。
+        let start = "TapToStartPc";
+        let target_terminal = "FieldHudTopPc";
+        let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut frontier: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+        frontier.push_back(start);
+        visited.insert(start);
+        let mut reached_terminal = false;
+        while let Some(node) = frontier.pop_front() {
+            if node == target_terminal {
+                reached_terminal = true;
+                break;
+            }
+            let def = by_name
+                .get(node)
+                .expect("walk node must be resolved by name (step2 guarantees existence)");
+            for next in def.next.as_deref().unwrap_or(&[]) {
+                if visited.insert(next.as_str()) {
+                    frontier.push_back(next.as_str());
+                }
+            }
+        }
+        assert!(
+            reached_terminal,
+            "FieldHudTopPc is unreachable from start TapToStartPc by following `next` edges. \
+             A broken start edge (TapToStartPc.next=[]) or a missing intermediate link leaves \
+             the cold-start chain walkable only in part. Every node from start to terminal \
+             must be connected via next."
+        );
+
+        // 到達性の補強: 全中間ノード(indegree>0 の非終点)も起点から到達可能であること。
+        //     到達性ウォークで到達したノード集合を使い、孤立した中間ノードを検出する。
+        let reachable: std::collections::HashSet<&str> = if reached_terminal {
+            // 終点到達時は break 前の visited を再構築するため再ウォーク(visited は消費済みでない)。
+            // reachable 判定のため、visited はウォーク途中で増分していたが break で早期終了した
+            // 可能性があるため、ここでは到達性の主張(reached_terminal)に依存し全ノード到達を再検証。
+            let mut v: std::collections::HashSet<&str> = std::collections::HashSet::new();
+            let mut f: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
+            f.push_back(start);
+            v.insert(start);
+            while let Some(node) = f.pop_front() {
+                let def = by_name.get(node).expect("resolved node");
+                for next in def.next.as_deref().unwrap_or(&[]) {
+                    if v.insert(next.as_str()) {
+                        f.push_back(next.as_str());
+                    }
+                }
+            }
+            v
+        } else {
+            std::collections::HashSet::new()
+        };
+        for d in &defs {
+            if d.name == "TapToStartPc" || d.name == "FieldHudTopPc" {
+                continue;
+            }
+            assert!(
+                reachable.contains(d.name.as_str()),
+                "intermediate node '{}' is unreachable from start TapToStartPc: \
+                 a disconnected sub-graph exists in nav_to_field_pc",
+                d.name
+            );
+        }
+
         // 3. チェーン整合性: FieldHudTopPc を指すスライスが少なくとも1つ存在する
         //    (load -> field の接続が物理的にあること)。FieldHudTopPc 単独の場合は
         //    中間スライス未作成(T3 未完了)なので、この時点では cold-start 不可。
