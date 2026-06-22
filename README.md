@@ -117,6 +117,21 @@ cargo run --bin anaden-studio
 - **PC 版（Windows 16:9）**: PrintWindow capture + SendInput 入力 + pc-scoped テンプレバンク（field_pc / menu_pc / title_pc / nav_to_field_pc / field_loop_pc）着地済み。コールドスタート状態機械（TapToStartPc → LoadGamePc → FieldHudTopPc）の到達可能性・順序は CI で固定。verify-after-fire 誠実検証 wired。
 - **Android 版（20:9）**: 完全系成立。capture（scrcpy 1秒）・認識（ccoeff）・入力（scrcpy-touch、アンチチート突破）の各層を実機検証済み。
 - **残課題**:
-  - PC 版 title cold-start の実機 1 サイクル E2E（`title_pc_probe.png` 実機取得後、absence-skip テスト `pc_title_pc_templates_match_real_capture_above_threshold` を >=0.80 実効ゲートへ昇格）。現在はデバイス未接続のため absence-skip を維持。
+  - PC 版 title cold-start の実機 1 サイクル E2E（`title_pc_probe.png` 実機取得後、absence-skip テスト `pc_title_pc_templates_match_real_capture_above_threshold` を >=0.80 実効ゲートへ昇格）。現在はデバイス未接続のため absence-skip を維持（Issue #12 OPEN・再開可能）。
   - 完全ループ（capture→認識→touch→効果）の end-to-end 実機検証、認識テンプレの更なる安定化（状態変動対策）。
   - テスト 205 件 green（`cargo nextest run --workspace`）。
+
+### PC 版 title コールドスタート: テンプレート一覧と absence-skip の理由（Issue #12 / Branch B フォールバック）
+
+Issue #12 は PC 版タイトルコールドスタート成立（実機 `title_pc_probe.png` 取得 → `title_pc` ROI/threshold 実測再調整 → E2E テスト `pc_title_pc_templates_match_real_capture_above_threshold` の absence-skip 解消）を追う P1 issue。デバイス未接続時は本節の通り README 完成（テンプレート一覧と absence-skip 根拠の明文化）にフォールバックし、**#12 は OPEN のまま absence-skip を維持**して再開可能状態にする（クローズしない）。
+
+**title_pc テンプレート一覧（完成）**: `templates/scenes/title_pc/` に PC 版 16:9（RAW 1258x708）コールドスタート用の小テンプレを2つ配置済み。いずれも点滅（"Tap to Start" 正規化座標 (930,488)）に巻き込まれない固定テクスチャを小テンプレ化し、実機 20:9 の大型テンプレ（`title_center.png` 800x300 / `load_game_area.png` 600x150 等、背景差・点滅アニメに弱い TASKS.md:30-33 既知ブロッカー）の安定性問題を迂回する設計。
+
+| ファイル | ROI [x,y,w,h] | threshold | 根拠 |
+|---|---|---|---|
+| `version_label.toml` | `[1046,668,112,28]` | `0.80` | 右下 version/copyright 表示帯。`analyze_title_regions.rs`（列分散手法）で実 title キャプチャ（1280x576）右下帯 y=545..572 を解析 → run x=1077..1189 w=112 を検出。corner-anchored 要素のため PC 16:9 では右下オフセット維持で配置 |
+| `title_logo_corner.toml` | `[140,60,60,60]` | `0.80` | title ロゴ固定角マーク。同解析で上部ロゴ帯 y=60..160 → 固定マーク run x=143..159 を検出。左上オフセット維持で配置 |
+
+両 TOML の ROI は決定論的解析（`analyze_title_regions.rs`）で導出したが、**現状 PNG は 20:9 キャプチャからの自己クロップで比例配置した暫定マーカ**。実機 PC RAW フレーム（`title_pc_probe.png`）に対する実測 conf での再調整が未完了。
+
+**absence-skip フラグの理由**: E2E テスト `pc_title_pc_templates_match_real_capture_above_threshold`（`crates/anaden-vision/src/pipeline.rs:2459-2470` の `title_pc_probe_path()` None ブランチ）は、プローブ画像 `templates/captures/title_pc_probe.png` が存在しない場合に検証をスキップしビルドを壊さない。これは PC 実機 PrintWindow キャプチャであり CI フォークやデバイス未接続環境では取得不能なため、`field_pc_probe.png` / `menu_pc_probe.png` と同じ absence-skip パターンに従う。プローブ整備後（デバイス接続可能になった時点）に自動的に実効検証へ切り替わり、暫定 ROI/threshold の実測再調整を促す。現環境はデバイス未接続のため absence-skip を維持し、#12 は再開可能状態で OPEN を保つ。
