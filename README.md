@@ -135,3 +135,17 @@ Issue #12 は PC 版タイトルコールドスタート成立（実機 `title_p
 両 TOML の ROI は決定論的解析（`analyze_title_regions.rs`）で導出したが、**現状 PNG は 20:9 キャプチャからの自己クロップで比例配置した暫定マーカ**。実機 PC RAW フレーム（`title_pc_probe.png`）に対する実測 conf での再調整が未完了。
 
 **absence-skip フラグの理由**: E2E テスト `pc_title_pc_templates_match_real_capture_above_threshold`（`crates/anaden-vision/src/pipeline.rs:2459-2470` の `title_pc_probe_path()` None ブランチ）は、プローブ画像 `templates/captures/title_pc_probe.png` が存在しない場合に検証をスキップしビルドを壊さない。これは PC 実機 PrintWindow キャプチャであり CI フォークやデバイス未接続環境では取得不能なため、`field_pc_probe.png` / `menu_pc_probe.png` と同じ absence-skip パターンに従う。プローブ整備後（デバイス接続可能になった時点）に自動的に実効検証へ切り替わり、暫定 ROI/threshold の実測再調整を促す。現環境はデバイス未接続のため absence-skip を維持し、#12 は再開可能状態で OPEN を保つ。
+
+### PC 版 title cold-start 再開手順（Step-by-step / Issue #12 Branch A 移行手順）
+
+デバイス接続可能になった時点で、以下の手順で Branch B（README 完成・absence-skip）から Branch A（実機プローブ整備・実効ゲート）へ移行する。誰でも追える粒度で残す。
+
+1. **実機タイトル停止**: `AnotherEden.exe` を起動し、タイトル画面で "Tap to Start" 点滅状態で停止させる（T1 ゲート: OS build 26200.8524 未適用で実行すること・§「準備」参照）。
+2. **プローブ取得**: PrintWindow で 1258x708 RAW フレームを取得し、`templates/captures/title_pc_probe.png` へ保存する（`field_pc_probe.png` / `menu_pc_probe.png` と同じ規約・RAW 空間そのまま）。
+3. **E2E テスト実行**: `cargo nextest run -p anaden-vision -E 'test(pc_title_pc_templates_match_real_capture_above_threshold)'` を実行する。プローブが検出された瞬間に absence-skip が外れ、実効 >=0.80 ゲートへ切り替わる。
+4. **version_label 再調整**: conf < 0.80 の場合、`templates/scenes/title_pc/version_label.toml` の `roi = [1046,668,112,28]` / `threshold = 0.80` を実機 RAW 1258x708 空間で再導出する（`analyze_title_regions.rs` 列分散手法を PC RAW フレームに対して再適用）。
+5. **title_logo_corner 再調整**: 必要なら `templates/scenes/title_pc/title_logo_corner.toml` の `roi = [140,60,60,60]` / `threshold = 0.80` も同様に再導出する（二重検出の相補テクスチャ）。
+
+**absence-skip 自動昇格の根拠**: `title_pc_probe_path()`（`crates/anaden-vision/src/pipeline.rs:2427`）が `templates/captures/title_pc_probe.png` を検出すると、上記手順 (3) のテスト `pc_title_pc_templates_match_real_capture_above_threshold` は `pipeline.rs:2459-2470` の None ブランチ（absence-skip `return`）を通過しなくなり、プローブ実機フレーム上での conf >= threshold 実効検証へ自動昇格する。コード変更なしで手順 (2) のファイル配置だけで切り替わる。
+
+**設計根拠リンク（20:9 大型テンプレ既知ブロッカーの迂回）**: 本節の小テンプレ化（`version_label` / `title_logo_corner`）は、実機 20:9 大型テンプレ（`title_center.png` 800x300 / `load_game_area.png` 600x150 等）が**背景差・点滅アニメに弱い**という既知ブロッカーを迂回する設計。根拠・詳細は前節「title_pc テンプレート一覧と absence-skip の理由」の**設計**列（README:128）に既出。小テンプレ化により "Tap to Start" 正規化座標 (930,488) の点滅に巻き込まれない固定テクスチャ（右下 version 帯・左上ロゴ角マーク）を検出対象とすることで安定性を確保している。

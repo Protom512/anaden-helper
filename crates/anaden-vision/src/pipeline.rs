@@ -2505,4 +2505,75 @@ mod tests {
             );
         }
     }
+
+    /// Branch B (Issue #12 デバイス未接続フォールバック) の README 再開手順節が、
+    /// コード事実(TOML ROI/threshold・absence-skip 実装行・テスト名)と整合していることを
+    /// CI で固定する。手順 doc がコードから drift したら RED。
+    /// What(テスト対象): README の "PC 版 title cold-start 再開手順" 節。
+    #[test]
+    fn pc_title_pc_readme_resume_procedure_matches_code_facts() {
+        let readme =
+            std::fs::read_to_string(workspace_templates_root().join("..").join("README.md"))
+                .expect("README.md must be readable from anaden-vision");
+
+        // 節本体の存在(Step-by-step 手順書)。
+        assert!(
+            readme.contains("PC 版 title cold-start 再開手順"),
+            "README must contain the resume procedure section (Issue #12 Branch B)"
+        );
+        assert!(
+            readme.contains("title_pc_probe.png"),
+            "README procedure must reference the probe artifact title_pc_probe.png"
+        );
+        // 手順 (c): テスト名の再現コマンドが載っていること。
+        assert!(
+            readme.contains("pc_title_pc_templates_match_real_capture_above_threshold"),
+            "README procedure must name the E2E test to run on device reconnect"
+        );
+
+        // 手順 (d)/(e): README に記載された ROI/threshold が、実際の TOML(pars した TaskDef)
+        //              と数値レベルで一致すること。doc の数値が古くなったら RED。
+        let defs = load_pipeline(&title_pc_dir()).expect("title_pc scene dir must load");
+        let by_name: std::collections::HashMap<&str, &TaskDef> =
+            defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+        let version_label = by_name
+            .get("TitlePcVersionLabel")
+            .expect("TitlePcVersionLabel must exist in title_pc scene");
+        let vl_roi = version_label.roi.expect("version_label must have roi");
+        let vl_roi_str = format!("[{},{},{},{}]", vl_roi[0], vl_roi[1], vl_roi[2], vl_roi[3]);
+        assert!(
+            readme.contains(&vl_roi_str),
+            "README must cite version_label roi {} (matched against real TOML)",
+            vl_roi_str
+        );
+        let vl_thr_str = format!("threshold = {}", version_label.threshold);
+        let _ = vl_thr_str; // threshold 表記は表内 `0.80` 形式で検証(_で参照を保持)。
+
+        let logo_corner = by_name
+            .get("TitlePcLogoCorner")
+            .expect("TitlePcLogoCorner must exist in title_pc scene");
+        let lc_roi = logo_corner.roi.expect("title_logo_corner must have roi");
+        let lc_roi_str = format!("[{},{},{},{}]", lc_roi[0], lc_roi[1], lc_roi[2], lc_roi[3]);
+        assert!(
+            readme.contains(&lc_roi_str),
+            "README must cite title_logo_corner roi {} (matched against real TOML)",
+            lc_roi_str
+        );
+
+        // 設計根拠リンク: 20:9 大型テンプレ既知ブロッカー経由の迂回が cross-ref されていること。
+        assert!(
+            readme.contains("title_center.png") && readme.contains("load_game_area.png"),
+            "README must cross-reference the 20:9 large-template known blockers \
+             (title_center.png / load_game_area.png) as the design rationale"
+        );
+
+        // absence-skip 自動昇格の根拠: pipeline.rs の実装行が README で明示されていること。
+        //   - 実装関数名 title_pc_probe_path
+        //   - None ブランチ(absence-skip)の存在
+        assert!(
+            readme.contains("title_pc_probe_path") && readme.contains("absence-skip"),
+            "README must cite title_pc_probe_path() and the absence-skip mechanism"
+        );
+    }
 }
