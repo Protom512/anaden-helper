@@ -1743,6 +1743,95 @@ mod tests {
         }
     }
 
+    // ---- T5: リアル1サイクル CLI 実行契約 (Issue #12 fallback clause) ----
+    //
+    // T5 は実機 PC(AnotherEden.exe タイトル画面) で TapToStartPc -> LoadGamePc ->
+    // FieldHudTopPc の状態機械ウォークを CLI 経由で証明するチケット。その実行契約
+    // (正確な開始タスク + 厳密な3段階遷移順序) をコードで固定し、live 実行時に
+    // オペレータが打つコマンドがこの契約と一致することを保証する。
+    //
+    // デバイス未接続時(本環境)は title_pc_probe.png が存在しないため absence-skip
+    // (pc_title_pc_templates_match_real_capture_above_threshold 参照) を維持し、
+    // 本テストが「実行すべき CLI 引数の契約」を代わりに固定する。実機接続時に
+    // オペレータが `anaden run --target windows templates/pipelines/nav_to_field_pc
+    // TapToStartPc --algorithm ccoeff --verify-after-fire true --max-iters 1` を実行
+    // すると、以下の3段階がこの順序で1サイクル駆動されることがこの表明の本体。
+    //
+    // Why not: 開始タスク名や中間段階の順序を README 文面だけで担保すると、T3/T1 の
+    // TOML リネーム時に README が陳腐化し気付かず live 証明が壊れる。TOML 由来の
+    // 名前を CI で参照することで契約とデータを同期させる。
+
+    /// T5 リアル1サイクル証明: nav_to_field_pc の `next` チェーンを開始タスクから
+    /// 辿ると、厳密に `[TapToStartPc, LoadGamePc, FieldHudTopPc]` の順で3段階到達し
+    /// 終点で停止することを検証する。CLI `--target windows ... TapToStartPc` が
+    /// 駆動する正確な状態機械ウォークを固定する。
+    ///
+    /// 各段階は単一の `next` を持ち(分岐無し)、終点 FieldHudTopPc は next=[] で停止
+    /// する。これが live 1サイクル証明の前提条件であり、段階数・順序・非分岐性が
+    /// 保たれなくなれば本テストが RED となり README/CLI 文面のズレを検知する。
+    #[test]
+    fn pc_nav_to_field_one_cycle_walk_order_matches_cli_contract() {
+        let dir = workspace_templates_root()
+            .join("pipelines")
+            .join("nav_to_field_pc");
+        let defs = load_pipeline(&dir).expect("nav_to_field_pc must load");
+        let by_name: std::collections::HashMap<&str, &TaskDef> =
+            defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+        // CLI 開始タスク契約: `anaden run ... TapToStartPc`。
+        const CLI_START_TASK: &str = "TapToStartPc";
+        // live 証明が期待する厳密な3段階順序(開始→中間→終点)。
+        const EXPECTED_WALK_ORDER: [&str; 3] = ["TapToStartPc", "LoadGamePc", "FieldHudTopPc"];
+
+        // `next` を辿って実際の到達順序を構築(非分岐前提で単一経路を追う)。
+        let mut actual_order: Vec<&str> = Vec::new();
+        let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
+        let mut cursor: Option<&str> = Some(CLI_START_TASK);
+        while let Some(name) = cursor {
+            // cycle 保護(自己ループや循環で無限ループしない)。
+            if !visited.insert(name) {
+                break;
+            }
+            actual_order.push(name);
+            let def = by_name
+                .get(name)
+                .unwrap_or_else(|| panic!("walk node '{name}' must exist in nav_to_field_pc"));
+            let next = def.next.as_deref().unwrap_or(&[]);
+            // 非分岐性: 各段階は単一の next(終点は空)のみ持つ。
+            //   分岐があると live 1サイクルの振る舞いが非決定性になり証明にならない。
+            assert!(
+                next.len() <= 1,
+                "{}: non-deterministic cold-start (next has {} targets {:?}); \
+                 one-cycle CLI proof requires a single linear chain",
+                name,
+                next.len(),
+                next
+            );
+            cursor = next.first().map(|s| s.as_str());
+        }
+
+        assert_eq!(
+            actual_order, EXPECTED_WALK_ORDER,
+            "live one-cycle walk order must be exactly {:?}. \
+             The README/CLI invocation `anaden run --target windows ... TapToStartPc` \
+             drives this ordered chain; any rename or reorder in nav_to_field_pc TOML \
+             must be reflected here and in the README.",
+            EXPECTED_WALK_ORDER
+        );
+
+        // 終点は next=[] で停止する(1サイクルで終わる)。max-iters 1 の live 実行が
+        // FieldHudTopPc に到達して終了することの前提。
+        let terminal = by_name
+            .get("FieldHudTopPc")
+            .expect("FieldHudTopPc terminal must exist");
+        assert_eq!(
+            terminal.next.as_deref(),
+            Some(&[][..]),
+            "FieldHudTopPc must terminate the one-cycle walk (next=[]) so the live \
+             proof completes in exactly one cycle"
+        );
+    }
+
     #[test]
     fn pc_pipeline_namespace_does_not_collide_with_20x9_field_loop() {
         // T7 の劣化検証が両者共存を前提とするため、PC 名前空間は 20:9 を上書きしない。
