@@ -2576,4 +2576,161 @@ mod tests {
             "README must cite title_pc_probe_path() and the absence-skip mechanism"
         );
     }
+
+    // ---- Issue #13 T2: title_pc ROI 導出 contract test ----
+    //
+    // pc_title_pc_readme_resume_procedure_matches_code_facts (README/TOML 数値整合) とは別の
+    // 契約を固定する: 「TOML ROI が analyze_title_regions の列分散出力(run)と一致するか、
+    // あるいは一致しない場合は幾何学的ギャップとして暫定値が保持されているか」。
+    //
+    // 背景: version_label.toml / title_logo_corner.toml の ROI は本来 PC RAW(16:9, 1258x708) 空間で
+    // 定義されなければならないが、PC 実機プローブ(title_pc_probe.png) が未整備のため、
+    // 現状は 20:9 端末(Pixel7a 2400x1080 → 正規化 1280x576) キャプチャ(nav_step0_norm.png) から
+    // 自己クロップした暫定マーカ。norm(20:9) → RAW(16:9) はアスペクト比不一致でアフィン写像不可。
+    //
+    // このテストは以下の事実を固定し、暫定値が理由なく書き換えられる(グリーンウォッシュ)のを防ぐ:
+    //   (A) title_logo_corner 上部帯(y=60..160) の列分散再導出で、norm 空間 run x=143..159 が
+    //       検出されること(qualitative 裏付け: 左上に固定マーク要素が存在)。
+    //   (B) norm(1280x576) と PC RAW(1258x708) のアスペクト比が不一致であること(幾何学的不変量)。
+    //   (C) 両 TOML の ROI が、Issue #13 で保持を決定した暫定値に等しいこと(silent overwrite 検出)。
+    //   (D) version_label 右下帯(y=545..572) の再導出で x=1077..1189 に run が存在しないこと
+    //       (当初コメントの主張が再現しない = 暫定値の裏付け欠如を文書化)。
+
+    /// analyze_title_regions.rs(列分散手法) と同一の決定論的 run 検出を再実装する。
+    /// examples/ はバイナリでライブラリ関数ではないため、本テスト内でアルゴリズムを再現し
+    /// プロダクション結合を増やさない(architecture-coupling-balance.md)。
+    fn title_region_runs(gray: &GrayImage, y0: u32, y1: u32, xs: u32, xe: u32) -> Vec<(u32, u32)> {
+        let band_h = (y1 - y0) as usize;
+        let mut col_var: Vec<u64> = Vec::with_capacity((xe - xs) as usize);
+        for x in xs..xe {
+            let mut vals: Vec<u8> = Vec::with_capacity(band_h);
+            for y in y0..y1 {
+                vals.push(gray.get_pixel(x, y).0[0]);
+            }
+            let mean = vals.iter().map(|v| *v as u64).sum::<u64>() as f64 / vals.len() as f64;
+            let var: u64 = vals
+                .iter()
+                .map(|v| {
+                    let d = *v as f64 - mean;
+                    (d * d) as u64
+                })
+                .sum();
+            col_var.push(var);
+        }
+        let max_var = *col_var.iter().max().unwrap_or(&1) as f64;
+        let sm: Vec<f64> = (0..col_var.len())
+            .map(|i| {
+                let a = col_var[i.saturating_sub(1)];
+                let b = col_var[i];
+                let c = col_var[(i + 1).min(col_var.len() - 1)];
+                (a + b + c) as f64 / 3.0
+            })
+            .collect();
+        let thr = max_var * 0.10;
+        let mut runs: Vec<(u32, u32)> = Vec::new();
+        let mut i = 0;
+        while i < sm.len() {
+            if sm[i] > thr {
+                let s = i;
+                while i < sm.len() && sm[i] > thr {
+                    i += 1;
+                }
+                runs.push((xs + s as u32, xs + i as u32));
+            } else {
+                i += 1;
+            }
+        }
+        runs
+    }
+
+    /// Issue #13 T2 contract: title_pc ROI は analyze_title_regions の列分散出力(run) と
+    /// 一致するか、一致しない場合は幾何学的ギャップ(norm 20:9 ≠ PC RAW 16:9) として
+    /// 暫定値が保持されていることを固定する。silent overwrite を RED で検出する。
+    /// What(テスト対象): version_label.toml / title_logo_corner.toml の ROI 導出契約。
+    #[test]
+    fn pc_title_pc_roi_derivation_matches_column_variance_runs_or_documents_gap() {
+        let defs = load_pipeline(&title_pc_dir()).expect("title_pc scene dir must load");
+        let by_name: std::collections::HashMap<&str, &TaskDef> =
+            defs.iter().map(|d| (d.name.as_str(), d)).collect();
+
+        let version_label = by_name
+            .get("TitlePcVersionLabel")
+            .expect("TitlePcVersionLabel must exist");
+        let logo_corner = by_name
+            .get("TitlePcLogoCorner")
+            .expect("TitlePcLogoCorner must exist");
+
+        // (C) 暫定値保持契約: Issue #13 T1 で affine bridge 不可と判定されたため、
+        //     両 ROI は暫定マーカの値そのままで保持されていなければならない。
+        //     これらの値が無修正で書き換えられていたら(グリーンウォッシュ) RED。
+        assert_eq!(
+            version_label.roi,
+            Some([1046, 668, 112, 28]),
+            "version_label ROI must be retained at the Issue #13 T1 provisional value \
+             [1046,668,112,28] until a PC real probe provides geometric corroboration"
+        );
+        assert_eq!(
+            logo_corner.roi,
+            Some([140, 60, 60, 60]),
+            "title_logo_corner ROI must be retained at the Issue #13 T1 provisional value \
+             [140,60,60,60] until a PC real probe provides geometric corroboration"
+        );
+
+        // 導出ソース(norm 20:9 キャプチャ) を読み込み、列分散 run を再導出。
+        let norm_path = workspace_templates_root()
+            .join("captures")
+            .join("nav_step0_norm.png");
+        // norm キャプチャが CI 上で常に存在することを前提とする(tracked 診断キャプチャ)。
+        assert!(
+            norm_path.exists(),
+            "derivation source nav_step0_norm.png must be tracked for the ROI contract test"
+        );
+        let norm = image::open(&norm_path).expect("open nav_step0_norm.png");
+        let (nw, nh) = (norm.width(), norm.height());
+        // 導出ソースが 20:9 norm(1280x576) であることを不変量として固定。
+        assert_eq!(
+            (nw, nh),
+            (1280, 576),
+            "nav_step0_norm.png must be the 20:9 normalized frame (1280x576); \
+             if this changes the entire norm→RAW derivation premise must be re-evaluated"
+        );
+        let gray = norm.to_luma8();
+
+        // (A) title_logo_corner 上部帯(y=60..160) の再導出: norm 空間 run x=143..159 が
+        //     検出されること。これは「左上に固定マーク要素が存在する」qualitative 裏付け。
+        let top_runs = title_region_runs(&gray, 60, 160, 0, nw);
+        assert!(
+            top_runs
+                .iter()
+                .any(|(s, e)| *s >= 140 && *e <= 165 && (*s as i64 - 143).abs() <= 5),
+            "title_logo_corner: top band y=60..160 must contain the norm-space run near \
+             x=143..159 (qualitative corroboration of a fixed corner mark), got runs={top_runs:?}"
+        );
+
+        // (D) version_label 右下帯(y=545..572) の再導出: 当初コメントが主張した
+        //     x=1077..1189 の run は検出されないこと(裏付け欠如の文書化)。
+        //     右端の run が x=1029 未満で終わることを確認し、x>=1077 の run が
+        //     存在しないことを固定する。
+        let bottom_runs = title_region_runs(&gray, 545, 572, 0, nw);
+        let has_far_right_run = bottom_runs.iter().any(|(s, _)| *s >= 1077);
+        assert!(
+            !has_far_right_run,
+            "version_label: bottom band y=545..572 must NOT contain a run starting at x>=1077 \
+             (the originally-claimed x=1077..1189 run does not reproduce on re-derivation); \
+             this documents the lack of geometric corroboration for the provisional value, \
+             got runs={bottom_runs:?}"
+        );
+
+        // (B) 幾何学的不変量: norm(20:9) と PC RAW(16:9) のアスペクト比は不一致。
+        //     これが affine bridge 不可の根拠。どちらかのアスペクト比が変わったら
+        //     導出前提全体の再評価が必要なので固定する。
+        let norm_aspect = nw as f64 / nh as f64; // 1280/576 ≈ 2.222 (20:9)
+        let raw_aspect = 1258.0 / 708.0; // ≈ 1.777 (16:9)
+        assert!(
+            (norm_aspect - raw_aspect).abs() > 0.1,
+            "norm aspect {norm_aspect:.3} must differ from PC RAW aspect {raw_aspect:.3} \
+             (20:9 vs 16:9): this non-uniform scaling is WHY no scale+offset affine bridge \
+             exists from norm-space runs to RAW 1258x708 ROI coordinates"
+        );
+    }
 }

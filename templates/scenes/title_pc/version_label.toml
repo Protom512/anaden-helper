@@ -11,15 +11,23 @@ template  = "version_label.png"
 #
 # 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
 #
-# ROI 導出(決定論的): analyze_title_regions.rs(列分散手法, analyze_menu_bar.rs の再利用) で
-# 実 title キャプチャ(templates/captures/nav_step0_norm.png, 1280x576) の右下帯 y=545..572 を
-# 解析 → version 表示の安定 run x=1077..1189 w=112 を検出。corner-anchored 要素のため
-# PC 16:9 (1258x708) では右下オフセットを維持して x=1046,y=668,w=112,h=28 に配置。
+# ⚠ 幾何学的ギャップ(解決済判定: affine bridge 不可 → 暫定値保持, Issue #13 T1):
+# 当初のコメントは「20:9 norm(1280x576) 右下帯 y=545..572 の run x=1077..1189 を
+# PC 16:9 (1258x708) へ scale+offset で写像」と主張していた。これは幾何学的に不成立:
+#   - norm(1280x576) は Pixel7a(20:9) を BASE_WIDTH=1280 基準で正規化した 20:9 フレーム。
+#   - PC RAW(1258x708) は 16:9 クライアント領域。アスペクト比 1.777 ≠ 20:9 の 2.222。
+#   - 縦横で縮尺が異なるため scale+offset のアフィン変換では 1280x576 → 1258x708 へ
+#     写像できない(異方性・非アフィンなコンテンツ配置が必要)。docs/pc-capture-dimensions.md §2。
+#   - さらに再実行(2026-06-23)で右下帯 y=545..572 に x=1077..1189 の run は検出されず、
+#     右端の run は x=985..1029 w=44 のみ。よって暫定値は再導出で裏付けられなかった。
+# 上記より affine bridge を厳密に文書化できないため、Issue #13 の承認条件に従い
+# 暫定 ROI は【値そのままで保持】し、20:9 自己クロップ暫定マーカ扱いを継続する。
+# (値の更新には実測 PC プローブによる幾何学的裏付けが必須 = Issue #12 Branch A)
 #
 # ⚠ 未解決リスク: templates/captures/title_pc_probe.png (PC 実機 title フレーム) が未整備。
-# 現 PNG は 20:9 キャプチャからの自己クロップで比例配置した暫定マーカ。
+# 現 PNG は 20:9 キャプチャからの自己クロップで比例配置した暫定マーカ(20:9 self-crop provisional)。
 # pipeline.rs の probe E2E テスト(pc_title_pc_templates_match_real_capture_above_threshold) は
 # プローブ不在時スキップし、実機プローブ整備後に閾値以上マッチで再検証する(absence-skip)。
-# T1 で実機 1 サイクル検証時に本 ROI/テンプレを実測 conf で再調整すること。
+# 実機プローブ(title_pc_probe.png)到着時に README step 3-5 で実測 conf を取り本 ROI/テンプレを再調整。
 roi       = [1046, 668, 112, 28]
 threshold = 0.80
