@@ -24,4 +24,4 @@ pub use pipeline::{
 };
 pub use scale::ScreenScaler;
 pub use scene_detector::SceneDetector;
-pub use template_store::{TemplateEntry, TemplateStore};
+pub use template_store::{TemplateEntry, TemplateStore, TemplateStoreError};

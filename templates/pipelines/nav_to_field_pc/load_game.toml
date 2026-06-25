@@ -1,0 +1,23 @@
+name      = "LoadGamePc"
+state     = "title_pc"
+algorithm = "ccoeff"
+# PC版(Windows 16:9) nav_to_field slice (T3 / 親 Issue #5)。pc-scoped 名前空間(nav_to_field_pc/)。
+# Tap-to-Start 発火後に出る "Continue / Load" ボタンをタップしゲームをロードする中間 slice。
+# 既存 _title_load/load_game.toml(threshold=0.01 ハック) を PC 16:9 RAW 空間で置き直す。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
+#
+# 検出テンプレ: scenes/title_pc/title_logo_corner.png(title ロゴ固定角マーク・点滅非依存)。
+#   Tap-to-Start 後も title ロゴは残留するため、これを load 画面到達検出に使う。
+#   version_label(TapToStartPc と同テンプレ) との重複検出を避け別テンプレを採用。
+template  = "../../scenes/title_pc/title_logo_corner.png"
+# 検出 ROI: title_logo_corner と同じ左上帯。
+roi       = [140, 60, 60, 60]
+threshold = 0.80
+# タップ位置: "Continue/Load" ボタン中央。
+#   legacy _title_load/load_game.toml の click_rect roi=[625,273,30,30] (1280x720 正規化) を
+#   RAW 1258x708 換算(比率維持): x≈614, y≈268。
+#   実機レイアウト確認後(T1) に微調整。click_rect で静的タップ。
+action    = { type = "click_rect", roi = [600, 258, 30, 30] }
+# 次遷移: field 到達検出(FieldHudTopPc) へ。
+next      = ["FieldHudTopPc"]

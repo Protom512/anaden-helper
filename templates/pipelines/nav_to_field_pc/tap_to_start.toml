@@ -1,0 +1,28 @@
+name      = "TapToStartPc"
+state     = "title_pc"
+algorithm = "ccoeff"
+# PC版(Windows 16:9) nav_to_field slice (T3 / 親 Issue #5)。pc-scoped 名前空間(nav_to_field_pc/)。
+# 既存 _title_load/load_game.toml(threshold=0.01 ハック) は実シーン変動に弱い。
+# 本 slice は title_pc 小テンプレ(version_label) で **安定検出** し、click_rect で
+# 点滅アニメ("Tap to Start") 位置をタップする。検出テンプレ≠タップ対象のため
+# 点滅フレームの非安定性に影響されず認識が成立する(T3 の核心設計)。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
+#
+# 検出テンプレ: scenes/title_pc/version_label.png(右下固定 version 表示帯・点滅非依存)。
+#   legacy title_center/load_game_area(大型) は背景差に弱いが、version_label は固定テクスチャ。
+template  = "../../scenes/title_pc/version_label.png"
+# 検出 ROI: version_label と同じ右下帯。
+roi       = [1046, 668, 112, 28]
+threshold = 0.80
+# タップ位置: "Tap to Start" 正規化座標 (930,488)。
+#   1280x720 正規化 → RAW 1258x708 換算(比率維持): x≈914, y≈480。
+#   click_rect.roi はタップ中心点の小矩形(30x30)。
+#   点滅アニメは認識対象ではない(認識は version_label)ため、発火タイミングの
+#   フレーム依存性は低い。vote(min_votes) 連続一致で点滅 off フレームを弁別可能(T1 調整)。
+action    = { type = "click_rect", roi = [900, 466, 30, 30] }
+# T1 接続仕上げ(親 Issue #5 / Issue #11): 起点エッジ修復。
+#   旧 next=[] は cold-start 有向グラフの切れ目。LoadGamePc が indegree=0 で孤立し、
+#   TapToStartPc -> LoadGamePc -> FieldHudTopPc の歩行可能性が壊れていた。
+#   LoadGamePc.next=["FieldHudTopPc"](load_game.toml) と接続し完全な状態機械とする。
+next      = ["LoadGamePc"]

@@ -1,0 +1,27 @@
+name      = "TitlePcLogoCorner"
+state     = "title_pc"
+algorithm = "ccoeff"
+template  = "title_logo_corner.png"
+# PC版(Windows 16:9) title コールドスタート用 小テンプレ (Task #5 / T3 / 親 Issue #5)。
+# pc-scoped 名前空間(scenes/title_pc/)。title_center.png(800x300, 306KB) のような大型テンプレは
+# 背景差に弱い(TASKS.md:30-33 既知ブロッカー)。本テンプレは title ロゴの固定角マークを
+# 小テンプレ化し、version_label とは別の固定テクスチャで二重検出を可能にする。
+#
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
+#
+# ⚠ 幾何学的ギャップ(解決済判定: affine bridge 不可 → 暫定値保持, Issue #13 T1):
+# analyze_title_regions.rs で norm(1280x576, Pixel7a 20:9) の上部ロゴ帯 y=60..160 を
+# 再解析すると、確かに run x=143..159 w=16 (center=151) が norm 空間で検出される。
+# しかし version_label.toml に記載の通り、norm(20:9) → PC RAW(16:9, 1258x708) の
+# アスペクト比不一致(2.222 ≠ 1.777)により scale+offset アフィン変換では写像できない。
+#   - norm 空間で run が検出されたことは「左上に固定マーク要素が存在する」という
+#     定性的裏付けにはなるが、RAW 1258 空間での確定座標 x=140,y=60,w=60,h=60 は
+#     幾何学的に導出できない。docs/pc-capture-dimensions.md §2 参照。
+# よって Issue #13 承認条件に従い暫定 ROI は【値そのままで保持】し、
+# 20:9 自己クロップ暫定マーカ扱いを継続する(値の更新には PC 実機プローブ必須)。
+#
+# ⚠ version_label.toml と同様、title_pc_probe.png 未整備のため暫定配置
+# (20:9 self-crop provisional marker)。
+# 実機プローブ整備後に実測 conf で再調整(absence-skip)。
+roi       = [140, 60, 60, 60]
+threshold = 0.80
