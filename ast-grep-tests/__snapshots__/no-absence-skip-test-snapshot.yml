@@ -1,0 +1,89 @@
+id: no-absence-skip-test
+snapshots:
+  ? |-
+    #[test]
+    fn newly_added_e2e_test() {
+        let probe = title_probe_path();
+        if probe.is_none() {
+            return;
+        }
+    }
+  : labels:
+    - source: return
+      style: primary
+      start: 105
+      end: 111
+    - source: '#[test]'
+      style: secondary
+      start: 0
+      end: 7
+    - source: |-
+        fn newly_added_e2e_test() {
+            let probe = title_probe_path();
+            if probe.is_none() {
+                return;
+            }
+        }
+      style: secondary
+      start: 8
+      end: 120
+  ? |-
+    #[test]
+    fn pc_field_pc_templates_match_real_capture_above_threshold() {
+        let probe_path = match field_pc_probe_path() {
+            Some(p) => p,
+            None => {
+                eprintln!("skip");
+                return;
+            }
+        };
+    }
+  : labels:
+    - source: return
+      style: primary
+      start: 206
+      end: 212
+    - source: '#[test]'
+      style: secondary
+      start: 0
+      end: 7
+    - source: |-
+        fn pc_field_pc_templates_match_real_capture_above_threshold() {
+            let probe_path = match field_pc_probe_path() {
+                Some(p) => p,
+                None => {
+                    eprintln!("skip");
+                    return;
+                }
+            };
+        }
+      style: secondary
+      start: 8
+      end: 232
+  ? |-
+    #[test]
+    fn pc_menu_pc_templates_match_real_capture_above_threshold() {
+        if !dir.exists() {
+            eprintln!("skip");
+            return;
+        }
+    }
+  : labels:
+    - source: return
+      style: primary
+      start: 129
+      end: 135
+    - source: '#[test]'
+      style: secondary
+      start: 0
+      end: 7
+    - source: |-
+        fn pc_menu_pc_templates_match_real_capture_above_threshold() {
+            if !dir.exists() {
+                eprintln!("skip");
+                return;
+            }
+        }
+      style: secondary
+      start: 8
+      end: 144
