@@ -1,0 +1,74 @@
+# 分類テスト: no-absence-skip-test ルールの valid / invalid 判定。
+#
+# invalid  = ルールが検出すべき absence-skip early `return;`(偽 green を生む idiom)。
+#   - probe-resolver None match arm 内の return;
+#   - ネームスペース dir 不在ガード(if !dir.exists() { return; })内の return;
+# valid    = ルールが検出してはならない正当なコード。
+#   - ライブラリコード(非 #[test])の return;
+#   - PNG 非依存 contract テスト(例外リスト)内の return;
+#   - 値を返す `return EXPR;`(単位 skip ではない)
+#   - テスト内であっても return; を持たない通常の assert-only テスト
+id: no-absence-skip-test
+valid:
+  # --- ライブラリコード(#[test] ではない)は対象外 ---
+  - |-
+    fn resolve_probe() -> Option<PathBuf> {
+        if !base.exists() {
+            return None;
+        }
+        return Some(base);
+    }
+  # --- 値を返す return EXPR; は absence-skip ではない ---
+  - |-
+    #[test]
+    fn returns_value() {
+        let x = match opt {
+            Some(v) => v,
+            None => return 1,
+        };
+    }
+  # --- PNG 非依存 contract テスト(例外): gitignored 診断キャプチャ不在時の skip は許容 ---
+  - |-
+    #[test]
+    fn pc_title_pc_roi_derivation_matches_column_variance_runs_or_documents_gap() {
+        if !norm_path.exists() {
+            return;
+        }
+    }
+  # --- 通常の assert-only テスト(return; なし) ---
+  - |-
+    #[test]
+    fn normal_assert_test() {
+        assert!(defs.len() >= 3);
+    }
+invalid:
+  # --- probe-resolver None match arm 内の absence-skip return; ---
+  - |-
+    #[test]
+    fn pc_field_pc_templates_match_real_capture_above_threshold() {
+        let probe_path = match field_pc_probe_path() {
+            Some(p) => p,
+            None => {
+                eprintln!("skip");
+                return;
+            }
+        };
+    }
+  # --- ネームスペース dir 不在ガード内の absence-skip return; ---
+  - |-
+    #[test]
+    fn pc_menu_pc_templates_match_real_capture_above_threshold() {
+        if !dir.exists() {
+            eprintln!("skip");
+            return;
+        }
+    }
+  # --- 新規に導入された absense-skip return;(プローブパス None) ---
+  - |-
+    #[test]
+    fn newly_added_e2e_test() {
+        let probe = title_probe_path();
+        if probe.is_none() {
+            return;
+        }
+    }

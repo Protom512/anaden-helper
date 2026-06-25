@@ -15,3 +15,11 @@ tracing = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+
+# PC 実機プローブ依存 E2E テスト(pc_field_pc / pc_field_loop_pc / pc_menu_pc / pc_title_pc)の
+# 実行ゲート。デフォルト OFF でこれらは #[ignore] 扱い(nextest 通常起動で green を偽装しない)。
+# `--features pc-e2e --run-ignored all` で実機プローブが整備された環境でのみ実行される。
+# 仕様詳細は README「PC 版 title cold-start 再開手順」節を参照。
+[features]
+default = []
+pc-e2e = []

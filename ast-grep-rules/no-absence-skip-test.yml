@@ -1,0 +1,58 @@
+# anaden-vision の #[test] 関数における absence-skip early `return;` を禁止する。
+#
+# 背景 (Issue #19 / R1):
+#   PC プローブ E2E テスト(pc_field_pc / pc_field_loop_pc / pc_menu_pc / pc_title_pc)は
+#   かつて「プローブ PNG 不在時に `return;` で検証を skip する」idiom(absence-skip) を使っていた。
+#   これは CI/fresh-clone でプローブが存在しなくてもテストが green で完了してしまう
+#   「偽 green」を生む原因だった。R1 では #[ignore] + pc-e2e feature 三値化へ改修済みで、
+#   プローブ不在時は image::open が fail-loud で panic する。
+#
+#   このルールは *新規に* absence-skip return; が再導入されるのを機械的に防止する。
+#
+# 例外 (PNG 非依存 contract テスト):
+#   pc_title_pc_roi_derivation_matches_column_variance_runs_or_documents_gap は
+#   templates/captures/nav_step0_norm.png (.gitignore 対応の診断キャプチャ) の存在に依存し、
+#   fresh clone / CI では不在のため明示的に skip する。これはプローブ不在による偽 green ではなく、
+#   ローカル診断キャプチャの有無に起因する固有の skip であり、R1 の対象外。
+#   新たに PNG/プローブ非依存の contract テストで skip が必要な場合は、関数名を not 節に追加すること。
+#
+# 検出対象:
+#   - probe-resolver の None match arm 内の `return;`
+#   - `if !dir.exists() { return; }` ネームスペースガード内の `return;`
+#   （いずれも単位 `return;` のみ。値を返す `return EXPR;` は absence-skip ではないため対象外）
+#
+# 運用 (.claude/rules 配下の lint 方針と整合):
+#   nextest デフォルト起動で偽 green を報告しないというローカル契約を、
+#   pre-commit / ローカル `ast-grep scan` で強制する。CI workflow は本スライスの対象外。
+id: no-absence-skip-test
+language: Rust
+severity: error
+rule:
+  # 単位 return; のみ（return EXPR; は除外）。regex '^return$' で return_expression
+  # のテキストが "return" だけ（被演算子なし）のものに限定する。
+  kind: return_expression
+  regex: '^return$'
+  inside:
+    # 当該 return; を含む関数が #[test] 関数であること。
+    # Rust tree-sitter では function_item は `fn` から始まり #[test] 属性を含まないため、
+    # 属性は先行 sibling (attribute_item) として follows で関連付ける。
+    kind: function_item
+    follows:
+      kind: attribute_item
+      regex: '#\[test\]'
+    stopBy: end
+    not:
+      # 例外: PNG 非依存 contract テスト。関数名 (field: name) で除外。
+      has:
+        field: name
+        regex: 'pc_title_pc_roi_derivation_matches_column_variance_runs_or_documents_gap'
+message: absence-skip early `return;` を #[test] に新規導入しないこと。プローブ/アセット不在時は #[ignore] + feature gate（pc-e2e）で三値化し、不在時は fail-loud (panic) させること（Issue #19 / R1）。
+note: |
+  この return; は CI/fresh-clone でアセットが存在しなくてもテストが green で完了する
+  「偽 green」を生む。修正パターン:
+    1. プローブ PNG 依存の E2E テストなら、#[cfg_attr(not(feature = "pc-e2e"), ignore)]
+       を付け、プローブ解決は unwrap_or_else(|| panic!(...)) で fail-loud にする。
+    2. どうしても skip が必要な PNG 非依存 contract テストの場合は、当ルールの not 節
+       (例外リスト) に関数名を追加し、その根拠をコメントで明記すること。
+files:
+  - "crates/anaden-vision/**/*.rs"

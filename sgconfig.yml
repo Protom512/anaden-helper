@@ -1,0 +1,12 @@
+# ast-grep プロジェクト設定。
+#
+# ruleDirs  : 汎用 linter(clippy/rustfmt) で表現できないプロジェクト固有の構造的 lint ルール。
+# testConfigs: ルールの分類テスト(valid/invalid) を置くディレクトリ。
+#
+# 実行:
+#   ast-grep test --skip-snapshot-tests   # ルールの単体テスト(CI 推奨)
+#   ast-grep scan crates/anaden-vision/   # プロジェクトスキャン(error severity で非ゼロ終了)
+ruleDirs:
+  - ast-grep-rules
+testConfigs:
+  - testDir: ast-grep-tests

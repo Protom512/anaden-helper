@@ -2020,20 +2020,23 @@ mod tests {
     /// E2E: field_pc_probe.png(T7 PrintWindow 実機 1258x708 field フレーム) 上で
     /// 各 PC field テンプレが threshold 以上の confidence でマッチする。
     /// これが --target windows で field_loop がアンブロックされる直接証明。
+    ///
+    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
+    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
+    /// プローブ不在時は absence-skip せず image::open が fail-loud で panic する
+    /// (CI が missing-probe を偽 green で報告しないための不変量)。
     #[test]
+    #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_field_pc_templates_match_real_capture_above_threshold() {
         let dir = field_pc_dir();
-        let probe_path = match field_pc_probe_path() {
-            Some(p) => p,
-            None => {
-                // プローブ未整備の環境(CI フォーク等)では検証をスキップ。
-                eprintln!(
-                    "skip: field_pc_probe.png not found \
-                     (neither templates/captures/ nor workspace-root capture_probe.png)"
-                );
-                return;
-            }
-        };
+        let probe_path = field_pc_probe_path().unwrap_or_else(|| {
+            panic!(
+                "field_pc_probe.png not found (neither templates/captures/ nor \
+                 workspace-root capture_probe.png). PC-probe E2E requires a real \
+                 PrintWindow capture — run with `--features pc-e2e --run-ignored all` only \
+                 when the probe is provisioned."
+            )
+        });
         let defs = load_pipeline(&dir).expect("field_pc load");
         let screenshot = image::open(&probe_path).expect("open field_pc_probe.png");
 
@@ -2073,21 +2076,24 @@ mod tests {
 
     /// field_loop_pc/ の各 TaskDef が field_pc_probe.png 上で threshold 以上でマッチする。
     /// `--target windows` + `field_loop_pc` パイプラインのオフライン/E2E 前提契約。
+    ///
+    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
+    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
+    /// プローブ不在時は absence-skip せず fail-loud で panic する。
     #[test]
+    #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_field_loop_pc_templates_match_real_capture_above_threshold() {
         let dir = workspace_templates_root()
             .join("pipelines")
             .join("field_loop_pc");
-        let probe_path = match field_pc_probe_path() {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "skip: field_pc_probe.png not found \
-                     (neither templates/captures/ nor workspace-root capture_probe.png)"
-                );
-                return;
-            }
-        };
+        let probe_path = field_pc_probe_path().unwrap_or_else(|| {
+            panic!(
+                "field_pc_probe.png not found (neither templates/captures/ nor \
+                 workspace-root capture_probe.png). PC-probe E2E requires a real \
+                 PrintWindow capture — run with `--features pc-e2e --run-ignored all` only \
+                 when the probe is provisioned."
+            )
+        });
         let defs = load_pipeline(&dir).expect("field_loop_pc load");
         let screenshot = image::open(&probe_path).expect("open field_pc_probe.png");
 
@@ -2272,26 +2278,23 @@ mod tests {
     /// threshold(>=0.95) 以上の confidence でマッチし、かつ ROI が 1258x708 に
     /// 収まることを検証する。これが conf>=0.95 acceptance gate。
     ///
-    /// `pc_field_pc_templates_match_real_capture_above_threshold`(pipeline.rs:1609)
-    /// と同じ absence-skip パターンを採用し、プローブ or menu_pc ネームスペースが
-    /// 未整備の環境(CI フォーク等)では検証をスキップしてビルドを壊さない。
+    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
+    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
+    /// プローブ不在時は absence-skip せず fail-loud で panic する
+    /// (namespace-dir / probe の両 early-return を廃止)。
     #[test]
+    #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_menu_pc_templates_match_real_capture_above_threshold() {
         let dir = menu_pc_dir();
-        if !dir.exists() {
-            eprintln!("skip: menu_pc namespace not found at {:?}", dir);
-            return;
-        }
-        let probe_path = match menu_pc_probe_path() {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "skip: menu_pc_probe.png not found \
-                     (neither templates/captures/ nor workspace root)"
-                );
-                return;
-            }
-        };
+        let probe_path = menu_pc_probe_path().unwrap_or_else(|| {
+            panic!(
+                "menu_pc_probe.png not found (neither templates/captures/ nor \
+                 workspace root) or menu_pc namespace missing at {:?}. PC-probe E2E \
+                 requires a real PrintWindow capture — run with `--features pc-e2e \
+                 --run-ignored all` only when the probe is provisioned.",
+                dir
+            )
+        });
 
         let defs = load_pipeline(&dir).expect("menu_pc load");
         // menu 底部 7 アイコン(bag/board/gacha/grasta/info/party/record)。
@@ -2489,29 +2492,26 @@ mod tests {
     /// threshold 以上の confidence でマッチすることを検証する。これが T3 コールドスタート
     /// 検出の最終証明(Tap-to-Start 点滅に巻き込まれない固定テクスチャで安定マッチ)。
     ///
-    /// absence-skip: title_pc_probe.png は実機 PrintWindow キャプチャであり、CI フォークや
-    /// 実機未接続環境では存在しない。その場合は検証をスキップしビルドを壊さない
-    /// (field_pc/menu_pc と同じパターン)。プローブ整備後(T1 実機 1 サイクル検証時)に
-    /// 本テストが実効検証となり、ROI/threshold の実測再調整を促す。
+    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
+    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
+    /// プローブ不在時は absence-skip せず fail-loud で panic する
+    /// (namespace-dir / probe の両 early-return を廃止)。本テストは Issue #12 の
+    /// Branch B(README 完成)から Branch A(実機プローブ整備)へ、プローブ配置だけで
+    /// 自己昇格する — `--features pc-e2e --run-ignored all` 起動で実効検証となる。
     #[test]
+    #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_title_pc_templates_match_real_capture_above_threshold() {
         let dir = title_pc_dir();
-        if !dir.exists() {
-            eprintln!("skip: title_pc namespace not found at {:?}", dir);
-            return;
-        }
-        let probe_path = match title_pc_probe_path() {
-            Some(p) => p,
-            None => {
-                eprintln!(
-                    "skip: title_pc_probe.png not found \
-                     (neither templates/captures/ nor workspace root). \
-                     T3 title_pc sub-templates are provisionally placed in RAW-1258 space; \
-                     real-probe E2E is deferred until a PC title-frame capture is captured (T1)."
-                );
-                return;
-            }
-        };
+        let probe_path = title_pc_probe_path().unwrap_or_else(|| {
+            panic!(
+                "title_pc_probe.png not found (neither templates/captures/ nor \
+                 workspace root) or title_pc namespace missing at {:?}. T3 title_pc \
+                 sub-templates are provisionally placed in RAW-1258 space; real-probe E2E \
+                 is deferred until a PC title-frame capture is provisioned (Issue #12). \
+                 Run with `--features pc-e2e --run-ignored all` only when the probe exists.",
+                dir
+            )
+        });
         let defs = load_pipeline(&dir).expect("title_pc load");
         let screenshot = image::open(&probe_path).expect("open title_pc_probe.png");
 
@@ -2551,7 +2551,7 @@ mod tests {
     }
 
     /// Branch B (Issue #12 デバイス未接続フォールバック) の README 再開手順節が、
-    /// コード事実(TOML ROI/threshold・absence-skip 実装行・テスト名)と整合していることを
+    /// コード事実(TOML ROI/threshold・R1 ゲート機構・テスト名)と整合していることを
     /// CI で固定する。手順 doc がコードから drift したら RED。
     /// What(テスト対象): README の "PC 版 title cold-start 再開手順" 節。
     #[test]
@@ -2612,12 +2612,41 @@ mod tests {
              (title_center.png / load_game_area.png) as the design rationale"
         );
 
-        // absence-skip 自動昇格の根拠: pipeline.rs の実装行が README で明示されていること。
+        // R1 三値ゲートの根拠: pipeline.rs の実装行が README で明示されていること。
         //   - 実装関数名 title_pc_probe_path
-        //   - None ブランチ(absence-skip)の存在
+        //   - ゲート機構: pc-e2e feature flag + --run-ignored 起動コマンド
+        // absence-skip 機構は R1 で廃止(プローブ不在時は fail-loud panic)されたため、
+        // README の再開手順は新ゲート機構を記述しなければならない。旧 absence-skip 文言は
+        // 歴史的経緯の記述として README に残り得るが、本 assert は新機構トークンを要求する。
         assert!(
-            readme.contains("title_pc_probe_path") && readme.contains("absence-skip"),
-            "README must cite title_pc_probe_path() and the absence-skip mechanism"
+            readme.contains("title_pc_probe_path")
+                && readme.contains("pc-e2e")
+                && readme.contains("--run-ignored"),
+            "README must cite title_pc_probe_path() and the R1 three-valued gate \
+             (pc-e2e feature + --run-ignored command)"
+        );
+    }
+
+    /// R1 docs-drift contract (Issue #19 / T3-readme):
+    /// README の「absence-skip フラグの理由」節が、R1 三値ゲート(ignore attribute,
+    /// pc-e2e feature, --run-ignored)へ移行済みであることを固定する。R1 で absence-skip
+    /// (None ブランチ return)は廃止されプローブ不在時は fail-loud panic になったため、
+    /// skip の理由を説明する節は新ゲート機構を記述しなければならない。旧文言のまま残ると
+    /// 読者にサイレント skip が生きていると誤認させる(偽成功の温床)。本テストは README:137
+    /// 相当の skip-reason 段落が pc-e2e feature トークンを含むことを要求する
+    /// (旧 absence-skip-return 記述のみだと RED)。
+    #[test]
+    fn pc_title_pc_readme_skip_reason_describes_r1_gate_not_absence_skip() {
+        let readme =
+            std::fs::read_to_string(workspace_templates_root().join("..").join("README.md"))
+                .expect("README.md must be readable from anaden-vision");
+
+        // skip *理由* を説明する節が R1 ゲート機構(pc-e2e feature)へ言及していること。
+        // 旧 absence-skip-return 記述のみの README ではこのトークンが欠落し RED となる。
+        assert!(
+            readme.contains("absence-skip") && readme.contains("pc-e2e"),
+            "README skip-reason prose must be migrated to the R1 three-valued gate \
+             (mention pc-e2e); pure absence-skip-return description is obsolete under R1"
         );
     }
 
