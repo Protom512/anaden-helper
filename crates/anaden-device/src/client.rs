@@ -7,7 +7,7 @@ use tracing::{debug, info, warn};
 
 #[derive(Debug, Error)]
 pub enum AdbError {
-    #[error("ADB command failed: {message}")]
+    #[error("Device I/O failed: {message}")]
     CommandFailed { message: String },
 
     #[error("Device not found: {serial}")]

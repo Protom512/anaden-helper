@@ -2071,6 +2071,50 @@ mod tests {
         }
     }
 
+    /// field_loop_pc/ の各 TaskDef が field_pc_probe.png 上で threshold 以上でマッチする。
+    /// `--target windows` + `field_loop_pc` パイプラインのオフライン/E2E 前提契約。
+    #[test]
+    fn pc_field_loop_pc_templates_match_real_capture_above_threshold() {
+        let dir = workspace_templates_root()
+            .join("pipelines")
+            .join("field_loop_pc");
+        let probe_path = match field_pc_probe_path() {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "skip: field_pc_probe.png not found \
+                     (neither templates/captures/ nor workspace-root capture_probe.png)"
+                );
+                return;
+            }
+        };
+        let defs = load_pipeline(&dir).expect("field_loop_pc load");
+        let screenshot = image::open(&probe_path).expect("open field_pc_probe.png");
+
+        for d in &defs {
+            let m = d
+                .detect(&screenshot, Path::new(""))
+                .unwrap_or_else(|e| panic!("{} detect error: {e}", d.name));
+            let m = m.unwrap_or_else(|| {
+                panic!(
+                    "{}: must match field_pc_probe.png at threshold {} (got None)",
+                    d.name, d.threshold
+                )
+            });
+            assert!(
+                m.confidence.0 >= d.threshold,
+                "{}: confidence {} below threshold {} on real PC capture",
+                d.name,
+                m.confidence.0,
+                d.threshold
+            );
+            assert_roi_within_1258x708(
+                [m.region.x, m.region.y, m.region.width, m.region.height],
+                &format!("{} match region", d.name),
+            );
+        }
+    }
+
     // ---- PC版 menu_pc シーンテンプレスライス (Task#2 / Issue#6 / 親 Issue#5) ----
     //
     // templates/scenes/menu_pc/ に PC版(16:9, RAW 1258x708) 参照テンプレ7件
