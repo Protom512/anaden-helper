@@ -141,7 +141,14 @@ Issue #12 は PC 版タイトルコールドスタート成立（実機 `title_p
 デバイス接続可能になった時点で、以下の手順で Branch B（README 完成・absence-skip）から Branch A（実機プローブ整備・実効ゲート）へ移行する。誰でも追える粒度で残す。
 
 1. **実機タイトル停止**: `AnotherEden.exe` を起動し、タイトル画面で "Tap to Start" 点滅状態で停止させる（T1 ゲート: OS build 26200.8524 未適用で実行すること・§「準備」参照）。
-2. **プローブ取得**: PrintWindow で 1258x708 RAW フレームを取得し、`templates/captures/title_pc_probe.png` へ保存する（`field_pc_probe.png` / `menu_pc_probe.png` と同じ規約・RAW 空間そのまま）。
+2. **プローブ取得**: 詳細な operator 手順（どの画面をどう取得するか・全 probe 一覧）は **[Wiki: PC-Probe-Acquisition](https://github.com/Protom512/anaden-helper/wiki/PC-Probe-Acquisition)** 参照。PrintWindow で 1258x708 RAW フレームを取得し `templates/captures/title_pc_probe.png` へ保存:
+
+   ```bash
+   cargo run --release -p anaden-device --example probe_windows_capture -- \
+     --process AnotherEden.exe --out templates/captures/title_pc_probe.png
+   ```
+
+   取得 PNG が 1258x708 であることを確認後 `git add -f` で追跡（`templates/captures/` は .gitignore 対象だが probe は例外・`field_pc_probe.png` / `menu_pc_probe.png` と同じ規約）。
 3. **E2E テスト実行**: `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all -E 'test(pc_title_pc_templates_match_real_capture_above_threshold)'` を実行する（`--features pc-e2e` で feature ゲートを開き、`--run-ignored all` で `#[ignore]` マークを突破して実行）。プローブ不在時は absence-skip せず fail-loud で panic するため、プローブ配置後に初めて実効 >=0.80 ゲートとして走る。
 4. **version_label 再調整**: conf < 0.80 の場合、`templates/scenes/title_pc/version_label.toml` の `roi = [1046,668,112,28]` / `threshold = 0.80` を実機 RAW 1258x708 空間で再導出する（`analyze_title_regions.rs` 列分散手法を PC RAW フレームに対して再適用）。
 5. **title_logo_corner 再調整**: 必要なら `templates/scenes/title_pc/title_logo_corner.toml` の `roi = [140,60,60,60]` / `threshold = 0.80` も同様に再導出する（二重検出の相補テクスチャ）。
