@@ -119,7 +119,7 @@ cargo run --bin anaden-studio
 - **残課題**:
   - PC 版 title cold-start の実機 1 サイクル E2E（`title_pc_probe.png` 実機取得後、absence-skip テスト `pc_title_pc_templates_match_real_capture_above_threshold` を >=0.80 実効ゲートへ昇格）。現在はデバイス未接続のため absence-skip を維持（Issue #12 OPEN・再開可能）。
   - 完全ループ（capture→認識→touch→効果）の end-to-end 実機検証、認識テンプレの更なる安定化（状態変動対策）。
-  - テスト 205 件 green（`cargo nextest run --workspace`）。
+  - テスト 209 件 green（`cargo nextest run --workspace`、実測値）。
 
 ### PC 版 title コールドスタート: テンプレート一覧と absence-skip の理由（Issue #12 / Branch B フォールバック）
 
