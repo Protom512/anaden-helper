@@ -2724,11 +2724,18 @@ mod tests {
         let norm_path = workspace_templates_root()
             .join("captures")
             .join("nav_step0_norm.png");
-        // norm キャプチャが CI 上で常に存在することを前提とする(tracked 診断キャプチャ)。
-        assert!(
-            norm_path.exists(),
-            "derivation source nav_step0_norm.png must be tracked for the ROI contract test"
-        );
+        // nav_step0_norm.png は templates/captures/ が .gitignore 対応で未追跡のため、
+        // fresh clone / CI では存在しない。hard-assert すると clone/CI が panic する（偽 green）。
+        // 実在する(ローカル)時のみ列分散 run の再導出を検証し、不在時は明示ログで skip する。
+        // ※field_pc/menu_pc/title_pc probe の absence-skip パターン(pipeline.rs:2026-)に準拠。
+        if !norm_path.exists() {
+            eprintln!(
+                "skip: nav_step0_norm.png not found at {:?} — gitignored 診断キャプチャのため\
+                 CI/clone では未存在。列分散 run 再導出の検証はローカル(実在時)のみ実行",
+                norm_path
+            );
+            return;
+        }
         let norm = image::open(&norm_path).expect("open nav_step0_norm.png");
         let (nw, nh) = (norm.width(), norm.height());
         // 導出ソースが 20:9 norm(1280x576) であることを不変量として固定。
