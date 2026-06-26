@@ -1,12 +1,15 @@
 //! Another Eden 自動操作ツールの CLI エントリポイント。
 //!
-//! 2つのサブコマンドを持つ:
+//! 4つのサブコマンドを持つ:
 //! - `run`: 宣言的パイプラインを ADB 実機でライブ実行する(PipelineDriver 駆動)。
 //! - `legacy`: 旧来の Orchestrator(命令型 Strategy ループ) を動かす後方互換エントリ。
+//! - `ensure-open`: 起動状態を確認し未起動なら起動する独立 CI gate(Issue #21)。
+//! - `launch`: 無条件起動(AlreadyOpen チェックなし、リカバリ用途)。
 
 use std::path::PathBuf;
 use std::time::Duration;
 
+use anaden_cli_contract::{ensure_outcome_label, standalone_exit_code};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
@@ -108,6 +111,125 @@ enum Commands {
         #[arg(short, long)]
         config: Option<PathBuf>,
     },
+    /// ゲームの起動状態を確認し、未起動なら起動して生存/前景化を確認する(Issue #21)。
+    ///
+    /// パイプライン実行なしで「起動確認＋起動」だけを行う独立 CI gate サブコマンド。
+    ///
+    /// **終了コード契約(run とは異なる・純加算)**:
+    /// - AlreadyOpen / Launched => exit 0(CI gate success)
+    /// - Timeout                => exit 2(CI gate **失敗**。ソフト失敗)
+    /// - ハードエラー(AdbError/spawn/OpenProcess 失敗) => exit 1
+    ///
+    /// 注意: `anaden run` は Timeout を soft warn として **継続** するが、本サブコマンドは
+    /// 独立 gate として Timeout を非ゼロ終了する。CI スクリプトはこの違いを前提に分岐すること。
+    EnsureOpen {
+        /// 実行ターゲット: `android`(ADB) または `windows`(PC版 Win32)。
+        /// `windows` 指定時は `Win32Launch`、`android` 指定時は `AppController` を使用。
+        #[arg(long, default_value = "android")]
+        target: String,
+        /// ADB デバイスシリアル。`--target android` 時は必須、`--target windows` 時は不要。
+        serial: Option<String>,
+        /// 起動/前景化待ちのタイムアウト(秒)。Timeout 到達で exit 2。
+        /// `run` の `--ensure-open-wait-secs`(既定 30) と同等。
+        #[arg(long, default_value_t = 30)]
+        wait_secs: u64,
+    },
+    /// ゲームを無条件で起動する(AlreadyOpen チェックをスキップ、Issue #21)。
+    ///
+    /// `ensure-open` との違い: 起動済みかに関わらず常に launch を1回実行し、生存/前景化を
+    /// 確認する。リカバリ用途(プロセス異常時の強制再起動)向け。終了コード契約は
+    /// `ensure-open` に同じ(Launched=0 / Timeout=2 / ハードエラー=1)。
+    Launch {
+        /// 実行ターゲット: `android`(ADB) または `windows`(PC版 Win32)。
+        #[arg(long, default_value = "android")]
+        target: String,
+        /// ADB デバイスシリアル。`--target android` 時は必須、`--target windows` 時は不要。
+        serial: Option<String>,
+        /// 起動/前景化待ちのタイムアウト(秒)。Timeout 到達で exit 2。
+        /// `run` の `--ensure-open-wait-secs`(既定 30) と同等。
+        #[arg(long, default_value_t = 30)]
+        wait_secs: u64,
+    },
+}
+
+/// ゲーム起動保証の共有実行部(`run` パスと standalone サブコマンドの唯一の真実の源)。
+///
+/// `target` に応じてバックエンドを解決し、対応する ensure 呼出(`AppController::ensure_app_open`
+/// / `Win32Launch::ensure_open`)を行って生の [`anaden_device::EnsureOutcome`] を返す。
+/// 戻り値のラベル化/ログ/終了コードは呼出側の責務:
+/// - `run` パスは soft warn でパイプラインを継続(Timeout でも止まらない)。
+/// - standalone(`ensure-open`/`launch`)は [`ensure_open_exit_code`] で非ゼロ終了。
+///
+/// これを抽出することで、`run_pipeline_live` の android/windows 両経路と standalone 経路が
+/// 同一の起動保証本体を共有し、ドリフトを防ぐ(architecture-coupling-balance: high-cohesion,
+/// single source of truth for ensure behavior)。`run_pipeline_live` 本体のそれ以外の
+/// リファクタリングは行わない(最小変更)。
+///
+/// - `target = "android"`: `serial` 必須。`AppController::ensure_app_open` を呼ぶ。
+/// - `target = "windows"`: `Win32Launch::ensure_open` を呼ぶ(`#[cfg(windows)]`)。
+///   非 Windows ビルドでは対となるフォールバック関数が bail する(Linux CI 回避)。
+/// - それ以外の `target`: anyhow エラー。
+#[cfg(windows)]
+async fn ensure_open_outcome(
+    target: &str,
+    serial: Option<&str>,
+    wait: Duration,
+) -> Result<anaden_device::EnsureOutcome> {
+    match target {
+        "android" => {
+            let serial = serial.ok_or_else(|| {
+                anyhow::anyhow!("--target android 時は ADB シリアル(serial)が必須です")
+            })?;
+            let controller =
+                anaden_device::AppController::new(anaden_device::AdbClient::new(serial));
+            controller
+                .ensure_app_open(wait)
+                .await
+                .map_err(|e| anyhow::anyhow!("ゲーム起動保証に失敗({serial}): {e}"))
+        }
+        "windows" => {
+            let launcher = anaden_device::Win32Launch::default_paths();
+            launcher
+                .ensure_open(wait)
+                .await
+                .map_err(|e| anyhow::anyhow!("ゲーム起動保証(Win32)に失敗: {e}"))
+        }
+        other => anyhow::bail!("--target は `android` または `windows` です(指定値: {other})"),
+    }
+}
+
+/// `ensure_open_outcome` の非 Windows ビルド向けフォールバック(コンパイルエラー回避)。
+///
+/// `windows` ターゲットは PC版 Win32 バックエンド(`wfsdrv` 依存)を要するため、非 Windows
+/// ビルドでは `Win32Launch` が存在しない。`windows` ターゲットのみ bail する。
+///
+/// 注意: android(ADB) はプラットフォーム非依存(`AdbClient` は cfg-gate されない)なので、
+/// 非 Windows ビルドでも android パスは機能する。bail するのは `windows` ターゲットのみ
+/// (Win32 バックエンド依存)。これにより Linux CI runner 上でも `--target android` の
+/// コンパイル/呼出が壊れない。
+#[cfg(not(windows))]
+async fn ensure_open_outcome(
+    target: &str,
+    serial: Option<&str>,
+    wait: Duration,
+) -> Result<anaden_device::EnsureOutcome> {
+    match target {
+        "android" => {
+            let serial = serial.ok_or_else(|| {
+                anyhow::anyhow!("--target android 時は ADB シリアル(serial)が必須です")
+            })?;
+            let controller =
+                anaden_device::AppController::new(anaden_device::AdbClient::new(serial));
+            controller
+                .ensure_app_open(wait)
+                .await
+                .map_err(|e| anyhow::anyhow!("ゲーム起動保証に失敗({serial}): {e}"))
+        }
+        "windows" => anyhow::bail!(
+            "`--target windows` は Windows ビルドでのみ利用可能です。このバイナリは Windows 向けではないため PC版バックエンドを使用できません"
+        ),
+        other => anyhow::bail!("--target は `android` または `windows` です(指定値: {other})"),
+    }
 }
 
 /// `--algorithm` 文字列を Algorithm へ解決する。
@@ -211,12 +333,15 @@ async fn run_pipeline_live(
 
     // ---- (2b) ゲーム起動保証 ----
     // 接続時にゲームが開いている保証はないため、非前景なら起動して前景化を待つ。
+    // 起動保証の呼出本体は `ensure_open_outcome`(run/standalone 共有)へ一本化。
+    // run パスは Timeout を soft warn として扱いパイプラインを継続する(standalone とは異なる)。
     if ensure_open {
-        let controller = anaden_device::AppController::new(anaden_device::AdbClient::new(serial));
-        let outcome = controller
-            .ensure_app_open(Duration::from_secs(ensure_open_wait_secs))
-            .await
-            .map_err(|e| anyhow::anyhow!("ゲーム起動保証に失敗({serial}): {e}"))?;
+        let outcome = ensure_open_outcome(
+            "android",
+            Some(serial),
+            Duration::from_secs(ensure_open_wait_secs),
+        )
+        .await?;
         match outcome {
             anaden_device::EnsureOutcome::AlreadyOpen => {
                 info!("ゲームは既に前景(起動不要)");
@@ -387,12 +512,13 @@ async fn run_with_windows(
     );
 
     // ---- (2) 起動保証(Win32Launch) ----
+    // `launcher` は (5) の NoMatch リカバリフックでも再利用するためここで構築。
+    // 起動保証の呼出本体は `ensure_open_outcome`(run/standalone 共有)へ一本化。
     let launcher = anaden_device::Win32Launch::default_paths();
     if ensure_open {
-        let outcome = launcher
-            .ensure_open(Duration::from_secs(ensure_open_wait_secs))
-            .await
-            .map_err(|e| anyhow::anyhow!("ゲーム起動保証(Win32)に失敗: {e}"))?;
+        let outcome =
+            ensure_open_outcome("windows", None, Duration::from_secs(ensure_open_wait_secs))
+                .await?;
         match outcome {
             anaden_device::EnsureOutcome::AlreadyOpen => info!("ゲームは既に起動中(起動不要)"),
             anaden_device::EnsureOutcome::Launched => info!("ゲームを起動し生存を確認"),
@@ -461,6 +587,7 @@ async fn run_with_windows(
 
 /// `--target windows` 指定だが非 Windows ビルド時のフォールバック(コンパイルエラー回避)。
 #[cfg(not(windows))]
+#[allow(clippy::too_many_arguments)]
 async fn run_with_windows(
     _start_task: &str,
     _pipeline_dir: &PathBuf,
@@ -733,6 +860,103 @@ async fn run_legacy(
     Ok(())
 }
 
+/// `ensure-open` / `launch` サブコマンドの実行部(Issue #21)。
+///
+/// `target` でバックエンドを解決し、`force_launch` で挙動を切り替える:
+/// - `force_launch == false`(`ensure-open`): ゲームが非前景/未起動なら起動し、前景化/生存を
+///   `wait` の間ポーリング確認する。起動保証の呼出本体は [`ensure_open_outcome`] へ一本化
+///   (`run` パスと同一の真実の源・ドリフト防止)。
+/// - `force_launch == true`(`launch`): 常に launch を1回実行した上で、前景化/生存を
+///   [`ensure_open_outcome`] で確認する。
+///
+/// 戻り値は `Result<EnsureOutcome, anyhow::Error>`:
+/// - `Ok(outcome)`: ドメイン成果物。`main()` が [`exit_standalone`] へ渡し、
+///   [`standalone_exit_code`] で exit code を決定し、[`ensure_outcome_label`] の1行を
+///   印字してから `std::process::exit` する。
+/// - `Err(_)`: ハードエラー(AdbError / spawn / OpenProcess 失敗)。同じく [`exit_standalone`]
+///   が [`standalone_exit_code`] で `EXIT_HARDCERROR`(1) へ射影し exit 1 する
+///   (AC4 の真経路。本関数では exit しない=テスト可能性と panic 禁止のため)。
+async fn run_ensure_open_or_launch(
+    target: &str,
+    serial: Option<&str>,
+    wait_secs: u64,
+    force_launch: bool,
+) -> Result<anaden_device::EnsureOutcome> {
+    let wait = Duration::from_secs(wait_secs);
+    // force_launch 時の先行 launch は起動済みかに関わらず常に 1 回行う(launch サブコマンド専用)。
+    // その後の生存/前景化確認は `ensure_open_outcome` で `run` パスと共有する。
+    if force_launch {
+        force_launch_app(target, serial).await?;
+    }
+    ensure_open_outcome(target, serial, wait).await
+}
+
+/// スタンドアロン(`ensure-open`/`launch`)サブコマンドの成果物→終了コード適用(唯一の exit 点)。
+///
+/// [`standalone_exit_code`] で Ok/Err 両方の終了コードを決定し(AC1-AC4 の契約適用)、
+/// 人間可読1行を印字してから `std::process::exit` する。`-> !` で常に diverge するため、
+/// main の match arm はこれだけで完結する(`?` bubble による暗黙 exit 1 を廃止し、
+/// AC4「hard error ⇒ exit 1」を明示的な真経路へ置換)。
+fn exit_standalone(result: Result<anaden_device::EnsureOutcome, anyhow::Error>) -> ! {
+    let code = standalone_exit_code(result.as_ref());
+    match &result {
+        Ok(outcome) => println!("{}", ensure_outcome_label(outcome)),
+        Err(e) => eprintln!("ensure-open/launch 失敗: {e}"),
+    }
+    std::process::exit(code);
+}
+
+/// `launch` サブコマンドの先行起動(`force_launch == true` 時)。起動済みかに関わらず
+/// 常に 1 回 `launch_app` を呼ぶ。実機呼出のみで戻り値なし(成果物は呼出元の ensure が担う)。
+#[cfg(windows)]
+async fn force_launch_app(target: &str, serial: Option<&str>) -> Result<()> {
+    match target {
+        "android" => {
+            let serial = serial.ok_or_else(|| {
+                anyhow::anyhow!("--target android 時は ADB シリアル(serial)が必須です")
+            })?;
+            let controller =
+                anaden_device::AppController::new(anaden_device::AdbClient::new(serial));
+            controller
+                .launch_app()
+                .await
+                .map_err(|e| anyhow::anyhow!("ゲーム起動に失敗({serial}): {e}"))
+        }
+        "windows" => {
+            let launcher = anaden_device::Win32Launch::default_paths();
+            launcher
+                .launch_app()
+                .await
+                .map_err(|e| anyhow::anyhow!("ゲーム起動(Win32)に失敗: {e}"))
+        }
+        other => anyhow::bail!("--target は `android` または `windows` です(指定値: {other})"),
+    }
+}
+
+/// `force_launch_app` の非 Windows ビルド向けフォールバック(コンパイルエラー回避)。
+///
+/// android(ADB) はプラットフォーム非依存なので機能する。bail するのは `windows` のみ。
+#[cfg(not(windows))]
+async fn force_launch_app(target: &str, serial: Option<&str>) -> Result<()> {
+    match target {
+        "android" => {
+            let serial = serial.ok_or_else(|| {
+                anyhow::anyhow!("--target android 時は ADB シリアル(serial)が必須です")
+            })?;
+            let controller =
+                anaden_device::AppController::new(anaden_device::AdbClient::new(serial));
+            controller
+                .launch_app()
+                .await
+                .map_err(|e| anyhow::anyhow!("ゲーム起動に失敗({serial}): {e}"))
+        }
+        "windows" => anyhow::bail!(
+            "`--target windows` は Windows ビルドでのみ利用可能です。このバイナリは Windows 向けではないため PC版バックエンドを使用できません"
+        ),
+        other => anyhow::bail!("--target は `android` または `windows` です(指定値: {other})"),
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // ロギングの初期化
@@ -800,5 +1024,168 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
+        Commands::EnsureOpen {
+            target,
+            serial,
+            wait_secs,
+        } => {
+            // ensure-open: 起動状態確認＋必要なら起動。Timeout は CI gate 失敗(exit 2)。
+            // Ok/Err 双方の終了コードを `exit_standalone`(唯一の exit 点)で適用する。
+            exit_standalone(
+                run_ensure_open_or_launch(&target, serial.as_deref(), wait_secs, false).await,
+            );
+        }
+        Commands::Launch {
+            target,
+            serial,
+            wait_secs,
+        } => {
+            // launch: 無条件起動(AlreadyOpen チェックなし)。終了コード契約は ensure-open に同じ。
+            exit_standalone(
+                run_ensure_open_or_launch(&target, serial.as_deref(), wait_secs, true).await,
+            );
+        }
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use anaden_cli_contract::{EXIT_TIMEOUT, ensure_open_exit_code};
+
+    // ---- ensure_outcome_label (pure contract, device-free) ----
+    // この純粋関数が `run` パス(android/windows)と standalone サブコマンドの
+    // 「EnsureOutcome → 人間可読メッセージ」唯一の真実の源(single source of truth)。
+    // 両経路のドリフトを防ぐため、ラベル化は必ずこの関数へ集中させる。
+
+    #[test]
+    fn label_already_open() {
+        assert_eq!(
+            ensure_outcome_label(&anaden_device::EnsureOutcome::AlreadyOpen),
+            "起動不要(既に起動中)"
+        );
+    }
+
+    #[test]
+    fn label_launched() {
+        assert_eq!(
+            ensure_outcome_label(&anaden_device::EnsureOutcome::Launched),
+            "起動し生存を確認"
+        );
+    }
+
+    #[test]
+    fn label_timeout() {
+        assert_eq!(
+            ensure_outcome_label(&anaden_device::EnsureOutcome::Timeout),
+            "起動タイムアウト"
+        );
+    }
+
+    #[test]
+    fn label_covers_all_variants() {
+        // EnsureOutcome へ新バリアントが追加された際、このテストがラベル未対応を検出する。
+        let variants = [
+            anaden_device::EnsureOutcome::AlreadyOpen,
+            anaden_device::EnsureOutcome::Launched,
+            anaden_device::EnsureOutcome::Timeout,
+        ];
+        for v in &variants {
+            // 各バリアントが空でないラベルへ解決されること(フォールバック漏れ検出)。
+            let label = ensure_outcome_label(v);
+            assert!(!label.is_empty(), "variant {:?} produced empty label", v);
+        }
+    }
+
+    // ---- ensure_open_exit_code (Issue #21 exit-code contract, device-free) ----
+    // 契約: AlreadyOpen=0, Launched=0, Timeout=2(非0・ハードエラー1とは区別)。
+    // ハードエラー(AdbError/spawn/OpenProcess 失敗)は standalone_exit_code が Err を
+    // EXIT_HARDCERROR(1) へ射影する(main exit_standalone の真経路・AC4)。本テストは
+    // 「ソフト成果物の exit code」のみ検証し、Err 側は ensure_open_cli.rs の真正テストが担う。
+
+    #[test]
+    fn exit_code_already_open_is_zero() {
+        // CI gate は AlreadyOpen を success とみなす(UC-1: 起動スキップ)。
+        assert_eq!(
+            ensure_open_exit_code(&anaden_device::EnsureOutcome::AlreadyOpen),
+            0
+        );
+    }
+
+    #[test]
+    fn exit_code_launched_is_zero() {
+        // CI gate は Launched を success とみなす(UC-2: 起動+生存確認)。
+        assert_eq!(
+            ensure_open_exit_code(&anaden_device::EnsureOutcome::Launched),
+            0
+        );
+    }
+
+    #[test]
+    fn exit_code_timeout_is_non_zero_and_distinct_from_hard_error() {
+        // UC-3: Timeout は CI gate 失敗(非0)。推奨契約値 2 はハードエラー(exit 1 via
+        // standalone_exit_code)と区別される「ソフト失敗」。この分離が run-vs-standalone の意味の分裂の核。
+        let code = ensure_open_exit_code(&anaden_device::EnsureOutcome::Timeout);
+        assert_ne!(code, 0, "Timeout must be non-zero for CI gate");
+        assert_eq!(code, EXIT_TIMEOUT, "Timeout must map to EXIT_TIMEOUT (2)");
+        assert_ne!(
+            code, 1,
+            "Timeout must be distinct from hard-error exit code 1"
+        );
+    }
+
+    #[test]
+    fn exit_code_success_variants_share_zero() {
+        // AlreadyOpen と Launched は CI gate 上同一个(success)。両者が異なる exit code だと
+        // スクリプト分岐が無用に複雑になる。同一の 0 に揃っていることを検証。
+        assert_eq!(
+            ensure_open_exit_code(&anaden_device::EnsureOutcome::AlreadyOpen),
+            ensure_open_exit_code(&anaden_device::EnsureOutcome::Launched)
+        );
+    }
+
+    // ---- ensure_open_outcome: ターゲット解離・引数バリデーション(デバイス非依存分岐) ----
+    // 実機呼出(android: ADB / windows: Win32)は各バックエンドのユニットテストで検証済み。
+    // ここではバックエンドへ到達する前に bail する分岐(不正ターゲット・serial 必須)のみ検証する。
+    // これが `run` パスと standalone サブコマンドの共有する ensure 本体の契約入口。
+
+    #[tokio::test]
+    async fn ensure_open_outcome_rejects_unknown_target() {
+        // 不正ターゲットはバックエンド解決前にエラー(panic しない)。
+        let result =
+            ensure_open_outcome("ios", Some("localhost:5555"), Duration::from_secs(1)).await;
+        assert!(result.is_err(), "unknown target must error, not panic");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("--target"),
+            "error should mention --target validation, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn ensure_open_outcome_android_requires_serial() {
+        // android ターゲットで serial 未指定は引数エラー(panic しない)。
+        // シリアル解決で即 bail するため実機 ADB 呼出へ到達しない。
+        let result = ensure_open_outcome("android", None, Duration::from_secs(1)).await;
+        assert!(result.is_err(), "android without serial must error");
+        let msg = format!("{}", result.unwrap_err());
+        assert!(
+            msg.contains("serial"),
+            "error should mention missing serial, got: {msg}"
+        );
+    }
+
+    #[tokio::test]
+    async fn force_launch_app_rejects_unknown_target() {
+        // launch サブコマンドの先行起動も同じターゲットバリデーションを共有する。
+        let result = force_launch_app("ios", Some("localhost:5555")).await;
+        assert!(result.is_err(), "unknown target must error, not panic");
+        assert!(
+            format!("{}", result.unwrap_err()).contains("--target"),
+            "error should mention --target validation"
+        );
     }
 }

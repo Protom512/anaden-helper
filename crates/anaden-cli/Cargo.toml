@@ -4,6 +4,10 @@ description = "CLI entry point for Another Eden automation"
 version.workspace = true
 edition.workspace = true
 
+[lib]
+name = "anaden_cli_contract"
+path = "src/contract.rs"
+
 [[bin]]
 name = "anaden"
 path = "src/main.rs"
