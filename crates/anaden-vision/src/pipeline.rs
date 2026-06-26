@@ -2515,6 +2515,28 @@ mod tests {
         let defs = load_pipeline(&dir).expect("title_pc load");
         let screenshot = image::open(&probe_path).expect("open title_pc_probe.png");
 
+        // RAW 空間契約(Issue #12): title_pc_probe.png は PC RAW 1258x708 空間でなければ
+        // ならない(docs/pc-capture-dimensions.md §2・ScreenScaler は 1258<=1280 で RAW
+        // passthrough)。field_pc_probe.png / menu_pc_probe.png と同一取得経路(GetClientRect
+        // 1258x708 PrintWindow)。異寸法(例: 1918x1048 のフル HWND キャプチャ)は ROI/template
+        // が 1258x708 空間で定義されるため幾何学的に不一致し、下流 detect が無意味に None に
+        // なる。ここで fail-loud し正しい RAW 空間での再取得を促す(R5 no-false-green 原則)。
+        const TITLE_PC_PROBE_RAW_W: u32 = 1258;
+        const TITLE_PC_PROBE_RAW_H: u32 = 708;
+        assert_eq!(
+            (screenshot.width(), screenshot.height()),
+            (TITLE_PC_PROBE_RAW_W, TITLE_PC_PROBE_RAW_H),
+            "title_pc_probe.png is {}x{} but PC RAW space contract is {}x{} \
+             (docs/pc-capture-dimensions.md §2). Re-capture via the same path as \
+             field_pc_probe.png / menu_pc_probe.png (GetClientRect 1258x708 PrintWindow). \
+             A mismatched-size probe is geometrically incompatible with the 1258x708-space \
+             ROI/templates and produces a meaningless NoMatch downstream (Issue #12).",
+            screenshot.width(),
+            screenshot.height(),
+            TITLE_PC_PROBE_RAW_W,
+            TITLE_PC_PROBE_RAW_H,
+        );
+
         for d in &defs {
             let m = d
                 .detect(&screenshot, Path::new(""))
