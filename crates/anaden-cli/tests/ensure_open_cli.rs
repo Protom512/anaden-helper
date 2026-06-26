@@ -22,7 +22,7 @@
 
 use anaden_cli_contract::{
     EXIT_ALREADY_OR_LAUNCHED, EXIT_HARDCERROR, EXIT_TIMEOUT, EnsureOpenTarget,
-    ensure_open_exit_code, resolve_target,
+    ensure_open_exit_code, resolve_target, standalone_exit_code,
 };
 use anaden_device::EnsureOutcome;
 
@@ -69,35 +69,40 @@ fn hard_error_exit_code_is_one() {
     assert_ne!(EXIT_HARDCERROR, EXIT_TIMEOUT);
 }
 
+// ---- AC4 真経路: hard error(spawn/OpenProcess/AdbError 失敗) ⇒ exit 1 (真経路) ----
+// standalone_exit_code が Err を EXIT_HARDCERROR(1) へ射影する。これが AC4 契約の真正証拠
+//（従来は anyhow bubble の暗黙 exit 1 に依存し未検証だった）。prod(main exit_standalone)は
+// この純粋関数へ Ok/Err 双方を委任するため、ここで契約を固定すれば prod 挙動も固定される。
+#[test]
+fn hard_error_maps_to_exit_one_via_standalone() {
+    let r: Result<&EnsureOutcome, &str> = Err("spawn failed");
+    assert_eq!(standalone_exit_code(r), EXIT_HARDCERROR);
+    assert_eq!(standalone_exit_code(r), 1);
+    // Ok 側との区別も再確認(Timeout は 2 で hard error 1 とは異なる)。
+    assert_eq!(
+        standalone_exit_code::<()>(Ok(&EnsureOutcome::Timeout)),
+        EXIT_TIMEOUT
+    );
+}
+
 // ---- AC5: android ターゲットは serial 必須(None は引数エラー扱い) ----
-// contract 層の target 解決が Android を正しく識別することで、
-// 呼び出し側が「Android + serial None => EXIT_HARDCERROR」と判定できる根拠となる。
+// contract 層が Android を正しく識別することで、呼出側(main の ensure_open_outcome /
+// force_launch_app)が「Android + serial None => Err => EXIT_HARDCERROR」と判定できる根拠となる。
+// serial 強制の実経路は main.rs インラインテスト(ensure_open_outcome_android_requires_serial)
+// が真正に担保済みのため、統合テスト側は contract 層の識別のみを固定する(tdd-coupling: 実装
+// 詳細のモックで偽 green を作らず、公開契約の振る舞いのみを検証)。
 #[test]
 fn android_target_requires_serial_argument() {
-    let target = resolve_target("android");
-    assert_eq!(target, Ok(EnsureOpenTarget::Android));
-    // Android 判定後、serial が None なら呼び出し側は EXIT_HARDCERROR(1) を返す。
-    // このテストは「Android 識別が正しいこと」を契約化し、serial チェックの前提を固定する。
-    let resolved = target.unwrap();
-    let serial: Option<&str> = None;
-    assert_eq!(android_serial_error_exit(resolved, serial), EXIT_HARDCERROR);
+    assert_eq!(resolve_target("android"), Ok(EnsureOpenTarget::Android));
 }
 
 // ---- AC6: windows ターゲットを非 Windows ビルドで呼出 => graceful error (panic しない) ----
-// resolve_target("windows") 自体は両プラットフォームで Ok(panic しない)。
-// 非想定環境での graceful fallback はバイナリ側(cfg! 呼出)で行うが、
-// その判定根拠となる「windows が正しく解決されること」をここで担保する。
+// resolve_target("windows") 自体は両プラットフォームで Ok(panic しない)。非 Windows ビルド
+// での graceful fallback はバイナリ側(cfg-gate された bail)で行うが、その判定根拠となる
+// 「windows が正しく解決されること」をここで担保する(モック呼出なし・純粋契約のみ)。
 #[test]
 fn windows_target_resolves_without_panic_on_any_platform() {
-    let target = resolve_target("windows"); // must not panic
-    assert_eq!(target, Ok(EnsureOpenTarget::Windows));
-    // Windows では serial 不要(本テストは serial 不要性の回帰防止)。
-    let resolved = target.unwrap();
-    assert_eq!(
-        android_serial_error_exit(resolved, None),
-        EXIT_ALREADY_OR_LAUNCHED,
-        "Windows ターゲットでは serial 未指定でもエラーにならないこと"
-    );
+    assert_eq!(resolve_target("windows"), Ok(EnsureOpenTarget::Windows));
 }
 
 // ---- AC7: 不正 --target 文字列 => 引数エラー(Err) ----
@@ -137,16 +142,5 @@ fn all_outcome_variants_project_to_defined_constants() {
             code == EXIT_ALREADY_OR_LAUNCHED || code == EXIT_HARDCERROR || code == EXIT_TIMEOUT,
             "未知の終了コードに射影された: outcome={outcome:?} code={code}"
         );
-    }
-}
-
-// ---- ヘルパ: AC5/AC6 で使う「Android + serial 必須」判定の純粋モック ----
-// バイナリ側(main.rs)の実装と同じ論理: Android で serial None なら hard error。
-// これをテスト内に置くことで、契約層が Android 識別を正しく提供している限り
-// バイナリ側の serial チェックも契約どおり振る舞えることを固定する。
-fn android_serial_error_exit(target: EnsureOpenTarget, serial: Option<&str>) -> i32 {
-    match target {
-        EnsureOpenTarget::Android if serial.is_none() => EXIT_HARDCERROR,
-        _ => EXIT_ALREADY_OR_LAUNCHED,
     }
 }

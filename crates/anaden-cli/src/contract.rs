@@ -64,6 +64,22 @@ pub fn ensure_open_exit_code(outcome: &EnsureOutcome) -> i32 {
     }
 }
 
+/// スタンドアロン ensure-open/launch の終了コード決定(Ok/Err 双方を覆盖・純粋・決定論的)。
+///
+/// Issue #21 AC4: Ok 側は [`ensure_open_exit_code`] へ委任、Err 側(ハードエラー:
+/// AdbError / spawn / OpenProcess 失敗)は [`EXIT_HARDCERROR`](1)。本関数が AC4 の
+/// 「hard error ⇒ exit 1」契約の唯一の真実の源。`std::process::exit` はテスト不能なため、
+/// exit の発動は呼出側(main の `exit_standalone`)が行い、本関数は純粋に射影するだけ
+/// (テスト可能性と rust-anti-patterns panic 禁止の両立)。ジェネリック `<E>` により
+/// anyhow 型へ依存せず device/anyhow フリーを維持。`E: ?Sized` により `&str`(`E = str`)
+/// のような unsized なエラー型の借用も受け取れる(`Result<&EnsureOutcome, &str>` でテスト可能)。
+pub fn standalone_exit_code<E: ?Sized>(result: Result<&EnsureOutcome, &E>) -> i32 {
+    match result {
+        Ok(outcome) => ensure_open_exit_code(outcome),
+        Err(_) => EXIT_HARDCERROR,
+    }
+}
+
 /// [`EnsureOutcome`] を人間可読な1行ラベルへ射影する純粋関数。
 ///
 /// `run` パス(android/windows)と standalone サブコマンド(`ensure-open`/`launch`)の
