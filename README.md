@@ -69,6 +69,38 @@ target/release/anaden run <serial> <pipeline_dir> <start_task> \
   --capture scrcpy --input scrcpy --algorithm ccoeff
 ```
 
+### 起動状態確認・起動（`ensure-open` / `launch`）
+
+パイプライン実行なしで「ゲームが起動しているか確認し、未起動なら起動する」を単独で行う独立 CI gate サブコマンド（Issue #21）。`run` の `--ensure-open true`（デフォルト ON）と同等の起動保証ロジックを、パイプラインを回さずに実行できる。終了コードで AlreadyOpen / Launched / Timeout を機械的に取得可能（CI gate・運用スクリプトからの単体呼び出し向け）。
+
+```bash
+# PC 版: 起動状態確認＋必要なら起動（serial 不要）
+target/release/anaden ensure-open --target windows
+
+# Android 版: serial は位置引数（必須）
+target/release/anaden ensure-open <serial> --target android
+
+# 無条件起動（AlreadyOpen チェックなし・リカバリ用途）
+target/release/anaden launch --target windows
+```
+
+**終了コード契約**（`run` とは意図的に異なる・純加算）:
+
+| 成果物 | `ensure-open` / `launch` | `run`（参考・変更なし） |
+|---|---|---|
+| AlreadyOpen / Launched | `0`（成功） | soft log（継続） |
+| Timeout（起動したが前景化せず） | `2`（CI gate 失敗） | soft warn（継続） |
+| ハードエラー（AdbError / spawn / OpenProcess 失敗） | `1` | error |
+
+`run` は Timeout でもパイプラインを継続するが、スタンドアロン gate は CI スクリプトへ「起動失敗」を明示するため Timeout を非ゼロで返す。
+
+```bash
+# CI gate 例: 起動保証を前提ステップとして実行（Timeout/ハードエラーで非ゼロ）
+anaden ensure-open --target windows || { echo "起動保証失敗"; exit 1; }
+```
+
+> `--target windows` は Windows ビルドのみ利用可能。非 Windows ビルドでは `--target android`（ADB）のみ機能し、`windows` は graceful エラー（exit 1）する（`wfsdrv` 依存の Win32 バックエンド absent）。`--wait-secs`（既定 30）で起動/前景化待ちタイムアウトを調整可。
+
 ## 主なフラグ
 
 | フラグ | 値 | 説明 |
