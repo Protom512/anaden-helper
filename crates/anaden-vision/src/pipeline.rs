@@ -2515,27 +2515,32 @@ mod tests {
         let defs = load_pipeline(&dir).expect("title_pc load");
         let screenshot = image::open(&probe_path).expect("open title_pc_probe.png");
 
-        // RAW 空間契約(Issue #12): title_pc_probe.png は PC RAW 1258x708 空間でなければ
-        // ならない(docs/pc-capture-dimensions.md §2・ScreenScaler は 1258<=1280 で RAW
-        // passthrough)。field_pc_probe.png / menu_pc_probe.png と同一取得経路(GetClientRect
-        // 1258x708 PrintWindow)。異寸法(例: 1918x1048 のフル HWND キャプチャ)は ROI/template
-        // が 1258x708 空間で定義されるため幾何学的に不一致し、下流 detect が無意味に None に
-        // なる。ここで fail-loud し正しい RAW 空間での再取得を促す(R5 no-false-green 原則)。
+        // PC RAW 空間(1258x708)へ正規化(Issue #12)。取得ウィンドウサイズは表示解像度/DPI で
+        // 変動しオペレータは制御できない(「画像側でサイズ変更」指示)。ROI/template は PC RAW
+        // 1258x708 空間で定義されるため、probe が異寸法(例: 1918x1048)なら 1258x708 へ
+        // resize_exact してから detect に渡す。これで field_pc_probe/menu_pc_probe(1258x708
+        // native)と同一空間へ揃う。ScreenScaler は 1280 基準で PC(1258<=1280) を RAW passthrough
+        // するため、ここで PC RAW 空間への明示 resize が必要(detect は呼出側が正規化済みを前提)。
         const TITLE_PC_PROBE_RAW_W: u32 = 1258;
         const TITLE_PC_PROBE_RAW_H: u32 = 708;
-        assert_eq!(
-            (screenshot.width(), screenshot.height()),
-            (TITLE_PC_PROBE_RAW_W, TITLE_PC_PROBE_RAW_H),
-            "title_pc_probe.png is {}x{} but PC RAW space contract is {}x{} \
-             (docs/pc-capture-dimensions.md §2). Re-capture via the same path as \
-             field_pc_probe.png / menu_pc_probe.png (GetClientRect 1258x708 PrintWindow). \
-             A mismatched-size probe is geometrically incompatible with the 1258x708-space \
-             ROI/templates and produces a meaningless NoMatch downstream (Issue #12).",
-            screenshot.width(),
-            screenshot.height(),
-            TITLE_PC_PROBE_RAW_W,
-            TITLE_PC_PROBE_RAW_H,
-        );
+        let screenshot = if screenshot.width() == TITLE_PC_PROBE_RAW_W
+            && screenshot.height() == TITLE_PC_PROBE_RAW_H
+        {
+            screenshot // 既に RAW 空間(field_pc_probe/menu_pc_probe と同一)
+        } else {
+            eprintln!(
+                "title_pc_probe.png is {}x{} — resizing to PC RAW {}x{} (window size is not operator-controllable)",
+                screenshot.width(),
+                screenshot.height(),
+                TITLE_PC_PROBE_RAW_W,
+                TITLE_PC_PROBE_RAW_H,
+            );
+            screenshot.resize_exact(
+                TITLE_PC_PROBE_RAW_W,
+                TITLE_PC_PROBE_RAW_H,
+                image::imageops::FilterType::Triangle,
+            )
+        };
 
         for d in &defs {
             let m = d
