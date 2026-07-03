@@ -1,7 +1,36 @@
 #!/bin/bash
 # Reliability test harness for block-dangerous-git.sh
 # Feeds synthetic tool_input JSON and reports BLOCK/ALLOW per case.
-HOOK="C:/Users/black/git-repo/anaden-helper/.claude/hooks/block-dangerous-git.sh"
+#
+# Portability: HOOK is derived from REPO_ROOT via `git rev-parse --show-toplevel`,
+# mirroring scripts/verify_pr_merge_safety.sh L25-37 (set -u, git-presence check,
+# REPO_ROOT derivation with fail-closed exit, cd into repo). No machine-specific
+# path literals — runs on any checkout / CI / non-Windows machine.
+
+set -u
+
+# --- Preflight (AC2): fail-closed on missing prerequisites -------------------
+if ! command -v git >/dev/null 2>&1; then
+  echo "ERROR: git not found in PATH" >&2
+  exit 1
+fi
+if ! command -v jq >/dev/null 2>&1; then
+  echo "ERROR: jq not found in PATH" >&2
+  exit 1
+fi
+
+# --- AC1: derive repo root + hook path, no hardcoded machine-specific path ----
+REPO_ROOT="$(git rev-parse --show-toplevel 2>/dev/null)" || {
+  echo "ERROR: not inside a git repository" >&2
+  exit 1
+}
+# shellcheck disable=SC2164
+cd "$REPO_ROOT"
+HOOK="$REPO_ROOT/.claude/hooks/block-dangerous-git.sh"
+if [ ! -f "$HOOK" ]; then
+  echo "ERROR: hook not found at $HOOK" >&2
+  exit 1
+fi
 run() {
   local desc="$1"; local cmd="$2"
   local json
