@@ -26,8 +26,14 @@ ALWAYS_BLOCK_PATTERNS=(
   "push --mirror"
 )
 
+# ALWAYS_BLOCK 判定は --force-with-lease を benign flag として事前 strip した COPY で行う。
+# 元の COMMAND は L38+ の refspec / bare-push 判定で再利用するため破壊しない(Option B)。
+#   ※ push --force / push -f (無条件 force push) はこの COPY 上でも一致して BLOCK される。
+#   ※ --force-with-lease は strip 済みなので誘爆せず、feature ブランチ上の push は後段で ALLOW される。
+COMMAND_FOR_ALWAYS_BLOCK=$(echo "$COMMAND" | sed -E 's/[[:space:]]+--force-with-lease([[:space:]]|$)/ /g')
+
 for pattern in "${ALWAYS_BLOCK_PATTERNS[@]}"; do
-  if echo "$COMMAND" | grep -qE "$pattern"; then
+  if echo "$COMMAND_FOR_ALWAYS_BLOCK" | grep -qE "$pattern"; then
     echo "BLOCKED: '$COMMAND' matches dangerous pattern '$pattern'. The user has prevented you from doing this." >&2
     exit 2
   fi
