@@ -636,6 +636,8 @@ where
             anaden_engine::LoopStopReason::Stop => "Stop アクション到達(正常)",
             anaden_engine::LoopStopReason::TerminalTask => "終端タスク到達(正常)",
             anaden_engine::LoopStopReason::MaxIterations => "最大サイクル到達",
+            anaden_engine::LoopStopReason::GoalReached => "宣言的ゴール到達(正常)",
+            anaden_engine::LoopStopReason::GoalTimeout => "ゴール未到達タイムアウト(soft failure)",
             anaden_engine::LoopStopReason::CaptureError => "キャプチャエラーで停止",
             anaden_engine::LoopStopReason::ExecuteError => "発火エラーで停止",
         }

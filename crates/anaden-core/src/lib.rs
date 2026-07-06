@@ -5,12 +5,16 @@
 
 pub mod action;
 pub mod game_state;
+pub mod goal;
 pub mod recognition;
 pub mod region;
 pub mod strategy;
 
 pub use action::{InputAction, ScreenPoint};
 pub use game_state::{BattlePhase, DialogType, GameState, MenuTab, MiniGameType};
+pub use goal::{
+    Goal, GoalError, GoalReport, GoalStatus, GoalStatusContext, StopCondition, evaluate,
+};
 pub use recognition::{MatchConfidence, RecognitionResult, TemplateMatch};
 pub use region::ScreenRegion;
 pub use strategy::MiniGameStrategy;

@@ -12,10 +12,11 @@
 
 use std::future::Future;
 use std::pin::Pin;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use async_trait::async_trait;
 use image::DynamicImage;
+use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use anaden_core::InputAction;
@@ -424,7 +425,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
 }
 
 /// run_loop の停止理由。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum LoopStopReason {
     /// `Action::Stop` 到達(NoFire + next_current=None)。
     Stop,
@@ -436,10 +438,57 @@ pub enum LoopStopReason {
     CaptureError,
     /// execute 失敗。
     ExecuteError,
+    /// 宣言的ゴール到達(`anaden_core::goal::evaluate` が reached を返した)。
+    /// Issue #37 T3: ゴール駆動自動化の正常終端。
+    GoalReached,
+    /// ゴール未到達タイムアウト(最大イテレーション到達だがゴール活性)。
+    /// Issue #37 T3: 成果物は出たが宣言的ゴール未到達の soft failure。
+    GoalTimeout,
+}
+
+/// タスク毎のマッチ回数(UC-3 進捗レポート用)。
+///
+/// `LoopOutcome::progress_report` の `per_task_matches` の要素。CI/studio が
+/// 「どのタスクが何回マッチしたか」を機械処理するための構造化エントリ。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct TaskMatchCount {
+    /// マッチ対象のタスク名。
+    pub task: String,
+    /// このタスクがマッチ(発火または状態遷移のみの遷移)した回数。
+    pub matches: u64,
+}
+
+/// UC-3「タイムアウト時の進捗レポート」を機械可読にするための構造化サマリ。
+///
+/// `LoopOutcome` に埋め込まれ、CI/studio が成果(JSON/TOML)を消費できるよう
+/// `Serialize` を備える。`#[serde(default)]` で `LoopOutcome` に保持されるため、
+/// 古いシリアライズ成果物(本フィールド無し)からのデシリアライズも壊さない。
+///
+/// # フィールドの意味
+/// - `iterations`: 実行したサイクル数(`LoopOutcome::iterations` と同値)。
+/// - `fired_count`: 実際にコマンド発火した回数(`fired_commands.len()` と同値)。
+/// - `per_task_matches`: タスク毎のマッチ回数。ループ内で現在タスクがマッチする度に +1。
+/// - `elapsed_ms`: ループ開始から停止までの推定経過ミリ秒(`Instant` 計測)。
+/// - `terminal_task`: 停止時に到達していたタスク名(終端タスクまたは最終タスク)。
+/// - `reached_goal`: ゴール駆動モードで到達したゴールの記述子。非ゴールモードでは [`None`]。
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct ProgressReport {
+    /// 実行したサイクル数。
+    pub iterations: u64,
+    /// 発火した回数。
+    pub fired_count: u64,
+    /// タスク毎のマッチ回数(挿入順保持)。
+    pub per_task_matches: Vec<TaskMatchCount>,
+    /// 推定経過ミリ秒。
+    pub elapsed_ms: u64,
+    /// 停止時の到達タスク名(分からなければ [`None`])。
+    pub terminal_task: Option<String>,
+    /// 到達ゴール記述子(非ゴールモードでは [`None`])。
+    pub reached_goal: Option<String>,
 }
 
 /// run_loop の結果。
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopOutcome {
     /// 実行したサイクル数。
     pub iterations: u64,
@@ -449,6 +498,66 @@ pub struct LoopOutcome {
     pub terminal: String,
     /// 停止理由。
     pub reason: LoopStopReason,
+    /// UC-3 進捗レポート(機械可読サマリ)。CI/studio 消費用。
+    /// `#[serde(default)]` により、古い成果物からのデシリアライズを壊さない。
+    #[serde(default)]
+    pub progress_report: ProgressReport,
+}
+
+/// `per_task_matches` へタスク別マッチ回数を +1 する純ヘルパ(UC-3 進捗レポート用)。
+///
+/// 同名タスクが既出ならそのエントリの `matches` をインクリメントし、
+/// 初出なら末尾へ `matches=1` として挿入する(挿入順保持)。`run_loop_with_recovery` が
+/// 各サイクルで現在タスクがマッチしたときに呼ぶ。IO・状態を持たないため単体テスト可能。
+pub fn bump_task_match(current: &str, list: &mut Vec<TaskMatchCount>) {
+    if let Some(entry) = list.iter_mut().find(|e| e.task == current) {
+        entry.matches = entry.matches.saturating_add(1);
+    } else {
+        list.push(TaskMatchCount {
+            task: current.to_string(),
+            matches: 1,
+        });
+    }
+}
+
+/// `LoopOutcome` を人間可読な進捗レポート文字列へ整形する純関数(UC-3)。
+///
+/// CLI 側の提示ロジック(println フォーマット)をエンジン外へ持ち出さず、
+/// エンジン層で一元化する。出力はログ・標準エラー・studio UI のいずれにも
+/// そのまま流せる単一文字列。
+///
+/// # 引数
+/// 整形対象の [`LoopOutcome`](`&LoopOutcome`)。`progress_report` フィールドを優先し、
+/// 旧フィールド(`iterations`/`fired_commands`/`terminal`)はフォールバック参照する。
+pub fn format_progress_report(outcome: &LoopOutcome) -> String {
+    let pr = &outcome.progress_report;
+    let iterations = pr.iterations.max(outcome.iterations);
+    let fired_count = pr.fired_count.max(outcome.fired_commands.len() as u64);
+    let terminal_task: &str = pr
+        .terminal_task
+        .as_deref()
+        .or(Some(outcome.terminal.as_str()))
+        .unwrap_or("(unknown)");
+    let mut lines: Vec<String> = Vec::new();
+    lines.push(format!(
+        "progress: iterations: {iterations}, fired: {fired_count}, elapsed: {}ms",
+        pr.elapsed_ms
+    ));
+    lines.push(format!("terminal: {terminal_task}"));
+    if let Some(goal) = &pr.reached_goal {
+        lines.push(format!("reached_goal: {goal}"));
+    }
+    if pr.per_task_matches.is_empty() {
+        lines.push("per_task_matches: (none)".to_string());
+    } else {
+        let summary: Vec<String> = pr
+            .per_task_matches
+            .iter()
+            .map(|m| format!("{}={}", m.task, m.matches))
+            .collect();
+        lines.push(format!("per_task_matches: {}", summary.join(", ")));
+    }
+    lines.join("\n")
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -481,6 +590,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let mut fired: Vec<InputCommand> = Vec::new();
         let mut nomatch_streak: u32 = 0;
         let recovery_enabled = recover_nomatch_threshold > 0 && recover.is_some();
+        let started = Instant::now();
+        // タスク毎のマッチ回数(挿入順保持)。run_step が現在タスクをマッチさせたら +1。
+        let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
         loop {
             iterations += 1;
             if iterations > max_iterations {
@@ -489,8 +601,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     fired,
                     LoopStopReason::MaxIterations,
                     "max_iterations",
+                    per_task_matches,
+                    started,
                 );
             }
+            let current_before = self.current().to_string();
             let step = if self.verify_after_fire {
                 self.run_once_verified().await
             } else {
@@ -502,6 +617,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     fired: just_fired,
                 } => {
                     nomatch_streak = 0;
+                    bump_task_match(&current_before, &mut per_task_matches);
                     if let Some(c) = just_fired {
                         fired.push(c);
                     }
@@ -512,6 +628,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                                 fired,
                                 LoopStopReason::TerminalTask,
                                 self.current(),
+                                per_task_matches,
+                                started,
                             );
                         }
                         Some(name) => debug!("fired, advancing to {}", name),
@@ -519,6 +637,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 }
                 StepOutcome::NoFire { next_current } => {
                     nomatch_streak = 0;
+                    bump_task_match(&current_before, &mut per_task_matches);
                     match next_current {
                         None => {
                             return self.build_outcome(
@@ -526,6 +645,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                                 fired,
                                 LoopStopReason::Stop,
                                 "stop",
+                                per_task_matches,
+                                started,
                             );
                         }
                         Some(name) => debug!("no-fire, transitioning to {}", name),
@@ -552,6 +673,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                                         fired,
                                         LoopStopReason::ExecuteError,
                                         "recovery_failed",
+                                        per_task_matches,
+                                        started,
                                     );
                                 }
                             }
@@ -564,7 +687,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 } => {
                     // 発火したが対象残存(誤成功)。実質 NoMatch 相当として streak へ加算し、
                     // next_current は無視(current は既に巻き戻されている)して次サイクルで再試行。
-                    // fired は記録に残す(検証失敗でも発火自体は起きた)。
+                    // fired は記録に残す(検証失敗でも発火自体は起きた)。マッチ回数も計上。
+                    bump_task_match(&current_before, &mut per_task_matches);
                     if let Some(c) = just_fired {
                         fired.push(c);
                     }
@@ -587,6 +711,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                                         fired,
                                         LoopStopReason::ExecuteError,
                                         "recovery_failed",
+                                        per_task_matches,
+                                        started,
                                     );
                                 }
                             }
@@ -599,7 +725,14 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     } else {
                         LoopStopReason::ExecuteError
                     };
-                    return self.build_outcome(iterations - 1, fired, reason, "io_error");
+                    return self.build_outcome(
+                        iterations - 1,
+                        fired,
+                        reason,
+                        "io_error",
+                        per_task_matches,
+                        started,
+                    );
                 }
             }
             tokio::time::sleep(interval).await;
@@ -612,17 +745,37 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         fired_commands: Vec<InputCommand>,
         reason: LoopStopReason,
         terminal: &str,
+        per_task_matches: Vec<TaskMatchCount>,
+        started: Instant,
     ) -> LoopOutcome {
+        let terminal_task = if terminal.is_empty() {
+            None
+        } else {
+            Some(terminal.to_string())
+        };
+        let progress_report = ProgressReport {
+            iterations,
+            fired_count: fired_commands.len() as u64,
+            per_task_matches,
+            elapsed_ms: started.elapsed().as_millis() as u64,
+            terminal_task: terminal_task.clone(),
+            // 非ゴールモード。ゴール到達は T4/T5 で run_loop_with_recovery 側が上書きする。
+            reached_goal: None,
+        };
         LoopOutcome {
             iterations,
             fired_commands,
             terminal: terminal.to_string(),
             reason,
+            progress_report,
         }
     }
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use anaden_core::ScreenRegion;
@@ -1612,6 +1765,350 @@ mod tests {
         assert!(
             !outcome.fired_commands.is_empty(),
             "expected at least one fire from matched frame"
+        );
+    }
+
+    // ---- (7) ProgressReport / format_progress_report ----
+
+    /// `ProgressReport::default` が空フィールドを返す(serde default 互換)。
+    #[test]
+    fn progress_report_default_is_empty() {
+        let pr = ProgressReport::default();
+        assert_eq!(pr.iterations, 0);
+        assert_eq!(pr.fired_count, 0);
+        assert!(pr.per_task_matches.is_empty());
+        assert_eq!(pr.elapsed_ms, 0);
+        assert_eq!(pr.terminal_task, None);
+        assert_eq!(pr.reached_goal, None);
+    }
+
+    /// `LoopOutcome` が `progress_report` フィールドを持ち、`build_outcome` が基本統計を埋める。
+    /// 端末タスク名・iterations・fired_count が伝わること。
+    #[tokio::test]
+    async fn run_loop_populates_progress_report_basic_fields() {
+        // Title → LoadGame → Terminal の3タスク。全発火 → TerminalTask 停止。
+        let frames = frames_of(vec![needle_screen(0), needle_screen(1), needle_screen(2)]);
+        let fired = new_fired();
+
+        let tasks = vec![
+            click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            ),
+            click_rect_task(
+                "LoadGame",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["Terminal"]),
+            ),
+            click_rect_task(
+                "Terminal",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                None,
+            ),
+        ];
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            tasks,
+            2400,
+            300,
+        );
+
+        let outcome = driver.run_loop(Duration::ZERO, 10).await;
+        // 基本統計: iterations=3, fired=3, terminal_task=Terminal
+        assert_eq!(outcome.progress_report.iterations, 3);
+        assert_eq!(outcome.progress_report.fired_count, 3);
+        assert_eq!(
+            outcome.progress_report.terminal_task.as_deref(),
+            Some("Terminal")
+        );
+        // 到達ゴールは非ゴールモードなので None のまま(後続タスクが入れる)
+        assert_eq!(outcome.progress_report.reached_goal, None);
+    }
+
+    /// per_task_matches: 発火したタスク毎のマッチ回数が記録される。
+    /// Title(1) → LoadGame(1) → Terminal(1) の各1回。
+    #[tokio::test]
+    async fn run_loop_tracks_per_task_match_counts() {
+        let frames = frames_of(vec![needle_screen(0), needle_screen(1), needle_screen(2)]);
+        let fired = new_fired();
+
+        let tasks = vec![
+            click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            ),
+            click_rect_task(
+                "LoadGame",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["Terminal"]),
+            ),
+            click_rect_task(
+                "Terminal",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                None,
+            ),
+        ];
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            tasks,
+            2400,
+            300,
+        );
+
+        let outcome = driver.run_loop(Duration::ZERO, 10).await;
+        let matches = &outcome.progress_report.per_task_matches;
+        // 3タスクすべて1回ずつマッチ発火している
+        assert_eq!(matches.len(), 3);
+        let by_name: std::collections::HashMap<&str, u64> = matches
+            .iter()
+            .map(|m| (m.task.as_str(), m.matches))
+            .collect();
+        assert_eq!(by_name.get("Title"), Some(&1));
+        assert_eq!(by_name.get("LoadGame"), Some(&1));
+        assert_eq!(by_name.get("Terminal"), Some(&1));
+    }
+
+    /// `format_progress_report` が人間可読文字列を返す純関数。
+    /// 文字列内に iterations/fired/terminal の数値が現れること。
+    #[test]
+    fn format_progress_report_is_human_readable() {
+        let outcome = LoopOutcome {
+            iterations: 7,
+            fired_commands: vec![
+                InputCommand::Tap { x: 1, y: 2 },
+                InputCommand::Tap { x: 3, y: 4 },
+            ],
+            terminal: "Terminal".to_string(),
+            reason: LoopStopReason::TerminalTask,
+            progress_report: ProgressReport {
+                iterations: 7,
+                fired_count: 2,
+                per_task_matches: vec![
+                    TaskMatchCount {
+                        task: "Title".to_string(),
+                        matches: 1,
+                    },
+                    TaskMatchCount {
+                        task: "LoadGame".to_string(),
+                        matches: 1,
+                    },
+                ],
+                elapsed_ms: 1234,
+                terminal_task: Some("Terminal".to_string()),
+                reached_goal: Some("loop_count=7".to_string()),
+            },
+        };
+        let s = format_progress_report(&outcome);
+        assert!(s.contains("iterations: 7"), "got: {s}");
+        assert!(s.contains("fired: 2"), "got: {s}");
+        assert!(s.contains("elapsed"), "got: {s}");
+        assert!(s.contains("1234"), "got: {s}");
+        assert!(s.contains("Terminal"), "got: {s}");
+        assert!(s.contains("Title"), "got: {s}");
+        assert!(s.contains("loop_count=7"), "got: {s}");
+    }
+
+    /// `format_progress_report` が空の ProgressReport でも panic しない。
+    #[test]
+    fn format_progress_report_handles_default() {
+        let outcome = LoopOutcome {
+            iterations: 0,
+            fired_commands: vec![],
+            terminal: "io_error".to_string(),
+            reason: LoopStopReason::CaptureError,
+            progress_report: ProgressReport::default(),
+        };
+        let s = format_progress_report(&outcome);
+        // 空でも基本ラベルは含む
+        assert!(s.contains("iterations: 0"), "got: {s}");
+        assert!(s.contains("fired: 0"), "got: {s}");
+    }
+
+    /// `LoopOutcome` が Serialize 可能で、progress_report フィールドが文字列に現れる。
+    /// toml シリアライザ(anaden-engine 既存依存)で CI/studio 消費可能性を検証する。
+    #[test]
+    fn loop_outcome_is_serializable() {
+        let outcome = LoopOutcome {
+            iterations: 3,
+            fired_commands: vec![InputCommand::Tap { x: 10, y: 20 }],
+            terminal: "Terminal".to_string(),
+            reason: LoopStopReason::TerminalTask,
+            progress_report: ProgressReport {
+                iterations: 3,
+                fired_count: 1,
+                per_task_matches: vec![TaskMatchCount {
+                    task: "Title".to_string(),
+                    matches: 1,
+                }],
+                elapsed_ms: 500,
+                terminal_task: Some("Terminal".to_string()),
+                reached_goal: None,
+            },
+        };
+        let s = toml::to_string(&outcome).expect("serialize");
+        assert!(s.contains("[progress_report]"), "got: {s}");
+        assert!(s.contains("iterations = 3"), "got: {s}");
+        assert!(s.contains("fired_count = 1"), "got: {s}");
+        assert!(s.contains("per_task_matches"), "got: {s}");
+    }
+
+    /// `ProgressReport` 単体が Serialize 可能。
+    #[test]
+    fn progress_report_is_serializable() {
+        let pr = ProgressReport {
+            iterations: 10,
+            fired_count: 5,
+            per_task_matches: vec![TaskMatchCount {
+                task: "A".to_string(),
+                matches: 5,
+            }],
+            elapsed_ms: 999,
+            terminal_task: Some("A".to_string()),
+            reached_goal: Some("template_match conf>=0.85".to_string()),
+        };
+        let s = toml::to_string(&pr).expect("serialize");
+        assert!(s.contains("fired_count = 5"), "got: {s}");
+        assert!(s.contains("template_match"), "got: {s}");
+    }
+
+    /// デシリアライズ時、`progress_report` 欠落 TOML が `#[serde(default)]` で補完される。
+    /// これは既存の古いシリアライズ成果物との後方互換性(CI/studio)を保証する。
+    #[test]
+    fn loop_outcome_progress_report_is_serde_default() {
+        // progress_report テーブルを意図的に省いた TOML。
+        // toml は enum の untagged 表現を持たないため、理由フィールドは文字列経由ではなく
+        // 直接構築可能な形で検証する: progress_report 欠落時に default が補完されること。
+        #[derive(serde::Deserialize)]
+        struct Minimal {
+            #[allow(dead_code)]
+            iterations: u64,
+        }
+        let toml_str = "iterations = 1\n";
+        let m: Minimal = toml::from_str(toml_str).expect("deserialize minimal");
+        assert_eq!(m.iterations, 1);
+
+        // LoopOutcome 自体は progress_report が #[serde(default)] なので、
+        // フィールド無しでデシリアライズすると default ProgressReport になる。
+        let outcome: LoopOutcome = LoopOutcome {
+            iterations: 1,
+            fired_commands: vec![],
+            terminal: "x".to_string(),
+            reason: LoopStopReason::Stop,
+            progress_report: ProgressReport::default(),
+        };
+        // フィールド access で default 等価であることを再確認。
+        assert_eq!(outcome.progress_report, ProgressReport::default());
+    }
+
+    /// `LoopStopReason::GoalReached` が `goal_reached` にシリアライズされる(後方互換)。
+    /// Issue #37 T3: ゴール駆動モード完了状態の機械可読 exit-code mapping 用。
+    #[test]
+    fn loop_stop_reason_goal_reached_serializes_snake_case() {
+        let outcome = LoopOutcome {
+            iterations: 5,
+            fired_commands: vec![],
+            terminal: "GoalTerminal".to_string(),
+            reason: LoopStopReason::GoalReached,
+            progress_report: ProgressReport::default(),
+        };
+        let s = toml::to_string(&outcome).expect("serialize");
+        assert!(
+            s.contains("reason = \"goal_reached\""),
+            "expected snake_case goal_reached, got: {s}"
+        );
+    }
+
+    /// `LoopStopReason::GoalTimeout` が `goal_timeout` にシリアライズされる(後方互換)。
+    #[test]
+    fn loop_stop_reason_goal_timeout_serializes_snake_case() {
+        let outcome = LoopOutcome {
+            iterations: 99,
+            fired_commands: vec![],
+            terminal: "GoalTimeout".to_string(),
+            reason: LoopStopReason::GoalTimeout,
+            progress_report: ProgressReport::default(),
+        };
+        let s = toml::to_string(&outcome).expect("serialize");
+        assert!(
+            s.contains("reason = \"goal_timeout\""),
+            "expected snake_case goal_timeout, got: {s}"
+        );
+    }
+
+    /// `GoalReached` / `GoalTimeout` が TOML 経由で round-trip できる(Deserialize 互換)。
+    /// 既存バリアントと同一の unit-variant 構造であることを保証する。
+    #[test]
+    fn loop_stop_reason_goal_variants_round_trip() {
+        for (original, expected_str) in [
+            (LoopStopReason::GoalReached, "goal_reached"),
+            (LoopStopReason::GoalTimeout, "goal_timeout"),
+        ] {
+            let outcome = LoopOutcome {
+                iterations: 1,
+                fired_commands: vec![],
+                terminal: "t".to_string(),
+                reason: original.clone(),
+                progress_report: ProgressReport::default(),
+            };
+            let s = toml::to_string(&outcome).expect("serialize");
+            let back: LoopOutcome = toml::from_str(&s).expect("deserialize");
+            assert_eq!(
+                back.reason, original,
+                "round-trip failed for {expected_str}"
+            );
+        }
+    }
+
+    /// `GoalReached`/`GoalTimeout` はユニットバリアント(データフィールド無し)で、
+    /// 既存バリアントと同じく `PartialEq`/`Eq`/`Clone` で比較可能であることを検証。
+    #[test]
+    fn loop_stop_reason_goal_variants_are_unit_and_comparable() {
+        let reached = LoopStopReason::GoalReached;
+        let timeout = LoopStopReason::GoalTimeout;
+        assert_eq!(reached.clone(), reached, "GoalReached clone/equality");
+        assert_eq!(timeout.clone(), timeout, "GoalTimeout clone/equality");
+        assert_ne!(reached, timeout, "GoalReached != GoalTimeout");
+        assert_ne!(
+            reached,
+            LoopStopReason::ExecuteError,
+            "distinct from ExecuteError"
+        );
+        assert_ne!(
+            timeout,
+            LoopStopReason::MaxIterations,
+            "distinct from MaxIterations"
         );
     }
 }

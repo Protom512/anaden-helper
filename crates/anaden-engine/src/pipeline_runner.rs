@@ -9,6 +9,7 @@
 //! ループを駆動する。
 
 use image::DynamicImage;
+use serde::{Deserialize, Serialize};
 
 use anaden_core::ScreenRegion;
 use anaden_vision::{Action, StepOutcome, TaskDef, run_step};
@@ -21,7 +22,7 @@ use anaden_vision::{Action, StepOutcome, TaskDef, run_step};
 ///
 /// duration_ms は現状 [`Action::Swipe`] にパラメータが無いため持たない。後段の発火層が
 /// デフォルト値を埋める。将来 [`Action::Swipe`] に duration が増えたらフィールド追加で拡張する。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputCommand {
     /// 指定座標をタップ。
     Tap { x: u32, y: u32 },
@@ -145,6 +146,9 @@ impl PipelineState {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use image::{DynamicImage, GrayImage, Luma};
@@ -462,5 +466,43 @@ mod tests {
             other => panic!("expected Tap, got {other:?}"),
         }
         assert_eq!(state.current(), "LoadGame");
+    }
+
+    // ---- (F) InputCommand の serde Deserialize 境界検証（E0277 回帰ガード） ----
+    //
+    // LoopOutcome.fired_commands: Vec<InputCommand> が serde::Deserialize 境界を満たすには、
+    // InputCommand 自体が Deserialize でなければならない（E0277）。本モジュールは JSON 等の
+    // フォーマットクレート(serde_json/bincode)に依存しないため、汎用デシリアライザを要求する
+    // 関数へ型を渡すことで「Deserialize 境界を満たすこと」を静的に検証する。
+    // T-fix-1 で #[derive(Deserialize)] を外すとこれらのテストはコンパイルエラーとなる。
+
+    fn _require_deserialize<'de, T>()
+    where
+        T: serde::Deserialize<'de>,
+    {
+    }
+
+    #[test]
+    fn input_command_satisfies_serde_deserialize_bound() {
+        // E0277 の直接の再発防止: 型レベルで Deserialize<'de> を要求する関数へ渡す。
+        _require_deserialize::<InputCommand>();
+    }
+
+    #[test]
+    fn input_command_vec_satisfies_serde_deserialize_bound() {
+        // Vec<InputCommand> は LoopOutcome.fired_commands の実型。
+        // これが Deserialize 可能であることが E0277 解消の直接の要件。
+        _require_deserialize::<Vec<InputCommand>>();
+    }
+
+    #[test]
+    fn input_command_satisfies_serde_serialize_bound() {
+        // Serialize は既存。両 derive が揃っていることを型レベルで担保。
+        fn _require_serialize<T>()
+        where
+            T: serde::Serialize,
+        {
+        }
+        _require_serialize::<InputCommand>();
     }
 }
