@@ -8,8 +8,8 @@ mod state_machine;
 
 pub use orchestrator::{AutomationConfig, Orchestrator, RunSummary};
 pub use pipeline_driver::{
-    Capture, Input, LoopOutcome, LoopStopReason, PipelineDriver, RecoveryHook, StepOutcome,
-    rescale_command,
+    Capture, Input, LoopOutcome, LoopStopReason, PipelineDriver, ProgressReport, RecoveryHook,
+    StepOutcome, TaskMatchCount, format_progress_report, rescale_command,
 };
 pub use pipeline_runner::{
     InputCommand, PipelineState, TickResult, action_to_command, advance_next,

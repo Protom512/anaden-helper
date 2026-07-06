@@ -339,6 +339,14 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
             continue;
         }
 
+        // pipeline.toml はパイプライン manifest（Goal/start_task 宣言）であり TaskDef
+        // ではない。誤パース回避のため manifest 慣例パスを明示的にスキップする
+        // （regression: `load_pipeline_skips_pipeline_manifest_file`）。
+        if is_pipeline_manifest_path(&path) {
+            debug!("Skipping pipeline manifest (not a TaskDef): {:?}", path);
+            continue;
+        }
+
         let content = std::fs::read_to_string(&path).map_err(|e| TaskDefError::ParseFailed {
             path: path.clone(),
             reason: e.to_string(),
@@ -359,6 +367,22 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
     }
 
     Ok(defs)
+}
+
+/// パイプライン manifest の慣例ファイル名。各パイプラインディレクトリのルートに
+/// 置かれたこのファイルは TaskDef ではなく [`PipelineManifest`]（Goal/start_task）
+/// を宣言する。`load_pipeline` はこのファイルをスキップし、
+/// [`load_pipeline_manifest`] が読み込む。
+pub const PIPELINE_MANIFEST_FILENAME: &str = "pipeline.toml";
+
+/// `path` がパイプライン manifest の慣例パス（ファイル名 == `pipeline.toml`、
+/// case-sensitive）かを判定する。TaskDef 誤パース回避のために [`load_pipeline`]
+/// が呼ぶ。
+fn is_pipeline_manifest_path(path: &Path) -> bool {
+    path.file_name()
+        .and_then(|n| n.to_str())
+        .map(|n| n == PIPELINE_MANIFEST_FILENAME)
+        .unwrap_or(false)
 }
 
 /// 1ステップの実行結果。action は省略時 [`Action::DoNothing`] を補充済み。
@@ -2838,6 +2862,39 @@ mod tests {
             "norm aspect {norm_aspect:.3} must differ from PC RAW aspect {raw_aspect:.3} \
              (20:9 vs 16:9): this non-uniform scaling is WHY no scale+offset affine bridge \
              exists from norm-space runs to RAW 1258x708 ROI coordinates"
+        );
+    }
+
+    // ---- pipeline.toml スキップ契約 ----
+    //
+    // `load_pipeline` は慣例パス `pipeline.toml` を TaskDef としてパースせずスキップする。
+    // この manifest 由来の Goal 読込機能は Issue #38 で削除された（driver 配線が T4/T5
+    // に繰越され dead-code となったため）。スキップ契約自体は load_pipeline の不変条件
+    // として残り、manifest 相当の TOML が置かれても TaskDef 誤パースしないことを保証する。
+
+    /// manifest のみ（task 無し）を置いたディレクトリを走査すると、load_pipeline は
+    /// pipeline.toml をスキップするので空 Vec を返すこと（回帰: manifest が TaskDef
+    /// として誤パースされない）。
+    #[test]
+    fn load_pipeline_skips_pipeline_manifest_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "TapBottom"
+
+            [[goal]]
+            name = "farm50"
+            [goal.stop]
+            LoopCount = { target = 50 }
+            "#,
+        );
+
+        let defs = load_pipeline(tmp.path()).expect("load must skip manifest, no error");
+        assert!(
+            defs.is_empty(),
+            "pipeline.toml must NOT be parsed as a TaskDef; got {defs:?}"
         );
     }
 }
