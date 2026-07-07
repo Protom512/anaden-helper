@@ -2782,6 +2782,168 @@ mod tests {
         assert_eq!(outcome.iterations, 1);
     }
 
+    // ===== UC-3 backward-compat AC: run_loop_with_goal(goal=None) byte-identical to
+    //       run_loop_with_recovery =====
+    //
+    // Issue #37/#41 close 認可条件 Task #4:
+    // `run_loop_with_goal` が `goal=None` で渡されたとき `run_loop_with_recovery` へ
+    // **verbatim(バイト同一)** で委譲することを、Outcome の全観測可能フィールドを
+    // 機械的に比較して検証する。Goal 駆動コードパスが導入されても、ゴール非宣言時の
+    // 既存挙動(MaxIterations/Recovery で停止、reached_goal=None)が **1 ビットも変わらない**
+    // ことの回帰防止。
+    //
+    // 既存 backcompat_* テスト群(2650-2783)は run_loop / run_loop_with_recovery を直接呼び、
+    // goal=None の *意味論的* 契約(MaxIterations 等)を検証する。本テストはそれらと相補的に、
+    // **委譲経路自体(run_loop_with_goal の None 早期 return)** を通した場合の出力が、
+    // 直接 run_loop_with_recovery を呼んだ場合と完全一致することを個別に固定する。
+
+    /// `run_loop_with_goal(goal=None)` と `run_loop_with_recovery` の出力が
+    /// **完全に同一**であることを、純粋 NoMatch + recovery 無しの最小ケースで検証する。
+    /// 両者の `LoopOutcome` を構造的に比較(reason / iterations / terminal / fired_commands /
+    /// progress_report)し、GoalReached/GoalTimeout が発火しないことを確認。
+    /// また reached_goal が None のままであることも併せて検証(UC-3 AC の核心不変条件)。
+    #[tokio::test]
+    async fn backcompat_goal_none_run_loop_with_goal_is_byte_identical_to_recovery() {
+        // 直接 run_loop_with_recovery を呼んだ基準結果(baseline)。
+        let (mut driver_baseline, _fired_baseline) = build_nomatch_driver();
+        let baseline = driver_baseline
+            .run_loop_with_recovery(Duration::ZERO, 7, 0, None)
+            .await;
+
+        // 同一 fixture で run_loop_with_goal(goal=None) を通した結果。
+        let (mut driver_via_goal, _fired_via_goal) = build_nomatch_driver();
+        let clock = FakeClock::starting_at(0);
+        let via_goal = driver_via_goal
+            .run_loop_with_goal(Duration::ZERO, 7, 0, None, None, clock)
+            .await;
+
+        // === 停止理由: MaxIterations(Goal 系停止理由は出ない)===
+        assert_eq!(
+            baseline.reason,
+            LoopStopReason::MaxIterations,
+            "baseline must stop with MaxIterations"
+        );
+        assert_eq!(
+            via_goal.reason,
+            LoopStopReason::MaxIterations,
+            "run_loop_with_goal(goal=None) must stop with MaxIterations, got {:?}",
+            via_goal.reason
+        );
+        assert_eq!(
+            baseline.reason, via_goal.reason,
+            "reason diverges between direct and delegated paths"
+        );
+
+        // === 全観測可能フィールドのバイト同一性 ===
+        assert_eq!(
+            baseline.iterations, via_goal.iterations,
+            "iterations diverges (delegation must be byte-identical)"
+        );
+        assert_eq!(
+            baseline.terminal, via_goal.terminal,
+            "terminal diverges (delegation must be byte-identical)"
+        );
+        assert_eq!(
+            baseline.fired_commands, via_goal.fired_commands,
+            "fired_commands diverges (delegation must be byte-identical)"
+        );
+        assert_eq!(
+            baseline.progress_report.iterations, via_goal.progress_report.iterations,
+            "progress_report.iterations diverges"
+        );
+        assert_eq!(
+            baseline.progress_report.fired_count, via_goal.progress_report.fired_count,
+            "progress_report.fired_count diverges"
+        );
+        assert_eq!(
+            baseline.progress_report.per_task_matches, via_goal.progress_report.per_task_matches,
+            "progress_report.per_task_matches diverges"
+        );
+        assert_eq!(
+            baseline.progress_report.terminal_task, via_goal.progress_report.terminal_task,
+            "progress_report.terminal_task diverges"
+        );
+
+        // === UC-3 AC 核心不変条件: reached_goal は None のまま ===
+        assert!(
+            baseline.progress_report.reached_goal.is_none(),
+            "baseline reached_goal must be None (no goal declared)"
+        );
+        assert!(
+            via_goal.progress_report.reached_goal.is_none(),
+            "run_loop_with_goal(goal=None) must leave reached_goal as None — \
+             goal-evaluation code must not populate it on the undeclared path"
+        );
+
+        // === Goal 系停止理由が一切発火しないことの明示的表明 ===
+        assert_ne!(
+            via_goal.reason,
+            LoopStopReason::GoalReached,
+            "goal=None path must NEVER emit GoalReached"
+        );
+        assert_ne!(
+            via_goal.reason,
+            LoopStopReason::GoalTimeout,
+            "goal=None path must NEVER emit GoalTimeout"
+        );
+    }
+
+    /// recovery hook 付きでも `run_loop_with_goal(goal=None)` が
+    /// `run_loop_with_recovery` と同じ停止契約(MaxIterations 優先、Goal 系不出現)を
+    /// 保つことを検証する。hook は Ok を返し続けるため MaxIterations まで到達する。
+    /// (recovery Err の ExecuteError 契約は既存 2710 テストが直接経路で担保済み。)
+    #[tokio::test]
+    async fn backcompat_goal_none_with_recovery_hook_preserves_max_iterations_contract() {
+        fn make_hook() -> (Arc<AtomicU32>, RecoveryHook) {
+            let calls = Arc::new(AtomicU32::new(0));
+            let calls_clone = calls.clone();
+            let hook: RecoveryHook = Box::new(move |_streak| {
+                let c = calls_clone.clone();
+                Box::pin(async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            });
+            (calls, hook)
+        }
+
+        // run_loop_with_goal(goal=None) + recovery hook 経路。
+        let (mut driver, _fired) = build_nomatch_driver();
+        let (calls, hook) = make_hook();
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 12, 3, Some(hook), None, clock)
+            .await;
+
+        // 停止理由は MaxIterations のみ(Goal 系停止理由は発火しない)。
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "goal=None + recovery(Ok) must stop with MaxIterations, got {:?}",
+            outcome.reason
+        );
+        assert_ne!(
+            outcome.reason,
+            LoopStopReason::GoalReached,
+            "GoalReached must never fire when goal=None even with recovery"
+        );
+        assert_ne!(
+            outcome.reason,
+            LoopStopReason::GoalTimeout,
+            "GoalTimeout must never fire when goal=None even with recovery"
+        );
+        // recovery hook は最低 1 回発火(threshold=3, max=12 → 3,6,9,12 のいずれか)。
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "recovery hook must fire at least once under goal=None delegation path"
+        );
+        // reached_goal は None(UC-3 AC 不変条件、recovery 付きでも崩れない)。
+        assert!(
+            outcome.progress_report.reached_goal.is_none(),
+            "reached_goal must stay None even with recovery hook under goal=None"
+        );
+    }
+
     // ===== T-fix-1: evaluate_goal unit contract =====
 
     /// LoopCount ゴールが既に target に到達しているとき `evaluate_goal` は
@@ -3218,6 +3380,205 @@ mod tests {
             outcome.reason,
             LoopStopReason::GoalReached,
             "must NOT reach GoalReached when task name mismatches last_match"
+        );
+    }
+
+    // ===== UC-3 E2E (Timeout ゴール到達) =====
+    //
+    // UC-3 は「宣言した秒数が経過したら停止する」時間駆動の異常終端保証。
+    // goal.rs の doc に固定されている通り、Timeout は与えられた elapsed_secs と
+    // 宣言値の比較のみで判定する(pure evaluate)。run_loop_with_goal は各 tick 後に
+    // GoalClock.elapsed_secs() を呼び、GoalStatus::Failed → LoopStopReason::GoalTimeout
+    // で停止する。本 E2E テストは UC-1(L3019)/UC-2(L3096) と対になる UC-3 の 1 本。
+    //
+    // FakeClock(build_nomatch_driver の fixture と FakeClock::starting_at を流用)が
+    // elapsed_secs 呼出毎に +1 するので、NoMatch が持続する build_nomatch_driver でも
+    // 宣言秒数に到達したタイミングで GoalTimeout になる。
+
+    /// UC-3 正常系: `Timeout { secs: 3 }` を与えると、FakeClock が呼出毎に +1 進むので
+    /// 4 サイクル目(elapsed_secs == 3 >= 3)に `LoopStopReason::GoalTimeout` で停止し、
+    /// `terminal == "goal_timeout"`、`reached_goal == "timeout=3"` になること。
+    /// また `iterations == 4` は `max_iterations == 10` 未到達であり、ゴールが先に効いて
+    /// いる(MaxIterations ではない)ことを検証する。
+    ///
+    /// ここでは `FakeClock::starting_at(0)` を使用する(org-feedback approval condition)。
+    /// FakeClock の進め方(呼出毎 +1)により、開始値 0 → 0,1,2,3 と返し、3 で閾値到達。
+    #[tokio::test]
+    async fn uc3_timeout_goal_reaches_goal_timeout_after_declared_secs() {
+        let (mut driver, _fired) = build_nomatch_driver();
+
+        let goal = anaden_core::Goal {
+            name: "hard_stop".into(),
+            stop: anaden_core::StopCondition::Timeout { secs: 3 },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 10, 0, None, Some(&goal), clock)
+            .await;
+
+        // UC-3 の核心: elapsed_secs が secs(=3)に到達 → GoalTimeout(MaxIterations ではない)。
+        // FakeClock starting_at(0) は呼出毎に 0,1,2,3 を返すので、4 tick 目で 3>=3 到達。
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::GoalTimeout,
+            "UC-3 Timeout secs=3 must reach GoalTimeout once FakeClock advances past the \
+             limit, got {:?}",
+            outcome.reason
+        );
+        assert_eq!(
+            outcome.terminal, "goal_timeout",
+            "terminal must be goal_timeout for Timeout failure"
+        );
+        // 記述子は goal_descriptor の Timeout 形式(timeout=<secs>)。
+        assert_eq!(
+            outcome.progress_report.reached_goal.as_deref(),
+            Some("timeout=3"),
+            "reached_goal descriptor must reflect Timeout secs"
+        );
+        // iterations は max_iterations(=10)未到達 → ゴールが先に効いた。
+        assert!(
+            outcome.iterations < 10,
+            "goal must terminate before max_iterations; got iterations={}",
+            outcome.iterations
+        );
+        // FakeClock の呼出毎 +1 トレース: tick1=0, tick2=1, tick3=2, tick4=3(>=3 → stop)。
+        assert_eq!(
+            outcome.iterations, 4,
+            "must reach timeout exactly on iteration 4 (elapsed 0,1,2,3)"
+        );
+    }
+
+    // ===== JSON ラウンドトリップ検証(エンジン産出 outcome) =====
+    //
+    // 既存 `loop_outcome_is_json_serializable`(L2423) は hand-built な LoopOutcome を
+    // 使っており、serde の形状(reason snake_case / progress_report ネスト / reached_goal)
+    // が JSON 経路で保たれることを検証している。一方で「エンジン経路(run_loop_with_goal)
+    // を通じて実際に populate された reached_goal を持つ outcome」が JSON ラウンドトリップ
+    // を生き延びるかは別の保証になる: evaluate_goal → goal_descriptor が埋めた文字列が
+    // シリアライズ→デシリアライズ後も完全に一致することを、UC-1 と UC-2 の両方の
+    // ゴール種別で検証する(UC-3 Timeout は本チケットのスコープ外: #42 の未達 AC は
+    // UC-1/UC-2 の JSON 耐性で明示されているため)。
+    // Issue #42 / 親 #37 Shard 3: JSON 成果レポート検証。
+
+    /// UC-1(LoopCount) エンジン産出 outcome が JSON ラウンドトリップを生き延びること。
+    /// run_loop_with_goal で実際に GoalReached まで駆動し、`reached_goal == "loop_count=3"`
+    /// が populate された outcome を to_string → from_str し、progress_report.reached_goal
+    /// が完全一致で生き残ることを assert する。
+    #[tokio::test]
+    async fn uc1_loop_count_outcome_reached_goal_survives_json_roundtrip() {
+        let (mut driver, _fired) = build_nomatch_driver();
+
+        let goal = anaden_core::Goal {
+            name: "farm3".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 3 },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 10, 0, None, Some(&goal), clock)
+            .await;
+
+        // 前提: エンジン経路で実際に到達し、reached_goal が populate されていること。
+        assert_eq!(outcome.reason, LoopStopReason::GoalReached);
+        let expected_descriptor = outcome
+            .progress_report
+            .reached_goal
+            .as_deref()
+            .expect("reached_goal must be populated by engine for UC-1 LoopCount");
+        assert_eq!(expected_descriptor, "loop_count=3");
+
+        // JSON ラウンドトリップ: to_string → from_str。
+        let s = serde_json::to_string(&outcome).expect("serialize json");
+        let back: LoopOutcome = serde_json::from_str(&s).expect("deserialize json");
+
+        // progress_report.reached_goal がラウンドトリップを生き延びる(本テストの核心)。
+        assert_eq!(
+            back.progress_report.reached_goal.as_deref(),
+            Some("loop_count=3"),
+            "UC-1 reached_goal descriptor must survive JSON round-trip; json={s}"
+        );
+        // reason も snake_case 経路で往復できること(対称性担保)。
+        assert_eq!(back.reason, LoopStopReason::GoalReached);
+        // iterations も保持されること(progress_report と top-level の両方)。
+        assert_eq!(back.iterations, 3);
+        assert_eq!(back.progress_report.iterations, 3);
+    }
+
+    /// UC-2(TemplateMatch) エンジン産出 outcome が JSON ラウンドトリップを生き延びること。
+    /// needle 埋込画面で Title タスクをマッチ→発火させ、TemplateMatch ゴール到達で
+    /// populate された reached_goal(記述子は task と confidence を含む) が to_string → from_str
+    /// 後も完全一致で生き残ることを assert する。UC-1 と記述子フォーマットが異なるため
+    /// 両方を網羅する(template_match conf>=<c> (task=<t>) 形式の JSON 耐性)。
+    #[tokio::test]
+    async fn uc2_template_match_outcome_reached_goal_survives_json_roundtrip() {
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let frames = frames_of(vec![matched]);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        let goal = anaden_core::Goal {
+            name: "find_title".into(),
+            stop: anaden_core::StopCondition::TemplateMatch {
+                task: "Title".into(),
+                confidence: 0.85,
+            },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 10, 0, None, Some(&goal), clock)
+            .await;
+
+        // 前提: エンジン経路で TemplateMatch ゴール到達し、reached_goal が populate されていること。
+        assert_eq!(outcome.reason, LoopStopReason::GoalReached);
+        let expected_descriptor = outcome
+            .progress_report
+            .reached_goal
+            .as_deref()
+            .expect("reached_goal must be populated by engine for UC-2 TemplateMatch");
+        assert_eq!(
+            expected_descriptor,
+            "template_match conf>=0.85 (task=Title)"
+        );
+
+        // JSON ラウンドトリップ: to_string → from_str。
+        let s = serde_json::to_string(&outcome).expect("serialize json");
+        let back: LoopOutcome = serde_json::from_str(&s).expect("deserialize json");
+
+        // progress_report.reached_goal がラウンドトリップを生き延びる(本テストの核心)。
+        // 記述子は空白・記号(>=, ()) を含むため、JSON 文字列 escaping も耐性検証に含まれる。
+        assert_eq!(
+            back.progress_report.reached_goal.as_deref(),
+            Some("template_match conf>=0.85 (task=Title)"),
+            "UC-2 reached_goal descriptor must survive JSON round-trip; json={s}"
+        );
+        // reason も snake_case 経路で往復できること(対称性担保)。
+        assert_eq!(back.reason, LoopStopReason::GoalReached);
+        // 発火履歴も形状を保って往復できること(fired_commands が空でない)。
+        assert!(
+            !back.fired_commands.is_empty(),
+            "fired_commands must survive JSON round-trip non-empty"
         );
     }
 }

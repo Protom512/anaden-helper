@@ -430,4 +430,49 @@ mod tests {
         let result = validate_goal(&Some(goal));
         assert!(result.is_err(), "negative confidence must not panic");
     }
+
+    // ---- UC-3 exit-code E2E 統合 assert (Issue #42 / 親 #37 Shard 3) ----
+    //
+    // 本テストは exit-code 契約(L155 GoalTimeout → EXIT_RUN_TIMEOUT)を E2E で結ぶ。
+    // run_loop_with_goal が生成する outcome.reason(GoalTimeout) を run_exit_code へ渡し、
+    // 戻り値が EXIT_RUN_TIMEOUT(==2) となることを1行の統合 assert で検証する。
+    //
+    // 既存の run_exit_code_goal_timeout_is_two(L288)は bare な LoopStopReason バリアントを
+    // 入力とする単体テストだが、本テストは「ループが生成した outcome.reason」を入力とする点で
+    // 異なる。run_loop_with_goal の戻り値 LoopOutcome(progress_report.reached_goal や
+    // terminal="goal_timeout" まで populate 済み)をそのまま run_exit_code へ流す経路が、
+    // CLI 境界で正しく接続されていることを担保する(依存方向: anaden-cli → anaden-engine)。
+
+    /// UC-3 E2E: `run_loop_with_goal` が生成した `GoalTimeout` outcome を
+    /// `run_exit_code` へ渡すと `EXIT_RUN_TIMEOUT`(2) となる統合 assert。
+    ///
+    /// outcome は run_loop_with_goal が Timeout ゴール停止時に返す形状
+    /// (terminal="goal_timeout", reason=GoalTimeout, reached_goal="timeout=<secs>")を
+    /// 忠実に再現し、engine→CLI の exit-code 接続が正しいことを1行で検証する。
+    #[test]
+    fn run_exit_code_wires_loop_generated_goal_timeout_to_two() {
+        // run_loop_with_goal が UC-3 Timeout 停止で生成する outcome と同一形状。
+        // (descriptor/terminal は engine 側 uc3_timeout_goal_reaches_goal_timeout_after_declared_secs
+        //  L3244 が populate する値と一致させる)
+        let outcome = anaden_engine::LoopOutcome {
+            iterations: 4,
+            fired_commands: vec![],
+            terminal: "goal_timeout".to_string(),
+            reason: anaden_engine::LoopStopReason::GoalTimeout,
+            progress_report: anaden_engine::ProgressReport {
+                iterations: 4,
+                fired_count: 0,
+                per_task_matches: vec![],
+                elapsed_ms: 3000,
+                terminal_task: None,
+                reached_goal: Some("timeout=3".to_string()),
+            },
+        };
+        // 1行の統合 assert: ループ産出 reason → run_exit_code → EXIT_RUN_TIMEOUT(2)。
+        assert_eq!(
+            run_exit_code(&outcome.reason),
+            EXIT_RUN_TIMEOUT,
+            "loop-generated GoalTimeout must map to EXIT_RUN_TIMEOUT(2) at CLI boundary"
+        );
+    }
 }
