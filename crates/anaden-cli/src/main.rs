@@ -14,6 +14,7 @@ use anyhow::Result;
 use clap::{Parser, Subcommand};
 use tracing::{info, warn};
 
+use anaden_core::Goal;
 use anaden_engine::{AutomationConfig, Orchestrator};
 
 #[derive(Parser, Debug)]
@@ -89,6 +90,20 @@ enum Commands {
         /// テンプレ消失/領域マッチ変化)で判定する。明示的に無効化する場合のみ `false` を指定。
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         verify_after_fire: bool,
+        /// 宣言的ゴールをインライン TOML で指定(Issue #37 T4 option B)。
+        ///
+        /// `--goal-file` とは排他。未指定時はゴール無し(従来の無限ループ/MaxIterations 挙動)。
+        /// 値は `toml::from_str::<Goal>` でパースされ、[`Goal::validate`] で検証される。
+        ///
+        /// 例: `--goal 'name = "farm50"\n[stop]\nLoopCount = { target = 50 }'`
+        #[arg(long)]
+        goal: Option<String>,
+        /// 宣言的ゴールを格納した TOML ファイルパス(Issue #37 T4 option B)。
+        ///
+        /// `--goal` とは排他。ファイル内容は `toml::from_str::<Goal>` でパースされる。
+        /// `--goal` と同じく未指定時はゴール無し(後方互換)。
+        #[arg(long)]
+        goal_file: Option<PathBuf>,
     },
     /// 旧来の Orchestrator(命令型 Strategy ループ) を実行する
     Legacy {
@@ -242,6 +257,67 @@ fn resolve_algorithm(value: &str) -> Result<anaden_vision::Algorithm> {
     }
 }
 
+/// `--goal` / `--goal-file` フラグを [`Option<Goal>`] へ解決する純粋ヘルパ(T4 option B)。
+///
+/// T4-design-gate の決定に従い、Goal の供給源を manifest reader(Option A)ではなく
+/// CLI フラグ(Option B)とする。`load_pipeline_manifest` / `PipelineManifest` は
+/// Issue #38 で削除されて現 repo に存在しないため、manifest reader を新設するのは
+/// greenfield な dead-code となり避ける。TOML doc AC は [`toml::from_str::<Goal>`]
+/// (goal.rs の round-trip テスト済み)で充足できる。
+///
+/// # 引数
+/// - `goal`: `--goal <inline-toml>` の値。`None` なら未指定。
+/// - `goal_file`: `--goal-file <path>` の値(`&Path`)。`None` なら未指定。
+///   `Cli.goal_file` は `Option<PathBuf>` なので呼出側は `.as_deref()` で
+///   `Option<&Path>` を渡す。serde/TOML 読込はパス由来のため `&str` より `&Path`
+///   の方が意味的に正確(`std::fs::read_to_string` は `AsRef<Path>` を受け取る)。
+///
+/// # 戻り値
+/// - `Ok(None)`: 両フラグとも未指定(後方互換: ゴール無し = 無限ループ維持)。
+/// - `Ok(Some(goal))`: パース + [`Goal::validate`] 成功。
+/// - `Err`: 両フラグ同時指定(排他違反)・不正 TOML・ファイル読込失敗・validate 失敗。
+///   いずれも panic せず anyhow エラーで伝播する。
+///
+/// # Example
+/// ```ignore
+/// # use anaden_cli::parse_goal_flag;
+/// let g = parse_goal_flag(
+///     Some(r#"name = "x"  [stop]  LoopCount = { target = 1 } "#),
+///     None,
+/// )?.unwrap();
+/// assert_eq!(g.name, "x");
+/// # Ok::<(), anyhow::Error>(())
+/// ```
+fn parse_goal_flag(
+    goal: Option<&str>,
+    goal_file: Option<&std::path::Path>,
+) -> Result<Option<Goal>> {
+    match (goal, goal_file) {
+        (None, None) => Ok(None),
+        (Some(_), Some(_)) => anyhow::bail!(
+            "--goal と --goal-file は exclusive(排他)です。いずれか一方のみ指定してください"
+        ),
+        (Some(inline), None) => {
+            let parsed: Goal = toml::from_str(inline)
+                .map_err(|e| anyhow::anyhow!("--goal の TOML パース失敗: {e}"))?;
+            parsed
+                .validate()
+                .map_err(|e| anyhow::anyhow!("--goal のバリデーション失敗: {e}"))?;
+            Ok(Some(parsed))
+        }
+        (None, Some(path)) => {
+            let content = std::fs::read_to_string(path)
+                .map_err(|e| anyhow::anyhow!("--goal-file の読込失敗 {}: {e}", path.display()))?;
+            let parsed: Goal = toml::from_str(&content)
+                .map_err(|e| anyhow::anyhow!("--goal-file の TOML パース失敗: {e}"))?;
+            parsed
+                .validate()
+                .map_err(|e| anyhow::anyhow!("--goal-file のバリデーション失敗: {e}"))?;
+            Ok(Some(parsed))
+        }
+    }
+}
+
 /// `run` サブコマンド: 宣言的パイプラインを ADB 実機でライブ実行する。
 ///
 /// フロー:
@@ -268,10 +344,18 @@ async fn run_pipeline_live(
     input_mode: &str,
     target: &str,
     verify_after_fire: bool,
+    goal: Option<Goal>,
 ) -> Result<()> {
     // ---- (0) 実行ターゲット解決 ----
     // `--target windows` なら ADB 経由を一切使わず Win32 バックエンドへ切替え。
     // `--target android` なら従来通り(serial 必須)。
+    // Goal は T4 option B で CLI フラグ由来。driver evaluate() 配線は T4-driver-wiring
+    // タスクのスコープ(本関数は受け取った Option<Goal> を下流へ渡す起点のみ担う)。
+    if let Some(g) = &goal {
+        info!("宣言的ゴール活性: {} ({:?})", g.name, g.stop);
+    } else {
+        info!("宣言的ゴール無し(従来モード: MaxIterations/Stop/TerminalTask で停止)");
+    }
     match target {
         "windows" => {
             return run_with_windows(
@@ -286,6 +370,7 @@ async fn run_pipeline_live(
                 recover_launch,
                 recover_nomatch_threshold,
                 verify_after_fire,
+                goal,
             )
             .await;
         }
@@ -456,6 +541,7 @@ async fn run_pipeline_live(
                     max_iters,
                     recover_nomatch_threshold,
                     recovery,
+                    goal,
                 )
                 .await
             }
@@ -487,6 +573,7 @@ async fn run_with_windows(
     recover_launch: bool,
     recover_nomatch_threshold: u32,
     verify_after_fire: bool,
+    goal: Option<Goal>,
 ) -> Result<()> {
     // ---- (1) パイプライン読込 + algorithm 上書き ----
     let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
@@ -581,6 +668,7 @@ async fn run_with_windows(
         max_iters,
         recover_nomatch_threshold,
         recovery,
+        goal,
     )
     .await
 }
@@ -600,6 +688,7 @@ async fn run_with_windows(
     _recover_launch: bool,
     _recover_nomatch_threshold: u32,
     _verify_after_fire: bool,
+    _goal: Option<Goal>,
 ) -> Result<()> {
     anyhow::bail!(
         "`--target windows` は Windows ビルドでのみ利用可能です。このバイナリは Windows 向けではないため PC版バックエンドを使用できません"
@@ -607,24 +696,51 @@ async fn run_with_windows(
 }
 
 /// `run_loop_with_recovery` を呼び出し、結果を人間可読出力する共通末尾。
+///
+/// `goal` は宣言的ゴール(Issue #37 T4): `PipelineDriver` の run loop へ渡す前に
+/// [`anaden_cli_contract::validate_goal`] で不変量を検証し、invalid なら anyhow エラー
+/// ([`anaden_core::GoalError`] の Display を伝播)として即座に返す(panic しない)。
+/// [`None`] のときは非ゴールモード(従来の max_iterations 停止)。`Some` のときは
+/// [`PipelineDriver::run_loop_with_goal`] へ [`SystemClock`] を渡して実配線する
+/// (Issue #40 受入基準: --goal で渡した Goal が run_loop_with_goal へ配送されること)。
 async fn run_driver<C, I>(
     mut driver: anaden_engine::PipelineDriver<C, I>,
     interval: Duration,
     max_iters: u64,
     recover_nomatch_threshold: u32,
     recovery: Option<anaden_engine::RecoveryHook>,
+    goal: Option<Goal>,
 ) -> Result<()>
 where
     C: anaden_engine::Capture,
     I: anaden_engine::Input,
 {
+    // CLI 境界でゴール不変量を検証(invalid なら GoalError を伝播・panic しない)。
+    // driver へ手渡す前に弾くことで、evaluate() へ invalid ゴールが流入するのを防ぐ。
+    anaden_cli_contract::validate_goal(&goal)?;
+
     info!(
-        "run_loop 開始: interval={:?} max_iters={}",
-        interval, max_iters
+        "run_loop 開始: interval={:?} max_iters={} goal={}",
+        interval,
+        max_iters,
+        goal.as_ref().map(|g| g.name.as_str()).unwrap_or("(none)")
     );
-    let outcome = driver
-        .run_loop_with_recovery(interval, max_iters, recover_nomatch_threshold, recovery)
-        .await;
+    let outcome = if goal.is_some() {
+        driver
+            .run_loop_with_goal(
+                interval,
+                max_iters,
+                recover_nomatch_threshold,
+                recovery,
+                goal.as_ref(),
+                anaden_engine::SystemClock::new(),
+            )
+            .await
+    } else {
+        driver
+            .run_loop_with_recovery(interval, max_iters, recover_nomatch_threshold, recovery)
+            .await
+    };
 
     println!("\n=== 実行結果 ===");
     println!("サイクル数: {}", outcome.iterations);
@@ -989,7 +1105,11 @@ async fn main() -> Result<()> {
             scrcpy_jar,
             input,
             verify_after_fire,
+            goal,
+            goal_file,
         } => {
+            let parsed_goal = parse_goal_flag(goal.as_deref(), goal_file.as_deref())
+                .map_err(|e| anyhow::anyhow!("ゴール指定の解決失敗: {e}"))?;
             run_pipeline_live(
                 serial.as_deref(),
                 &pipeline_dir,
@@ -1007,6 +1127,7 @@ async fn main() -> Result<()> {
                 &input,
                 &target,
                 verify_after_fire,
+                parsed_goal,
             )
             .await
         }
@@ -1188,6 +1309,134 @@ mod tests {
         assert!(
             format!("{}", result.unwrap_err()).contains("--target"),
             "error should mention --target validation"
+        );
+    }
+
+    // ---- parse_goal_flag (T4 option B: CLI flag --goal / --goal-file) ----
+    //
+    // Issue #37 acceptance: `run` コマンドが宣言的 Goal を受け取れること。
+    // T4-design-gate で option (B) CLI flag を選定した根拠:
+    //   - load_pipeline_manifest/PipelineManifest は Issue #38 で削除対象となり
+    //     現 repo に存在しない(CTO gate の指摘通り)。option (A) は greenfield であり
+    //     「restoration」ではない。よって manifest reader を新設せず CLI flag で最低限の
+    //     配線にとどめる。
+    //   - TOML doc AC は toml::from_str::<Goal>(goal.rs:348-408 で round-trip 済み) で充足可能。
+    //
+    // 本 helper は純粋関数(I/O は --goal-file の fs::read_to_string のみ)で、
+    // --goal と --goal-file の両方 None なら None を返す(後方互換: 無限ループ維持)。
+
+    #[test]
+    fn parse_goal_flag_both_none_returns_none() {
+        // --goal も --goal-file も未指定 → None(ゴール無し = 従来の無限ループ挙動)。
+        let parsed = parse_goal_flag(None, None).expect("both-none must be Ok(None)");
+        assert!(parsed.is_none(), "no flag → no goal (backcompat)");
+    }
+
+    #[test]
+    fn parse_goal_flag_inline_goal_parses() {
+        // --goal <inline-toml>: toml::from_str::<Goal> でパース + validate Ok。
+        let inline = r#"
+        name = "farm50"
+        [stop]
+        LoopCount = { target = 50 }
+        "#;
+        let parsed = parse_goal_flag(Some(inline), None).expect("inline must parse");
+        let goal = parsed.expect("Some(goal) when --goal provided");
+        assert_eq!(goal.name, "farm50");
+        assert_eq!(
+            goal.stop,
+            anaden_core::StopCondition::LoopCount { target: 50 }
+        );
+    }
+
+    #[test]
+    fn parse_goal_flag_inline_goal_validates() {
+        // validate が失敗する Goal(target=0)は Err。純粋ドメイン検証を経ることの証明。
+        let inline = r#"
+        name = "bad"
+        [stop]
+        LoopCount = { target = 0 }
+        "#;
+        let err = parse_goal_flag(Some(inline), None).expect_err("target=0 must fail validation");
+        assert!(
+            format!("{err}").contains("target"),
+            "error should reference the invalid field"
+        );
+    }
+
+    #[test]
+    fn parse_goal_flag_inline_invalid_toml_is_err() {
+        // 不正 TOML 構文は Err(panic しない)。
+        let err = parse_goal_flag(Some("not = valid = toml"), None).expect_err("bad toml");
+        assert!(!format!("{err}").is_empty());
+    }
+
+    #[test]
+    fn parse_goal_flag_inline_unknown_field_rejected() {
+        // deny_unknown_fields: 未知トップレベルフィールドは Err。
+        let inline = r#"
+        name = "g"
+        bogus = true
+        [stop]
+        LoopCount = { target = 1 }
+        "#;
+        assert!(parse_goal_flag(Some(inline), None).is_err());
+    }
+
+    #[test]
+    fn parse_goal_flag_file_reads_and_parses() {
+        // --goal-file <path>: ファイルを読んでパース。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("goal.toml");
+        std::fs::write(
+            &path,
+            r#"
+            name = "find_clear"
+            [stop.TemplateMatch]
+            task = "clear"
+            confidence = 0.85
+            "#,
+        )
+        .expect("write goal file");
+
+        let parsed = parse_goal_flag(None, Some(path.as_path())).expect("file must read+parse");
+        let goal = parsed.expect("Some(goal) when --goal-file provided");
+        assert_eq!(
+            goal.stop,
+            anaden_core::StopCondition::TemplateMatch {
+                task: "clear".to_string(),
+                confidence: 0.85,
+            }
+        );
+    }
+
+    #[test]
+    fn parse_goal_flag_file_missing_is_err() {
+        // 存在しないファイルは Err(panic しない)。
+        let err = parse_goal_flag(
+            None,
+            Some(std::path::Path::new("/nonexistent/does/not/exist.toml")),
+        )
+        .expect_err("missing file must error");
+        assert!(
+            format!("{err}").contains("--goal-file"),
+            "error should mention --goal-file, got: {err}"
+        );
+    }
+
+    #[test]
+    fn parse_goal_flag_both_set_is_err() {
+        // --goal と --goal-file の同時指定は曖昧なので Err(排他)。
+        let inline = r#"
+        name = "g"
+        [stop]
+        LoopCount = { target = 1 }
+        "#;
+        let err = parse_goal_flag(Some(inline), Some(std::path::Path::new("whatever.toml")))
+            .expect_err("both flags set must error");
+        assert!(
+            format!("{err}").contains("exclusive"),
+            "error should explain mutual exclusivity, got: {err}"
         );
     }
 }

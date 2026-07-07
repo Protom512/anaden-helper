@@ -159,6 +159,33 @@ pub fn run_exit_code(reason: &anaden_engine::LoopStopReason) -> i32 {
     }
 }
 
+/// `run` サブコマンドが `PipelineDriver` へ渡す前にゴールを検証する純粋関数
+/// (Issue #37 T4: run_loop signature threading)。
+///
+/// `run_driver` は宣言的ゴールを [`anaden_engine::PipelineDriver`] の run loop へ渡す
+/// 共通末尾だが、driver へ手渡す前に必ず本関数で不変量を検証する。これにより
+/// 「`Goal::validate()` が `Err` を返すゴール」が driver tick へ流入するのを防ぐ
+/// (driver 内の `evaluate` は純粋呼出だが、caller 責務で invalid を弾く契約)。
+///
+/// # 引数
+/// - `goal`: CLI / manifest / flag 由来の宣言的ゴール([`Option<anaden_core::Goal>`])。
+///   [`None`] は非ゴールモード(従来の無限ループ / max_iterations 停止)。
+///
+/// # 戻り値
+/// - `Ok(())`: `goal == None`(非ゴールモード)、または `Some(goal)` かつ
+///   [`anaden_core::Goal::validate`] が `Ok(())` を返した場合。
+/// - `Err`: `Some(goal)` かつ [`anaden_core::Goal::validate`] が [`anaden_core::GoalError`]
+///   を返した場合。anyhow へ変換し、`GoalError` の Display 文字列を保持する。
+///
+/// # 純粋性
+/// デバイス I/O・時間・乱数に依存せず決定論的。`tests/` からデバイスなしで検証可能。
+pub fn validate_goal(goal: &Option<anaden_core::Goal>) -> Result<(), anyhow::Error> {
+    match goal {
+        None => Ok(()),
+        Some(g) => g.validate().map_err(|e| anyhow::anyhow!(e)),
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]
@@ -301,5 +328,106 @@ mod tests {
                 code
             );
         }
+    }
+
+    // ---- validate_goal (Issue #37 T4: run_loop signature threading, device-free) ----
+    // 契約: None => Ok(非ゴールモード)。Some(valid) => Ok。
+    //       Some(invalid) => Err(GoalError を伝播)。driver へ渡る前に CLI 境界で弾く。
+
+    #[test]
+    fn validate_goal_none_is_ok() {
+        // 非ゴールモード(従来の無限ループ)は常に許容される。
+        assert!(validate_goal(&None).is_ok());
+    }
+
+    #[test]
+    fn validate_goal_some_valid_loop_count_is_ok() {
+        // UC-1: LoopCount target=50 は妥当。
+        let goal = anaden_core::Goal {
+            name: "farm50".to_string(),
+            stop: anaden_core::StopCondition::LoopCount { target: 50 },
+        };
+        assert!(validate_goal(&Some(goal)).is_ok());
+    }
+
+    #[test]
+    fn validate_goal_some_valid_timeout_is_ok() {
+        // UC-3: Timeout secs=3600 は妥当。
+        let goal = anaden_core::Goal {
+            name: "one_hour".to_string(),
+            stop: anaden_core::StopCondition::Timeout { secs: 3600 },
+        };
+        assert!(validate_goal(&Some(goal)).is_ok());
+    }
+
+    #[test]
+    fn validate_goal_some_valid_template_match_is_ok() {
+        // UC-2: TemplateMatch confidence=0.85 は妥当。
+        let goal = anaden_core::Goal {
+            name: "find_clear".to_string(),
+            stop: anaden_core::StopCondition::TemplateMatch {
+                task: "clear".to_string(),
+                confidence: 0.85,
+            },
+        };
+        assert!(validate_goal(&Some(goal)).is_ok());
+    }
+
+    #[test]
+    fn validate_goal_loop_count_zero_is_err() {
+        // LoopCount target=0 は NonPositive エラー。driver へ渡る前に弾かれる。
+        let goal = anaden_core::Goal {
+            name: "bad".to_string(),
+            stop: anaden_core::StopCondition::LoopCount { target: 0 },
+        };
+        let result = validate_goal(&Some(goal));
+        assert!(result.is_err(), "zero target must error before driver");
+        let msg = format!("{}", result.unwrap_err());
+        // GoalError::NonPositive の Display 文字列が anyhow 経由で伝播していること。
+        assert!(msg.contains("greater than 0"), "got: {msg}");
+        assert!(msg.contains("target"), "field name propagated: {msg}");
+    }
+
+    #[test]
+    fn validate_goal_timeout_zero_is_err() {
+        // Timeout secs=0 は NonPositive エラー(field: secs)。
+        let goal = anaden_core::Goal {
+            name: "bad".to_string(),
+            stop: anaden_core::StopCondition::Timeout { secs: 0 },
+        };
+        let result = validate_goal(&Some(goal));
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("secs"), "field name propagated: {msg}");
+    }
+
+    #[test]
+    fn validate_goal_template_match_bad_confidence_is_err() {
+        // TemplateMatch confidence=0.0 は InvalidConfidence エラー。
+        let goal = anaden_core::Goal {
+            name: "bad".to_string(),
+            stop: anaden_core::StopCondition::TemplateMatch {
+                task: "clear".to_string(),
+                confidence: 0.0,
+            },
+        };
+        let result = validate_goal(&Some(goal));
+        assert!(result.is_err());
+        let msg = format!("{}", result.unwrap_err());
+        assert!(msg.contains("confidence"), "got: {msg}");
+    }
+
+    #[test]
+    fn validate_goal_does_not_panic_on_negative_confidence() {
+        // 負の信頼度も panic せず Err へ(ライブラリ非 panic 契約)。
+        let goal = anaden_core::Goal {
+            name: "bad".to_string(),
+            stop: anaden_core::StopCondition::TemplateMatch {
+                task: "x".to_string(),
+                confidence: -0.5,
+            },
+        };
+        let result = validate_goal(&Some(goal));
+        assert!(result.is_err(), "negative confidence must not panic");
     }
 }
