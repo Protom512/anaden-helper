@@ -2782,6 +2782,168 @@ mod tests {
         assert_eq!(outcome.iterations, 1);
     }
 
+    // ===== UC-3 backward-compat AC: run_loop_with_goal(goal=None) byte-identical to
+    //       run_loop_with_recovery =====
+    //
+    // Issue #37/#41 close 認可条件 Task #4:
+    // `run_loop_with_goal` が `goal=None` で渡されたとき `run_loop_with_recovery` へ
+    // **verbatim(バイト同一)** で委譲することを、Outcome の全観測可能フィールドを
+    // 機械的に比較して検証する。Goal 駆動コードパスが導入されても、ゴール非宣言時の
+    // 既存挙動(MaxIterations/Recovery で停止、reached_goal=None)が **1 ビットも変わらない**
+    // ことの回帰防止。
+    //
+    // 既存 backcompat_* テスト群(2650-2783)は run_loop / run_loop_with_recovery を直接呼び、
+    // goal=None の *意味論的* 契約(MaxIterations 等)を検証する。本テストはそれらと相補的に、
+    // **委譲経路自体(run_loop_with_goal の None 早期 return)** を通した場合の出力が、
+    // 直接 run_loop_with_recovery を呼んだ場合と完全一致することを個別に固定する。
+
+    /// `run_loop_with_goal(goal=None)` と `run_loop_with_recovery` の出力が
+    /// **完全に同一**であることを、純粋 NoMatch + recovery 無しの最小ケースで検証する。
+    /// 両者の `LoopOutcome` を構造的に比較(reason / iterations / terminal / fired_commands /
+    /// progress_report)し、GoalReached/GoalTimeout が発火しないことを確認。
+    /// また reached_goal が None のままであることも併せて検証(UC-3 AC の核心不変条件)。
+    #[tokio::test]
+    async fn backcompat_goal_none_run_loop_with_goal_is_byte_identical_to_recovery() {
+        // 直接 run_loop_with_recovery を呼んだ基準結果(baseline)。
+        let (mut driver_baseline, _fired_baseline) = build_nomatch_driver();
+        let baseline = driver_baseline
+            .run_loop_with_recovery(Duration::ZERO, 7, 0, None)
+            .await;
+
+        // 同一 fixture で run_loop_with_goal(goal=None) を通した結果。
+        let (mut driver_via_goal, _fired_via_goal) = build_nomatch_driver();
+        let clock = FakeClock::starting_at(0);
+        let via_goal = driver_via_goal
+            .run_loop_with_goal(Duration::ZERO, 7, 0, None, None, clock)
+            .await;
+
+        // === 停止理由: MaxIterations(Goal 系停止理由は出ない)===
+        assert_eq!(
+            baseline.reason,
+            LoopStopReason::MaxIterations,
+            "baseline must stop with MaxIterations"
+        );
+        assert_eq!(
+            via_goal.reason,
+            LoopStopReason::MaxIterations,
+            "run_loop_with_goal(goal=None) must stop with MaxIterations, got {:?}",
+            via_goal.reason
+        );
+        assert_eq!(
+            baseline.reason, via_goal.reason,
+            "reason diverges between direct and delegated paths"
+        );
+
+        // === 全観測可能フィールドのバイト同一性 ===
+        assert_eq!(
+            baseline.iterations, via_goal.iterations,
+            "iterations diverges (delegation must be byte-identical)"
+        );
+        assert_eq!(
+            baseline.terminal, via_goal.terminal,
+            "terminal diverges (delegation must be byte-identical)"
+        );
+        assert_eq!(
+            baseline.fired_commands, via_goal.fired_commands,
+            "fired_commands diverges (delegation must be byte-identical)"
+        );
+        assert_eq!(
+            baseline.progress_report.iterations, via_goal.progress_report.iterations,
+            "progress_report.iterations diverges"
+        );
+        assert_eq!(
+            baseline.progress_report.fired_count, via_goal.progress_report.fired_count,
+            "progress_report.fired_count diverges"
+        );
+        assert_eq!(
+            baseline.progress_report.per_task_matches, via_goal.progress_report.per_task_matches,
+            "progress_report.per_task_matches diverges"
+        );
+        assert_eq!(
+            baseline.progress_report.terminal_task, via_goal.progress_report.terminal_task,
+            "progress_report.terminal_task diverges"
+        );
+
+        // === UC-3 AC 核心不変条件: reached_goal は None のまま ===
+        assert!(
+            baseline.progress_report.reached_goal.is_none(),
+            "baseline reached_goal must be None (no goal declared)"
+        );
+        assert!(
+            via_goal.progress_report.reached_goal.is_none(),
+            "run_loop_with_goal(goal=None) must leave reached_goal as None — \
+             goal-evaluation code must not populate it on the undeclared path"
+        );
+
+        // === Goal 系停止理由が一切発火しないことの明示的表明 ===
+        assert_ne!(
+            via_goal.reason,
+            LoopStopReason::GoalReached,
+            "goal=None path must NEVER emit GoalReached"
+        );
+        assert_ne!(
+            via_goal.reason,
+            LoopStopReason::GoalTimeout,
+            "goal=None path must NEVER emit GoalTimeout"
+        );
+    }
+
+    /// recovery hook 付きでも `run_loop_with_goal(goal=None)` が
+    /// `run_loop_with_recovery` と同じ停止契約(MaxIterations 優先、Goal 系不出現)を
+    /// 保つことを検証する。hook は Ok を返し続けるため MaxIterations まで到達する。
+    /// (recovery Err の ExecuteError 契約は既存 2710 テストが直接経路で担保済み。)
+    #[tokio::test]
+    async fn backcompat_goal_none_with_recovery_hook_preserves_max_iterations_contract() {
+        fn make_hook() -> (Arc<AtomicU32>, RecoveryHook) {
+            let calls = Arc::new(AtomicU32::new(0));
+            let calls_clone = calls.clone();
+            let hook: RecoveryHook = Box::new(move |_streak| {
+                let c = calls_clone.clone();
+                Box::pin(async move {
+                    c.fetch_add(1, Ordering::SeqCst);
+                    Ok(())
+                })
+            });
+            (calls, hook)
+        }
+
+        // run_loop_with_goal(goal=None) + recovery hook 経路。
+        let (mut driver, _fired) = build_nomatch_driver();
+        let (calls, hook) = make_hook();
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 12, 3, Some(hook), None, clock)
+            .await;
+
+        // 停止理由は MaxIterations のみ(Goal 系停止理由は発火しない)。
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "goal=None + recovery(Ok) must stop with MaxIterations, got {:?}",
+            outcome.reason
+        );
+        assert_ne!(
+            outcome.reason,
+            LoopStopReason::GoalReached,
+            "GoalReached must never fire when goal=None even with recovery"
+        );
+        assert_ne!(
+            outcome.reason,
+            LoopStopReason::GoalTimeout,
+            "GoalTimeout must never fire when goal=None even with recovery"
+        );
+        // recovery hook は最低 1 回発火(threshold=3, max=12 → 3,6,9,12 のいずれか)。
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "recovery hook must fire at least once under goal=None delegation path"
+        );
+        // reached_goal は None(UC-3 AC 不変条件、recovery 付きでも崩れない)。
+        assert!(
+            outcome.progress_report.reached_goal.is_none(),
+            "reached_goal must stay None even with recovery hook under goal=None"
+        );
+    }
+
     // ===== T-fix-1: evaluate_goal unit contract =====
 
     /// LoopCount ゴールが既に target に到達しているとき `evaluate_goal` は
