@@ -3220,4 +3220,203 @@ mod tests {
             "must NOT reach GoalReached when task name mismatches last_match"
         );
     }
+
+    // ===== UC-3 E2E (Timeout ゴール到達) =====
+    //
+    // UC-3 は「宣言した秒数が経過したら停止する」時間駆動の異常終端保証。
+    // goal.rs の doc に固定されている通り、Timeout は与えられた elapsed_secs と
+    // 宣言値の比較のみで判定する(pure evaluate)。run_loop_with_goal は各 tick 後に
+    // GoalClock.elapsed_secs() を呼び、GoalStatus::Failed → LoopStopReason::GoalTimeout
+    // で停止する。本 E2E テストは UC-1(L3019)/UC-2(L3096) と対になる UC-3 の 1 本。
+    //
+    // FakeClock(build_nomatch_driver の fixture と FakeClock::starting_at を流用)が
+    // elapsed_secs 呼出毎に +1 するので、NoMatch が持続する build_nomatch_driver でも
+    // 宣言秒数に到達したタイミングで GoalTimeout になる。
+
+    /// UC-3 正常系: `Timeout { secs: 3 }` を与えると、FakeClock が呼出毎に +1 進むので
+    /// 4 サイクル目(elapsed_secs == 3 >= 3)に `LoopStopReason::GoalTimeout` で停止し、
+    /// `terminal == "goal_timeout"`、`reached_goal == "timeout=3"` になること。
+    /// また `iterations == 4` は `max_iterations == 10` 未到達であり、ゴールが先に効いて
+    /// いる(MaxIterations ではない)ことを検証する。
+    ///
+    /// ここでは `FakeClock::starting_at(0)` を使用する(org-feedback approval condition)。
+    /// FakeClock の進め方(呼出毎 +1)により、開始値 0 → 0,1,2,3 と返し、3 で閾値到達。
+    #[tokio::test]
+    async fn uc3_timeout_goal_reaches_goal_timeout_after_declared_secs() {
+        let (mut driver, _fired) = build_nomatch_driver();
+
+        let goal = anaden_core::Goal {
+            name: "hard_stop".into(),
+            stop: anaden_core::StopCondition::Timeout { secs: 3 },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 10, 0, None, Some(&goal), clock)
+            .await;
+
+        // UC-3 の核心: elapsed_secs が secs(=3)に到達 → GoalTimeout(MaxIterations ではない)。
+        // FakeClock starting_at(0) は呼出毎に 0,1,2,3 を返すので、4 tick 目で 3>=3 到達。
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::GoalTimeout,
+            "UC-3 Timeout secs=3 must reach GoalTimeout once FakeClock advances past the \
+             limit, got {:?}",
+            outcome.reason
+        );
+        assert_eq!(
+            outcome.terminal, "goal_timeout",
+            "terminal must be goal_timeout for Timeout failure"
+        );
+        // 記述子は goal_descriptor の Timeout 形式(timeout=<secs>)。
+        assert_eq!(
+            outcome.progress_report.reached_goal.as_deref(),
+            Some("timeout=3"),
+            "reached_goal descriptor must reflect Timeout secs"
+        );
+        // iterations は max_iterations(=10)未到達 → ゴールが先に効いた。
+        assert!(
+            outcome.iterations < 10,
+            "goal must terminate before max_iterations; got iterations={}",
+            outcome.iterations
+        );
+        // FakeClock の呼出毎 +1 トレース: tick1=0, tick2=1, tick3=2, tick4=3(>=3 → stop)。
+        assert_eq!(
+            outcome.iterations, 4,
+            "must reach timeout exactly on iteration 4 (elapsed 0,1,2,3)"
+        );
+    }
+
+    // ===== JSON ラウンドトリップ検証(エンジン産出 outcome) =====
+    //
+    // 既存 `loop_outcome_is_json_serializable`(L2423) は hand-built な LoopOutcome を
+    // 使っており、serde の形状(reason snake_case / progress_report ネスト / reached_goal)
+    // が JSON 経路で保たれることを検証している。一方で「エンジン経路(run_loop_with_goal)
+    // を通じて実際に populate された reached_goal を持つ outcome」が JSON ラウンドトリップ
+    // を生き延びるかは別の保証になる: evaluate_goal → goal_descriptor が埋めた文字列が
+    // シリアライズ→デシリアライズ後も完全に一致することを、UC-1 と UC-2 の両方の
+    // ゴール種別で検証する(UC-3 Timeout は本チケットのスコープ外: #42 の未達 AC は
+    // UC-1/UC-2 の JSON 耐性で明示されているため)。
+    // Issue #42 / 親 #37 Shard 3: JSON 成果レポート検証。
+
+    /// UC-1(LoopCount) エンジン産出 outcome が JSON ラウンドトリップを生き延びること。
+    /// run_loop_with_goal で実際に GoalReached まで駆動し、`reached_goal == "loop_count=3"`
+    /// が populate された outcome を to_string → from_str し、progress_report.reached_goal
+    /// が完全一致で生き残ることを assert する。
+    #[tokio::test]
+    async fn uc1_loop_count_outcome_reached_goal_survives_json_roundtrip() {
+        let (mut driver, _fired) = build_nomatch_driver();
+
+        let goal = anaden_core::Goal {
+            name: "farm3".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 3 },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 10, 0, None, Some(&goal), clock)
+            .await;
+
+        // 前提: エンジン経路で実際に到達し、reached_goal が populate されていること。
+        assert_eq!(outcome.reason, LoopStopReason::GoalReached);
+        let expected_descriptor = outcome
+            .progress_report
+            .reached_goal
+            .as_deref()
+            .expect("reached_goal must be populated by engine for UC-1 LoopCount");
+        assert_eq!(expected_descriptor, "loop_count=3");
+
+        // JSON ラウンドトリップ: to_string → from_str。
+        let s = serde_json::to_string(&outcome).expect("serialize json");
+        let back: LoopOutcome = serde_json::from_str(&s).expect("deserialize json");
+
+        // progress_report.reached_goal がラウンドトリップを生き延びる(本テストの核心)。
+        assert_eq!(
+            back.progress_report.reached_goal.as_deref(),
+            Some("loop_count=3"),
+            "UC-1 reached_goal descriptor must survive JSON round-trip; json={s}"
+        );
+        // reason も snake_case 経路で往復できること(対称性担保)。
+        assert_eq!(back.reason, LoopStopReason::GoalReached);
+        // iterations も保持されること(progress_report と top-level の両方)。
+        assert_eq!(back.iterations, 3);
+        assert_eq!(back.progress_report.iterations, 3);
+    }
+
+    /// UC-2(TemplateMatch) エンジン産出 outcome が JSON ラウンドトリップを生き延びること。
+    /// needle 埋込画面で Title タスクをマッチ→発火させ、TemplateMatch ゴール到達で
+    /// populate された reached_goal(記述子は task と confidence を含む) が to_string → from_str
+    /// 後も完全一致で生き残ることを assert する。UC-1 と記述子フォーマットが異なるため
+    /// 両方を網羅する(template_match conf>=<c> (task=<t>) 形式の JSON 耐性)。
+    #[tokio::test]
+    async fn uc2_template_match_outcome_reached_goal_survives_json_roundtrip() {
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let frames = frames_of(vec![matched]);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        let goal = anaden_core::Goal {
+            name: "find_title".into(),
+            stop: anaden_core::StopCondition::TemplateMatch {
+                task: "Title".into(),
+                confidence: 0.85,
+            },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 10, 0, None, Some(&goal), clock)
+            .await;
+
+        // 前提: エンジン経路で TemplateMatch ゴール到達し、reached_goal が populate されていること。
+        assert_eq!(outcome.reason, LoopStopReason::GoalReached);
+        let expected_descriptor = outcome
+            .progress_report
+            .reached_goal
+            .as_deref()
+            .expect("reached_goal must be populated by engine for UC-2 TemplateMatch");
+        assert_eq!(
+            expected_descriptor,
+            "template_match conf>=0.85 (task=Title)"
+        );
+
+        // JSON ラウンドトリップ: to_string → from_str。
+        let s = serde_json::to_string(&outcome).expect("serialize json");
+        let back: LoopOutcome = serde_json::from_str(&s).expect("deserialize json");
+
+        // progress_report.reached_goal がラウンドトリップを生き延びる(本テストの核心)。
+        // 記述子は空白・記号(>=, ()) を含むため、JSON 文字列 escaping も耐性検証に含まれる。
+        assert_eq!(
+            back.progress_report.reached_goal.as_deref(),
+            Some("template_match conf>=0.85 (task=Title)"),
+            "UC-2 reached_goal descriptor must survive JSON round-trip; json={s}"
+        );
+        // reason も snake_case 経路で往復できること(対称性担保)。
+        assert_eq!(back.reason, LoopStopReason::GoalReached);
+        // 発火履歴も形状を保って往復できること(fired_commands が空でない)。
+        assert!(
+            !back.fired_commands.is_empty(),
+            "fired_commands must survive JSON round-trip non-empty"
+        );
+    }
 }
