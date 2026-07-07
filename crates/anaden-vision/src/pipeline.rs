@@ -385,6 +385,89 @@ fn is_pipeline_manifest_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
+/// パイプライン manifest。各パイプラインディレクトリのルートに置かれた
+/// `pipeline.toml`（[`PIPELINE_MANIFEST_FILENAME`]）が宣言する、開始タスクと
+/// ゴール（終端条件）の集合。
+///
+/// TaskDef（認識タスク）とは分離された宣言層で、[`load_pipeline`] はこのファイルを
+/// TaskDef として誤パースしない（[`load_pipeline`] がスキップし、
+/// [`load_pipeline_manifest`] が読み込む）。
+///
+/// # TOML schema
+///
+/// ```toml
+/// start_task = "<task-name>"          # 必須: 最初に実行する TaskDef 名
+///
+/// [[goal]]                            # 省略可（無宣言 = 無限ループ・後方互換）
+/// name = "<goal-name>"
+/// [goal.stop]
+/// LoopCount = { target = 50 }        # UC-1: N 回反復で停止
+/// # または
+/// # [goal.stop.TemplateMatch]        # UC-2: テンプレートマッチで停止
+/// # task = "clear_button"
+/// # confidence = 0.85
+/// # または
+/// # Timeout = { secs = 3600 }        # UC-3: 指定秒数経過で停止
+/// ```
+///
+/// `start_task` は必須。`goals` は `[[goal]]` 配列（0個以上）。未知フィールドは
+/// `deny_unknown_fields` で拒否される（typo 回帰防止）。
+///
+/// # Goal バリアントの意味
+///
+/// 各 `stop` は [`anaden_core::StopCondition`] のいずれか1つ。詳細な評価セマンティクス
+/// （`LoopCount` は tick 数 = evaluate 呼出回数、`TemplateMatch` は信頼度閾値、
+/// `Timeout` は `elapsed_secs >= secs`）は `anaden_core::goal` モジュール doc 参照。
+/// 本 manifest 層は宣言をパースするだけで評価はしない（評価は driver 層の責務）。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct PipelineManifest {
+    /// 最初に実行する TaskDef 名（パイプラインディレクトリ内の `*.toml` の `name`）。
+    pub start_task: String,
+    /// ゴール（終端条件）のリスト。`[[goal]]` 配列。空の場合、driver は従来通り
+    /// 無限ループとして振る舞う（後方互換）。
+    ///
+    /// フィールド名は Rust 慣習で `goals` だが、TOML では `[[goal]]` 配列表記で
+    /// 宣言するため `#[serde(rename = "goal")]` で同期する。
+    #[serde(default, rename = "goal")]
+    pub goals: Vec<anaden_core::Goal>,
+}
+
+/// パイプラインディレクトリ内の慣例パス `pipeline.toml` を manifest として読み込む。
+///
+/// [`load_pipeline`] とは対照的に、TaskDef (`*.toml`) は読まず、manifest ファイル
+/// （[`PIPELINE_MANIFEST_FILENAME`]）のみを読み込む。ファイルが存在しない場合は
+/// [`TaskDefError::ParseFailed`] を返す（manifest 経路を選んだ呼出側は manifest の
+/// 存在を期待するため、不在は即時 fail する — [`load_pipeline`] の「空 Vec を返す」
+/// 緩い契約とは意図的に異なる）。
+///
+/// # 引数
+/// - `dir`: パイプラインディレクトリ。`dir/pipeline.toml` を読む。
+///
+/// # 戻り値
+/// - `Ok(PipelineManifest)`: パース成功。`start_task` + `goals` に分離済み。
+/// - `Err(TaskDefError::ParseFailed)`: ファイル不在・読込失敗・TOML 構文エラー・
+///   未知フィールド・`start_task` 欠落等。
+///
+/// # Goals と TaskDef の分離契約
+/// `goals` に含まれる `StopCondition::TemplateMatch { task, .. }` の `task` 名は
+/// 別ディレクトリのテンプレート識別子を指す場合があり、本関数は TaskDef 名前空間との
+/// 衝突を検証しない（driver 層の責務）。本関数は純粋に manifest の構文解析のみを行う。
+pub fn load_pipeline_manifest(dir: &Path) -> Result<PipelineManifest, TaskDefError> {
+    let manifest_path = dir.join(PIPELINE_MANIFEST_FILENAME);
+    let content =
+        std::fs::read_to_string(&manifest_path).map_err(|e| TaskDefError::ParseFailed {
+            path: manifest_path.clone(),
+            reason: format!("manifest read failed: {e}"),
+        })?;
+    let manifest: PipelineManifest =
+        toml::from_str(&content).map_err(|e| TaskDefError::ParseFailed {
+            path: manifest_path,
+            reason: e.to_string(),
+        })?;
+    Ok(manifest)
+}
+
 /// 1ステップの実行結果。action は省略時 [`Action::DoNothing`] を補充済み。
 ///
 /// `next` は空の場合あり（終端タスク）。base 継承解決は範囲外のため `next` は
@@ -392,7 +475,10 @@ fn is_pipeline_manifest_path(path: &Path) -> bool {
 ///
 /// `matched_region` はマッチしたテンプレート位置（[`MatchResult::region`]）。caller はこれを
 /// [`Action::ClickSelf`] のクリック座標計算などに使う（純粋層 [`crate`] 外の pipeline_runner）。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `matched_confidence` はマッチの信頼度（[`MatchResult::confidence`]）。Issue #37 T4:
+/// 宣言的ゴール TemplateMatch(UC-2) 評価が `last_match` を構築するために必要。
+#[derive(Debug, Clone, PartialEq)]
 pub struct StepOutcome {
     /// マッチしたタスク名（= `run_step` の `current_name` と一致するはず）。
     pub matched_task: String,
@@ -402,6 +488,8 @@ pub struct StepOutcome {
     pub next: Vec<String>,
     /// マッチしたテンプレート領域（スクリーンショット元解像度の座標）。
     pub matched_region: ScreenRegion,
+    /// マッチの信頼度（0.0..=1.0）。
+    pub matched_confidence: f32,
 }
 
 /// `current_name` の [`TaskDef`] を探して1ステップ実行（detect）する。
@@ -432,6 +520,7 @@ pub fn run_step(
                 action,
                 next,
                 matched_region: matched.region,
+                matched_confidence: matched.confidence.0,
             })
         }
         Ok(None) => None, // 閾値下 / ROI 外
@@ -1430,6 +1519,70 @@ mod tests {
         let hud_roi = hud.roi.expect("TapHudTrPc has ROI");
         assert_roi_within_1258x708(hud_roi, "TapHudTrPc");
         assert!(hud.template.exists(), "hud template PNG must exist");
+    }
+
+    // ---- T-manifest-reader: 実 template の manifest round-trip 回帰 ----
+    //
+    // docs/goal-manifest.md §実例 は `templates/pipelines/field_loop_pc/pipeline.toml`
+    // を UC-1 (LoopCount) の正例として宣言する。既存 manifest テスト群は tempdir 上の
+    // 合成 TOML で網羅するが、実 template ファイルが doc の schema 通りにパースできる
+    // ことを CI で固定する（doc 編集者が schema を壊した場合に即座に RED）。
+    //
+    // 併せて「分離契約」を同一ディレクトリで再検証する: load_pipeline は pipeline.toml
+    // をスキップして TaskDef(tap_bottom/tap_hud_tr)のみを返し、load_pipeline_manifest は
+    // pipeline.toml のみを start_task + goals に分離する。
+
+    /// `templates/pipelines/field_loop_pc/pipeline.toml` が `load_pipeline_manifest`
+    /// で正しくパースされ、`start_task = "TapBottomStablePc"` + UC-1 LoopCount(50) の
+    /// `goals` に分離されることを検証する。doc/schema 同期の回帰テスト。
+    #[test]
+    fn field_loop_pc_pipeline_manifest_loads_start_task_and_loop_count_goal() {
+        let dir = workspace_templates_root()
+            .join("pipelines")
+            .join("field_loop_pc");
+        let manifest = load_pipeline_manifest(&dir)
+            .expect("field_loop_pc/pipeline.toml must load as manifest");
+
+        // start_task は同ディレクトリの TaskDef(tap_bottom.toml) name と一致すること。
+        assert_eq!(
+            manifest.start_task, "TapBottomStablePc",
+            "start_task must match TapBottomStablePc TaskDef name"
+        );
+        // [[goal]] は1つ。UC-1 LoopCount。
+        assert_eq!(
+            manifest.goals.len(),
+            1,
+            "field_loop_pc manifest declares exactly one goal"
+        );
+        let goal = &manifest.goals[0];
+        assert_eq!(goal.name, "field_loop_50");
+        assert_eq!(
+            goal.stop,
+            anaden_core::StopCondition::LoopCount { target: 50 },
+            "field_loop_pc goal must be UC-1 LoopCount(target=50)"
+        );
+        // バリデーション（target>0）も通過すること（driver 呼出前前提条件）。
+        goal.validate().expect("field_loop_pc goal must validate");
+
+        // 分離契約の再検証: 同ディレクトリで load_pipeline は manifest をスキップし
+        // TaskDef のみ(tap_bottom + tap_hud_tr = 2件)を返すこと。
+        let defs = load_pipeline(&dir).expect("TaskDefs must load (manifest skipped)");
+        assert_eq!(
+            defs.len(),
+            2,
+            "load_pipeline must skip pipeline.toml and pick up only the 2 TaskDefs"
+        );
+        assert!(
+            defs.iter().any(|d| d.name == "TapBottomStablePc"),
+            "TapBottomStablePc TaskDef must be present alongside the manifest"
+        );
+        // start_task は manifest と TaskDef 名前空間の整合も取れていること
+        // （doc の「TaskDef の name と一致」という制約）。
+        assert!(
+            defs.iter().any(|d| d.name == manifest.start_task),
+            "manifest.start_task '{}' must exist as a TaskDef in the same directory",
+            manifest.start_task
+        );
     }
 
     #[test]
@@ -2895,6 +3048,288 @@ mod tests {
         assert!(
             defs.is_empty(),
             "pipeline.toml must NOT be parsed as a TaskDef; got {defs:?}"
+        );
+    }
+
+    // ---- T5-toml-doc: load_pipeline_manifest で start_task + goal を分離パース ----
+    //
+    // manifest 経路(A) の本体。`pipeline.toml` を TaskDef ではなく PipelineManifest
+    // (start_task + goals) として読み込む。Goal シリアライズ表記は anaden-core/src/goal.rs
+    // の既存テスト(deserialize_loop_count/template_match/timeout, deny_unknown_fields)で
+    // 既検証済み。本テスト群は「manifest ロード層が start_task と goals を正しく分離し、
+    // Goal バリアント3種を透過的にパースすること」を検証する（Goal 自体の評価ロジックは
+    // anaden-core 側の責務なのでここでは扱わない）。
+    //
+    // schema:
+    //   start_task = "<task-name>"        # 必須
+    //   [[goal]]                          # 0個以上（無宣言 = 無限ループ後方互換）
+    //   name = "<goal-name>"
+    //   [goal.stop]
+    //   LoopCount = { target = <u64> }
+    //   # or
+    //   [goal.stop.TemplateMatch]
+    //   task = "<template>", confidence = <f32>
+    //   # or
+    //   Timeout = { secs = <u64> }
+
+    /// UC-1 (LoopCount): start_task + 単一 goal が分離パースされること。
+    #[test]
+    fn manifest_parses_start_task_and_loop_count_goal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "TapBottom"
+
+            [[goal]]
+            name = "farm50"
+            [goal.stop]
+            LoopCount = { target = 50 }
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        assert_eq!(manifest.start_task, "TapBottom");
+        assert_eq!(manifest.goals.len(), 1, "exactly one goal");
+        let goal = &manifest.goals[0];
+        assert_eq!(goal.name, "farm50");
+        assert_eq!(
+            goal.stop,
+            anaden_core::StopCondition::LoopCount { target: 50 }
+        );
+    }
+
+    /// UC-2 (TemplateMatch): start_task + TemplateMatch goal が分離パースされること。
+    #[test]
+    fn manifest_parses_template_match_goal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "DetectClear"
+
+            [[goal]]
+            name = "find_clear"
+            [goal.stop.TemplateMatch]
+            task = "clear_button"
+            confidence = 0.85
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        assert_eq!(manifest.start_task, "DetectClear");
+        let goal = &manifest.goals[0];
+        assert_eq!(goal.name, "find_clear");
+        assert_eq!(
+            goal.stop,
+            anaden_core::StopCondition::TemplateMatch {
+                task: "clear_button".to_string(),
+                confidence: 0.85
+            }
+        );
+    }
+
+    /// UC-3 (Timeout): start_task + Timeout goal が分離パースされること。
+    #[test]
+    fn manifest_parses_timeout_goal() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "Farm"
+
+            [[goal]]
+            name = "one_hour_limit"
+            [goal.stop]
+            Timeout = { secs = 3600 }
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        assert_eq!(manifest.start_task, "Farm");
+        let goal = &manifest.goals[0];
+        assert_eq!(goal.name, "one_hour_limit");
+        assert_eq!(
+            goal.stop,
+            anaden_core::StopCondition::Timeout { secs: 3600 }
+        );
+    }
+
+    /// 後方互換（無限ループ維持）: goal 宣言が無い manifest は空 goals で読み込めること。
+    /// driver は goals が空なら Goal 無し（= 従来の無限ループ）として振る舞う。
+    #[test]
+    fn manifest_without_goals_loads_as_empty_goals_for_backcompat() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "TapBottom"
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        assert_eq!(manifest.start_task, "TapBottom");
+        assert!(
+            manifest.goals.is_empty(),
+            "no [[goal]] declaration => empty goals => infinite loop (backcompat)"
+        );
+    }
+
+    /// start_task 欠落は ParseFailed（必須フィールド）。
+    #[test]
+    fn manifest_missing_start_task_rejected() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            [[goal]]
+            name = "g"
+            [goal.stop]
+            LoopCount = { target = 1 }
+            "#,
+        );
+
+        let err = load_pipeline_manifest(tmp.path()).expect_err("start_task is required");
+        assert!(matches!(err, TaskDefError::ParseFailed { .. }));
+    }
+
+    /// deny_unknown_fields: manifest 直下の未知フィールドは拒否されること。
+    #[test]
+    fn manifest_rejects_unknown_top_field() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "X"
+            bogus = true
+            "#,
+        );
+
+        let err = load_pipeline_manifest(tmp.path()).expect_err("unknown field must reject");
+        assert!(matches!(err, TaskDefError::ParseFailed { .. }));
+    }
+
+    /// deny_unknown_fields: goal テーブル内の未知フィールドは拒否されること
+    /// （Goal/StopCondition の deny_unknown_fields が manifest 経由でも効くことの証明）。
+    #[test]
+    fn manifest_rejects_unknown_goal_field() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "X"
+
+            [[goal]]
+            name = "g"
+            bogus = 1
+            [goal.stop]
+            LoopCount = { target = 1 }
+            "#,
+        );
+
+        let err = load_pipeline_manifest(tmp.path()).expect_err("unknown goal field must reject");
+        assert!(matches!(err, TaskDefError::ParseFailed { .. }));
+    }
+
+    /// manifest ファイル不在は ParseFailed（慣例パス pipeline.toml が無いと明示的エラー）。
+    /// load_pipeline の「空 Vec を返す」緩い契約とは意図的に異なる: manifest 経路を
+    /// 選んだ呼出側は manifest が存在することを期待するため、不在は即時 fail する。
+    #[test]
+    fn manifest_missing_file_returns_error() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = load_pipeline_manifest(tmp.path()).expect_err("missing manifest must error");
+        assert!(matches!(err, TaskDefError::ParseFailed { .. }));
+    }
+
+    /// 複数 goal 宣言: [[goal]] 配列として2つ以上の goal が順序保持でパースされること。
+    /// （goal.rs モジュールは AND/OR 合成を扱わないが、manifest 層は複数宣言を受容し、
+    /// driver 層が最初の1つを評価する等の将来拡張を妨げない。）
+    #[test]
+    fn manifest_parses_multiple_goals_in_order() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "Farm"
+
+            [[goal]]
+            name = "loop_50"
+            [goal.stop]
+            LoopCount = { target = 50 }
+
+            [[goal]]
+            name = "timeout_1h"
+            [goal.stop]
+            Timeout = { secs = 3600 }
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        assert_eq!(manifest.start_task, "Farm");
+        assert_eq!(manifest.goals.len(), 2, "two goals in declaration order");
+        assert_eq!(manifest.goals[0].name, "loop_50");
+        assert_eq!(manifest.goals[1].name, "timeout_1h");
+        assert_eq!(
+            manifest.goals[0].stop,
+            anaden_core::StopCondition::LoopCount { target: 50 }
+        );
+        assert_eq!(
+            manifest.goals[1].stop,
+            anaden_core::StopCondition::Timeout { secs: 3600 }
+        );
+    }
+
+    /// load_pipeline と load_pipeline_manifest の分離契約: 同一ディレクトリで
+    /// TaskDef (*.toml) は load_pipeline が読み、manifest (pipeline.toml) は
+    /// load_pipeline_manifest が読む。両者が衝突しないことの回帰。
+    #[test]
+    fn load_pipeline_and_load_pipeline_manifest_are_separated() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // TaskDef（通常タスク）
+        write_toml(
+            tmp.path(),
+            "tap_bottom.toml",
+            r#"
+            name = "TapBottom"
+            state = "Field"
+            algorithm = "ccoeff"
+            template = "t.png"
+            "#,
+        );
+        // manifest（Goal/start_task）
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "TapBottom"
+
+            [[goal]]
+            name = "farm50"
+            [goal.stop]
+            LoopCount = { target = 50 }
+            "#,
+        );
+
+        // load_pipeline は TaskDef のみ（manifest をスキップ）。
+        let defs = load_pipeline(tmp.path()).expect("task defs load");
+        assert_eq!(defs.len(), 1, "only TaskDef picked up, manifest skipped");
+        assert_eq!(defs[0].name, "TapBottom");
+
+        // load_pipeline_manifest は manifest のみ（start_task + goals を分離）。
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest load");
+        assert_eq!(manifest.start_task, "TapBottom");
+        assert_eq!(manifest.goals.len(), 1);
+        assert_eq!(
+            manifest.goals[0].stop,
+            anaden_core::StopCondition::LoopCount { target: 50 }
         );
     }
 }

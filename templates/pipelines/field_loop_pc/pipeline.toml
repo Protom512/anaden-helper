@@ -1,0 +1,29 @@
+# パイプライン manifest（T5-toml-doc）。TaskDef(tap_bottom.toml / tap_hud_tr.toml) とは
+# 分離された宣言層で、開始タスクとゴール(終端条件)を宣言する。
+# load_pipeline はこのファイルを TaskDef として誤パースせずスキップし、
+# load_pipeline_manifest が start_task + goals に分離パースする。
+#
+# schema(詳細は docs/goal-manifest.md):
+#   start_task = "<task-name>"          # 必須: 最初に実行する TaskDef 名
+#   [[goal]]                            # 省略可(無宣言 = 無限ループ・後方互換)
+#   name = "<goal-name>"
+#   [goal.stop]
+#   LoopCount = { target = 50 }         # UC-1: N 回反復で停止
+#   # [goal.stop.TemplateMatch]         # UC-2: テンプレートマッチで停止
+#   # task = "clear_button"
+#   # confidence = 0.85
+#   # Timeout = { secs = 3600 }         # UC-3: 指定秒数経過で停止
+#
+# deny_unknown_fields: 未知フィールドは拒否(typo 回帰防止)。
+# Goal の評価セマンティクス(LoopCount=evaluate 呼出回数 等)は anaden-core/src/goal.rs 参照。
+
+# 最初に実行する TaskDef。tap_bottom.toml の name="TapBottomStablePc" と一致すること。
+start_task = "TapBottomStablePc"
+
+# UC-1 (LoopCount): フィールド周回を 50 tick で打ち切る。
+# `target` は evaluate() の呼出回数(tick 数)。認識 NoMatch を含む全反復を1 tick として数える
+# (anaden-core/src/goal.rs モジュール doc の count-tracking セマンティクス)。
+[[goal]]
+name = "field_loop_50"
+[goal.stop]
+LoopCount = { target = 50 }

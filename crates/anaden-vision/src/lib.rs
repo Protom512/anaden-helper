@@ -20,7 +20,8 @@ pub use collector::{
 pub use engine::{SseVisionEngine, VisionEngine};
 pub use matcher::{MatchResult, TemplateMatcher};
 pub use pipeline::{
-    Action, Algorithm, StepOutcome, TaskDef, TaskDefError, load_pipeline, run_step,
+    Action, Algorithm, PipelineManifest, StepOutcome, TaskDef, TaskDefError, load_pipeline,
+    load_pipeline_manifest, run_step,
 };
 pub use scale::ScreenScaler;
 pub use scene_detector::SceneDetector;

@@ -20,6 +20,7 @@ use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use anaden_core::InputAction;
+use anaden_core::ScreenRegion;
 use anaden_device::{AdbError, InputExecutor, ScreenshotCapture};
 use anaden_vision::{ScreenScaler, TaskDef};
 
@@ -31,6 +32,65 @@ use crate::pipeline_runner::{InputCommand, PipelineState};
 /// NoMatch 連続カウンタをリセットしてループを継続、`Err` なら IO エラーとして停止する。
 pub type RecoveryHook =
     Box<dyn FnMut(u32) -> Pin<Box<dyn Future<Output = Result<(), AdbError>> + Send>> + Send>;
+
+/// ゴール評価用の経過時間計測の抽象(Issue #37 T4)。
+///
+/// [`anaden_core::goal::evaluate`] は `elapsed_secs` を純粋パラメータとして受け取るため、
+/// ドライバ側は「現在の経過秒数」を供給するだけでよい。本 trait はその供給口であり、
+/// 本番では [`SystemClock`](`Instant::now` 計測)、テストでは `FakeClock`(決定論的ステップ)
+/// へ差し替え可能にする。`tokio::time::pause` をドライバへ導入せず済む(test-only runtime
+/// feature への結合を避ける = org-feedback estimate approval condition)。
+///
+/// `&mut self` なのは、テスト用 impl が「呼出毎に時間を進める」副作用を持てるようにするため。
+pub trait GoalClock: Send {
+    /// ループ開始からの経過秒数を返す。
+    fn elapsed_secs(&mut self) -> u64;
+}
+
+/// [`GoalClock`] の本番実装。`Instant::now()` で実時間を計測する。
+///
+/// `run_loop_with_goal` が `goal=Some` で渡されたときのみ消費される(`goal=None` なら
+/// 計測は行われない = 既存 `run_loop_with_recovery` と完全等価)。
+pub struct SystemClock {
+    started: Instant,
+}
+
+impl SystemClock {
+    /// 開始時刻を `now` として計測を開始する。
+    pub fn new() -> Self {
+        Self {
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl GoalClock for SystemClock {
+    fn elapsed_secs(&mut self) -> u64 {
+        self.started.elapsed().as_secs()
+    }
+}
+
+/// `evaluate_goal` へ渡すループ状態のバンドル。
+///
+/// `evaluate_goal` の引数が 8 個(clippy `too_many_arguments` 閾値超過)になるのを防ぐため、
+/// 呼出側がループ内で蓄積した `iterations` / `fired_commands` / `per_task_matches` /
+/// `started` を 1 つの借用束にまとめて渡す。`build_outcome` への転送もこの束から行う。
+struct GoalEvalInputs<'a> {
+    /// 現在の tick 数。
+    iterations: u64,
+    /// 累積発火コマンド。
+    fired_commands: &'a [InputCommand],
+    /// タスク毎のマッチ回数。
+    per_task_matches: &'a [TaskMatchCount],
+    /// ループ開始時刻。
+    started: Instant,
+}
 
 /// 720p 基準(幅1280)の [`InputCommand`] をデバイス実解像度(device_width)の座標へ変換する純関数。
 ///
@@ -211,6 +271,11 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// [`Self::run_loop_with_recovery`] は内部で [`Self::run_once`] の代わりに
     /// [`Self::run_once_verified`] を呼ぶ。
     verify_after_fire: bool,
+    /// 直近の tick でマッチしたテンプレート情報(UC-2 用)。
+    /// `run_once` がマッチ時に `(task_name, confidence, region)` を格納し、
+    /// `run_loop_with_goal` が `GoalStatusContext::tick` へ渡すために消費(`take`)する。
+    /// 非ゴールパス(`run_loop_with_recovery`)では参照されず、上書きされるだけ。
+    last_match: Option<(String, f32, ScreenRegion)>,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -235,6 +300,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             device_width,
             swipe_duration_ms,
             verify_after_fire: false,
+            last_match: None,
         }
     }
 
@@ -287,6 +353,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         );
         // 3. tick（純粋計算 + current 遷移）
         let t_rec = std::time::Instant::now();
+        // tick は内部で current を next[0] へ進めるため、マッチした(発火前)タスク名を
+        // 事前に採取する(UC-2 last_match の task 名要素)。
+        let matched_task_name = self.state.current().to_string();
         let tick = match self.state.tick(&normalized, &self.tasks) {
             Some(r) => r,
             None => {
@@ -299,6 +368,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
         };
         let recognize_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
+        // マッチしたテンプレート情報を記録(UC-2 ゴール評価用)。run_loop_with_goal が
+        // GoalStatusContext::tick へ渡すために消費(take)する。非ゴールパスでは未参照。
+        if let (Some(region), Some(confidence)) = (tick.matched_region, tick.matched_confidence) {
+            self.last_match = Some((matched_task_name, confidence, region));
+        }
         // 4. rescale + execute（command があれば発火）
         if let Some(cmd) = tick.command {
             let device_cmd = rescale_command(cmd, &self.scaler, self.device_width);
@@ -560,6 +634,27 @@ pub fn format_progress_report(outcome: &LoopOutcome) -> String {
     lines.join("\n")
 }
 
+/// [`Goal`](`anaden_core::Goal`) の到達記述子(descriptor)を [`StopCondition`] から導出する純関数。
+///
+/// `evaluate_goal` が `progress_report.reached_goal` へ埋める文字列で、各バリアントを
+/// 人間可読かつ機械処理可能な形式へ射影する:
+/// - `LoopCount { target }` → `loop_count=<target>`
+/// - `TemplateMatch { task, confidence }` → `template_match conf>=<confidence> (task=<task>)`
+/// - `Timeout { secs }` → `timeout=<secs>`
+///
+/// I/O・時間・乱数に依存しない。`pub(crate)` でテストからも参照可能。
+fn goal_descriptor(goal: &anaden_core::Goal) -> String {
+    match &goal.stop {
+        anaden_core::StopCondition::LoopCount { target } => {
+            format!("loop_count={target}")
+        }
+        anaden_core::StopCondition::TemplateMatch { task, confidence } => {
+            format!("template_match conf>={confidence} (task={task})")
+        }
+        anaden_core::StopCondition::Timeout { secs } => format!("timeout={secs}"),
+    }
+}
+
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// run_once を指定 interval で反復する。3つの停止条件:
     /// (a) Stop(command 無 + next_current=None)、(b) 終端(next_current=None だが Fired)、
@@ -579,6 +674,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// `Ok` なら連続カウンタをリセットしてループ継続。`Err` なら [`LoopStopReason::ExecuteError`]
     /// で停止(re-launch の ADB 失敗等)。`threshold == 0` または `recover == None` なら
     /// リカバリ無効(通常の [`Self::run_loop`] と等価)。
+    ///
+    /// 本メソッドは非ゴールモード([`Self::run_loop_with_goal`] へ `goal=None` を渡すのと等価)。
+    /// 宣言的ゴールで停止するには [`Self::run_loop_with_goal`] を使うこと。
     pub async fn run_loop_with_recovery(
         &mut self,
         interval: Duration,
@@ -586,12 +684,14 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         recover_nomatch_threshold: u32,
         mut recover: Option<RecoveryHook>,
     ) -> LoopOutcome {
+        // 非ゴールモード(後方互換)。run_loop_with_goal(goal=None) からも本メソッドへ委譲される
+        // ため、両者を相互再帰させず本メソッド内で完結させる(async fn の再帰は boxing が必要で
+        // コストが高い+実装上の理由がない)。ゴール評価付きは run_loop_with_goal を直接呼ぶこと。
         let mut iterations = 0u64;
         let mut fired: Vec<InputCommand> = Vec::new();
         let mut nomatch_streak: u32 = 0;
         let recovery_enabled = recover_nomatch_threshold > 0 && recover.is_some();
         let started = Instant::now();
-        // タスク毎のマッチ回数(挿入順保持)。run_step が現在タスクをマッチさせたら +1。
         let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
         loop {
             iterations += 1;
@@ -653,7 +753,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     }
                 }
                 StepOutcome::NoMatch => {
-                    // current 不変。リトライせず次サイクルへ。
                     nomatch_streak = nomatch_streak.saturating_add(1);
                     if recovery_enabled && nomatch_streak >= recover_nomatch_threshold {
                         info!(
@@ -685,9 +784,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     next_current: _,
                     fired: just_fired,
                 } => {
-                    // 発火したが対象残存(誤成功)。実質 NoMatch 相当として streak へ加算し、
-                    // next_current は無視(current は既に巻き戻されている)して次サイクルで再試行。
-                    // fired は記録に残す(検証失敗でも発火自体は起きた)。マッチ回数も計上。
                     bump_task_match(&current_before, &mut per_task_matches);
                     if let Some(c) = just_fired {
                         fired.push(c);
@@ -737,6 +833,321 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
             tokio::time::sleep(interval).await;
         }
+    }
+
+    /// `run_loop_with_recovery` + 宣言的ゴール評価(Issue #37 T4)。
+    ///
+    /// `goal=Some` のとき各 tick後に [`anaden_core::goal::evaluate`] を呼び、
+    /// [`GoalStatus::Reached`] → [`LoopStopReason::GoalReached`]
+    /// [`GoalStatus::Failed`] → [`LoopStopReason::GoalTimeout`] で停止する。
+    /// `goal=None` のときは [`Self::run_loop_with_recovery`] と完全等価(後方互換)。
+    ///
+    /// 経過秒数は [`GoalClock`] から供給する。本番は [`SystemClock`]、テストは
+    /// `FakeClock`(決定論的ステップ)を渡す。`tokio::time::pause` を導入しないことで
+    /// ドライバのテスト専用 runtime feature への結合を避ける(org-feedback approval)。
+    ///
+    /// `evaluate` 呼出毎に `GoalStatusContext::tick` を +1 する(tick 数 = evaluate 回数)。
+    /// `last_match` は現状 `None` を渡す(T5-UC2 で StepOutcome から confidence/task を
+    /// 伝播させる後続タスクが埋める。UC-1/UC-3 は last_match 不要)。
+    ///
+    /// `GoalClock` は具象型(非ジェネリクス)にすると `run_loop` 互換の既存シグネチャへ
+    /// 影響しないが、テストで差し替えられるようトレイトオブジェクトで受ける。
+    pub async fn run_loop_with_goal(
+        &mut self,
+        interval: Duration,
+        max_iterations: u64,
+        recover_nomatch_threshold: u32,
+        mut recover: Option<RecoveryHook>,
+        goal: Option<&anaden_core::Goal>,
+        mut clock: impl GoalClock,
+    ) -> LoopOutcome {
+        let Some(goal_ref) = goal else {
+            // ゴール無し: 既存 run_loop_with_recovery へ完全委譲。clock は消費されない。
+            return self
+                .run_loop_with_recovery(
+                    interval,
+                    max_iterations,
+                    recover_nomatch_threshold,
+                    recover,
+                )
+                .await;
+        };
+        // ゴール活性パス。run_loop_with_recovery の本体をインライン展開し、各 tick 後に
+        // evaluate を呼んで GoalReached/GoalTimeout で早期停止する。
+        // (run_loop_with_recovery へ evaluate を埋め込まず別関数に分けたのは、非ゴールパスの
+        //  既存テスト(MaxIterations 等)へ一切影響を与えないため。)
+        let mut iterations = 0u64;
+        let mut fired: Vec<InputCommand> = Vec::new();
+        let mut nomatch_streak: u32 = 0;
+        let recovery_enabled = recover_nomatch_threshold > 0 && recover.is_some();
+        let started = Instant::now();
+        let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
+        let mut goal_ctx = anaden_core::GoalStatusContext::new();
+        loop {
+            iterations += 1;
+            if iterations > max_iterations {
+                return self.build_outcome(
+                    iterations - 1,
+                    fired,
+                    LoopStopReason::MaxIterations,
+                    "max_iterations",
+                    per_task_matches,
+                    started,
+                );
+            }
+            let current_before = self.current().to_string();
+            let step = if self.verify_after_fire {
+                self.run_once_verified().await
+            } else {
+                self.run_once().await
+            };
+            // UC-2 (TemplateMatch): Fired/NoFire ブランチでは run_once が格納した
+            // self.last_match (task_name, confidence, region) を take() で取り出し
+            // GoalStatusContext::last_match へ伝播させる。NoMatch/FiredUnverified/Error は
+            // テンプレートマッチしていない(または誤成功)なので None を渡す。
+            // (NoFire は ClickSelf w/o region 等の「マッチしたが発火コマンド無」で、tick は
+            //  マッチしているので last_match を伝播する。)
+            let match_info: Option<(String, f32, ScreenRegion)> = match &step {
+                StepOutcome::Fired { .. } | StepOutcome::NoFire { .. } => self.last_match.take(),
+                _ => None,
+            };
+            match step {
+                StepOutcome::Fired {
+                    next_current,
+                    fired: just_fired,
+                } => {
+                    nomatch_streak = 0;
+                    bump_task_match(&current_before, &mut per_task_matches);
+                    if let Some(c) = just_fired {
+                        fired.push(c);
+                    }
+                    if let Some(name) = &next_current {
+                        debug!("fired, advancing to {}", name);
+                    }
+                    // ゴール評価(tick 数を +1)。GoalReached/GoalTimeout なら即停止。
+                    goal_ctx.tick(match_info);
+                    let elapsed = clock.elapsed_secs();
+                    if let Some(stop) = self.evaluate_goal(
+                        goal_ref,
+                        &goal_ctx,
+                        elapsed,
+                        GoalEvalInputs {
+                            iterations,
+                            fired_commands: &fired,
+                            per_task_matches: &per_task_matches,
+                            started,
+                        },
+                    ) {
+                        return stop;
+                    }
+                    if next_current.is_none() {
+                        return self.build_outcome(
+                            iterations,
+                            fired,
+                            LoopStopReason::TerminalTask,
+                            self.current(),
+                            per_task_matches,
+                            started,
+                        );
+                    }
+                }
+                StepOutcome::NoFire { next_current } => {
+                    nomatch_streak = 0;
+                    bump_task_match(&current_before, &mut per_task_matches);
+                    goal_ctx.tick(match_info);
+                    let elapsed = clock.elapsed_secs();
+                    if let Some(stop) = self.evaluate_goal(
+                        goal_ref,
+                        &goal_ctx,
+                        elapsed,
+                        GoalEvalInputs {
+                            iterations,
+                            fired_commands: &fired,
+                            per_task_matches: &per_task_matches,
+                            started,
+                        },
+                    ) {
+                        return stop;
+                    }
+                    if let Some(name) = &next_current {
+                        debug!("no-fire, transitioning to {}", name);
+                    }
+                    if next_current.is_none() {
+                        return self.build_outcome(
+                            iterations,
+                            fired,
+                            LoopStopReason::Stop,
+                            "stop",
+                            per_task_matches,
+                            started,
+                        );
+                    }
+                }
+                StepOutcome::NoMatch => {
+                    nomatch_streak = nomatch_streak.saturating_add(1);
+                    goal_ctx.tick(match_info);
+                    let elapsed = clock.elapsed_secs();
+                    if let Some(stop) = self.evaluate_goal(
+                        goal_ref,
+                        &goal_ctx,
+                        elapsed,
+                        GoalEvalInputs {
+                            iterations,
+                            fired_commands: &fired,
+                            per_task_matches: &per_task_matches,
+                            started,
+                        },
+                    ) {
+                        return stop;
+                    }
+                    if recovery_enabled && nomatch_streak >= recover_nomatch_threshold {
+                        info!(
+                            "NoMatch streak {} >= threshold {}; invoking recovery hook",
+                            nomatch_streak, recover_nomatch_threshold
+                        );
+                        if let Some(hook) = recover.as_mut() {
+                            match hook(nomatch_streak).await {
+                                Ok(()) => {
+                                    info!("recovery hook succeeded; resetting NoMatch streak");
+                                    nomatch_streak = 0;
+                                }
+                                Err(e) => {
+                                    warn!("recovery hook failed: {e}");
+                                    return self.build_outcome(
+                                        iterations - 1,
+                                        fired,
+                                        LoopStopReason::ExecuteError,
+                                        "recovery_failed",
+                                        per_task_matches,
+                                        started,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                StepOutcome::FiredUnverified {
+                    next_current: _,
+                    fired: just_fired,
+                } => {
+                    bump_task_match(&current_before, &mut per_task_matches);
+                    if let Some(c) = just_fired {
+                        fired.push(c);
+                    }
+                    nomatch_streak = nomatch_streak.saturating_add(1);
+                    goal_ctx.tick(match_info);
+                    let elapsed = clock.elapsed_secs();
+                    if let Some(stop) = self.evaluate_goal(
+                        goal_ref,
+                        &goal_ctx,
+                        elapsed,
+                        GoalEvalInputs {
+                            iterations,
+                            fired_commands: &fired,
+                            per_task_matches: &per_task_matches,
+                            started,
+                        },
+                    ) {
+                        return stop;
+                    }
+                    if recovery_enabled && nomatch_streak >= recover_nomatch_threshold {
+                        info!(
+                            "FiredUnverified streak {} >= threshold {}; invoking recovery hook",
+                            nomatch_streak, recover_nomatch_threshold
+                        );
+                        if let Some(hook) = recover.as_mut() {
+                            match hook(nomatch_streak).await {
+                                Ok(()) => {
+                                    info!("recovery hook succeeded; resetting streak");
+                                    nomatch_streak = 0;
+                                }
+                                Err(e) => {
+                                    warn!("recovery hook failed: {e}");
+                                    return self.build_outcome(
+                                        iterations - 1,
+                                        fired,
+                                        LoopStopReason::ExecuteError,
+                                        "recovery_failed",
+                                        per_task_matches,
+                                        started,
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+                StepOutcome::Error(msg) => {
+                    let reason = if msg.starts_with("capture") {
+                        LoopStopReason::CaptureError
+                    } else {
+                        LoopStopReason::ExecuteError
+                    };
+                    return self.build_outcome(
+                        iterations - 1,
+                        fired,
+                        reason,
+                        "io_error",
+                        per_task_matches,
+                        started,
+                    );
+                }
+            }
+            tokio::time::sleep(interval).await;
+        }
+    }
+
+    /// ゴールを評価し、終端状態なら停止理由と terminal 文字列を返す。
+    /// まだ継続なら [`None`]。呼出側が [`Self::build_outcome`] で累積状態
+    /// (`fired_commands`/`per_task_matches`)を保持したまま停止 outcome を構築できるよう、
+    /// 本メソッドは理由と terminal のみを返す(LoopOutcome 構築は呼出側に委ねる)。
+    fn evaluate_goal_reason(
+        &self,
+        goal: &anaden_core::Goal,
+        ctx: &anaden_core::GoalStatusContext,
+        elapsed_secs: u64,
+    ) -> Option<(LoopStopReason, &'static str)> {
+        match anaden_core::evaluate(goal, ctx, elapsed_secs) {
+            anaden_core::GoalStatus::NotYet => None,
+            anaden_core::GoalStatus::Reached(_) => {
+                Some((LoopStopReason::GoalReached, "goal_reached"))
+            }
+            anaden_core::GoalStatus::Failed(_) => {
+                Some((LoopStopReason::GoalTimeout, "goal_timeout"))
+            }
+        }
+    }
+
+    /// ゴールを評価し、終端状態なら呼出側がそのまま `return` できる完成 [`LoopOutcome`] を返す。
+    /// まだ継続なら [`None`]。
+    ///
+    /// [`Self::evaluate_goal_reason`] で理由と terminal を判定した上で、[`Self::build_outcome`]
+    /// で基本 outcome を構築し、ゴール到達時は `progress_report.reached_goal` へ
+    /// **ゴール記述子文字列** を上書きで埋める(Issue #37 T3: 成果レポート用)。
+    ///
+    /// 記述子はモジュール直下の free function [`goal_descriptor`](@goal_descriptor) が
+    /// [`anaden_core::StopCondition`] のバリアントから導出する
+    /// (`loop_count=<n>` / `template_match conf>=<f> (task=<t>)` / `timeout=<secs>`)。
+    /// `GoalTimeout` のとき到達ゴールは無いので `reached_goal` は [`None`] のままとする。
+    fn evaluate_goal(
+        &self,
+        goal: &anaden_core::Goal,
+        ctx: &anaden_core::GoalStatusContext,
+        elapsed_secs: u64,
+        inputs: GoalEvalInputs,
+    ) -> Option<LoopOutcome> {
+        let (reason, terminal) = self.evaluate_goal_reason(goal, ctx, elapsed_secs)?;
+        let mut outcome = self.build_outcome(
+            inputs.iterations,
+            inputs.fired_commands.to_vec(),
+            reason,
+            terminal,
+            inputs.per_task_matches.to_vec(),
+            inputs.started,
+        );
+        // ゴール到達/タイムアウト時、評価対象ゴールの記述子を埋める
+        // (CI/studio が「どのゴールで停止したか」を人間可読に追跡するため)。
+        outcome.progress_report.reached_goal = Some(goal_descriptor(goal));
+        Some(outcome)
     }
 
     fn build_outcome(
@@ -2003,6 +2414,77 @@ mod tests {
         assert!(s.contains("template_match"), "got: {s}");
     }
 
+    /// `LoopOutcome` が JSON 経路(`serde_json`)でも CI/studio 消費可能な形で
+    /// シリアライズされることを検証する。TOML 経路は `loop_outcome_is_serializable`
+    /// が担保済み。JSON 経路は `reason = "goal_reached"` の snake_case 表現と
+    /// `progress_report.reached_goal` 記述子を両方含むことを assert する。
+    /// Issue #37 T5: JSON 成果レポート検証。
+    #[test]
+    fn loop_outcome_is_json_serializable() {
+        let outcome = LoopOutcome {
+            iterations: 5,
+            fired_commands: vec![InputCommand::Tap { x: 10, y: 20 }],
+            terminal: "GoalTerminal".to_string(),
+            reason: LoopStopReason::GoalReached,
+            progress_report: ProgressReport {
+                iterations: 5,
+                fired_count: 1,
+                per_task_matches: vec![TaskMatchCount {
+                    task: "Clear".to_string(),
+                    matches: 1,
+                }],
+                elapsed_ms: 4321,
+                terminal_task: Some("GoalTerminal".to_string()),
+                reached_goal: Some("loop_count=5".to_string()),
+            },
+        };
+        let s = serde_json::to_string(&outcome).expect("serialize json");
+        // reason が snake_case で JSON に現れる(後方互換性)
+        assert!(s.contains("\"reason\":\"goal_reached\""), "got: {s}");
+        // ネストした progress_report テーブルが JSON に現れる
+        assert!(s.contains("\"progress_report\":{"), "got: {s}");
+        // reached_goal 記述子が JSON に現れる(ゴール到達時の成果物)
+        assert!(s.contains("\"reached_goal\":\"loop_count=5\""), "got: {s}");
+        // 逆シリアライズ(round-trip)も成立すること
+        let back: LoopOutcome = serde_json::from_str(&s).expect("deserialize json");
+        assert_eq!(back.iterations, 5);
+        assert_eq!(back.reason, LoopStopReason::GoalReached);
+        assert_eq!(
+            back.progress_report.reached_goal.as_deref(),
+            Some("loop_count=5")
+        );
+    }
+
+    /// `ProgressReport` 単体が JSON シリアライズ可能で、`reached_goal` 記述子を含む。
+    /// TOML と JSON 双方で reached_goal 記述子が現れることを assert する(AC: 双方経路)。
+    #[test]
+    fn progress_report_is_json_serializable_with_reached_goal() {
+        let pr = ProgressReport {
+            iterations: 8,
+            fired_count: 3,
+            per_task_matches: vec![TaskMatchCount {
+                task: "Boss".to_string(),
+                matches: 2,
+            }],
+            elapsed_ms: 1500,
+            terminal_task: Some("Boss".to_string()),
+            reached_goal: Some("template_match conf>=0.85".to_string()),
+        };
+        // JSON 経路
+        let j = serde_json::to_string(&pr).expect("serialize json");
+        assert!(j.contains("\"fired_count\":3"), "got: {j}");
+        assert!(
+            j.contains("\"reached_goal\":\"template_match conf>=0.85\""),
+            "got: {j}"
+        );
+        // TOML 経路(対称性担保)
+        let t = toml::to_string(&pr).expect("serialize toml");
+        assert!(
+            t.contains("reached_goal = \"template_match conf>=0.85\""),
+            "got: {t}"
+        );
+    }
+
     /// デシリアライズ時、`progress_report` 欠落 TOML が `#[serde(default)]` で補完される。
     /// これは既存の古いシリアライズ成果物との後方互換性(CI/studio)を保証する。
     #[test]
@@ -2109,6 +2591,633 @@ mod tests {
             timeout,
             LoopStopReason::MaxIterations,
             "distinct from MaxIterations"
+        );
+    }
+
+    // ---- (8) T5: goal=None 後方互換性検証 ----
+    //
+    // Issue #37 T5-no-goal-backcompat: ゴール駆動モード(T4)が `Option<Goal>` を
+    // `run_loop_with_recovery` へ追加しても、`goal=None`(ゴール非宣言)時は既存の
+    // max_iterations bounded 挙動が **byte-identical** で保持されなければならない。
+    //
+    // 本セクションは以下を検証する:
+    // (a) 既存テスト `run_loop_no_match_hits_max_iterations` /
+    //     `recovery_hook_fires_after_nomatch_threshold` と同一の結果(reason/iterations/
+    //     fired_commands/terminal/current)が得られること。
+    // (b) goal=None で GoalReached/GoalTimeout が **発火しない** こと。
+    //     (停止理由は常に MaxIterations)
+    // (c) 「無限ループ相当」特性: max_iters を大きくすると iterations が比例的に増え、
+    //     一定の max_iters で打切られるまで延々継続できること。
+    // (d) recovery hook の発火回数・streak リセット挙動が goal=None で崩れないこと。
+
+    /// NoMatch フレームを無限に返す driver を構築するヘルパ(goal=None backcompat 共通)。
+    /// 全フレーム背景一色なので tick は常に NoMatch → current 不変でループが回る。
+    fn build_nomatch_driver() -> (
+        PipelineDriver<FakeCapture, FakeInput>,
+        Arc<Mutex<Vec<InputCommand>>>,
+    ) {
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let many: Vec<DynamicImage> = (0..200).map(|_| blank.clone()).collect();
+        let frames = frames_of(many);
+        let fired = new_fired();
+        let driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+        (driver, fired)
+    }
+
+    /// goal=None(現行シグネチャ = ゴール非宣言)で NoMatch が持続すると
+    /// **MaxIterations** で停止し、iterations が max_iterations に等しいこと。
+    /// これは既存 `run_loop_no_match_hits_max_iterations` と同一の契約。
+    #[tokio::test]
+    async fn backcompat_goal_none_no_match_hits_max_iterations_byte_identical() {
+        let (mut driver, fired) = build_nomatch_driver();
+
+        let outcome = driver.run_loop(Duration::ZERO, 5).await;
+        // 停止理由は MaxIterations のみ(GoalReached/GoalTimeout は出ない)。
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "goal=None must stop with MaxIterations, got {:?}",
+            outcome.reason
+        );
+        // iterations は max_iterations に厳密に等しい(byte-identical)。
+        assert_eq!(outcome.iterations, 5);
+        // 発火無し。
+        assert!(
+            outcome.fired_commands.is_empty(),
+            "no fires on pure NoMatch"
+        );
+        // current 不変。
+        assert_eq!(driver.current(), "Title");
+        assert!(fired.lock().expect("fired lock").is_empty());
+    }
+
+    /// goal=None + recovery hook(threshold 到達で Ok)でも停止理由は MaxIterations。
+    /// これは既存 `recovery_hook_fires_after_nomatch_threshold` と同一の契約。
+    #[tokio::test]
+    async fn backcompat_goal_none_recovery_hook_fires_under_max_iterations() {
+        let (mut driver, _fired) = build_nomatch_driver();
+
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let hook: RecoveryHook = Box::new(move |_streak| {
+            let c = calls_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 10, 3, Some(hook))
+            .await;
+        // goal=None なので MaxIterations(Goal 系停止理由は出ない)。
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "goal=None with recovery must stop with MaxIterations"
+        );
+        // threshold=3, max_iters=10 → hook は 3,6,9 回目の最低 3 回発火する想定だが、
+        // 最低 1 回の発火だけを厳密契約として検証する(timing に依存しない)。
+        assert!(
+            calls.load(Ordering::SeqCst) >= 1,
+            "recovery hook must fire at least once under goal=None"
+        );
+        assert!(outcome.fired_commands.is_empty());
+    }
+
+    /// goal=None で recovery hook が Err を返すと **ExecuteError** で即停止
+    /// (MaxIterations 以前)。ゴール非宣言時もリカバリ失敗契約は不変。
+    #[tokio::test]
+    async fn backcompat_goal_none_recovery_error_stops_immediately() {
+        let (mut driver, _fired) = build_nomatch_driver();
+
+        let hook: RecoveryHook = Box::new(|_| {
+            Box::pin(async {
+                Err(AdbError::CommandFailed {
+                    message: "launch failed".into(),
+                })
+            })
+        });
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 100, 2, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::ExecuteError);
+        assert_eq!(outcome.terminal, "recovery_failed");
+        // max_iters=100 だが即停止 → GoalTimeout ではなく ExecuteError が優先。
+        assert!(
+            outcome.iterations < 100,
+            "must short-circuit before max_iterations"
+        );
+    }
+
+    /// 「無限ループ相当」特性: goal=None で max_iters を大きくすると、
+    /// その max_iters に到達するまでループが延々継続する(打切りによる停止のみ)。
+    /// max_iters=5 と max_iters=50 を比較し、iterations が max に比例することを検証。
+    #[tokio::test]
+    async fn backcompat_goal_none_indefinite_continuation_scales_with_max_iters() {
+        // max_iters=5
+        let (mut driver_a, _fired_a) = build_nomatch_driver();
+        let out_small = driver_a.run_loop(Duration::ZERO, 5).await;
+        assert_eq!(out_small.reason, LoopStopReason::MaxIterations);
+        assert_eq!(out_small.iterations, 5);
+
+        // max_iters=50 — 10倍。同一条件下で iterations が 10倍に伸びる(=延々継続)。
+        let (mut driver_b, _fired_b) = build_nomatch_driver();
+        let out_large = driver_b.run_loop(Duration::ZERO, 50).await;
+        assert_eq!(out_large.reason, LoopStopReason::MaxIterations);
+        assert_eq!(out_large.iterations, 50);
+
+        // 比例関係: 50 == 5 * 10。「max_iters を大きくすると延々継続」の機械的証明。
+        assert_eq!(
+            out_large.iterations,
+            out_small.iterations * 10,
+            "iterations must scale linearly with max_iters under goal=None"
+        );
+        // 両者ともゴール系停止理由ではない。
+        assert_ne!(out_large.reason, LoopStopReason::GoalReached);
+        assert_ne!(out_large.reason, LoopStopReason::GoalTimeout);
+    }
+
+    /// goal=None(既定)時、`progress_report.reached_goal` は常に [`None`]。
+    /// T4 が Goal 到達時に reached_goal を埋めるように変更しても、
+    /// goal=None では None のままであることを検証(後方互換の境界)。
+    #[tokio::test]
+    async fn backcompat_goal_none_progress_report_reached_goal_is_none() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        let outcome = driver.run_loop(Duration::ZERO, 5).await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert!(
+            outcome.progress_report.reached_goal.is_none(),
+            "reached_goal must be None when goal is not declared"
+        );
+    }
+
+    /// goal=None の境界値: max_iterations=1 でも MaxIterations で即停止
+    /// (1 サイクル後に打切)。ゴール評価が介入して早期終端しないこと。
+    #[tokio::test]
+    async fn backcompat_goal_none_single_iteration_still_max_iterations() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        let outcome = driver.run_loop(Duration::ZERO, 1).await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(outcome.iterations, 1);
+    }
+
+    // ===== T-fix-1: evaluate_goal unit contract =====
+
+    /// LoopCount ゴールが既に target に到達しているとき `evaluate_goal` は
+    /// `GoalReached` の `LoopOutcome` を返し、`reached_goal` に記述子を埋める。
+    /// まだ到達していなければ [`None`] を返す(継続)。
+    #[tokio::test]
+    async fn evaluate_goal_loop_count_reached_and_not_yet() {
+        let (driver, _fired) = build_nomatch_driver();
+        let started = Instant::now();
+        let goal_reached = anaden_core::Goal {
+            name: "g1".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 5 },
+        };
+        let goal_pending = anaden_core::Goal {
+            name: "g2".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 100 },
+        };
+
+        // 到達済み: ctx.iterations >= target
+        let mut ctx_hit = anaden_core::GoalStatusContext::new();
+        for _ in 0..5 {
+            ctx_hit.tick(None);
+        }
+        let outcome = driver
+            .evaluate_goal(
+                &goal_reached,
+                &ctx_hit,
+                0,
+                GoalEvalInputs {
+                    iterations: 5,
+                    fired_commands: &[],
+                    per_task_matches: &[],
+                    started,
+                },
+            )
+            .expect("expected Some(LoopOutcome) on GoalReached");
+        assert_eq!(outcome.reason, LoopStopReason::GoalReached);
+        assert_eq!(outcome.terminal, "goal_reached");
+        assert_eq!(
+            outcome.progress_report.reached_goal.as_deref(),
+            Some("loop_count=5"),
+            "descriptor must reflect LoopCount target"
+        );
+        assert_eq!(outcome.progress_report.iterations, 5);
+
+        // 未到達: None (ループ継続)
+        let mut ctx_low = anaden_core::GoalStatusContext::new();
+        for _ in 0..3 {
+            ctx_low.tick(None);
+        }
+        assert!(
+            driver
+                .evaluate_goal(
+                    &goal_pending,
+                    &ctx_low,
+                    0,
+                    GoalEvalInputs {
+                        iterations: 3,
+                        fired_commands: &[],
+                        per_task_matches: &[],
+                        started,
+                    },
+                )
+                .is_none(),
+            "must return None when target not reached"
+        );
+    }
+
+    /// Timeout ゴールが elapsed_secs >= secs のとき `GoalTimeout` で停止し、
+    /// `reached_goal` に timeout 記述子を埋める。UC-3 契約。
+    #[tokio::test]
+    async fn evaluate_goal_timeout_yields_goal_timeout_descriptor() {
+        let (driver, _fired) = build_nomatch_driver();
+        let started = Instant::now();
+        let goal = anaden_core::Goal {
+            name: "g3".into(),
+            stop: anaden_core::StopCondition::Timeout { secs: 10 },
+        };
+        let ctx = anaden_core::GoalStatusContext::new();
+        let outcome = driver
+            .evaluate_goal(
+                &goal,
+                &ctx,
+                10,
+                GoalEvalInputs {
+                    iterations: 0,
+                    fired_commands: &[],
+                    per_task_matches: &[],
+                    started,
+                },
+            )
+            .expect("expected Some on timeout reached");
+        assert_eq!(outcome.reason, LoopStopReason::GoalTimeout);
+        assert_eq!(outcome.terminal, "goal_timeout");
+        assert_eq!(
+            outcome.progress_report.reached_goal.as_deref(),
+            Some("timeout=10"),
+            "descriptor must reflect Timeout secs"
+        );
+
+        // elapsed < secs → None
+        assert!(
+            driver
+                .evaluate_goal(
+                    &goal,
+                    &ctx,
+                    9,
+                    GoalEvalInputs {
+                        iterations: 0,
+                        fired_commands: &[],
+                        per_task_matches: &[],
+                        started,
+                    },
+                )
+                .is_none(),
+            "must return None before timeout"
+        );
+    }
+
+    /// TemplateMatch ゴール: ctx.last_match が閾値以上で task 一致のとき GoalReached。
+    /// UC-2 契約(T-fix-1 では evaluate_goal 単体の経路のみ検証。match_info 伝播は
+    /// T-wire-match-info が担う)。
+    #[tokio::test]
+    async fn evaluate_goal_template_match_reached() {
+        let (driver, _fired) = build_nomatch_driver();
+        let started = Instant::now();
+        let goal = anaden_core::Goal {
+            name: "g4".into(),
+            stop: anaden_core::StopCondition::TemplateMatch {
+                task: "Boss".into(),
+                confidence: 0.85,
+            },
+        };
+        let mut ctx = anaden_core::GoalStatusContext::new();
+        ctx.tick(Some((
+            "Boss".to_string(),
+            0.9_f32,
+            ScreenRegion::new(0, 0, 10, 10),
+        )));
+        let outcome = driver
+            .evaluate_goal(
+                &goal,
+                &ctx,
+                0,
+                GoalEvalInputs {
+                    iterations: 1,
+                    fired_commands: &[],
+                    per_task_matches: &[],
+                    started,
+                },
+            )
+            .expect("expected Some on TemplateMatch reached");
+        assert_eq!(outcome.reason, LoopStopReason::GoalReached);
+        assert_eq!(
+            outcome.progress_report.reached_goal.as_deref(),
+            Some("template_match conf>=0.85 (task=Boss)"),
+            "descriptor must reflect TemplateMatch task/confidence"
+        );
+    }
+
+    /// 記述子生成器が全 StopCondition バリアントをカバーし、
+    /// 既存 fixtures(`loop_count=7`, `template_match conf>=0.85`)の形式と一致する。
+    #[test]
+    fn goal_descriptor_covers_all_variants() {
+        let lc = anaden_core::Goal {
+            name: "n".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 7 },
+        };
+        assert_eq!(goal_descriptor(&lc), "loop_count=7");
+
+        let tm = anaden_core::Goal {
+            name: "n".into(),
+            stop: anaden_core::StopCondition::TemplateMatch {
+                task: "X".into(),
+                confidence: 0.85,
+            },
+        };
+        assert!(goal_descriptor(&tm).starts_with("template_match conf>=0.85"));
+
+        let to = anaden_core::Goal {
+            name: "n".into(),
+            stop: anaden_core::StopCondition::Timeout { secs: 30 },
+        };
+        assert_eq!(goal_descriptor(&to), "timeout=30");
+    }
+
+    // ===== T-wire-match-info: UC-2 E2E (TemplateMatch ゴール到達) =====
+    //
+    // Issue #37 T-wire-match-info: これまで match_info が全 StepOutcome バリアントで
+    // None に hardcode されていたため、GoalStatusContext::last_match が populated されず
+    // TemplateMatch ゴールが一切 GoalReached に到達しなかった(UC-2 が発火しない)。
+    //
+    // 修正: Fired/NoFire ブランチで self.last_match.take() を読み出し ctx へ伝播。
+    // 本 E2E テストは「マッチングテンプレートが発火したサイクルで TemplateMatch ゴールが
+    // GoalReached に到達する」ことを検証する(TDD: 修正前は赤、修正後は緑)。
+
+    /// 決定論的経過秒数を返すテスト用クロック(org-feedback approval condition 参照)。
+    /// `elapsed_secs` は tokio::time::pause ではなく呼出毎に決定論的に増やす。
+    struct FakeClock {
+        next_secs: u64,
+    }
+
+    impl FakeClock {
+        fn starting_at(secs: u64) -> Self {
+            Self { next_secs: secs }
+        }
+    }
+
+    impl GoalClock for FakeClock {
+        fn elapsed_secs(&mut self) -> u64 {
+            let now = self.next_secs;
+            // 呼出毎に 1 秒進める(UC-3 timeout 跨ぎテストで使用)。
+            self.next_secs = self.next_secs.saturating_add(1);
+            now
+        }
+    }
+
+    // ===== UC-1 E2E (LoopCount ゴール到達) =====
+    //
+    // UC-1 は「宣言した反復数(tick)に到達したら停止する」時間駆動の終端保証。
+    // goal.rs の doc に固定されている通り、LoopCount は認識成功率に依存せず、
+    // evaluate 呼出回数(tick 数)のみで到達を判定する。よって NoMatch が持続する
+    // build_nomatch_driver の fixture でも到達できる(UC-2/UC-3 のようにテンプレート
+    // マッチや時間経過に依存しない)。本 E2E テストは UC-2(L3010)/UC-3(L2880 周辺)
+    // の既存 E2E と対になる UC-1 の 1 本。
+
+    /// UC-1 正常系: `LoopCount { target: 3 }` を与えると、3 tick(= 3 サイクル)後に
+    /// `LoopStopReason::GoalReached` で停止し、`reached_goal == "loop_count=3"`、
+    /// `iterations == 3` となること。`build_nomatch_driver` の fixture は NoMatch が
+    /// 持続するが、LoopCount は tick 数のみで判定するため NoMatch でも到達する。
+    ///
+    /// ここでは `FakeClock::starting_at` を使用する(org-feedback approval condition)。
+    /// LoopCount は経過秒数に依存しないので、clock の進み方は結果に影響しないが、
+    /// `SystemClock` 切替や `tokio::time::pause` の持ち込みは契約違反として禁止する。
+    #[tokio::test]
+    async fn uc1_loop_count_goal_reaches_goal_reached_after_target_ticks() {
+        let (mut driver, _fired) = build_nomatch_driver();
+
+        let goal = anaden_core::Goal {
+            name: "farm3".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 3 },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 10, 0, None, Some(&goal), clock)
+            .await;
+
+        // UC-1 の核心: target=3 → 3 tick で GoalReached(MaxIterations ではない)。
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::GoalReached,
+            "UC-1 LoopCount target=3 must reach GoalReached after 3 ticks, got {:?}",
+            outcome.reason
+        );
+        assert_eq!(outcome.terminal, "goal_reached");
+        // 記述子は goal_descriptor の LoopCount 形式(loop_count=<target>)。
+        assert_eq!(
+            outcome.progress_report.reached_goal.as_deref(),
+            Some("loop_count=3"),
+            "reached_goal descriptor must reflect LoopCount target"
+        );
+        // tick 数 = evaluate 呼出回数 = サイクル数。target 到達と同値。
+        assert_eq!(
+            outcome.iterations, 3,
+            "must reach goal exactly at iteration 3"
+        );
+    }
+
+    /// UC-1 エッジ: `target` が `max_iterations` を超える場合、ゴール到達前に
+    /// `max_iterations` に先到達し `LoopStopReason::MaxIterations` になること。
+    /// これは「到達テストが常に GoalReached になる偽陽性」を防ぐ対照であり、
+    /// LoopCount の早期停止が max_iterations ガードより優先されないことを検証する。
+    #[tokio::test]
+    async fn uc1_loop_count_goal_hits_max_iterations_when_target_exceeds_budget() {
+        let (mut driver, _fired) = build_nomatch_driver();
+
+        let goal = anaden_core::Goal {
+            name: "farm_unbounded".into(),
+            // max_iterations=5 より大きい target → 到達不可。
+            stop: anaden_core::StopCondition::LoopCount { target: 50 },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 5, 0, None, Some(&goal), clock)
+            .await;
+
+        // ゴール未到達 → MaxIterations(GoalReached/GoalTimeout ではない)。
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "UC-1 LoopCount with target>max_iterations must stop with MaxIterations, got {:?}",
+            outcome.reason
+        );
+        // ゴールに到達していないので記述子は埋まらない。
+        assert!(
+            outcome.progress_report.reached_goal.is_none(),
+            "reached_goal must be None when goal is not reached"
+        );
+        // iterations は max_iterations に等しい。
+        assert_eq!(outcome.iterations, 5);
+    }
+
+    /// UC-2: テンプレートマッチが発火した直後のサイクルで TemplateMatch ゴールが
+    /// `GoalReached` に到達し、`reached_goal` に記述子が埋まること。
+    ///
+    /// 手順: needle 埋込画面を与え ClickRect タスクをマッチ→発火させる。
+    /// ゴールは同じタスク名 + 閾値 0.85(実測信頼度は閾値を超える)。
+    /// run_loop_with_goal は Fired ブランチで last_match.take() により
+    /// (task_name, confidence, region) を ctx.last_match へ伝播し、evaluate が
+    /// Reached を返す → GoalReached で停止。
+    #[tokio::test]
+    async fn uc2_template_match_goal_reaches_goal_reached_when_matching_template_fires() {
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        // Title 発火後 next=LoadGame へ遷移するが、初回の Fired でゴール到達するので
+        // 1 枚で十分(到達前の巻き戻り等は無い)。
+        let frames = frames_of(vec![matched]);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            // next を出す(発火はする)がゴール評価が先に効いて GoalReached で停止。
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        let goal = anaden_core::Goal {
+            name: "find_title".into(),
+            stop: anaden_core::StopCondition::TemplateMatch {
+                task: "Title".into(),
+                confidence: 0.85,
+            },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 10, 0, None, Some(&goal), clock)
+            .await;
+
+        // UC-2 の核心: GoalReached で停止(MaxIterations/TerminalTask ではない)。
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::GoalReached,
+            "UC-2 TemplateMatch goal must reach GoalReached when matching template fires, \
+             got {:?}",
+            outcome.reason
+        );
+        assert_eq!(outcome.terminal, "goal_reached");
+        // 記述子が task と confidence を反映。
+        assert_eq!(
+            outcome.progress_report.reached_goal.as_deref(),
+            Some("template_match conf>=0.85 (task=Title)"),
+            "reached_goal descriptor must reflect the TemplateMatch task/confidence"
+        );
+        // 1 サイクル目で到達(発火 = ctx.last_match populated → 即 Reached)。
+        assert_eq!(
+            outcome.iterations, 1,
+            "must reach goal on first matching cycle"
+        );
+        // 発火は起きている。
+        assert!(
+            !outcome.fired_commands.is_empty(),
+            "matching template must have fired a command"
+        );
+    }
+
+    /// UC-2 回帰保護: last_match の task がゴール task と一致しないと到達しないこと。
+    /// これで match_info 伝播が正しくても task 名不一致で NotYet → MaxIterations になる
+    /// 対照を確立し、到達テストが「常に到達する偽陽性」にならないようにする。
+    #[tokio::test]
+    async fn uc2_template_match_goal_does_not_reach_when_task_name_mismatches() {
+        let needle = gradient_needle(40, 40);
+        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let many: Vec<DynamicImage> = (0..20).map(|_| matched.clone()).collect();
+        let frames = frames_of(many);
+        let fired = new_fired();
+
+        let task = click_rect_task(
+            "Title",
+            Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            },
+            // next=None にすると TerminalTask で止まるので、遷移させてループを回す。
+            // Title→LoadGame だが LoadGame 定義が無いので以降 NoMatch で MaxIterations。
+            Some(vec!["LoadGame"]),
+        );
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400,
+            300,
+        );
+
+        // ゴール task を "OtherTask"(マッチしない)にする → last_match.task == "Title" ≠ "OtherTask"
+        // → NotYet → MaxIterations。
+        let goal = anaden_core::Goal {
+            name: "find_other".into(),
+            stop: anaden_core::StopCondition::TemplateMatch {
+                task: "OtherTask".into(),
+                confidence: 0.85,
+            },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 5, 0, None, Some(&goal), clock)
+            .await;
+
+        assert_ne!(
+            outcome.reason,
+            LoopStopReason::GoalReached,
+            "must NOT reach GoalReached when task name mismatches last_match"
         );
     }
 }

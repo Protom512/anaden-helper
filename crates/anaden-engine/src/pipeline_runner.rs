@@ -85,12 +85,23 @@ pub fn advance_next(outcome: &StepOutcome) -> Option<String> {
 ///
 /// `next_current` は caller のログ/デバッグ用参照情報。実際の `current` 更新は
 /// [`PipelineState::tick`] 内で行うため、caller は戻り値をそのまま消費してよい。
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `matched_confidence` / `matched_region` はマッチしたテンプレートの信頼度と領域。
+/// Issue #37 T4: 宣言的ゴールの TemplateMatch(UC-2) 評価が `last_match` を構築するために
+/// 必要。`run_step` の [`StepOutcome`][anaden_vision::StepOutcome] が保持する値をここへ伝播する。
+#[derive(Debug, Clone, PartialEq)]
 pub struct TickResult {
     /// 発火すべき入力コマンド。[`None`] はこの tick で入力無し。
     pub command: Option<InputCommand>,
     /// 遷移先タスク名。[`None`] は停止 or 待機（caller が別判断）。
     pub next_current: Option<String>,
+    /// マッチしたテンプレートの信頼度（0.0..=1.0）。
+    /// テンプレ未マッチ時は [`None`] だが、本構造体はマッチ成功時のみ構築されるため
+    /// 実運用上は常に [`Some`]。UC-2 評価用。
+    pub matched_confidence: Option<f32>,
+    /// マッチしたテンプレート領域（スクリーンショット元解像度座標）。
+    /// UC-2 評価用（`GoalStatusContext::last_match` の region 要素）。
+    pub matched_region: Option<ScreenRegion>,
 }
 
 /// パイプラインの実行状態ホルダ。現在タスク名だけを持つ最小の状態。
@@ -133,7 +144,9 @@ impl PipelineState {
     /// `screenshot`/`tasks` は借用参照。変更するのは `current` のみ（純粋計算 + 状態遷移）。
     pub fn tick(&mut self, screenshot: &DynamicImage, tasks: &[TaskDef]) -> Option<TickResult> {
         let outcome = run_step(tasks, screenshot, &self.current)?;
-        let command = action_to_command(&outcome.action, Some(outcome.matched_region));
+        let matched_region = outcome.matched_region;
+        let matched_confidence = Some(outcome.matched_confidence);
+        let command = action_to_command(&outcome.action, Some(matched_region));
         let next_current = advance_next(&outcome);
         if let Some(next) = &next_current {
             self.current = next.clone();
@@ -141,6 +154,8 @@ impl PipelineState {
         Some(TickResult {
             command,
             next_current,
+            matched_confidence,
+            matched_region: Some(matched_region),
         })
     }
 }
@@ -201,6 +216,7 @@ mod tests {
             action,
             next: next.into_iter().map(String::from).collect(),
             matched_region: dummy_region(),
+            matched_confidence: 0.95,
         }
     }
 

@@ -31,6 +31,9 @@ clap = { version = "4", features = ["derive"] }
 image = { workspace = true }
 imageproc = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [features]
 default = []
 # 常駐 capture(scrcpy) を CLI から利用可能にする。
