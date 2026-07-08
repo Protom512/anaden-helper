@@ -23,5 +23,14 @@ template  = "title_logo_corner.png"
 # ⚠ version_label.toml と同様、title_pc_probe.png 未整備のため暫定配置
 # (20:9 self-crop provisional marker)。
 # 実機プローブ整備後に実測 conf で再調整(absence-skip)。
-roi       = [140, 60, 60, 60]
+# ↓ 実測小特徴へ更新 (operator probe 2026-07-07, PC RAW 1258x708 space)。
+#   設計決定 (DEFER option b): operator がドラッグした全帯 [164,63,932,405] は
+#   932x405 で小テンプレ上限(roi[2]<=130 && roi[3]<=130)を 7 倍超過し、かつ背景差に
+#   弱い(TASKS.md:30-33)。よって同帯内で最高テクスチャエネルギーの 120x120 窓を
+#   find_logo_corner_subfeature.rs で選出し、ロゴグリフ上の安定小特徴として再クロップ。
+#   候補 [624,263,120,120] はタイトル文字部分に掛かり(高コントラスト固定テクスチャ)。
+#   これで小テンプレ上限を満たしつつ version_label とは別の固定テクスチャで二重検出。
+#   ⚠ 既知限界: 現状 conf=1.0 は自己クロッププローブ(title_pc_probe.png)由来の自己一致。
+#   cross-capture ロバスト性は実機の独立 title フレーム取得後に再検証が必要(README 参照)。
+roi       = [624, 263, 120, 120]
 threshold = 0.80

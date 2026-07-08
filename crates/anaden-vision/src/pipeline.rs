@@ -2854,24 +2854,30 @@ mod tests {
         );
     }
 
-    // ---- Issue #13 T2: title_pc ROI 導出 contract test ----
+    // ---- Issue #12 Branch A: title_pc ROI 実機プローブ grounded contract test ----
     //
-    // pc_title_pc_readme_resume_procedure_matches_code_facts (README/TOML 数値整合) とは別の
-    // 契約を固定する: 「TOML ROI が analyze_title_regions の列分散出力(run)と一致するか、
-    // あるいは一致しない場合は幾何学的ギャップとして暫定値が保持されているか」。
+    // 旧 Issue #13 T2 の retain-old-value ガード([1046,668,112,28] / [140,60,60,60] を硬固定)
+    // は no-probe 時代のグリーンウォッシュ防止用だった。その panic 文が待っていた
+    // 「幾何学的裏付け(geometric corroboration)」= PC 実機プローブが 2026-07-07 に到着し、
+    // TOML ROI は実測値([712,8,121,35] / [624,263,120,120])へ更新済み。よって旧ガードは
+    // 陳腐化し、テストは「実機プローブで grounded した導出ナラティブ」を固定し直す。
     //
-    // 背景: version_label.toml / title_logo_corner.toml の ROI は本来 PC RAW(16:9, 1258x708) 空間で
-    // 定義されなければならないが、PC 実機プローブ(title_pc_probe.png) が未整備のため、
-    // 現状は 20:9 端末(Pixel7a 2400x1080 → 正規化 1280x576) キャプチャ(nav_step0_norm.png) から
-    // 自己クロップした暫定マーカ。norm(20:9) → RAW(16:9) はアスペクト比不一致でアフィン写像不可。
+    // 新契約(Branch A — real-probe-grounded):
+    //   (A) 両 TOML ROI が実測値(operator probe 2026-07-07, PC RAW 1258x708 space) に等しい。
+    //       silent revert to the old 20:9 self-crop values を RED で検出する。
+    //   (B) 実機プローブ title_pc_probe.png が存在し、取り込み寸法不変量を持つ:
+    //       - 生ファイルは 1918x1048 RGBA(オペレータ制御不可の取得ウィンドウサイズ)。
+    //       - pipeline.rs はこれを 1258x708(PC RAW) へ resize_exact してから detect に渡す
+    //         (pc_title_pc_templates_match_real_capture_above_threshold:2701- 参照)。
+    //   (C) 実機プローブから再導出した列分散 run が、実測 ROI 帯の存在を裏付けること:
+    //       version_label 带 (y=8..43, x=712..833) と logo 带 (y=63..468, x=164..1096) に
+    //       run が再現する = 旧 retain-old-value ガードが待っていた geometric corroboration。
+    //   (D) 旧暫定値([1046,668,112,28]=右下 / [140,60,60,60]=左上小マーク) は 20:9 自己クロップ
+    //       由来の不正確さ(version_label は実際は右上) を文書化済み。実測値への移行完了を固定。
     //
-    // このテストは以下の事実を固定し、暫定値が理由なく書き換えられる(グリーンウォッシュ)のを防ぐ:
-    //   (A) title_logo_corner 上部帯(y=60..160) の列分散再導出で、norm 空間 run x=143..159 が
-    //       検出されること(qualitative 裏付け: 左上に固定マーク要素が存在)。
-    //   (B) norm(1280x576) と PC RAW(1258x708) のアスペクト比が不一致であること(幾何学的不変量)。
-    //   (C) 両 TOML の ROI が、Issue #13 で保持を決定した暫定値に等しいこと(silent overwrite 検出)。
-    //   (D) version_label 右下帯(y=545..572) の再導出で x=1077..1189 に run が存在しないこと
-    //       (当初コメントの主張が再現しない = 暫定値の裏付け欠如を文書化)。
+    // ※プローブ不在時(古い CI checkout) は presence-of-probe 不変量 (B) で panic せず、
+    //    実測値保持 (A) だけを検証して残りを明示ログで skip する。プローブは tracked なので
+    //    fresh clone にも存在し、本 skip は取り込みミス時の grace path に過ぎない。
 
     /// analyze_title_regions.rs(列分散手法) と同一の決定論的 run 検出を再実装する。
     /// examples/ はバイナリでライブラリ関数ではないため、本テスト内でアルゴリズムを再現し
@@ -2920,9 +2926,11 @@ mod tests {
         runs
     }
 
-    /// Issue #13 T2 contract: title_pc ROI は analyze_title_regions の列分散出力(run) と
-    /// 一致するか、一致しない場合は幾何学的ギャップ(norm 20:9 ≠ PC RAW 16:9) として
-    /// 暫定値が保持されていることを固定する。silent overwrite を RED で検出する。
+    /// Issue #12 Branch A contract: title_pc ROI は実機プローブ title_pc_probe.png で
+    /// grounded しており、TOML ROI が実測値([712,8,121,35] / [624,263,120,120]) に等しいこと、
+    /// かつプローブから再導出した列分散 run が幾何学的裏付けを与えることを固定する。
+    /// 旧 Issue #13 retain-old-value ガード(=no-probe 時代のグリーンウォッシュ防止) は
+    /// 実機プローブ到着により陳腐化したため、real-probe-grounded ナラティブへ置換した。
     /// What(テスト対象): version_label.toml / title_logo_corner.toml の ROI 導出契約。
     #[test]
     fn pc_title_pc_roi_derivation_matches_column_variance_runs_or_documents_gap() {
@@ -2937,85 +2945,100 @@ mod tests {
             .get("TitlePcLogoCorner")
             .expect("TitlePcLogoCorner must exist");
 
-        // (C) 暫定値保持契約: Issue #13 T1 で affine bridge 不可と判定されたため、
-        //     両 ROI は暫定マーカの値そのままで保持されていなければならない。
-        //     これらの値が無修正で書き換えられていたら(グリーンウォッシュ) RED。
+        // (A) 実測値保持契約: 両 ROI は operator probe 2026-07-07 (PC RAW 1258x708 space) で
+        //     実測/選出された値でなければならない。旧 20:9 自己クロップ暫定値
+        //     ([1046,668,112,28] / [140,60,60,60]) への silent revert を RED で検出する。
+        //     version_label は実機では右上(旧暫定の右下は不正確)。logo_corner は operator
+        //     がドラッグした全帯 [164,63,932,405] を、小テンプレ上限(<=130px)・背景差耐性の
+        //     ため find_logo_corner_subfeature.rs で最高エネルギー 120x120 窓へ再クロップ
+        //     (DEFER option b)。候補 [624,263,120,120] はロゴグリフ上の安定小特徴。
         assert_eq!(
             version_label.roi,
-            Some([1046, 668, 112, 28]),
-            "version_label ROI must be retained at the Issue #13 T1 provisional value \
-             [1046,668,112,28] until a PC real probe provides geometric corroboration"
+            Some([712, 8, 121, 35]),
+            "version_label ROI must be the real-probe-measured value [712,8,121,35] \
+             (operator probe 2026-07-07, PC RAW 1258x708 space). The old Issue #13 \
+             provisional [1046,668,112,28]=bottom-right was a 20:9 self-crop artifact; \
+             the version label is actually at the top-right on the real PC title frame"
         );
         assert_eq!(
             logo_corner.roi,
-            Some([140, 60, 60, 60]),
-            "title_logo_corner ROI must be retained at the Issue #13 T1 provisional value \
-             [140,60,60,60] until a PC real probe provides geometric corroboration"
+            Some([624, 263, 120, 120]),
+            "title_logo_corner ROI must be the small-feature value [624,263,120,120] \
+             (selected by find_logo_corner_subfeature.rs as the highest-energy 120x120 \
+             window inside the operator-dragged band [164,63,932,405] on title_pc_probe.png \
+             2026-07-07, PC RAW 1258x708 space). The full 932x405 band exceeded the \
+             small-template ceiling (roi[2]<=130 && roi[3]<=130) ~7x and is background-diff \
+             sensitive; DEFER option (b) re-cropped it into a stable small feature. The old \
+             Issue #13 provisional [140,60,60,60] was a 20:9 self-crop artifact"
         );
 
-        // 導出ソース(norm 20:9 キャプチャ) を読み込み、列分散 run を再導出。
-        let norm_path = workspace_templates_root()
-            .join("captures")
-            .join("nav_step0_norm.png");
-        // nav_step0_norm.png は templates/captures/ が .gitignore 対応で未追跡のため、
-        // fresh clone / CI では存在しない。hard-assert すると clone/CI が panic する（偽 green）。
-        // 実在する(ローカル)時のみ列分散 run の再導出を検証し、不在時は明示ログで skip する。
-        // ※field_pc/menu_pc/title_pc probe の absence-skip パターン(pipeline.rs:2026-)に準拠。
-        if !norm_path.exists() {
-            eprintln!(
-                "skip: nav_step0_norm.png not found at {:?} — gitignored 診断キャプチャのため\
-                 CI/clone では未存在。列分散 run 再導出の検証はローカル(実在時)のみ実行",
-                norm_path
-            );
-            return;
-        }
-        let norm = image::open(&norm_path).expect("open nav_step0_norm.png");
-        let (nw, nh) = (norm.width(), norm.height());
-        // 導出ソースが 20:9 norm(1280x576) であることを不変量として固定。
+        // (B) プローブ取り込み不変量: title_pc_probe.png は tracked ので fresh clone にも
+        //     存在するはず。取り込みミスで欠けている場合は実測値保持 (A) だけ検証し、
+        //     geometric corroboration (C) は明示ログで skip する(偽 green にしない)。
+        let probe_path = match title_pc_probe_path() {
+            Some(p) => p,
+            None => {
+                eprintln!(
+                    "skip geometric corroboration: title_pc_probe.png not found. ROI retain \
+                     contract (A) still verified above; the probe is tracked so a fresh clone \
+                     should contain it — re-run after `git checkout templates/captures/`."
+                );
+                return;
+            }
+        };
+
+        let probe = image::open(&probe_path).expect("open title_pc_probe.png");
+        // 生ファイル寸法不変量: 取得ウィンドウサイズはオペレータ制御不可につき 1918x1048 RGBA。
+        // pipeline.rs はこれを 1258x708(PC RAW) へ resize_exact してから detect に渡す。
         assert_eq!(
-            (nw, nh),
-            (1280, 576),
-            "nav_step0_norm.png must be the 20:9 normalized frame (1280x576); \
-             if this changes the entire norm→RAW derivation premise must be re-evaluated"
-        );
-        let gray = norm.to_luma8();
-
-        // (A) title_logo_corner 上部帯(y=60..160) の再導出: norm 空間 run x=143..159 が
-        //     検出されること。これは「左上に固定マーク要素が存在する」qualitative 裏付け。
-        let top_runs = title_region_runs(&gray, 60, 160, 0, nw);
-        assert!(
-            top_runs
-                .iter()
-                .any(|(s, e)| *s >= 140 && *e <= 165 && (*s as i64 - 143).abs() <= 5),
-            "title_logo_corner: top band y=60..160 must contain the norm-space run near \
-             x=143..159 (qualitative corroboration of a fixed corner mark), got runs={top_runs:?}"
+            (probe.width(), probe.height()),
+            (1918, 1048),
+            "title_pc_probe.png raw capture must be 1918x1048 RGBA (operator window size, \
+             not operator-controllable); pipeline.rs resizes it to PC RAW 1258x708 in-code. \
+             If the capture dimensions change the resize-to-RAW premise must be re-validated."
         );
 
-        // (D) version_label 右下帯(y=545..572) の再導出: 当初コメントが主張した
-        //     x=1077..1189 の run は検出されないこと(裏付け欠如の文書化)。
-        //     右端の run が x=1029 未満で終わることを確認し、x>=1077 の run が
-        //     存在しないことを固定する。
-        let bottom_runs = title_region_runs(&gray, 545, 572, 0, nw);
-        let has_far_right_run = bottom_runs.iter().any(|(s, _)| *s >= 1077);
+        // PC RAW 1258x708 へ resize_exact(E2E ゲート pc_title_pc_templates_match_real_*
+        // と同一の正規化経路)。ROI は RAW 空間で定義されるため、run 再導出も RAW 空間で行う。
+        const TITLE_PC_PROBE_RAW_W: u32 = 1258;
+        const TITLE_PC_PROBE_RAW_H: u32 = 708;
+        let raw = probe.resize_exact(
+            TITLE_PC_PROBE_RAW_W,
+            TITLE_PC_PROBE_RAW_H,
+            image::imageops::FilterType::Triangle,
+        );
+        let gray = raw.to_luma8();
+
+        // (C) geometric corroboration (= 旧 retain-old-value ガードが待っていた実機裏付け):
+        //     実測 ROI 帯の y-range 内で、x-range に重なる列分散 run が再現すること。
+        //     これが「実測 ROI が実機プローブ上の実テクスチャ位置を指している」客観的証明。
+        //
+        // version_label: ROI y=8..43, x=712..833。この水平帯で x>=712 に run が存在すること。
+        let vl_runs = title_region_runs(&gray, 8, 43, 700, 850);
         assert!(
-            !has_far_right_run,
-            "version_label: bottom band y=545..572 must NOT contain a run starting at x>=1077 \
-             (the originally-claimed x=1077..1189 run does not reproduce on re-derivation); \
-             this documents the lack of geometric corroboration for the provisional value, \
-             got runs={bottom_runs:?}"
+            vl_runs.iter().any(|(s, e)| *e > 712 && *s < 833),
+            "version_label: real-probe band y=8..43 must contain a column-variance run \
+             overlapping x=712..833 (the measured ROI [712,8,121,35]). This is the \
+             geometric corroboration the old retain-old-value guard was waiting for; \
+             got runs={vl_runs:?}"
         );
 
-        // (B) 幾何学的不変量: norm(20:9) と PC RAW(16:9) のアスペクト比は不一致。
-        //     これが affine bridge 不可の根拠。どちらかのアスペクト比が変わったら
-        //     導出前提全体の再評価が必要なので固定する。
-        let norm_aspect = nw as f64 / nh as f64; // 1280/576 ≈ 2.222 (20:9)
-        let raw_aspect = 1258.0 / 708.0; // ≈ 1.777 (16:9)
+        // logo_corner: ROI y=263..383, x=624..744 (小特徴 [624,263,120,120])。
+        // この帯で x>=624 に run が存在すること。候補窓はロゴグリフ上(高コントラスト固定テクスチャ)
+        // なので列分散 run が再現するはず — これが「小特徴 ROI が実テクスチャを指す」客観的証明。
+        let lc_runs = title_region_runs(&gray, 263, 383, 610, 760);
         assert!(
-            (norm_aspect - raw_aspect).abs() > 0.1,
-            "norm aspect {norm_aspect:.3} must differ from PC RAW aspect {raw_aspect:.3} \
-             (20:9 vs 16:9): this non-uniform scaling is WHY no scale+offset affine bridge \
-             exists from norm-space runs to RAW 1258x708 ROI coordinates"
+            lc_runs.iter().any(|(s, e)| *e > 624 && *s < 744),
+            "title_logo_corner: real-probe band y=263..383 must contain a column-variance \
+             run overlapping x=624..744 (the small-feature ROI [624,263,120,120] selected \
+             by find_logo_corner_subfeature.rs inside the operator-dragged band). \
+             got runs={lc_runs:?}"
         );
+
+        // (D) 実機プローブ到着による契約の置換を文書化: 旧 retain-old-value ガードの前提
+        //     (PC 実機プローブ未整備 → 暫定値を値そのままで保持) は解消済み。プローブが
+        //     tracked のまま万一失われた場合は上記 (B) で skip されるため、ここに到達するのは
+        //     プローブが実在し実測 ROI が它のテクスチャ位置を指している時のみ (= 真の green)。
     }
 
     // ---- pipeline.toml スキップ契約 ----

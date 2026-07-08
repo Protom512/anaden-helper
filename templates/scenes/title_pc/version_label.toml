@@ -29,5 +29,8 @@ template  = "version_label.png"
 # pipeline.rs の probe E2E テスト(pc_title_pc_templates_match_real_capture_above_threshold) は
 # プローブ不在時スキップし、実機プローブ整備後に閾値以上マッチで再検証する(absence-skip)。
 # 実機プローブ(title_pc_probe.png)到着時に README step 3-5 で実測 conf を取り本 ROI/テンプレを再調整。
-roi       = [1046, 668, 112, 28]
+# ↓ 実測値へ更新 (operator probe 2026-07-07, PC RAW 1258x708 space)。
+#   バージョン表示「ver 3.15.60 (985)」は実機では【右上】(旧暫定 [1046,668,112,28]=右下 は
+#   20:9 自己クロップ由来で不正確)。テンプレ version_label.png も 1258x708 空間へ再生成済み。
+roi       = [712, 8, 121, 35]
 threshold = 0.80
