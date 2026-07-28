@@ -847,8 +847,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// ドライバのテスト専用 runtime feature への結合を避ける(org-feedback approval)。
     ///
     /// `evaluate` 呼出毎に `GoalStatusContext::tick` を +1 する(tick 数 = evaluate 回数)。
-    /// `last_match` は現状 `None` を渡す(T5-UC2 で StepOutcome から confidence/task を
-    /// 伝播させる後続タスクが埋める。UC-1/UC-3 は last_match 不要)。
+    /// `last_match` には `StepOutcome` から取り出した `(task_name, confidence, region)` を
+    /// 渡す: Fired/NoFire ブランチでは `self.last_match.take()` で伝播し、
+    /// NoMatch/FiredUnverified/Error は `None` を渡す(UC-2: テンプレートマッチしていない、
+    /// または誤成功のため)。NoFire は ClickSelf w/o region 等「マッチしたが発火コマンド無」の
+    /// ケースで tick 上はマッチ扱いなので伝播する。
     ///
     /// `GoalClock` は具象型(非ジェネリクス)にすると `run_loop` 互換の既存シグネチャへ
     /// 影響しないが、テストで差し替えられるようトレイトオブジェクトで受ける。
