@@ -195,7 +195,17 @@ fn click(process: &str, method: InputMethod, x: i32, y: i32, hold_ms: u64) -> Re
                 });
             }
             let (origin_x, origin_y) = client_to_screen_abs(hwnd, 0, 0);
-            let sent = sendinput_click(origin_x + x, origin_y + y, hold_ms);
+            // ガード3: 発火座標(画面絶対)が対象ウィンドウの画面矩形内かを境界チェック。
+            // 枠外なら別ウィンドウ/デスクトップへの誤クリックになるため注入中止。
+            let (fire_x, fire_y) = (origin_x + x, origin_y + y);
+            if !point_in_window_rect(hwnd, fire_x, fire_y) {
+                return Err(AdbError::CommandFailed {
+                    message: format!(
+                        "発火座標({fire_x},{fire_y})が対象ウィンドウ画面矩形外 (process={process})。誤クリック防止のため注入中止。"
+                    ),
+                });
+            }
+            let sent = sendinput_click(fire_x, fire_y, hold_ms);
             if sent != 2 {
                 return Err(AdbError::CommandFailed {
                     message: format!(
@@ -252,6 +262,20 @@ fn swipe(
                 });
             }
             let (origin_x, origin_y) = client_to_screen_abs(hwnd, 0, 0);
+
+            // ガード3: Swipe 両端点(画面絶対)が対象ウィンドウ画面矩形内か境界チェック。
+            // いずれかが枠外なら別ウィンドウ/デスクトップへの誤操作になるため注入中止。
+            let (start_x, start_y) = (origin_x + x1, origin_y + y1);
+            let (end_x, end_y) = (origin_x + x2, origin_y + y2);
+            if !point_in_window_rect(hwnd, start_x, start_y)
+                || !point_in_window_rect(hwnd, end_x, end_y)
+            {
+                return Err(AdbError::CommandFailed {
+                    message: format!(
+                        "Swipe 端点(start={start_x},{start_y} end={end_x},{end_y})が対象ウィンドウ画面矩形外 (process={process})。誤操作防止のため注入中止。"
+                    ),
+                });
+            }
 
             let (vw, vh, ox, oy) = virtual_screen();
             let base = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
@@ -388,6 +412,39 @@ fn resolve_pid_and_hwnd(process: &str) -> Result<(u32, HWND), AdbError> {
         message: format!("PID {pid} に紐づく可視ウィンドウが見つかりません ({process})。ウィンドウが最小化/非表示の可能性。"),
     })?;
     Ok((pid, hwnd))
+}
+
+/// 発火座標がウィンドウ画面矩形内かを判定する純粋関数(ガード3 の判定本体)。
+///
+/// `rect` は Win32 `RECT`(left/top = 左上、right/bottom = 右下、いずれも画面座標 i32)。
+/// 座標 (x, y) が矩形の「内部」(上下左右いずれの辺上も含む閉区間)にあれば true を返す。
+/// 左上原点の画面座標系で用いる。SendInput は画面絶対座標へ注入するため、対象 HWND の
+/// 画面矩形(GetWindowRect)外の座標が発火点なら誤クリックを防ぐため false(注入中止)とする。
+///
+/// 閉区間判定の理由: GetWindowRect が返す right/bottom は「クライアント領域を含むウィンドウ枠の
+/// 右下角」であり、ゲームのクリック可能領域は通常この枠内に収まる。枠上の点まで弾くと正常な
+/// 端クリックまで落とすため、辺上は許容(閉区間)とする。
+fn rect_contains(rect: &RECT, x: i32, y: i32) -> bool {
+    x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
+}
+
+/// 指定 HWND の画面矩形(GetWindowRect)内に画面座標 (sx, sy) が含まれるか(ガード3)。
+///
+/// SendInput 用画面絶対座標が対象ウィンドウの枠内かを検証する。枠外(別ウィンドウ/
+/// デスクトップ上)の座標で注入しようとした場合 false を返し、呼び出し側は注入中止して
+/// 誤クリックを防ぐ。GetWindowRect 失敗時は安全側に倒して false(矩形不明=注入不可)とする。
+fn point_in_window_rect(hwnd: HWND, sx: i32, sy: i32) -> bool {
+    unsafe {
+        if hwnd.0.is_null() {
+            return false;
+        }
+        let mut rect: RECT = mem::zeroed();
+        // 既存 client_to_screen_abs と同じ GetWindowRect 呼び出しパターン。
+        if GetWindowRect(hwnd, &mut rect as *mut RECT).is_err() {
+            return false;
+        }
+        rect_contains(&rect, sx, sy)
+    }
 }
 
 /// SendInput 直前のフォアグラウンド再検証(ガード2)。
@@ -624,5 +681,58 @@ mod tests {
             msg.contains("プロセスが見つかりません"),
             "missing process must surface as CommandFailed, got: {msg}"
         );
+    }
+
+    /// ガード3: rect_contains の境界内/外を検証する純粋関数テスト。
+    #[test]
+    fn rect_contains_inside_and_outside() {
+        // 画面座標 (100,100)-(800,600) の矩形。
+        let rect = RECT {
+            left: 100,
+            top: 100,
+            right: 800,
+            bottom: 600,
+        };
+        // 内部(中央)。
+        assert!(rect_contains(&rect, 400, 350));
+        // 左上より外。
+        assert!(!rect_contains(&rect, 50, 50));
+        // 右下より外。
+        assert!(!rect_contains(&rect, 900, 700));
+        // x だけ外。
+        assert!(!rect_contains(&rect, 50, 350));
+        // y だけ外。
+        assert!(!rect_contains(&rect, 400, 50));
+    }
+
+    /// ガード3: rect_contains のコーナー/辺上は閉区間で許容されることを検証。
+    #[test]
+    fn rect_contains_corners_and_edges_are_inclusive() {
+        let rect = RECT {
+            left: 100,
+            top: 100,
+            right: 800,
+            bottom: 600,
+        };
+        // 4隅(辺上 = 閉区間で true)。
+        assert!(rect_contains(&rect, 100, 100), "左上角");
+        assert!(rect_contains(&rect, 800, 100), "右上角");
+        assert!(rect_contains(&rect, 100, 600), "左下角");
+        assert!(rect_contains(&rect, 800, 600), "右下角");
+        // 辺上の中央。
+        assert!(rect_contains(&rect, 450, 100), "上辺");
+        assert!(rect_contains(&rect, 800, 350), "右辺");
+        // 辺の1px外側は false。
+        assert!(!rect_contains(&rect, 99, 350), "左辺の1px外");
+        assert!(!rect_contains(&rect, 801, 350), "右辺の1px外");
+    }
+
+    /// ガード3: point_in_window_rect は null HWND で安全側 false を返すこと。
+    /// (FFI の GetWindowRect には到達せず、null 判定で落とす経路。)
+    #[test]
+    fn point_in_window_rect_null_hwnd_is_false() {
+        let null_hwnd = HWND(std::ptr::null_mut());
+        assert!(!point_in_window_rect(null_hwnd, 0, 0));
+        assert!(!point_in_window_rect(null_hwnd, 500, 500));
     }
 }
