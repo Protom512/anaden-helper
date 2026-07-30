@@ -17,6 +17,7 @@ use std::time::{Duration, Instant};
 use async_trait::async_trait;
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use anaden_core::InputAction;
@@ -276,6 +277,11 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// `run_loop_with_goal` が `GoalStatusContext::tick` へ渡すために消費(`take`)する。
     /// 非ゴールパス(`run_loop_with_recovery`)では参照されず、上書きされるだけ。
     last_match: Option<(String, f32, ScreenRegion)>,
+    /// 外部キャンセル口(Ctrl+C 等)。[`Self::with_cancel`] で設定したときのみ有効。
+    /// 各ループ(`run_loop` / `run_loop_with_recovery` / `run_loop_with_goal`)は
+    /// サイクル冒頭で `is_cancelled()` を判定し、sleep 区間を [`tokio::select!`] で
+    /// cancel 待ち受け化する。[`None`] のときは従来の `tokio::time::sleep` のみ(後方互換)。
+    cancel: Option<CancellationToken>,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -301,6 +307,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             swipe_duration_ms,
             verify_after_fire: false,
             last_match: None,
+            cancel: None,
         }
     }
 
@@ -314,6 +321,19 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// 既定は検証 OFF(現状維持)。本メソッドを呼ばなければ [`Self::run_once`] 相当の挙動のまま。
     pub fn with_verify(mut self, enabled: bool) -> Self {
         self.verify_after_fire = enabled;
+        self
+    }
+
+    /// 外部キャンセルトークン(Ctrl+C / SIGINT 等)を設定するビルダー。
+    ///
+    /// 呼ばない場合は `cancel = None`(デフォルト = 従来動作、後方互換)。main.rs の
+    /// 呼出元は `.with_verify` と同じビルダーチェーンで重ねるだけでシグネチャを変えない。
+    /// 設定すると各ループ(`run_loop` / `run_loop_with_recovery` / `run_loop_with_goal`)が
+    /// サイクル冒頭で [`CancellationToken::is_cancelled`] を判定して
+    /// [`LoopStopReason::Interrupted`] で停止し、末尾の interval 待ちを
+    /// [`tokio::select!`] で cancel 通知を即時受け取るようになる。
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
         self
     }
 
@@ -496,6 +516,35 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         };
         self.input.execute(&action).await
     }
+
+    /// キャンセルトークンが設定済みかつ発火済みか。未設定時は常に [`false`](後方互換)。
+    fn is_cancelled(&self) -> bool {
+        match &self.cancel {
+            Some(token) => token.is_cancelled(),
+            None => false,
+        }
+    }
+
+    /// interval 待ち。キャンセルトークンが設定されていれば [`tokio::select!`] で
+    /// cancel 通知を即時受け取る(そうでなければ従来の [`tokio::time::sleep`])。
+    ///
+    /// 末尾の `select!` は cancel 優先: 両方同時(競合)でも cancel 側を拾い、次サイクル冒頭の
+    /// [`Self::is_cancelled`] で [`LoopStopReason::Interrupted`] 停止へ遷移させる。
+    /// トークン未設定時は sleep のみを await し、cancel 分岐はコンパイル時に存在しない
+    /// (実行時分岐ではないので zero-cost 寄り)。
+    async fn sleep_or_cancelled(&self, interval: Duration) {
+        match &self.cancel {
+            Some(token) => {
+                tokio::select! {
+                    _ = token.cancelled() => debug!("cancel observed during interval sleep"),
+                    _ = tokio::time::sleep(interval) => {}
+                }
+            }
+            None => {
+                tokio::time::sleep(interval).await;
+            }
+        }
+    }
 }
 
 /// run_loop の停止理由。
@@ -518,6 +567,11 @@ pub enum LoopStopReason {
     /// ゴール未到達タイムアウト(最大イテレーション到達だがゴール活性)。
     /// Issue #37 T3: 成果物は出たが宣言的ゴール未到達の soft failure。
     GoalTimeout,
+    /// 外部キャンセル(Ctrl+C / SIGINT)。[`PipelineDriver::with_cancel`] で設定した
+    /// [`CancellationToken`] が発火したときにループが即時停止したことを示す。
+    /// PC版 Live 実行中の緊急停止経路。`#[derive]` Serialize/Deserialize 付きなので
+    /// `interrupted` の snake_case 表現として機械可読(JSON/TOML)に現れる。
+    Interrupted,
 }
 
 /// タスク毎のマッチ回数(UC-3 進捗レポート用)。
@@ -694,6 +748,17 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let started = Instant::now();
         let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
         loop {
+            // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
+            if self.is_cancelled() {
+                return self.build_outcome(
+                    iterations,
+                    fired,
+                    LoopStopReason::Interrupted,
+                    "interrupted",
+                    per_task_matches,
+                    started,
+                );
+            }
             iterations += 1;
             if iterations > max_iterations {
                 return self.build_outcome(
@@ -831,7 +896,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     );
                 }
             }
-            tokio::time::sleep(interval).await;
+            // interval 待ちを cancel 通知で即時抜けられるように select! 化。
+            // トークン未設定時は cancel 分岐が発火しないので従来の sleep のみ(後方互換)。
+            self.sleep_or_cancelled(interval).await;
         }
     }
 
@@ -887,6 +954,17 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
         let mut goal_ctx = anaden_core::GoalStatusContext::new();
         loop {
+            // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
+            if self.is_cancelled() {
+                return self.build_outcome(
+                    iterations,
+                    fired,
+                    LoopStopReason::Interrupted,
+                    "interrupted",
+                    per_task_matches,
+                    started,
+                );
+            }
             iterations += 1;
             if iterations > max_iterations {
                 return self.build_outcome(
@@ -1095,7 +1173,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     );
                 }
             }
-            tokio::time::sleep(interval).await;
+            // interval 待ちを cancel 通知で即時抜けられるように select! 化。
+            self.sleep_or_cancelled(interval).await;
         }
     }
 
@@ -3583,5 +3662,109 @@ mod tests {
             !back.fired_commands.is_empty(),
             "fired_commands must survive JSON round-trip non-empty"
         );
+    }
+
+    // ===== ガード1: CancellationToken 対応(Ctrl+C / SIGINT) =====
+    //
+    // PipelineDriver::with_cancel(token) で外部キャンセル口を設定すると、各ループが
+    // (a) サイクル冒頭で is_cancelled() を判定して LoopStopReason::Interrupted で停止、
+    // (b) 末尾の interval 待ちを tokio::select! で cancel 即時抜けする。
+    // with_cancel を呼ばない(デフォルト)ときは cancel=None で従来動作(後方互換)。
+    // main.rs の呼出元シグネチャを変えないビルダーパターンで実装されているため、
+    // 既存の全 run_loop_* テストは無変更で通過する。
+
+    /// cancel 済み token を with_cancel して run_loop を呼ぶと、最初のサイクル冒頭で
+    /// 即座に Interrupted 停止する(1 tick も消費しない)。
+    #[tokio::test]
+    async fn cancel_pre_cancelled_token_stops_immediately_as_interrupted() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        let token = CancellationToken::new();
+        token.cancel();
+        driver = driver.with_cancel(token);
+
+        let outcome = driver.run_loop(Duration::from_secs(60), 100).await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::Interrupted,
+            "pre-cancelled token must stop with Interrupted"
+        );
+        assert_eq!(outcome.terminal, "interrupted");
+        // 冒頭判定で抜けるので 0 tick(発火も無し)。
+        assert_eq!(outcome.iterations, 0);
+        assert!(outcome.fired_commands.is_empty());
+    }
+
+    /// sleep 中に別タスクから cancel すると、select! が即座に抜けて次サイクル冒頭で
+    /// Interrupted 停止する。interval を長め(100ms)にして sleep 区間内で cancel させる。
+    #[tokio::test]
+    async fn cancel_during_interval_sleep_stops_as_interrupted() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        driver = driver.with_cancel(token);
+
+        // 50ms 後に別タスクで cancel(初回サイクルは sleep 100ms 中に入る)。
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_token.cancel();
+        });
+
+        let outcome = driver.run_loop(Duration::from_millis(100), 1000).await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::Interrupted,
+            "cancel during sleep must stop with Interrupted, got {:?}",
+            outcome.reason
+        );
+        // 最低1サイクルは回っている(冒頭判定は最初は false のため)。
+        assert!(
+            outcome.iterations >= 1,
+            "must have run at least one cycle before cancel"
+        );
+    }
+
+    /// with_cancel を呼ばない(デフォルト cancel=None)ときは従来動作。NoMatch 持続で
+    /// MaxIterations になり、Interrupted にはならない(後方互換)。
+    #[tokio::test]
+    async fn cancel_none_default_preserves_max_iterations_behavior() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        // with_cancel を呼ばない = デフォルト cancel = None。
+        let outcome = driver.run_loop(Duration::ZERO, 5).await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "default (no cancel token) must preserve MaxIterations behavior"
+        );
+        assert_ne!(
+            outcome.reason,
+            LoopStopReason::Interrupted,
+            "Interrupted must not fire without a cancel token"
+        );
+        assert_eq!(outcome.iterations, 5);
+    }
+
+    /// run_loop_with_goal でも with_cancel が効く: cancel 済み token で即時 Interrupted。
+    /// (ゴール評価経路でも cancel 判定がループ冒頭に入っていることの回帰保護。)
+    #[tokio::test]
+    async fn cancel_with_goal_path_stops_as_interrupted() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        let token = CancellationToken::new();
+        token.cancel();
+        driver = driver.with_cancel(token);
+
+        let goal = anaden_core::Goal {
+            name: "g".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 100 },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 1000, 0, None, Some(&goal), clock)
+            .await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::Interrupted,
+            "cancel must take precedence on goal path too"
+        );
+        assert_eq!(outcome.iterations, 0);
     }
 }
