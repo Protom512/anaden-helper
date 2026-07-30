@@ -11,8 +11,9 @@
 //! なので X/Y 同一ファクタで動く。
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use image::DynamicImage;
@@ -282,6 +283,9 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// サイクル冒頭で `is_cancelled()` を判定し、sleep 区間を [`tokio::select!`] で
     /// cancel 待ち受け化する。[`None`] のときは従来の `tokio::time::sleep` のみ(後方互換)。
     cancel: Option<CancellationToken>,
+    /// スナップショット保存の連番(ガード4)。ANADEN_SNAPSHOT_DIR 設定時に
+    /// NoMatch / FiredUnverified でインクリメントしてファイル名へ埋める。
+    snapshot_counter: u64,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -308,6 +312,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             verify_after_fire: false,
             last_match: None,
             cancel: None,
+            snapshot_counter: 0,
         }
     }
 
@@ -384,6 +389,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     t_rec.elapsed().as_secs_f64() * 1000.0,
                     t_cycle.elapsed().as_secs_f64() * 1000.0
                 );
+                // ガード4: NoMatch 発生時、ANADEN_SNAPSHOT_DIR 設定時に normalized
+                // フレームを PNG 保存(認識ズレ原因特定用)。未設定時は no-op。
+                self.save_snapshot(&matched_task_name, &normalized);
                 return StepOutcome::NoMatch;
             }
         };
@@ -491,6 +499,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         // run_step を直接呼び、task_name で再認識。マッチ残存 → 対象残存 = 未検証。
         let still_present = anaden_vision::run_step(&self.tasks, &normalized, task_name).is_some();
         if still_present {
+            // ガード4: アクション無効(対象残存)時、ANADEN_SNAPSHOT_DIR 設定時に
+            // 発火後フレームを PNG 保存(偽成功の原因特定用)。未設定時は no-op。
+            self.save_snapshot(task_name, &normalized);
             // current を発火前タスクへ巻き戻す(次サイクルで同じタスクを再試行)。
             self.state.set_current(task_name.to_string());
             StepOutcome::FiredUnverified {
@@ -543,6 +554,52 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             None => {
                 tokio::time::sleep(interval).await;
             }
+        }
+    }
+
+    /// スナップショット保存ディレクトリ(ガード4)。
+    ///
+    /// 環境変数 `ANADEN_SNAPSHOT_DIR` が設定されていればそのパスを、未設定なら [`None`]
+    /// (保存 OFF)を返す。NoMatch / FiredUnverified 発生時の認識ズレ原因特定用。
+    /// Live 実行のデバッグ用途で、未設定時は一切のファイル IO を行わない(後方互換)。
+    fn snapshot_dir() -> Option<PathBuf> {
+        std::env::var_os("ANADEN_SNAPSHOT_DIR").map(PathBuf::from)
+    }
+
+    /// 画像を PNG として best-effort 保存する(ガード4)。
+    ///
+    /// `ANADEN_SNAPSHOT_DIR` 未設定時は no-op([`None`] 早期 return)。設定時は
+    /// `<dir>/<task>_<連番>_<SystemTimeナノ秒>.png` へ `image` の PNG エンコーダで保存する。
+    /// 全てのエラー(ディレクトリ作成失敗・書込失敗・エンコード失敗)は `let _ =` で
+    /// 無視し、ライブラリコードから panic しない(認識失敗時のデバッグ補助が目的で、
+    /// 保存失敗でループを止めない)。連番は `snapshot_counter` をインクリメントして使う。
+    fn save_snapshot(&mut self, task: &str, frame: &DynamicImage) {
+        let Some(dir) = Self::snapshot_dir() else {
+            return;
+        };
+        self.snapshot_counter = self.snapshot_counter.saturating_add(1);
+        // SystemTime のナノ秒で一意性を補強(連番だけでは再実行で衝突するため)。
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = dir.join(format!(
+            "{task}_{counter}_{stamp}.png",
+            counter = self.snapshot_counter
+        ));
+        // フレームを PNG 保存。best-effort: エラーは全て無視(panic しない)。
+        let _ = std::fs::create_dir_all(&dir);
+        let file = match std::fs::File::create(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("snapshot create failed ({}): {e}", path.display());
+                return;
+            }
+        };
+        let mut buffered = std::io::BufWriter::new(file);
+        match frame.write_to(&mut buffered, image::ImageFormat::Png) {
+            Ok(()) => debug!("snapshot saved: {}", path.display()),
+            Err(e) => warn!("snapshot write failed ({}): {e}", path.display()),
         }
     }
 }
@@ -3766,5 +3823,132 @@ mod tests {
             "cancel must take precedence on goal path too"
         );
         assert_eq!(outcome.iterations, 0);
+    }
+
+    // ===== ガード4: NoMatch/FiredUnverified スナップショット保存 =====
+    //
+    // ANADEN_SNAPSHOT_DIR 設定時に NoMatch 発生で normalized フレームが PNG 保存され、
+    // 未設定時は no-op(ファイルが1つも作られない)ことを検証する。
+    // env 操作はプロセス全体へ伝播するため、set 後に必ず unset して他テストへ
+    // 影響を与えない(並列実行の nextest でも自己完結)。
+
+    /// NoMatch 発生時、ANADEN_SNAPSHOT_DIR 設定ディレクトリへ PNG が保存される。
+    /// run_once を1回呼び(needle 無し画像 → NoMatch)、dir 内に .png が1つ以上できること。
+    #[tokio::test]
+    async fn snapshot_saved_on_no_match_when_dir_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // env 設定。edition 2024 で set_var/remove_var は unsafe。env はプロセス全域へ
+        // 伝播するため、他テストとの並列競合を避けるよう本テストは set→検証→unset を
+        // 自己完結させる(Drop guard で確実に unset)。
+        unsafe {
+            std::env::set_var("ANADEN_SNAPSHOT_DIR", tmp.path());
+        }
+        // RAII: テスト本体が panic しても env を必ず解除する。
+        struct EnvUnset;
+        impl Drop for EnvUnset {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("ANADEN_SNAPSHOT_DIR");
+                }
+            }
+        }
+        let _unset = EnvUnset;
+
+        let screen = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+        let out = driver.run_once().await;
+        assert_eq!(out, StepOutcome::NoMatch);
+
+        // dir 内に PNG が1つ以上保存されていること。
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("png"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "ANADEN_SNAPSHOT_DIR set + NoMatch must save at least one PNG"
+        );
+        // ファイル名にタスク名 "Title" が含まれること(cause 追跡用)。
+        let has_task = entries.iter().any(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with("Title_"))
+                .unwrap_or(false)
+        });
+        assert!(has_task, "snapshot filename must start with task name");
+    }
+
+    /// ANADEN_SNAPSHOT_DIR 未設定時は NoMatch でも保存されない(no-op)。
+    #[tokio::test]
+    async fn snapshot_not_saved_when_dir_unset() {
+        // 未設定状態を保証(他テストの set 残りを排除)。
+        unsafe {
+            std::env::remove_var("ANADEN_SNAPSHOT_DIR");
+        }
+
+        let screen = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+        let out = driver.run_once().await;
+        assert_eq!(out, StepOutcome::NoMatch);
+
+        // snapshot_dir() が None → 保存経路に入っていないことの直接検証。
+        assert!(
+            PipelineDriver::<FakeCapture, FakeInput>::snapshot_dir().is_none(),
+            "snapshot_dir must be None when ANADEN_SNAPSHOT_DIR unset"
+        );
+        // カウンタもインクリメントされていない(save_snapshot 早期 return)。
+        assert_eq!(
+            driver.snapshot_counter, 0,
+            "counter must not increment when dir unset"
+        );
     }
 }
