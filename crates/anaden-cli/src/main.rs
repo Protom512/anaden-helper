@@ -12,6 +12,7 @@ use std::time::Duration;
 use anaden_cli_contract::{ensure_outcome_label, standalone_exit_code};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
+use tokio_util::sync::CancellationToken;
 use tracing::{info, warn};
 
 use anaden_core::Goal;
@@ -345,7 +346,17 @@ async fn run_pipeline_live(
     target: &str,
     verify_after_fire: bool,
     goal: Option<Goal>,
+    cancel_token: CancellationToken,
 ) -> Result<()> {
+    // ---- Ctrl+C / SIGINT リスナ起動 ----
+    // tokio::signal::ctrl_c() が返ったら token.cancel() する。driver(各 run_with_* 経由で
+    // .with_cancel(token) 済み)はサイクル冒頭の is_cancelled() と sleep 区間の
+    // tokio::select! で即時 Interrupted 停止へ遷移する。リスナの join は行わない
+    // (driver が Interrupted で抜けた時点でプロセスも終了するため、リスナの放棄で問題ない)。
+    // ctrl_c() のエラー(シグナルハンドラ設定失敗)は warn して継続(シグナル無視でも
+    // MaxIterations/Stop で止まるので致命的ではない)。
+    spawn_ctrl_c_listener(cancel_token.clone());
+
     // ---- (0) 実行ターゲット解決 ----
     // `--target windows` なら ADB 経由を一切使わず Win32 バックエンドへ切替え。
     // `--target android` なら従来通り(serial 必須)。
@@ -371,6 +382,7 @@ async fn run_pipeline_live(
                 recover_nomatch_threshold,
                 verify_after_fire,
                 goal,
+                cancel_token,
             )
             .await;
         }
@@ -487,6 +499,7 @@ async fn run_pipeline_live(
                 recover_nomatch_threshold,
                 recovery,
                 verify_after_fire,
+                cancel_token,
             )
             .await
         }
@@ -504,6 +517,7 @@ async fn run_pipeline_live(
                     recover_nomatch_threshold,
                     recovery,
                     verify_after_fire,
+                    cancel_token,
                 )
                 .await
             }
@@ -536,7 +550,8 @@ async fn run_pipeline_live(
                         device_width,
                         300,
                     )
-                    .with_verify(verify_after_fire),
+                    .with_verify(verify_after_fire)
+                    .with_cancel(cancel_token),
                     interval_dur,
                     max_iters,
                     recover_nomatch_threshold,
@@ -574,6 +589,7 @@ async fn run_with_windows(
     recover_nomatch_threshold: u32,
     verify_after_fire: bool,
     goal: Option<Goal>,
+    cancel_token: CancellationToken,
 ) -> Result<()> {
     // ---- (1) パイプライン読込 + algorithm 上書き ----
     let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
@@ -663,7 +679,8 @@ async fn run_with_windows(
             device_width,
             300,
         )
-        .with_verify(verify_after_fire),
+        .with_verify(verify_after_fire)
+        .with_cancel(cancel_token),
         interval_dur,
         max_iters,
         recover_nomatch_threshold,
@@ -689,6 +706,7 @@ async fn run_with_windows(
     _recover_nomatch_threshold: u32,
     _verify_after_fire: bool,
     _goal: Option<Goal>,
+    _cancel_token: CancellationToken,
 ) -> Result<()> {
     anyhow::bail!(
         "`--target windows` は Windows ビルドでのみ利用可能です。このバイナリは Windows 向けではないため PC版バックエンドを使用できません"
@@ -779,6 +797,7 @@ async fn run_with_capture_scrcpy<I>(
     recover_nomatch_threshold: u32,
     recovery: Option<anaden_engine::RecoveryHook>,
     verify_after_fire: bool,
+    cancel_token: CancellationToken,
 ) -> Result<()>
 where
     I: anaden_engine::Input,
@@ -815,11 +834,15 @@ where
             device_width,
             300,
         )
-        .with_verify(verify_after_fire),
+        .with_verify(verify_after_fire)
+        .with_cancel(cancel_token),
         interval,
         max_iters,
         recover_nomatch_threshold,
         recovery,
+        // scrcpy capture 経路は T4 goal 配線の対象外(goal は run_pipeline_live の
+        // screencap/windows 経路でのみ供給)。よって非ゴールモード(None)で run_driver へ。
+        None,
     )
     .await
 }
@@ -841,6 +864,7 @@ async fn run_with_scrcpy_session(
     recover_nomatch_threshold: u32,
     recovery: Option<anaden_engine::RecoveryHook>,
     verify_after_fire: bool,
+    cancel_token: CancellationToken,
 ) -> Result<()> {
     let mut config = anaden_device::ScrcpySessionConfig::default();
     // jar パスは scoop 既定と同じだが、CLI 引数で上書き可能にする。
@@ -881,11 +905,14 @@ async fn run_with_scrcpy_session(
             device_width,
             300,
         )
-        .with_verify(verify_after_fire),
+        .with_verify(verify_after_fire)
+        .with_cancel(cancel_token),
         interval,
         max_iters,
         recover_nomatch_threshold,
         recovery,
+        // scrcpy session 経路も T4 goal 配線対象外(非ゴールモードで run_driver へ)。
+        None,
     )
     .await
 }
@@ -904,6 +931,7 @@ async fn run_with_scrcpy_session(
     _recover_nomatch_threshold: u32,
     _recovery: Option<anaden_engine::RecoveryHook>,
     _verify_after_fire: bool,
+    _cancel_token: CancellationToken,
 ) -> Result<()> {
     anyhow::bail!(
         "`--input scrcpy` は `capture-scrcpy` feature 無効では使用できません。`--features anaden-cli/capture-scrcpy` でビルドしてください"
@@ -925,6 +953,7 @@ async fn run_with_capture_scrcpy<I>(
     _recover_nomatch_threshold: u32,
     _recovery: Option<anaden_engine::RecoveryHook>,
     _verify_after_fire: bool,
+    _cancel_token: CancellationToken,
 ) -> Result<()>
 where
     I: anaden_engine::Input,
@@ -1076,6 +1105,28 @@ async fn force_launch_app(target: &str, serial: Option<&str>) -> Result<()> {
     }
 }
 
+/// Ctrl+C / SIGINT を監視し `token.cancel()` を発火するバックグラウンドリスナを起動する。
+///
+/// `tokio::signal::ctrl_c()` が完了(シグナル受信)したら [`CancellationToken::cancel`] を呼ぶ。
+/// driver(各 `run_with_*` 経由で `.with_cancel(token)` 済み)はサイクル冒頭の `is_cancelled()`
+/// と interval sleep 区間の `tokio::select!` で即時 [`anaden_engine::LoopStopReason::Interrupted`]
+/// 停止へ遷移する。本関数はリスナの join を待たず(`tokio::spawn` で切り離し)即座に返る:
+/// driver が Interrupted で抜け次第プロセスも終了するため、リスナの放棄は安全。
+///
+/// `ctrl_c()` のエラー(シグナルハンドラ設定失敗)は warn のみで継続する。シグナルを拾えなく
+/// ても driver は MaxIterations / Stop / TerminalTask で停止するため致命的ではない(ただし
+/// 非決定論的な無限ループを避けるため `--max-iters` の併用を推奨)。
+fn spawn_ctrl_c_listener(token: CancellationToken) {
+    tokio::spawn(async move {
+        if let Err(e) = tokio::signal::ctrl_c().await {
+            warn!("ctrl_c シグナルリスナの設定に失敗しました(Ctrl+C で安全停止できません): {e}");
+            return;
+        }
+        info!("Ctrl+C / SIGINT を受信: キャンセルトークンを発火します(安全停止へ遷移)");
+        token.cancel();
+    });
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // ロギングの初期化
@@ -1111,6 +1162,10 @@ async fn main() -> Result<()> {
         } => {
             let parsed_goal = parse_goal_flag(goal.as_deref(), goal_file.as_deref())
                 .map_err(|e| anyhow::anyhow!("ゴール指定の解決失敗: {e}"))?;
+            // Ctrl+C / SIGINT を拾う協調的キャンセルトークン。run_pipeline_live 内で
+            // spawn_ctrl_c_listener を起動し、driver へ .with_cancel(token) 配線する。
+            // トークン発火で driver は LoopStopReason::Interrupted(exit 2) で安全停止する。
+            let cancel_token = CancellationToken::new();
             run_pipeline_live(
                 serial.as_deref(),
                 &pipeline_dir,
@@ -1129,6 +1184,7 @@ async fn main() -> Result<()> {
                 &target,
                 verify_after_fire,
                 parsed_goal,
+                cancel_token,
             )
             .await
         }

@@ -23,6 +23,9 @@ anaden-vision = { workspace = true }
 anaden-engine = { workspace = true }
 anaden-strategies = { workspace = true }
 tokio = { workspace = true }
+# Ctrl+C / SIGINT の協調的キャンセル。CancellationToken はデフォルト feature に含まれる。
+# main.rs で tokio::signal::ctrl_c を受け取り token.cancel() し、PipelineDriver::with_cancel へ配線。
+tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
