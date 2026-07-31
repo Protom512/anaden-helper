@@ -18,10 +18,8 @@ pub const BASE_HEIGHT: u32 = 720;
 /// PC版テンプレート/ROI はこの raw-1258x708 空間で定義されている。
 /// 実行時キャプチャはサイズが異なりうるため、`roi_to_normalized` / `needle_to_normalized` で
 /// raw-1258 空間の定義を実キャプチャ寸法へスケールする。
-#[allow(dead_code)] // pipeline detect (コミット4) で使用開始。段階的コミットのため一時許可。
 pub const PC_CLIENT_WIDTH_MEASURED: u32 = 1258;
 /// PC版実測クライアント高さ(708)。GetClientRect 実測値(capture_probe.png = 1258x708)。
-#[allow(dead_code)] // pipeline detect (コミット4) で使用開始。段階的コミットのため一時許可。
 pub const PC_CLIENT_HEIGHT_MEASURED: u32 = 708;
 
 /// 画面を基準座標系へ正規化するスケーラ。
@@ -91,7 +89,6 @@ impl ScreenScaler {
 ///
 /// `roi = [x, y, width, height]`。各要素を round で整数化して返す。
 /// キャプチャ寸法が 0 の場合は入力 ROI をそのまま返す（ゼロ除算回避）。
-#[allow(dead_code)] // pipeline detect (コミット4) で使用開始。段階的コミットのため一時許可。
 pub fn roi_to_normalized(roi: [u32; 4], norm_w: u32, norm_h: u32) -> [u32; 4] {
     if norm_w == 0 || norm_h == 0 {
         return roi;
@@ -113,7 +110,6 @@ pub fn roi_to_normalized(roi: [u32; 4], norm_w: u32, norm_h: u32) -> [u32; 4] {
 ///
 /// `roi_to_normalized` と同じ X/Y 別比でリサイズする。キャプチャ寸法が 0 の場合は
 /// 入力画像を複製して返す。
-#[allow(dead_code)] // pipeline detect (コミット4) で使用開始。段階的コミットのため一時許可。
 pub fn needle_to_normalized(needle: &DynamicImage, norm_w: u32, norm_h: u32) -> DynamicImage {
     if norm_w == 0 || norm_h == 0 {
         return needle.clone();

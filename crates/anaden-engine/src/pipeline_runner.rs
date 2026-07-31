@@ -320,10 +320,16 @@ mod tests {
 
     // ---- (C) tick: 画像合成を通す統合テスト ----
     //
-    // pipeline.rs の run_step_setup 手法を再利用する。キャンバスは FULL_W×FULL_H。
+    // 新スケールモデルでは detect は needle/ROI を screenshot 寸法へ動的スケールする。
+    // needle_to_normalized / roi_to_normalized を恒等（sx=sy=1.0）にするため、キャンバスは
+    // PC版実測 raw-1258x708（=PC_CLIENT_*_MEASURED）。これで embed で needle を直接埋め込んでも
+    // detect が needle をスケールせず、埋め込み位置・サイズが保存されたままマッチする。
+    // needle は NEEDLE_PX に小さく保ち、全面 ccoeff 走査（O(N·M)）を単発テストで実用的時間に抑える。
 
-    const FULL_W: u32 = 320;
-    const FULL_H: u32 = 180;
+    const FULL_W: u32 = 1258;
+    const FULL_H: u32 = 708;
+    /// tick 統合テストの needle サイズ（全面走査コスト抑制のため小さく）。
+    const NEEDLE_PX: u32 = 16;
 
     /// テンプレPNGを tempdir に保存し、絶対パスを返す。tempdir は .keep() で永続化する。
     fn write_template_persisted(needle: &GrayImage) -> PathBuf {
@@ -338,7 +344,7 @@ mod tests {
     fn tick_match_emits_command_and_advances() {
         // ClickRect は matched_region 非依存。needle を含む screenshot でマッチさせ、
         // roi 中心を Tap する + next[0] へ current が進むことを検証する。
-        let needle = gradient_needle(40, 40);
+        let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
         let tpl = write_template_persisted(&needle);
 
@@ -371,7 +377,7 @@ mod tests {
     fn tick_no_match_returns_none_and_keeps_current() {
         // 背景のみ（needle 無）→ run_step None → tick None。current 変更なし。
         let screenshot = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
-        let needle = gradient_needle(40, 40);
+        let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let tpl = write_template_persisted(&needle);
 
         let tasks = vec![TaskDef {
@@ -394,7 +400,7 @@ mod tests {
 
     #[test]
     fn tick_unknown_current_returns_none() {
-        let needle = gradient_needle(40, 40);
+        let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
         let tpl = write_template_persisted(&needle);
 
@@ -422,7 +428,7 @@ mod tests {
 
     #[test]
     fn tick_stop_returns_no_command_and_none_next() {
-        let needle = gradient_needle(40, 40);
+        let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
         let tpl = write_template_persisted(&needle);
 
@@ -450,7 +456,7 @@ mod tests {
     fn click_self_uses_matched_region_in_tick() {
         // needle を (150,75) に埋め、ClickSelf で tick すると Tap が matched_region の中心
         // （マッチ左上 + needle wh/2 = (150+20, 75+20) 付近）になることをレンジ検証する。
-        let needle = gradient_needle(40, 40);
+        let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
         let tpl = write_template_persisted(&needle);
 

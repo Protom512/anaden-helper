@@ -24,7 +24,7 @@ use tracing::{debug, info, warn};
 use anaden_core::InputAction;
 use anaden_core::ScreenRegion;
 use anaden_device::{AdbError, InputExecutor, ScreenshotCapture};
-use anaden_vision::{ScreenScaler, TaskDef};
+use anaden_vision::{ScreenScaler, TaskDef, crop_to_content};
 
 use crate::pipeline_runner::{InputCommand, PipelineState};
 
@@ -367,8 +367,18 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let capture_ms = t_cap.elapsed().as_secs_f64() * 1000.0;
         let raw_w = screen.width();
         let raw_h = screen.height();
-        // 2. normalize → 基準幅画像(tick は基準座標系前提)
-        let normalized = self.scaler.normalize(&screen);
+        // 2. 黒帯クロップ → 描画領域(16:9)を抽出。黒帯なしならそのまま（copy 不要）。
+        //    normalize の前で行うことで、テンプレ（描画領域空間）とスケールが一致する。
+        let cropped = crop_to_content(&screen);
+        let crop_w = cropped.width();
+        let crop_h = cropped.height();
+        if (crop_w, crop_h) != (raw_w, raw_h) {
+            debug!(
+                "letterbox crop: raw={raw_w}x{raw_h} -> content={crop_w}x{crop_h} (black bars removed)"
+            );
+        }
+        // 3. normalize → 基準幅画像(tick は基準座標系前提)
+        let normalized = self.scaler.normalize(&cropped);
         let norm_w = normalized.width();
         let norm_h = normalized.height();
         // [DEBUG] 生フレーム寸法 + normalize 後寸法。向き/スケール乖離の診断用。
@@ -495,7 +505,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 return StepOutcome::Error(format!("verify_capture: {e}"));
             }
         };
-        let normalized = self.scaler.normalize(&screen);
+        // run_once と同じ黒帯クロップ → normalize 経路（検証も描画領域空間で行う）。
+        let cropped = crop_to_content(&screen);
+        let normalized = self.scaler.normalize(&cropped);
         // run_step を直接呼び、task_name で再認識。マッチ残存 → 対象残存 = 未検証。
         let still_present = anaden_vision::run_step(&self.tasks, &normalized, task_name).is_some();
         if still_present {
@@ -1338,35 +1350,6 @@ mod tests {
 
     // ---- pipeline_runner.rs のテストヘルパ相当（複製） ----
 
-    fn gradient_needle(w: u32, h: u32) -> GrayImage {
-        let mut img = GrayImage::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                let v = ((x + y) % 64) as u8;
-                img.put_pixel(x, y, Luma([v]));
-            }
-        }
-        img
-    }
-
-    fn embed(
-        haystack_w: u32,
-        haystack_h: u32,
-        needle: &GrayImage,
-        ox: u32,
-        oy: u32,
-        bg: u8,
-    ) -> GrayImage {
-        let mut img = GrayImage::from_pixel(haystack_w, haystack_h, Luma([bg]));
-        for y in 0..needle.height() {
-            for x in 0..needle.width() {
-                let p = needle.get_pixel(x, y)[0];
-                img.put_pixel(ox + x, oy + y, Luma([p]));
-            }
-        }
-        img
-    }
-
     fn luma_dyn(img: GrayImage) -> DynamicImage {
         DynamicImage::ImageLuma8(img)
     }
@@ -1379,21 +1362,77 @@ mod tests {
         p
     }
 
-    // テスト画面寸法。normalize が常に1280幅基準へリサイズする（早期 return 廃止）ため、
-    // 1280x720（=BASE_WIDTH x BASE_HEIGHT 相当）を用いる。これにより normalize は
-    // 1280x720 → 1280x720 への実質パススルーとなり、needle の埋め込み位置・サイズが
-    // 保存されたままマッチする。以前の 320x180 は normalize で1280x720へ拡大され、
-    // needle 位置がズレて NoMatch になっていた。
-    const FULL_W: u32 = 1280;
-    const FULL_H: u32 = 720;
+    // ---- 新スケールモデル対応の matched-frame ヘルパ ----
+    //
+    // run_once は capture → crop_to_content → normalize(1258→1280x720) → detect を経る。
+    // detect は needle を正規化後寸法(1280x720)へ動的スケールする。旧 embed() 方式（needle を
+    // screenshot に直接埋め込み）は、normalize 拡大と detect needle スケールが異なる resize 経路
+    // となりズレて NoMatch になる。よって needle と screenshot を **同一の raw-1258x708 特徴画像
+    // から生成** し、両者が run_once 通過後に一致するようにする:
+    //   - raw_feature(): 1258x708 の広域 gradient 特徴画像
+    //   - needle = raw_feature の NEEDLE_ROI(12x12) を crop（=raw-1258 空間のテンプレ）
+    //   - screenshot = raw_feature 全体
+    //   - TaskDef.roi = MATCH_ROI（needle を含む小窓）→ detect が crop して走査を局所化。
+    //
+    // 局所化の理由: run_loop 系テストは max_iterations まで複数サイクル回る。1258x708 の全面
+    // ccoeff 走査（O(N·M)）は1サイクルでも重く、複数サイクルで時間・メモリ爆発する。MATCH_ROI で
+    // needle 周辺の小窓のみ走査し、run_loop 制御ロジックの検証を現実的時間に保つ。
+    //
+    // 整合性: detect は TaskDef.roi を roi_to_normalized(roi, norm_w=1280, norm_h=720) でスケール
+    // して crop する。needle も同比(1258→1280)でスケール。screenshot の needle 領域も normalize
+    // (1258→1280) で拡大。三者とも「raw ROI を 1258→1280 比で Triangle 拡大」なので一致する。
+
+    /// テンプレ needle の raw-1258 空間 ROI（左上原点・12x12）。
+    const NEEDLE_ROI: [u32; 4] = [150, 75, 12, 12];
+    /// マッチ走査を局所化する TaskDef.roi（needle を含む小窓）。
+    const MATCH_ROI: [u32; 4] = [140, 65, 48, 36];
+
+    /// raw-1258x708 特徴画像（周期200の広域 gradient）。needle と screenshot の共通原料。
+    fn raw_feature() -> GrayImage {
+        let mut img = GrayImage::new(FULL_W, FULL_H);
+        for y in 0..FULL_H {
+            for x in 0..FULL_W {
+                let v = (((x * 2) + y) % 200) as u8;
+                img.put_pixel(x, y, Luma([v]));
+            }
+        }
+        img
+    }
+
+    /// raw_feature の NEEDLE_ROI 領域を crop してテンプレ PNG として保存し、絶対パスを返す。
+    fn crop_needle_template() -> PathBuf {
+        let raw = raw_feature();
+        let [nx, ny, nw, nh] = NEEDLE_ROI;
+        let mut needle = GrayImage::new(nw, nh);
+        for dy in 0..nh {
+            for dx in 0..nw {
+                needle.put_pixel(dx, dy, *raw.get_pixel(nx + dx, ny + dy));
+            }
+        }
+        write_template_persisted(&needle)
+    }
+
+    /// matched-frame 用の (screenshot, needle_template_path) を生成。
+    /// screenshot は raw-1258x708 特徴画像全体、needle は NEEDLE_ROI 領域の crop。
+    fn matched_frame() -> (DynamicImage, PathBuf) {
+        let raw = raw_feature();
+        let tpl = crop_needle_template();
+        (luma_dyn(raw), tpl)
+    }
+
+    // テスト画面寸法。PC版実測 raw-1258x708 空間（=PC_CLIENT_*_MEASURED）。
+    // raw_feature をこの寸法で作ることで、normalize(1258→1280x720) と detect の needle/ROI
+    // スケール(1258→1280) が同比となり、needle-screenshot が一致してマッチする。
+    const FULL_W: u32 = 1258;
+    const FULL_H: u32 = 708;
 
     fn click_rect_task(name: &str, action: Action, next: Option<Vec<&str>>) -> TaskDef {
         TaskDef {
             name: name.into(),
             state: name.into(),
             algorithm: anaden_vision::Algorithm::Ccoeff,
-            template: write_template_persisted(&gradient_needle(40, 40)),
-            roi: None,
+            template: crop_needle_template(),
+            roi: Some(MATCH_ROI),
             threshold: 0.9,
             base: None,
             action: Some(action),
@@ -1514,8 +1553,7 @@ mod tests {
     #[tokio::test]
     async fn run_once_fires_rescaled_tap_on_click_rect() {
         // ClickRect roi center は (640,360)（基準座標）。needle を埋めた基準画像を与える。
-        let needle = gradient_needle(40, 40);
-        let screen = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (screen, _tpl) = matched_frame();
         let frames = frames_of(vec![screen]);
         let fired = new_fired();
 
@@ -1564,8 +1602,7 @@ mod tests {
 
     #[tokio::test]
     async fn run_once_stop_yields_nofire_none() {
-        let needle = gradient_needle(40, 40);
-        let screen = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (screen, _tpl) = matched_frame();
         let frames = frames_of(vec![screen]);
         let fired = new_fired();
 
@@ -1661,10 +1698,10 @@ mod tests {
     // ---- (4) run_loop 検証 ----
 
     fn needle_screen(seed: u32) -> DynamicImage {
-        // seed でわずかに変化させた needle を埋めた画面。
-        let needle = gradient_needle(40, 40);
+        // matched-frame（raw-1258 特徴画像）。seed は歴史的互換用で未使用（以前も未使用）。
         let _ = seed;
-        luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128))
+        let (screen, _tpl) = matched_frame();
+        screen
     }
 
     #[tokio::test]
@@ -1974,8 +2011,7 @@ mod tests {
     async fn verify_success_when_template_disappears() {
         // 発火前フレーム: needle 埋込(マッチ→ClickRect 発火)。
         // 発火後フレーム: 背景のみ(needle 消失) → 検証成功 → Fired。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
         // run_once が1枚目消費、verify_action_effect が2枚目消費。
         let frames = frames_of(vec![matched, blank]);
@@ -2027,8 +2063,7 @@ mod tests {
     async fn verify_fails_when_template_persists() {
         // 発火前フレームも発火後フレームも needle 埋込 → 発火後もテンプレ残存 →
         // FiredUnverified。close_btn 誤キャプチャ等の「偽成功」を防ぐ経路。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let frames = frames_of(vec![matched.clone(), matched]);
         let fired = new_fired();
 
@@ -2084,8 +2119,7 @@ mod tests {
     #[tokio::test]
     async fn verify_skipped_on_nofire_and_nomatch() {
         // Stop(NoFire) は発火しないので検証スキップ → run_once と同じ NoFire(None)。
-        let needle = gradient_needle(40, 40);
-        let screen = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (screen, _tpl) = matched_frame();
         let frames = frames_of(vec![screen]);
         let fired = new_fired();
 
@@ -2114,8 +2148,7 @@ mod tests {
     #[tokio::test]
     async fn verify_capture_error_returns_error() {
         // 発火は成功(1枚目 matched)、事後 capture でフレーム枯渇 → Error(verify_capture)。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         // 2枚目無し → verify_action_effect の capture が "no more frames" エラー。
         let frames = frames_of(vec![matched]);
         let fired = new_fired();
@@ -2162,8 +2195,7 @@ mod tests {
         // FiredUnverified が NoMatch streak に加算されること。
         // 全フレーム matched(テンプレ残存) → 毎サイクル FiredUnverified → streak 蓄積 →
         // threshold=2 で recovery hook 発火。current は Title に巻き戻り続ける。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         // run_once(1) + verify(1) で1サイクル2枚消費。十分な枚数。
         let many: Vec<DynamicImage> = (0..40).map(|_| matched.clone()).collect();
         let frames = frames_of(many);
@@ -2230,8 +2262,7 @@ mod tests {
         // with_verify を呼ばない(デフォルト) → run_once と同等 → FiredUnverified は出ない。
         // 1枚目 matched で発火、2枚目も matched だが検証しないので普通の Fired。
         // run_loop は next へ進み、LoadGame タスクが無いので NoMatch ループ → MaxIterations。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let many: Vec<DynamicImage> = (0..20).map(|_| matched.clone()).collect();
         let frames = frames_of(many);
         let fired = new_fired();
@@ -2268,8 +2299,7 @@ mod tests {
     #[tokio::test]
     async fn nomatch_streak_resets_on_fired() {
         // threshold=3 未到達で hook 不発。MaxIterations で停止。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
 
         // 順序: blank, blank, matched, blank, blank, blank, ...(MaxIterations まで)
@@ -3400,8 +3430,7 @@ mod tests {
     /// Reached を返す → GoalReached で停止。
     #[tokio::test]
     async fn uc2_template_match_goal_reaches_goal_reached_when_matching_template_fires() {
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         // Title 発火後 next=LoadGame へ遷移するが、初回の Fired でゴール到達するので
         // 1 枚で十分(到達前の巻き戻り等は無い)。
         let frames = frames_of(vec![matched]);
@@ -3475,8 +3504,7 @@ mod tests {
     /// 対照を確立し、到達テストが「常に到達する偽陽性」にならないようにする。
     #[tokio::test]
     async fn uc2_template_match_goal_does_not_reach_when_task_name_mismatches() {
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let many: Vec<DynamicImage> = (0..20).map(|_| matched.clone()).collect();
         let frames = frames_of(many);
         let fired = new_fired();
@@ -3654,8 +3682,7 @@ mod tests {
     /// 両方を網羅する(template_match conf>=<c> (task=<t>) 形式の JSON 耐性)。
     #[tokio::test]
     async fn uc2_template_match_outcome_reached_goal_survives_json_roundtrip() {
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let frames = frames_of(vec![matched]);
         let fired = new_fired();
 
