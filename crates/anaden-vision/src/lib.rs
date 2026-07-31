@@ -6,6 +6,7 @@
 mod ccoeff;
 mod collector;
 mod engine;
+mod letterbox;
 mod matcher;
 mod pipeline;
 mod scale;
@@ -18,6 +19,7 @@ pub use collector::{
     extract_stable_tiles, group_captures, verify_templates,
 };
 pub use engine::{SseVisionEngine, VisionEngine};
+pub use letterbox::crop_to_content;
 pub use matcher::{MatchResult, TemplateMatcher};
 pub use pipeline::{
     Action, Algorithm, PipelineManifest, StepOutcome, TaskDef, TaskDefError, load_pipeline,
