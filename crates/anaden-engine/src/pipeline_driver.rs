@@ -1379,8 +1379,13 @@ mod tests {
         p
     }
 
-    const FULL_W: u32 = 320;
-    const FULL_H: u32 = 180;
+    // テスト画面寸法。normalize が常に1280幅基準へリサイズする（早期 return 廃止）ため、
+    // 1280x720（=BASE_WIDTH x BASE_HEIGHT 相当）を用いる。これにより normalize は
+    // 1280x720 → 1280x720 への実質パススルーとなり、needle の埋め込み位置・サイズが
+    // 保存されたままマッチする。以前の 320x180 は normalize で1280x720へ拡大され、
+    // needle 位置がズレて NoMatch になっていた。
+    const FULL_W: u32 = 1280;
+    const FULL_H: u32 = 720;
 
     fn click_rect_task(name: &str, action: Action, next: Option<Vec<&str>>) -> TaskDef {
         TaskDef {

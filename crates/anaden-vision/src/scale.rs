@@ -51,11 +51,15 @@ impl ScreenScaler {
         }
     }
 
-    /// 画像を基準幅に縮小する（高さはアスペクト比を保存）。
-    /// 既に基準幅以下なら複製を返す（拡大はしない）。
+    /// 画像を基準幅(1280)へリサイズする（高さはアスペクト比を保存）。
+    ///
+    /// 元解像度が基準幅より小さくても常に1280基準へ統一する（PC版1258x708も1280へ拡大）。
+    /// 黒帯クロップ後のキャプチャは描画領域(16:9)に揃うため、ここで一律1280幅へ正規化し、
+    /// その後 raw-1258 空間のテンプレ/ROI を `roi_to_normalized`/`needle_to_normalized` で
+    /// 1280空間へスケールしてマッチさせる。幅0の画像は複製を返す。
     pub fn normalize(&self, img: &DynamicImage) -> DynamicImage {
         let sw = img.width();
-        if sw <= self.base_w {
+        if sw == 0 {
             return img.clone();
         }
         let s = self.scale_factor(sw);
@@ -143,10 +147,13 @@ mod tests {
     }
 
     #[test]
-    fn already_small_image_not_upscaled() {
+    fn small_image_normalized_to_base_width() {
+        // normalize は常に1280幅基準へリサイズする（早期 return 廃止）。
+        // 800x600 → 幅1280基準 → 高さ 960（アスペクト比 4:3 保存）。
         let scaler = ScreenScaler::new();
         let out = scaler.normalize(&rgb(800, 600));
-        assert_eq!((out.width(), out.height()), (800, 600));
+        assert_eq!(out.width(), 1280);
+        assert_eq!(out.height(), 960);
     }
 
     #[test]
@@ -166,59 +173,63 @@ mod tests {
         assert!((s - (1280.0 / 2400.0)).abs() < 1e-6);
     }
 
-    // ---- T2 (Issue #5): PC版(Windows, 16:9, 1258x708) の RAW パススルー保証 ----
+    // ---- T2 (Issue #5) 改訂: PC版(1258x708) の1280基準正規化 ----
     //
-    // PC版キャプチャは GetClientRect 実測で 1258x708(SHARED-MEMORY 測定値)。
-    // この幅は BASE_WIDTH(1280) 以下のため、normalize はリサイズせず生画像をそのまま返す。
-    // 結果として PC版テンプレート/ROI はすべて RAW 1258x708 ピクセル空間で定義しなければ
-    // ならず、1280 基準の正規化空間(20:9 実機用)で定義すると座標がズレて NoMatch になる。
+    // PC版キャプチャは GetClientRect 実測で 1258x708。かつては normalize が
+    // 「1258 <= 1280 で RAW パススルー」していたが、黒帯入りキャプチャ(1918x1048等)対応のため
+    // normalize は常に1280幅基準へリサイズするよう変更された（早期 return 廃止）。
     //
-    // このテストは「1258 <= 1280 でパススルーされる」ことを固定化し、将来 normalize の
-    // 条件を誤って書き換えた場合(例: `<` を `<=` に変更、あるいは閾値を下げる等)に
-    // 即座に検出する。PC版テンプレート群(templates/scenes/field/*.toml の [roi])が
-    // raw-1258 空間で正しいのはこの不変条件に依存している。
+    // これにより PC版テンプレート/ROI は引き続き raw-1258x708 空間で定義されるが、
+    // マッチ時には detect が `roi_to_normalized` / `needle_to_normalized` で
+    // raw-1258 空間の定義を1280正規化空間へスケールする（コミット4で実装）。
+    //
+    // このテストは「1258x708 は1280基準へリサイズされる（パススルーしない）」ことを固定化する。
     //
     // 注意(定数昇格): PC_CLIENT_WIDTH_MEASURED / PC_CLIENT_HEIGHT_MEASURED はモジュール直下へ
     // pub 昇格済み。`use super::*` で本 mod から参照する。
 
     #[test]
-    fn pc_capture_1258_wide_passes_through_normalize_raw() {
+    fn pc_capture_1258_normalized_to_1280_base() {
         let scaler = ScreenScaler::new();
-        // PC版実測サイズ 1258x708 は BASE_WIDTH(1280) 以下 → リサイズされず RAW パススルー。
+        // PC版実測サイズ 1258x708 は常に1280幅基準へリサイズされる（早期 return 廃止）。
+        // 高さ = 708 * (1280/1258) = 720.4 → 720（アスペクト比 1258:708 ≈ 16:9 を保存）。
         let out = scaler.normalize(&rgb(PC_CLIENT_WIDTH_MEASURED, PC_CLIENT_HEIGHT_MEASURED));
         assert_eq!(
             (out.width(), out.height()),
-            (1258, 708),
-            "PC版キャプチャ(1258x708) は normalize で RAW パススルーされなければならない。\
-             リサイズされた場合、raw-1258 空間のテンプレート/ROI 座標がすべてズレる"
+            (1280, 720),
+            "PC版キャプチャ(1258x708) は normalize で 1280x720 へリサイズされる。\
+             raw-1258 空間のテンプレ/ROI は detect で roi_to_normalized/needle_to_normalized \
+             により1280空間へスケールされる"
         );
     }
 
     #[test]
-    fn pc_capture_scale_factor_is_identity() {
+    fn pc_capture_scale_factor_is_upscale() {
+        // normalize が常にリサイズへ変わったため、PC幅1258 の scale_factor は 1280/1258 > 1.0（拡大）。
+        // これは normalize が1258→1280へ拡大リサイズすることを意味し、早期 return は廃止された。
         let scaler = ScreenScaler::new();
-        // 1258 <= 1280 でも scale_factor は base_w/src の比を返す設計(1.0 ではない)。
-        // これは normalize が「幅で早期 return する」ことでパススルーを実現しており、
-        // scale_factor 自体を呼ばないことを意味する。to_base/from_base は別経路。
-        // ここでは「PC版幅で scale_factor を呼んでも 1.0 より大きい(拡大側)」こと、
-        // つまり仮にリサイズが走っても拡大(画質劣化+座標ズレ)になることを記録し、
-        // normalize の早期 return が必須であることを文書化する。
         let s = scaler.scale_factor(PC_CLIENT_WIDTH_MEASURED);
-        // 1280/1258 = 1.017... > 1.0 → リサイズされると拡大。パススルーが正しい。
+        // 1280/1258 = 1.017... > 1.0 → 拡大リサイズ。
         assert!(
             s > 1.0,
-            "PC幅1258 の scale_factor は >1.0 (拡大)。normalize の早期return必須"
+            "PC幅1258 の scale_factor は >1.0 (拡大)。normalize は常に1280基準へリサイズ"
         );
     }
 
     #[test]
     fn pc_roi_in_raw_space_fits_1258x708_bounds() {
-        // templates/scenes/field/*.toml の新規 [roi] テーブル(diary/map/template_01 等)は
+        // templates/scenes/field/*.toml の [roi] テーブル(diary/map/template_01 等)は
         // raw-1258x708 空間で定義されている。代表例として diary の ROI を検証:
         //   diary.toml: x=337 y=604 width=89 height=94
         // ROI 右下端 = (337+89, 604+94) = (426, 698) <= (1258, 708) → 収まる。
         // 注意: y=604 は 20:9 正規化高さ(576)を超えており、これが raw-1258 空間の決定的証拠。
         // もしこれが 1280-base 正規化空間なら y+height=698 > 576 で画面外にはみ出す。
+        //
+        // normalize 変更（常時1280基準リサイズ）との整合: ROI 定義自体は raw-1258 空間のまま
+        // 変更しない。normalize 後のキャプチャが 1280x720 になっても、detect が
+        // roi_to_normalized(roi, 1280, 720) で raw-1258 → 1280 へスケールするため、
+        // テンプレとROIの相対位置関係は保存される。このテストは ROI の raw-1258 性（定義空間）
+        // を維持確認するもので、normalize 経路変更後も成立する。
         let (x, y, w, h): (u32, u32, u32, u32) = (337, 604, 89, 94);
         let right = x + w;
         let bottom = y + h;
