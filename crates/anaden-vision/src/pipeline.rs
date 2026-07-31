@@ -926,12 +926,13 @@ mod tests {
         write_template(tmp.path(), &tpl_needle);
 
         // 低閾値では一致する（位置は解決できる）
+        // ROI 付与で SSE 全面走査を局所化（FULL_W/H=1258x708 全面走査は重いため）。
         let low_task = TaskDef {
             name: "T".into(),
             state: "T".into(),
             algorithm: Algorithm::Sse,
             template: tmp.path().join("scenes/title/title_center.png"),
-            roi: None,
+            roi: Some([140, 65, 40, 30]),
             threshold: 0.1,
             base: None,
             action: None,
@@ -1261,6 +1262,9 @@ mod tests {
         // それより高い閾値を設定 → detect が Ok(None) → run_step も None。
         // （MatchConfidence::new は [0,1] にクランプするため、閾値 1.1 では gating できない。
         //  detect_threshold_above_achievable_returns_none と同じ手法を採る）
+        //
+        // ROI 付与: needle は raw-1258 空間(1258x708 でスケール恒等) なので、needle を含む小窓
+        // ROI を指定して SSE 全面走査を局所化（FULL_W/H=1258x708 の全面走査は数分かかるため）。
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = gradient_needle(40, 40);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &base, 150, 75, 128));
@@ -1273,7 +1277,7 @@ mod tests {
             state: "Title".into(),
             algorithm: Algorithm::Sse,
             template: tmp.path().join("scenes/title/title_center.png"),
-            roi: None,
+            roi: Some([140, 65, 60, 60]),
             threshold: 0.1,
             base: None,
             action: Some(Action::ClickSelf),
@@ -2878,34 +2882,14 @@ mod tests {
             )
         });
         let defs = load_pipeline(&dir).expect("title_pc load");
-        let screenshot = image::open(&probe_path).expect("open title_pc_probe.png");
+        let probe = image::open(&probe_path).expect("open title_pc_probe.png");
 
-        // PC RAW 空間(1258x708)へ正規化(Issue #12)。取得ウィンドウサイズは表示解像度/DPI で
-        // 変動しオペレータは制御できない(「画像側でサイズ変更」指示)。ROI/template は PC RAW
-        // 1258x708 空間で定義されるため、probe が異寸法(例: 1918x1048)なら 1258x708 へ
-        // resize_exact してから detect に渡す。これで field_pc_probe/menu_pc_probe(1258x708
-        // native)と同一空間へ揃う。ScreenScaler は 1280 基準で PC(1258<=1280) を RAW passthrough
-        // するため、ここで PC RAW 空間への明示 resize が必要(detect は呼出側が正規化済みを前提)。
-        const TITLE_PC_PROBE_RAW_W: u32 = 1258;
-        const TITLE_PC_PROBE_RAW_H: u32 = 708;
-        let screenshot = if screenshot.width() == TITLE_PC_PROBE_RAW_W
-            && screenshot.height() == TITLE_PC_PROBE_RAW_H
-        {
-            screenshot // 既に RAW 空間(field_pc_probe/menu_pc_probe と同一)
-        } else {
-            eprintln!(
-                "title_pc_probe.png is {}x{} — resizing to PC RAW {}x{} (window size is not operator-controllable)",
-                screenshot.width(),
-                screenshot.height(),
-                TITLE_PC_PROBE_RAW_W,
-                TITLE_PC_PROBE_RAW_H,
-            );
-            screenshot.resize_exact(
-                TITLE_PC_PROBE_RAW_W,
-                TITLE_PC_PROBE_RAW_H,
-                image::imageops::FilterType::Triangle,
-            )
-        };
+        // 本番経路（PipelineDriver）と同一の crop_to_content → normalize を適用してから
+        // detect に渡す。旧 Issue #12 の明示 resize_exact(1258x708) ハックは廃止: detect が
+        // normalize 後寸法へ ROI/needle を動的スケールするため、サイズ・黒帯へ自動対応する。
+        let cropped = crate::crop_to_content(&probe);
+        let screenshot = crate::scale::ScreenScaler::new().normalize(&cropped);
+        let (sw, sh) = (screenshot.width(), screenshot.height());
 
         for d in &defs {
             let m = d
@@ -2925,19 +2909,30 @@ mod tests {
                 m.confidence.0,
                 d.threshold
             );
-            assert_roi_within_1258x708(
-                [m.region.x, m.region.y, m.region.width, m.region.height],
-                &format!("{} match region", d.name),
+            // match region は detect 入力画像（=normalize 後、通常 1280x720）と同じ座標空間。
+            // 画像寸法内に収まること（旧 raw-1258 前提は本番経路移行で廃止）。
+            assert!(
+                m.region.x + m.region.width <= sw && m.region.y + m.region.height <= sh,
+                "{}: match region [{},{},{},{}] must fit within normalized probe {}x{}",
+                d.name,
+                m.region.x,
+                m.region.y,
+                m.region.width,
+                m.region.height,
+                sw,
+                sh
             );
             println!(
-                "{}: conf={:.4} region=[{},{},{},{}] (threshold {:.2})",
+                "{}: conf={:.4} region=[{},{},{},{}] (threshold {:.2}) on {}x{} normalized probe",
                 d.name,
                 m.confidence.0,
                 m.region.x,
                 m.region.y,
                 m.region.width,
                 m.region.height,
-                d.threshold
+                d.threshold,
+                sw,
+                sh
             );
         }
     }
@@ -3177,50 +3172,65 @@ mod tests {
 
         let probe = image::open(&probe_path).expect("open title_pc_probe.png");
         // 生ファイル寸法不変量: 取得ウィンドウサイズはオペレータ制御不可につき 1918x1048 RGBA。
-        // pipeline.rs はこれを 1258x708(PC RAW) へ resize_exact してから detect に渡す。
+        // 本番経路（PipelineDriver）は crop_to_content → normalize でこれを 1280x720 へ正規化する。
         assert_eq!(
             (probe.width(), probe.height()),
             (1918, 1048),
             "title_pc_probe.png raw capture must be 1918x1048 RGBA (operator window size, \
-             not operator-controllable); pipeline.rs resizes it to PC RAW 1258x708 in-code. \
-             If the capture dimensions change the resize-to-RAW premise must be re-validated."
+             not operator-controllable); the driver normalizes it via crop_to_content + \
+             normalize. If the capture dimensions change the normalization premise must be \
+             re-validated."
         );
 
-        // PC RAW 1258x708 へ resize_exact(E2E ゲート pc_title_pc_templates_match_real_*
-        // と同一の正規化経路)。ROI は RAW 空間で定義されるため、run 再導出も RAW 空間で行う。
-        const TITLE_PC_PROBE_RAW_W: u32 = 1258;
-        const TITLE_PC_PROBE_RAW_H: u32 = 708;
-        let raw = probe.resize_exact(
-            TITLE_PC_PROBE_RAW_W,
-            TITLE_PC_PROBE_RAW_H,
-            image::imageops::FilterType::Triangle,
-        );
-        let gray = raw.to_luma8();
+        // 本番経路と同一の正規化（crop_to_content → normalize → 1280x720）を適用。
+        // 旧インライン resize_exact(1258x708) ハックは廃止: 本番は黒帯クロップ後に normalize する
+        // ため、幾何学的検証も同経路を通す。ROI は raw-1258 空間で定義されるので、
+        // roi_to_normalized で 1280x720 空間へ変換して run を見る。
+        let cropped = crate::crop_to_content(&probe);
+        let normalized = crate::scale::ScreenScaler::new().normalize(&cropped);
+        let gray = normalized.to_luma8();
+        let norm_w = normalized.width();
+        let norm_h = normalized.height();
 
         // (C) geometric corroboration (= 旧 retain-old-value ガードが待っていた実機裏付け):
         //     実測 ROI 帯の y-range 内で、x-range に重なる列分散 run が再現すること。
         //     これが「実測 ROI が実機プローブ上の実テクスチャ位置を指している」客観的証明。
-        //
-        // version_label: ROI y=8..43, x=712..833。この水平帯で x>=712 に run が存在すること。
-        let vl_runs = title_region_runs(&gray, 8, 43, 700, 850);
+        //     ROI [712,8,121,35] を 1280x720 空間へスケールし、その帯で run を見る。
+        let vl = crate::scale::roi_to_normalized([712, 8, 121, 35], norm_w, norm_h);
+        let vl_runs = title_region_runs(
+            &gray,
+            vl[1],
+            vl[1] + vl[3],
+            vl[0].saturating_sub(12),
+            vl[0] + vl[2] + 12,
+        );
         assert!(
-            vl_runs.iter().any(|(s, e)| *e > 712 && *s < 833),
-            "version_label: real-probe band y=8..43 must contain a column-variance run \
-             overlapping x=712..833 (the measured ROI [712,8,121,35]). This is the \
-             geometric corroboration the old retain-old-value guard was waiting for; \
-             got runs={vl_runs:?}"
+            vl_runs
+                .iter()
+                .any(|(s, e)| *e > vl[0] && *s < vl[0] + vl[2]),
+            "version_label: normalized-probe band must contain a column-variance run \
+             overlapping the scaled ROI {:?}. This is the geometric corroboration the old \
+             retain-old-value guard was waiting for; got runs={vl_runs:?}",
+            vl
         );
 
-        // logo_corner: ROI y=263..383, x=624..744 (小特徴 [624,263,120,120])。
-        // この帯で x>=624 に run が存在すること。候補窓はロゴグリフ上(高コントラスト固定テクスチャ)
-        // なので列分散 run が再現するはず — これが「小特徴 ROI が実テクスチャを指す」客観的証明。
-        let lc_runs = title_region_runs(&gray, 263, 383, 610, 760);
+        // logo_corner: ROI [624,263,120,120] を同空間へスケールして run を見る。
+        let lc = crate::scale::roi_to_normalized([624, 263, 120, 120], norm_w, norm_h);
+        let lc_runs = title_region_runs(
+            &gray,
+            lc[1],
+            lc[1] + lc[3],
+            lc[0].saturating_sub(12),
+            lc[0] + lc[2] + 12,
+        );
         assert!(
-            lc_runs.iter().any(|(s, e)| *e > 624 && *s < 744),
-            "title_logo_corner: real-probe band y=263..383 must contain a column-variance \
-             run overlapping x=624..744 (the small-feature ROI [624,263,120,120] selected \
-             by find_logo_corner_subfeature.rs inside the operator-dragged band). \
-             got runs={lc_runs:?}"
+            lc_runs
+                .iter()
+                .any(|(s, e)| *e > lc[0] && *s < lc[0] + lc[2]),
+            "title_logo_corner: normalized-probe band must contain a column-variance run \
+             overlapping the scaled small-feature ROI {:?} (selected by \
+             find_logo_corner_subfeature.rs inside the operator-dragged band). got runs={lc_runs:?}",
+            lc
         );
 
         // (D) 実機プローブ到着による契約の置換を文書化: 旧 retain-old-value ガードの前提
