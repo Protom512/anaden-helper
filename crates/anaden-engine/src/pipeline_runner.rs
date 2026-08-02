@@ -12,13 +12,16 @@ use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 
 use anaden_core::ScreenRegion;
-use anaden_vision::{Action, StepOutcome, TaskDef, run_step};
+use anaden_vision::{Action, StepOutcome, TaskDef, roi_to_normalized, run_step};
 
 /// デバイスへ発火すべき入力コマンド（ピクセル座標）。
 ///
-/// 座標モデルは [`anaden_core::ScreenPoint`] とデバイス層 `input tap x y` / `input swipe` の
-/// `u32` ピクセルと一致。[`Action::ClickSelf`] / [`Action::ClickRect`] は [`InputCommand::Tap`]、
-/// [`Action::Swipe`] は [`InputCommand::Swipe`] へ 1:1 対応する。
+/// **座標空間**: 全バリアントの座標は **normalize 後1280空間**（黒帯除去後描画領域を
+/// 幅1280基準へ正規化した空間）に統一される。実デバイス生画像（黒帯込み）への逆変換は
+/// 後段の [`crate::pipeline_driver::rescale_command`] が [`anaden_vision::CropInfo`] を使って行う。
+///
+/// - [`Action::ClickSelf`] / [`Action::ClickRect`] は [`InputCommand::Tap`]、
+///   [`Action::Swipe`] は [`InputCommand::Swipe`] へ 1:1 対応する。
 ///
 /// duration_ms は現状 [`Action::Swipe`] にパラメータが無いため持たない。後段の発火層が
 /// デフォルト値を埋める。将来 [`Action::Swipe`] に duration が増えたらフィールド追加で拡張する。
@@ -30,12 +33,18 @@ pub enum InputCommand {
     Swipe { from: (u32, u32), to: (u32, u32) },
 }
 
-/// アクションから入力コマンドへ変換する。
+/// アクションから入力コマンドへ変換する。全座標は **normalize 後空間**（screenshot と同じ
+/// 座標空間。PC版16:9なら1280x720、20:9端末なら1280x576 等）へ統一される。
 ///
-/// - [`Action::ClickSelf`] は `matched_region` の中心をタップ。`matched_region` が [`None`] の場合は
-///   クリック位置を決定できないため [`None`]（安全側: 発火しない）。
-/// - [`Action::ClickRect`] は `roi` 自身の中心をタップ（`matched_region` は無視する）。
-/// - [`Action::Swipe`] は `from`/`to` 各々の中心を使う。
+/// 座標空間の整合（C1 修正）:
+/// - [`Action::ClickSelf`] は `matched_region` の中心をタップ。`matched_region` は
+///   [`run_step`] が screenshot（=normalize後空間）と同じ空間で返すため、**既に同空間**。
+///   そのまま `Tap` へ。`matched_region` が [`None`] の場合は [`None`]（安全側: 発火しない）。
+/// - [`Action::ClickRect`] の `roi`・[`Action::Swipe`] の `from`/`to` は TOML 定義上
+///   **raw-1258x708 空間**。これを [`roi_to_normalized`] で `(norm_w, norm_h)` 空間へ変換してから
+///   中心を取り、`Tap`/`Swipe` へ載せる。detect（[`run_step`]）が ROI/needle をスケールするのと
+///   **同一の `(norm_w, norm_h)`** を渡すことで、ClickRect 座標が matched_region と同じ空間に揃う
+///   （従来は raw-1258 のまま `InputCommand` に入り、空間不整合でタップが外れていた）。
 /// - [`Action::DoNothing`] / [`Action::Stop`] は入力コマンドではないため [`None`]。
 ///
 /// `action` は参照で受け Clone 回避。戻り値 [`Option<InputCommand>`]: [`None`] は
@@ -43,6 +52,8 @@ pub enum InputCommand {
 pub fn action_to_command(
     action: &Action,
     matched_region: Option<ScreenRegion>,
+    norm_w: u32,
+    norm_h: u32,
 ) -> Option<InputCommand> {
     match action {
         Action::ClickSelf => match matched_region {
@@ -53,13 +64,22 @@ pub fn action_to_command(
             None => None,
         },
         Action::ClickRect { roi } => {
-            let (x, y) = roi.center();
+            // roi は raw-1258 空間 → (norm_w, norm_h) 空間へ変換して中心を取る。
+            let nroi = roi_to_normalized([roi.x, roi.y, roi.width, roi.height], norm_w, norm_h);
+            let nr = ScreenRegion::new(nroi[0], nroi[1], nroi[2], nroi[3]);
+            let (x, y) = nr.center();
             Some(InputCommand::Tap { x, y })
         }
-        Action::Swipe { from, to } => Some(InputCommand::Swipe {
-            from: from.center(),
-            to: to.center(),
-        }),
+        Action::Swipe { from, to } => {
+            // from/to も raw-1258 空間 → (norm_w, norm_h) 空間へ変換して中心を取る。
+            let nfrom =
+                roi_to_normalized([from.x, from.y, from.width, from.height], norm_w, norm_h);
+            let nto = roi_to_normalized([to.x, to.y, to.width, to.height], norm_w, norm_h);
+            Some(InputCommand::Swipe {
+                from: ScreenRegion::new(nfrom[0], nfrom[1], nfrom[2], nfrom[3]).center(),
+                to: ScreenRegion::new(nto[0], nto[1], nto[2], nto[3]).center(),
+            })
+        }
         Action::DoNothing => None,
         Action::Stop => None,
     }
@@ -146,7 +166,14 @@ impl PipelineState {
         let outcome = run_step(tasks, screenshot, &self.current)?;
         let matched_region = outcome.matched_region;
         let matched_confidence = Some(outcome.matched_confidence);
-        let command = action_to_command(&outcome.action, Some(matched_region));
+        // ClickRect/Swipe の roi/from/to を screenshot（=normalize後空間）と同じ空間へ揃えるため、
+        // その寸法を action_to_command へ渡す（detect の roi_to_normalized と同一 norm_w/norm_h）。
+        let command = action_to_command(
+            &outcome.action,
+            Some(matched_region),
+            screenshot.width(),
+            screenshot.height(),
+        );
         let next_current = advance_next(&outcome);
         if let Some(next) = &next_current {
             self.current = next.clone();
@@ -221,13 +248,17 @@ mod tests {
     }
 
     // ---- (A) action_to_command の全ケース ----
+    //
+    // norm_w/norm_h は ClickRect/Swipe の roi 変換先空間の寸法。ここでは PC版 raw-1258x708 空間
+    // （=PC_CLIENT_*_MEASURED）を渡し恒等変換させ、roi がそのまま中心計算へ渡るようにする。
+    // ClickSelf は matched_region が既に同空間なので norm 値は結果に影響しない。
 
     #[test]
     fn click_self_with_region_taps_center() {
         let action = Action::ClickSelf;
         let region = ScreenRegion::new(100, 200, 80, 60);
         assert_eq!(
-            action_to_command(&action, Some(region)),
+            action_to_command(&action, Some(region), FULL_W, FULL_H),
             Some(InputCommand::Tap { x: 140, y: 230 })
         );
     }
@@ -235,7 +266,7 @@ mod tests {
     #[test]
     fn click_self_without_region_returns_none() {
         let action = Action::ClickSelf;
-        assert_eq!(action_to_command(&action, None), None);
+        assert_eq!(action_to_command(&action, None, FULL_W, FULL_H), None);
     }
 
     #[test]
@@ -246,7 +277,7 @@ mod tests {
         // matched_region を与えても roi 優先であることを確認。
         let matched = Some(ScreenRegion::new(0, 0, 10, 10));
         assert_eq!(
-            action_to_command(&action, matched),
+            action_to_command(&action, matched, FULL_W, FULL_H),
             Some(InputCommand::Tap { x: 640, y: 360 })
         );
     }
@@ -258,7 +289,7 @@ mod tests {
             to: ScreenRegion::new(100, 100, 40, 40),
         };
         assert_eq!(
-            action_to_command(&action, None),
+            action_to_command(&action, None, FULL_W, FULL_H),
             Some(InputCommand::Swipe {
                 from: (120, 520),
                 to: (120, 120),
@@ -270,7 +301,12 @@ mod tests {
     fn do_nothing_returns_none() {
         let action = Action::DoNothing;
         assert_eq!(
-            action_to_command(&action, Some(ScreenRegion::new(10, 10, 10, 10))),
+            action_to_command(
+                &action,
+                Some(ScreenRegion::new(10, 10, 10, 10)),
+                FULL_W,
+                FULL_H
+            ),
             None
         );
     }
@@ -279,7 +315,12 @@ mod tests {
     fn stop_returns_none() {
         let action = Action::Stop;
         assert_eq!(
-            action_to_command(&action, Some(ScreenRegion::new(10, 10, 10, 10))),
+            action_to_command(
+                &action,
+                Some(ScreenRegion::new(10, 10, 10, 10)),
+                FULL_W,
+                FULL_H
+            ),
             None
         );
     }

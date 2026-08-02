@@ -25,6 +25,6 @@ pub use pipeline::{
     Action, Algorithm, PipelineManifest, StepOutcome, TaskDef, TaskDefError, load_pipeline,
     load_pipeline_manifest, run_step,
 };
-pub use scale::ScreenScaler;
+pub use scale::{BASE_HEIGHT, BASE_WIDTH, ScreenScaler, roi_to_normalized};
 pub use scene_detector::SceneDetector;
 pub use template_store::{TemplateEntry, TemplateStore, TemplateStoreError};

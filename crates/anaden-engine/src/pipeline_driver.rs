@@ -5,10 +5,18 @@
 //! 最終マイル層。orchestrator(命令型 Strategy ループ) とは独立し、`GameState`/Strategy/
 //! Recovery には依存しない。テンプレ画像は caller が `&[TaskDef]` として渡す。
 //!
-//! 解像度モデル: device 側は生解像度(Pixel 7a なら 2400x1080 等)。capture した画像を
-//! [`ScreenScaler::normalize`] で基準幅(1280)へ縮小して tick に食わせ、発火座標は逆方向に
-//! [`rescale_command`] で実機座標へ戻す。`ScreenScaler::from_base` は幅ベース均一スケール
-//! なので X/Y 同一ファクタで動く。
+//! 解像度モデル: device 側は生解像度(Pixel 7a なら 2400x1080 等 / PC版は黒帯込み生幅)。
+//! capture した画像を黒帯クロップ([`crop_to_content_with_info`]) →
+//! [`ScreenScaler::normalize`] で基準幅(1280)へ縮小して tick に食わせる。
+//! 発火座標は逆方向に [`rescale_command`] が [`CropInfo`]（黒帯オフセット情報）を使って
+//! normalize後1280空間 → 実機生画像（黒帯込み）へ戻す。
+//!
+//! **座標空間の統一（C1/M1 修正）**: 全 [`InputCommand`] は「normalize後1280空間」へ統一。
+//! ClickSelf は matched_region(既に1280空間) をそのまま、ClickRect/Swipe は raw-1258 空間の
+//! roi/from/to を1280空間へ変換してから載せる（[`crate::pipeline_runner::action_to_command`]）。
+//! rescale は黒帯込み実機画像への逆写像として `x_real = x_1280 * crop_w / 1280 + offset_x`、
+//! `y_real = y_1280 * crop_h / 720 + offset_y` で計算する。黒帯なし（offset=0, width=device_width）
+//! のとき従来の [`ScreenScaler::from_base`] と同等になる。
 
 use std::future::Future;
 use std::path::PathBuf;
@@ -24,7 +32,7 @@ use tracing::{debug, info, warn};
 use anaden_core::InputAction;
 use anaden_core::ScreenRegion;
 use anaden_device::{AdbError, InputExecutor, ScreenshotCapture};
-use anaden_vision::{ScreenScaler, TaskDef, crop_to_content};
+use anaden_vision::{BASE_WIDTH, CropInfo, ScreenScaler, TaskDef, crop_to_content_with_info};
 
 use crate::pipeline_runner::{InputCommand, PipelineState};
 
@@ -94,31 +102,52 @@ struct GoalEvalInputs<'a> {
     started: Instant,
 }
 
-/// 720p 基準(幅1280)の [`InputCommand`] をデバイス実解像度(device_width)の座標へ変換する純関数。
+/// normalize後1280空間の [`InputCommand`] を、実機生画像（黒帯込み）の座標へ変換する純関数。
 ///
-/// [`ScreenScaler::from_base`] は幅ベースの均一スケール(scale_factor = 1280/src_width)を用いる。
-/// X と Y は同一ファクタで動くため、両軸とも `from_base(device_width, v)` に通せばよい。
-/// IO を持たないため単体テスト可能。
+/// 入力座標は「黒帯除去後描画領域を幅1280基準へ正規化した空間」。normalize は
+/// [`ScreenScaler::normalize`] が **幅基準（幅→1280、高さはアスペクト比保存）** でリサイズ
+/// するため、コンテンツ領域内では X も Y も同じ比 `crop_info.width / 1280` で実ピクセルへ
+/// 戻る。よって [`CropInfo`]（コンテンツ領域の元画像空間における位置・寸法）を使って:
+/// - `x_real = x_1280 * crop_info.width / 1280 + crop_info.offset_x`
+/// - `y_real = y_1280 * crop_info.width / 1280 + crop_info.offset_y`
+///
+/// とする（両軸とも `width/1280`。高さ比 `height/720` を使うと、アスペクト比が 16:9 でない
+/// 端末で normalize 後高さ ≠ 720 となるため Y がズレる）。`crop_info` が「黒帯なし」
+/// （`offset=(0,0)`, `width=device_width`）のとき、この変換は従来の
+/// [`ScreenScaler::from_base`] と完全に同等になる。
+///
+/// `scaler` は後方互換のため残しているが、本実装では crop_info のみを使用する。IO を
+/// 持たないため単体テスト可能。
 pub fn rescale_command(
     cmd: InputCommand,
-    scaler: &ScreenScaler,
+    _scaler: &ScreenScaler,
     device_width: u32,
+    crop_info: &CropInfo,
 ) -> InputCommand {
+    let to_real = |x_1280: u32, y_1280: u32| -> (u32, u32) {
+        // 両軸とも幅比 crop_w/1280 でスケール（normalize が幅基準・アスペクト比保存のため）。
+        let s = (crop_info.width as f64) / (BASE_WIDTH as f64);
+        let x_real = (x_1280 as f64 * s).round() as u64 + crop_info.offset_x as u64;
+        let y_real = (y_1280 as f64 * s).round() as u64 + crop_info.offset_y as u64;
+        // 安全側: device_width でクランプ（実機画像幅を超えないように）。
+        (
+            x_real.min(device_width as u64) as u32,
+            y_real.min(device_width as u64) as u32,
+        )
+    };
     match cmd {
-        InputCommand::Tap { x, y } => InputCommand::Tap {
-            x: scaler.from_base(device_width, x),
-            y: scaler.from_base(device_width, y),
-        },
-        InputCommand::Swipe { from, to } => InputCommand::Swipe {
-            from: (
-                scaler.from_base(device_width, from.0),
-                scaler.from_base(device_width, from.1),
-            ),
-            to: (
-                scaler.from_base(device_width, to.0),
-                scaler.from_base(device_width, to.1),
-            ),
-        },
+        InputCommand::Tap { x, y } => {
+            let (rx, ry) = to_real(x, y);
+            InputCommand::Tap { x: rx, y: ry }
+        }
+        InputCommand::Swipe { from, to } => {
+            let (fx, fy) = to_real(from.0, from.1);
+            let (tx, ty) = to_real(to.0, to.1);
+            InputCommand::Swipe {
+                from: (fx, fy),
+                to: (tx, ty),
+            }
+        }
     }
 }
 
@@ -278,6 +307,11 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// `run_loop_with_goal` が `GoalStatusContext::tick` へ渡すために消費(`take`)する。
     /// 非ゴールパス(`run_loop_with_recovery`)では参照されず、上書きされるだけ。
     last_match: Option<(String, f32, ScreenRegion)>,
+    /// 直近の capture で黒帯クロップした描画領域の、元画像（黒帯込み生幅）空間における
+    /// 位置・寸法。`run_once` / `run_once_verified` が capture→crop 毎に更新し、
+    /// `rescale_command` が発火座標の逆変換（1280空間 → 実機生画像）に使う。
+    /// 初期値は `CropInfo::default()` (0,0,0,0) で、最初の capture で即座に上書きされる。
+    last_crop_info: CropInfo,
     /// 外部キャンセル口(Ctrl+C 等)。[`Self::with_cancel`] で設定したときのみ有効。
     /// 各ループ(`run_loop` / `run_loop_with_recovery` / `run_loop_with_goal`)は
     /// サイクル冒頭で `is_cancelled()` を判定し、sleep 区間を [`tokio::select!`] で
@@ -311,6 +345,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             swipe_duration_ms,
             verify_after_fire: false,
             last_match: None,
+            last_crop_info: CropInfo::default(),
             cancel: None,
             snapshot_counter: 0,
         }
@@ -369,12 +404,17 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let raw_h = screen.height();
         // 2. 黒帯クロップ → 描画領域(16:9)を抽出。黒帯なしならそのまま（copy 不要）。
         //    normalize の前で行うことで、テンプレ（描画領域空間）とスケールが一致する。
-        let cropped = crop_to_content(&screen);
+        //    CropInfo（元画像空間でのコンテンツ位置・寸法）も受け取り、後段の rescale で
+        //    発火座標を黒帯込み実機画像へ逆変換するために保持する。
+        let (cropped, crop_info) = crop_to_content_with_info(&screen);
+        self.last_crop_info = crop_info;
         let crop_w = cropped.width();
         let crop_h = cropped.height();
         if (crop_w, crop_h) != (raw_w, raw_h) {
             debug!(
-                "letterbox crop: raw={raw_w}x{raw_h} -> content={crop_w}x{crop_h} (black bars removed)"
+                "letterbox crop: raw={raw_w}x{raw_h} -> content={crop_w}x{crop_h} \
+                 (offset={},{}, black bars removed)",
+                crop_info.offset_x, crop_info.offset_y
             );
         }
         // 3. normalize → 基準幅画像(tick は基準座標系前提)
@@ -413,7 +453,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
         // 4. rescale + execute（command があれば発火）
         if let Some(cmd) = tick.command {
-            let device_cmd = rescale_command(cmd, &self.scaler, self.device_width);
+            let device_cmd =
+                rescale_command(cmd, &self.scaler, self.device_width, &self.last_crop_info);
             if let Err(e) = self.execute_command(&device_cmd).await {
                 warn!("pipeline execute error: {e}");
                 return StepOutcome::Error(format!("execute: {e}"));
@@ -506,7 +547,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
         };
         // run_once と同じ黒帯クロップ → normalize 経路（検証も描画領域空間で行う）。
-        let cropped = crop_to_content(&screen);
+        // CropInfo は検証では発火しないため保存不要だが、経路の一貫性のため _with_info を使用。
+        let (cropped, _crop_info) = crop_to_content_with_info(&screen);
         let normalized = self.scaler.normalize(&cropped);
         // run_step を直接呼び、task_name で再認識。マッチ残存 → 対象残存 = 未検証。
         let still_present = anaden_vision::run_step(&self.tasks, &normalized, task_name).is_some();
@@ -1440,25 +1482,33 @@ mod tests {
         }
     }
 
-    // ---- (1) rescale 純関数 ----
+    // ---- (1) rescale 純関数（crop info ベース） ----
+    //
+    // rescale_command は normalize後1280空間 → 実機生画像（黒帯込み）への逆写像。
+    // CropInfo でコンテンツ領域（黒帯除去後描画領域）の元画像空間における位置・寸法を受け取り:
+    //   x_real = x_1280 * crop_w / 1280 + offset_x
+    //   y_real = y_1280 * crop_h / 720  + offset_y
+    // 黒帯なし（offset=0, size=device）のとき従来の ScreenScaler::from_base と同等。
 
     #[test]
-    fn rescale_tap_pixel7a_2400_both_axes_uniform() {
+    fn rescale_tap_no_bars_equivalent_to_from_base_2400() {
+        // 黒帯なし: device_width=2400, content=2400x1080(フル)。CropInfo::full(2400,1080)。
+        // scale_factor = 2400/1280 = 1.875。640*1.875=1200, 360*1.875=675。
         let scaler = ScreenScaler::new();
-        // device_width=2400: scale_factor=1280/2400, 1/factor=1.875
-        // 640*1.875=1200, 360*1.875=675
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 2400);
+        let info = CropInfo::full(2400, 1080);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 2400, &info);
         assert_eq!(out, InputCommand::Tap { x: 1200, y: 675 });
     }
 
     #[test]
-    fn rescale_swipe_pixel7a_2400_both_axes() {
+    fn rescale_swipe_no_bars_equivalent_to_from_base_2400() {
         let scaler = ScreenScaler::new();
+        let info = CropInfo::full(2400, 1080);
         let cmd = InputCommand::Swipe {
             from: (640, 360),
             to: (0, 0),
         };
-        let out = rescale_command(cmd, &scaler, 2400);
+        let out = rescale_command(cmd, &scaler, 2400, &info);
         assert_eq!(
             out,
             InputCommand::Swipe {
@@ -1469,19 +1519,65 @@ mod tests {
     }
 
     #[test]
-    fn rescale_identity_when_device_width_equals_base() {
+    fn rescale_identity_when_device_width_equals_base_no_bars() {
+        // device_width=1280, content=1280x720(フル)。scale=1.0 → 恒等。
         let scaler = ScreenScaler::new();
-        // device_width=1280 (base と同値): scale_factor=1.0, from_base は恒等
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 1280);
+        let info = CropInfo::full(1280, 720);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 1280, &info);
         assert_eq!(out, InputCommand::Tap { x: 640, y: 360 });
     }
 
     #[test]
-    fn rescale_downscale_small_device_width() {
+    fn rescale_downscale_small_device_width_no_bars() {
+        // device_width=640, content=640x360(フル)。scale=0.5。640*0.5=320, 360*0.5=180。
         let scaler = ScreenScaler::new();
-        // device_width=640: scale_factor=2.0, from_base は 1/2 へ縮小
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 640);
+        let info = CropInfo::full(640, 360);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 640, &info);
         assert_eq!(out, InputCommand::Tap { x: 320, y: 180 });
+    }
+
+    #[test]
+    fn rescale_tap_with_letterbox_offset_shifts_coordinates() {
+        // 黒帯入り（M1 検証）: 実機生画像 1918x1048, コンテンツ領域は offset=(120,80) size=(1678,888)。
+        // normalize は幅基準（アスペクト比保存）なので、コンテンツ内では両軸とも crop_w/1280 比。
+        // s = 1678/1280 = 1.3109375。
+        // 1280空間 (640,360) → (640*s, 360*s) = (839.0, 471.94→472) → オフセット加算 (959, 552)。
+        // 従来の from_base(1918) なら (640*1918/1280, 360*1918/1280)=(959,539) となり
+        // Y がズレていた（黒帯を無視して全幅で均一スケールするため）。新実装で Y がコンテンツ
+        // 領域基準（オフセット反映）で正しく 552 になることを検証。
+        let scaler = ScreenScaler::new();
+        let info = CropInfo {
+            offset_x: 120,
+            offset_y: 80,
+            width: 1678,
+            height: 888,
+        };
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 1918, &info);
+        assert_eq!(out, InputCommand::Tap { x: 959, y: 552 });
+    }
+
+    #[test]
+    fn rescale_swipe_with_letterbox_offset() {
+        let scaler = ScreenScaler::new();
+        let info = CropInfo {
+            offset_x: 120,
+            offset_y: 80,
+            width: 1678,
+            height: 888,
+        };
+        // from=(640,360)→(959,552), to=(0,0)→(120,80)（コンテンツ左上=オフセットそのもの）。
+        let cmd = InputCommand::Swipe {
+            from: (640, 360),
+            to: (0, 0),
+        };
+        let out = rescale_command(cmd, &scaler, 1918, &info);
+        assert_eq!(
+            out,
+            InputCommand::Swipe {
+                from: (959, 552),
+                to: (120, 80),
+            }
+        );
     }
 
     // ---- (2) fake Capture/Input ----
@@ -1552,7 +1648,15 @@ mod tests {
 
     #[tokio::test]
     async fn run_once_fires_rescaled_tap_on_click_rect() {
-        // ClickRect roi center は (640,360)（基準座標）。needle を埋めた基準画像を与える。
+        // ClickRect roi [520,320,240,80] は raw-1258空間。matched_frame() は raw-1258x708（黒帯なし）。
+        // 新スケールモデルでの発火座標導出:
+        //  1. roi を screenshot と同じ空間へ: roi_to_normalized([520,320,240,80],1280,720)
+        //     = [529,325,244,81]。中心 (651,365)。
+        //  2. rescale(crop_info=full(1258,708), device_width=2400): s=1258/1280=0.9828。
+        //     (651*0.9828, 365*0.9828) = (640, 359)。
+        // テストフレーム(raw-1258) と device_width=2400 は不整合だが、CropInfo が full(1258,708)
+        // （フレーム実寸法）なので結果は 1258 周辺になる。raw-1258 実値での厳密検証は
+        // click_rect_fires_at_expected_device_coords_on_raw_1258_roi テスト（C2）で行う。
         let (screen, _tpl) = matched_frame();
         let frames = frames_of(vec![screen]);
         let fired = new_fired();
@@ -1587,15 +1691,15 @@ mod tests {
                 fired: just_fired,
             } => {
                 assert_eq!(next_current.as_deref(), Some("LoadGame"));
-                // 基準 (640,360) → 実機 2400 で (1200,675)
-                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1200, y: 675 }));
+                // 新スケールモデル: raw-1258 roi → 1280空間 → rescale(crop_info=full(1258,708))。
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 640, y: 359 }));
             }
             other => panic!("expected Fired, got {other:?}"),
         }
         // fake input 側にも同じ座標が記録されている
         assert_eq!(
             fired.lock().expect("fired lock").as_slice(),
-            &[InputCommand::Tap { x: 1200, y: 675 }]
+            &[InputCommand::Tap { x: 640, y: 359 }]
         );
         assert_eq!(driver.current(), "LoadGame");
     }
@@ -1754,9 +1858,9 @@ mod tests {
         let outcome = driver.run_loop(Duration::ZERO, 10).await;
         assert_eq!(outcome.reason, LoopStopReason::TerminalTask);
         assert_eq!(outcome.fired_commands.len(), 3);
-        // 全発火座標は rescale 済み (1200,675)
+        // 全発火座標は新スケールモデルで rescale 済み (640,359)
         for c in &outcome.fired_commands {
-            assert_eq!(*c, InputCommand::Tap { x: 1200, y: 675 });
+            assert_eq!(*c, InputCommand::Tap { x: 640, y: 359 });
         }
         assert_eq!(driver.current(), "Terminal");
     }
@@ -2047,7 +2151,7 @@ mod tests {
                 fired: just_fired,
             } => {
                 assert_eq!(next_current.as_deref(), Some("LoadGame"));
-                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1200, y: 675 }));
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 640, y: 359 }));
             }
             other => panic!("expected Fired (verified), got {other:?}"),
         }
@@ -2055,7 +2159,7 @@ mod tests {
         assert_eq!(driver.current(), "LoadGame");
         assert_eq!(
             fired.lock().expect("fired lock").as_slice(),
-            &[InputCommand::Tap { x: 1200, y: 675 }]
+            &[InputCommand::Tap { x: 640, y: 359 }]
         );
     }
 
@@ -2097,7 +2201,7 @@ mod tests {
                 next_current,
             } => {
                 // 発火自体は起きた(記録用)。
-                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1200, y: 675 }));
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 640, y: 359 }));
                 // next_current は tick 結果を伝搬(ログ用)。
                 assert_eq!(next_current.as_deref(), Some("LoadGame"));
             }
@@ -2112,7 +2216,7 @@ mod tests {
         // 発火は起きたので fake input に記録される。
         assert_eq!(
             fired.lock().expect("fired lock").as_slice(),
-            &[InputCommand::Tap { x: 1200, y: 675 }]
+            &[InputCommand::Tap { x: 640, y: 359 }]
         );
     }
 
@@ -2185,7 +2289,7 @@ mod tests {
         // 発火は起きたので fake input に記録される。
         assert_eq!(
             fired.lock().expect("fired lock").as_slice(),
-            &[InputCommand::Tap { x: 1200, y: 675 }]
+            &[InputCommand::Tap { x: 640, y: 359 }]
         );
     }
 
