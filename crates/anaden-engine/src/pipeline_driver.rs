@@ -4087,4 +4087,211 @@ mod tests {
             "counter must not increment when dir unset"
         );
     }
+
+    // ---- (C2) ClickRect 発火テスト: raw-1258 実値化 + 黒帯オフセット検証 ----
+    //
+    // 旧 run_once_fires_rescaled_tap_on_click_rect は ClickRect の roi を「1280基準座標」として
+    // 扱い、raw-1258 実値（TapToStartPc の [900,466,30,30] 等）で検証していなかった（silent 無効化）。
+    // ここでは実 TOML 定義と同じ raw-1258 空間の roi を与え、新スケールモデルで正しい実機座標へ
+    // 変換されることを検証する。さらに黒帯入りフレームで ClickSelf 発火座標に黒帯オフセットが
+    // 反映されることを検証する（M1）。
+
+    /// `matched_frame()` のコンテンツ（raw-1258x708 特徴画像）の周囲に黒帯を加えた画像を返す。
+    /// `bar_x`/`bar_y` は左右/上下の黒帯ピクセル幅。コンテンツは (bar_x, bar_y) に配置。
+    fn matched_frame_with_bars(bar_x: u32, bar_y: u32) -> DynamicImage {
+        let raw = raw_feature();
+        let full_w = FULL_W + 2 * bar_x;
+        let full_h = FULL_H + 2 * bar_y;
+        let mut img = GrayImage::from_pixel(full_w, full_h, Luma([0u8]));
+        for y in 0..FULL_H {
+            for x in 0..FULL_W {
+                let p = *raw.get_pixel(x, y);
+                img.put_pixel(bar_x + x, bar_y + y, p);
+            }
+        }
+        luma_dyn(img)
+    }
+
+    #[tokio::test]
+    async fn click_rect_fires_at_expected_device_coords_on_raw_1258_roi() {
+        // TapToStartPc 相当の ClickRect roi [900,466,30,30]（raw-1258 空間の実 TOML 値）。
+        // フレーム raw-1258x708（黒帯なし）、device_width=1258（フレームと一致）。
+        //
+        // 期待発火座標の導出:
+        //  1. roi → screenshot と同じ空間へ: roi_to_normalized([900,466,30,30],1280,720)
+        //     = [916,474,31,31]（1258→1280 は拡大、高さ 708→720 も拡大）。
+        //     中心 = (916+15, 474+15) = (931, 489)。
+        //  2. rescale(crop_info=full(1258,708), device_width=1258): s=1258/1280=0.9828。
+        //     (931*0.9828, 489*0.9828) = (915, 481)。
+        let (screen, _tpl) = matched_frame();
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let task = TaskDef {
+            name: "TapToStart".into(),
+            state: "TapToStart".into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: crop_needle_template(),
+            roi: Some(MATCH_ROI),
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickRect {
+                roi: ScreenRegion::new(900, 466, 30, 30),
+            }),
+            next: Some(vec!["LoadGamePc".into()]),
+        };
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("TapToStart"),
+            vec![task],
+            1258, // device_width（フレーム raw-1258 と一致）
+            300,
+        );
+
+        let out = driver.run_once().await;
+        match out {
+            StepOutcome::Fired {
+                fired: just_fired, ..
+            } => {
+                // raw-1258 実値 roi が正しい実機座標 (915,481) へ変換されること。
+                assert_eq!(
+                    just_fired,
+                    Some(InputCommand::Tap { x: 915, y: 481 }),
+                    "raw-1258 roi [900,466,30,30] は (915,481) へ変換されるべき"
+                );
+            }
+            other => panic!("expected Fired, got {other:?}"),
+        }
+        assert_eq!(
+            fired.lock().expect("fired lock").as_slice(),
+            &[InputCommand::Tap { x: 915, y: 481 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn click_self_fires_with_letterbox_offset_on_bars() {
+        // M1 検証: 黒帯入りフレームで ClickSelf 発火座標に黒帯オフセットが反映されること。
+        // 黒帯なしフレームでの発火座標と、黒帯入りフレームでの発火座標の差が、
+        // 黒帯オフセット（コンテンツ左上の元画像座標）に一致することを検証する。
+        //
+        // matched_frame() の needle は NEEDLE_ROI=[150,75,12,12]（raw-1258）。黒帯入りでは
+        // コンテンツを (bar_x,bar_y) に配置するため、crop でコンテンツだけ抜けば detect 結果
+        // （matched_region）は黒帯なしと同空間になる。よって InputCommand の1280空間座標は両者で
+        // 同じ。差は rescale 時の crop_info.offset のみから生じる。
+        let bar_x = 100u32;
+        let bar_y = 50u32;
+
+        // 黒帯なし: matched_frame() は raw-1258x708。crop_info=full(1258,708), offset=(0,0)。
+        let (screen_nobar, _tpl) = matched_frame();
+        let frames_nobar = frames_of(vec![screen_nobar]);
+        let fired_nobar = new_fired();
+        let task_nobar = TaskDef {
+            name: "Title".into(),
+            state: "Title".into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: crop_needle_template(),
+            roi: Some(MATCH_ROI),
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickSelf),
+            next: Some(vec!["LoadGame".into()]),
+        };
+        let mut driver_nobar = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_nobar.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired_nobar.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task_nobar],
+            1458, // device_width（黒帯入り全体幅 1258+2*100 と同じ値を使うが、黒帯なしなので影響しない）
+            300,
+        );
+        let out_nobar = driver_nobar.run_once().await;
+        let fired_nobar_cmd = match out_nobar {
+            StepOutcome::Fired { fired: c, .. } => c,
+            other => panic!("expected Fired (no-bar), got {other:?}"),
+        };
+
+        // 黒帯入り: コンテンツ1258x708 を (100,50) に配置 → 全体 1458x808。
+        // crop_to_content が黒帯を除去し CropInfo{offset:(100,50), size:(1258,708)} を返す。
+        let screen_bar = matched_frame_with_bars(bar_x, bar_y);
+        let frames_bar = frames_of(vec![screen_bar]);
+        let fired_bar = new_fired();
+        let task_bar = TaskDef {
+            name: "Title".into(),
+            state: "Title".into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: crop_needle_template(),
+            roi: Some(MATCH_ROI),
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickSelf),
+            next: Some(vec!["LoadGame".into()]),
+        };
+        let mut driver_bar = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_bar.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired_bar.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task_bar],
+            1458, // device_width（黒帯入り全体幅と一致）
+            300,
+        );
+        let out_bar = driver_bar.run_once().await;
+        let fired_bar_cmd = match out_bar {
+            StepOutcome::Fired { fired: c, .. } => c,
+            other => panic!("expected Fired (with-bar), got {other:?}"),
+        };
+
+        // 両者とも発火していること。
+        let nobar = fired_nobar_cmd.expect("no-bar must fire");
+        let bar = fired_bar_cmd.expect("with-bar must fire");
+        let (nx, ny) = match nobar {
+            InputCommand::Tap { x, y } => (x, y),
+            other => panic!("expected Tap (no-bar), got {other:?}"),
+        };
+        let (bx, by) = match bar {
+            InputCommand::Tap { x, y } => (x, y),
+            other => panic!("expected Tap (with-bar), got {other:?}"),
+        };
+        // 黒帯入りフレームではコンテンツが (bar_x,bar_y) に配置されるため、rescale 時の
+        // CropInfo.offset が (bar_x,bar_y) となり発火座標へ平行移動分が加算される。
+        // matched_region 自体は detect の丸めで両者で数px 異なりうるため、差が「オフセット方向に
+        // 有意（bar の半分以上）」であることを検証する（厳密なオフセット一致は純関数
+        // rescale_tap_with_letterbox_offset_shifts_coordinates で検証済み）。
+        let dx = bx as i64 - nx as i64;
+        let dy = by as i64 - ny as i64;
+        assert!(
+            dx >= (bar_x as i64) / 2,
+            "黒帯入りX座標({bx}) - 黒帯なし({nx}) = {dx} は bar_x={bar_x} の半分以上であるべき \
+            （黒帯オフセットが rescale に反映された証拠）"
+        );
+        assert!(
+            dy >= (bar_y as i64) / 2,
+            "黒帯入りY座標({by}) - 黒帯なし({ny}) = {dy} は bar_y={bar_y} の半分以上であるべき \
+            （黒帯オフセットが rescale に反映された証拠）"
+        );
+        // fake input にも反映されている。
+        assert_eq!(
+            fired_bar.lock().expect("fired lock").as_slice(),
+            &[InputCommand::Tap { x: bx, y: by }]
+        );
+    }
 }
