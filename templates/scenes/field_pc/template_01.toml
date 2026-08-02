@@ -7,7 +7,7 @@ template  = "template_01.png"
 # method=sse, ROI[254,606,86,91]) を上書きしない(legacy schema は TaskDef と非互換のため共存)。
 #
 # 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。
-# ScreenScaler は width<=1280 で非変換(RAW 通過)なので、1280 基準ではなく RAW 1258 空間で記述。
+# ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。ROI は RAW 1258 空間で定義し、detect が roi_to_normalized で1280空間へスケールする。
 #
 # ROI: フィールド画面 左下UI要素(キャラ/メニュー誘導帯)。20:9 legacy と同じ RAW 座標
 # [254,606,86,91] を PC 16:9 フレームで再検証 → ccoeff 自己クロップで conf=1.0000(実測)。

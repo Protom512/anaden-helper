@@ -7,7 +7,7 @@ template  = "title_logo_corner.png"
 # 背景差に弱い(TASKS.md:30-33 既知ブロッカー)。本テンプレは title ロゴの固定角マークを
 # 小テンプレ化し、version_label とは別の固定テクスチャで二重検出を可能にする。
 #
-# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。
 #
 # ⚠ 幾何学的ギャップ(解決済判定: affine bridge 不可 → 暫定値保持, Issue #13 T1):
 # analyze_title_regions.rs で norm(1280x576, Pixel7a 20:9) の上部ロゴ帯 y=60..160 を

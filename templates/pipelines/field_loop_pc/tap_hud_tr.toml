@@ -6,7 +6,7 @@ template  = "hud_tr.png"
 # 実機20:9 (templates/pipelines/field_loop/tap_hud_tr.toml) を上書きしない。
 #
 # 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。
-# ScreenScaler は width<=1280 で RAW 通過のため、1280基準ではなく RAW 1258 空間で記述。
+# ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。ROI は RAW 1258 空間で定義し、detect が roi_to_normalized で1280空間へスケールする。
 # 20:9 版(ROI=[1080,150,180,150] は1280基準)の流用はアスペクト比差で劣化(実績: conf 0.99→0.67)。
 #
 # ROI: フィールド画面 右上HUD要素。field_pc_probe.png 上で FieldPcHudTopRight が

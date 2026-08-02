@@ -8,7 +8,7 @@ template  = "party.png"
 # 位置がズレるため共存(非破壊)。本テンプレは PC RAW 1258x708 空間で再導出。
 #
 # 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。
-# ScreenScaler は width<=1280 で非変換(RAW 通過)のため RAW 空間で記述。
+# ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。ROI は RAW 1258 空間で定義し、detect が roi_to_normalized で1280空間へスケールする。
 #
 # ROI 導出: menu_pc_probe.png(1258x708) の下部アイコンバーを決定論的列分散解析で
 # 検出した7アイコン(右クラスタ x=703..1213, y=579..652)のうち party(最左)。
