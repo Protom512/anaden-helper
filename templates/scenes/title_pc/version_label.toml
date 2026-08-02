@@ -9,7 +9,7 @@ template  = "version_label.png"
 # その解決策: 点滅("Tap to Start" 正規化(930,488)) に巻き込まれない固定テクスチャ
 # (右下 version/copyright 表示帯) を小テンプレ化して安定検出する。
 #
-# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。
 #
 # ⚠ 幾何学的ギャップ(解決済判定: affine bridge 不可 → 暫定値保持, Issue #13 T1):
 # 当初のコメントは「20:9 norm(1280x576) 右下帯 y=545..572 の run x=1077..1189 を

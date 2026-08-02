@@ -5,7 +5,7 @@ algorithm = "ccoeff"
 # Tap-to-Start 発火後に出る "Continue / Load" ボタンをタップしゲームをロードする中間 slice。
 # 既存 _title_load/load_game.toml(threshold=0.01 ハック) を PC 16:9 RAW 空間で置き直す。
 #
-# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測, ScreenScaler RAW 通過)。
+# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。
 #
 # 検出テンプレ: scenes/title_pc/title_logo_corner.png(title ロゴ固定角マーク・点滅非依存)。
 #   Tap-to-Start 後も title ロゴは残留するため、これを load 画面到達検出に使う。
