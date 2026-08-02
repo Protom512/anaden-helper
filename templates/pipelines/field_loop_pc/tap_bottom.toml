@@ -6,8 +6,8 @@ template  = "bottom_stable.png"
 # とは独立した pc-scoped 名前空間。上書きしないこと(T7 の 20:9→16:9 劣化検証が共存を前提とする)。
 #
 # 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。
-# ScreenScaler は width<=1280 で非変換(RAW 通過)なので、ROI・テンプレとも
-# 1280-base 正規化空間ではなく RAW 1258 空間で直接記述する。
+# ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。ROI・テンプレとも
+# RAW 1258 空間で定義し、detect が roi_to_normalized/needle_to_normalized で1280空間へスケールする。
 # 20:9 版(tap_bottom.toml, ROI=[820,470,200,90] は1280基準)をそのまま流用すると
 # アスペクト比差でオフセット/NoMatch になるため RAW 再導出している。
 #

@@ -1641,7 +1641,7 @@ mod tests {
     // 実機(20:9)テンプレ templates/pipelines/field_loop/*, nav_to_field/* を上書きせず、
     // PC版は pc-scoped 名前空間(field_loop_pc/, nav_to_field_pc/, scenes/field_pc/)へ隔離する
     // (T7 の 20:9→16:9 劣化検証は両者の共存を前提とするため)。
-    // 全 ROI は RAW 1258x708 ピクセル空間(ScreenScaler は width<=1280 で非変換=RAW 通過)。
+    // 全 ROI は RAW 1258x708 空間で定義。normalize は常に1280幅基準へリサイズ（早期return廃止）、detect が roi_to_normalized で1280空間へスケール。
 
     /// workspace の `templates/` ルートを返す。
     /// anaden-vision クレート(crates/anaden-vision)からは `../../templates`。
@@ -1825,7 +1825,7 @@ mod tests {
     // click_rect で点滅位置を静的タップする。認識テンプレ≠タップ対象のため点滅フレームの
     // 非安定性に影響されず認識が成立する(T3 設計の要点)。
     //
-    // 全座標は RAW 1258x708 空間(ScreenScaler は width<=1280 で RAW 通過)。
+    // 全 ROI は RAW 1258x708 空間で定義。normalize は常に1280幅基準へリサイズ（早期return廃止）、detect が roi_to_normalized で1280空間へスケール。
     // template 参照先は pc-scoped(scenes/title_pc/)。
 
     /// nav_to_field_pc が T3 の中間スライス(TapToStartPc, LoadGamePc)を含み、
@@ -2495,7 +2495,7 @@ mod tests {
     // templates/scenes/menu_pc/ に PC版(16:9, RAW 1258x708) 参照テンプレ7件
     // (bag/board/gacha/grasta/info/party/record) を新設する。20:9 既存 templates/scenes/menu/*
     // は PC の 16:9 フレーム上で劣化するため、pc-scoped 名前空間(menu_pc)で隔離する。
-    // 全 ROI は RAW 1258x708 空間(ScreenScaler は width<=1280 で非変換=RAW 通過)。
+    // 全 ROI は RAW 1258x708 空間で定義。normalize は常に1280幅基準へリサイズ（早期return廃止）、detect が roi_to_normalized で1280空間へスケール。
     // TOML は TaskDef スキーマ(algorithm=sse + template + 平坦 roi)。20:9 legacy menu は
     // 旧 schema(method + [roi] サブテーブル)で TaskDef と非互換のため共存(非破壊)。
 
@@ -2724,7 +2724,7 @@ mod tests {
     //   - title_center.png(800x300, 306KB) / load_game_area.png(600x150) は大型で背景差に弱い
     // 本スライスはこれを解消: 点滅("Tap to Start") 非依存の固定テクスチャ(右下 version 帯,
     //   左上 ロゴ角)を小テンプレ化し nav_to_field_pc/TapToStartPc・LoadGamePc の検出に供する。
-    // 全 ROI は RAW 1258x708 空間(ScreenScaler は width<=1280 で RAW 通過)。
+    // 全 ROI は RAW 1258x708 空間で定義。normalize は常に1280幅基準へリサイズ（早期return廃止）、detect が roi_to_normalized で1280空間へスケール。
     // TOML は TaskDef スキーマ(algorithm=ccoeff + template + 平坦 roi)。
 
     fn title_pc_dir() -> PathBuf {
