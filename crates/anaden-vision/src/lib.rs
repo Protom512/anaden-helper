@@ -19,7 +19,7 @@ pub use collector::{
     extract_stable_tiles, group_captures, verify_templates,
 };
 pub use engine::{SseVisionEngine, VisionEngine};
-pub use letterbox::crop_to_content;
+pub use letterbox::{CropInfo, crop_to_content, crop_to_content_with_info};
 pub use matcher::{MatchResult, TemplateMatcher};
 pub use pipeline::{
     Action, Algorithm, PipelineManifest, StepOutcome, TaskDef, TaskDefError, load_pipeline,

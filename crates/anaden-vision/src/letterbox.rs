@@ -32,6 +32,40 @@ pub const MARGIN_PX: u32 = 2;
 /// クロップ後の最小寸法（ピクセル）。これを下回る黒帯検出は異常とみなしフォールバック。
 pub const MIN_CONTENT_PX: u32 = 64;
 
+/// 黒帯除去後の描画領域（コンテンツ）の、**元画像（黒帯込み生幅）空間における位置と寸法**。
+///
+/// `crop_to_content_with_info` が返す。`offset_x`/`offset_y` は元画像左上を原点とした
+/// コンテンツ領域左上のピクセル座標、`width`/`height` はコンテンツ領域の寸法。
+/// 黒帯が無ければ `offset=(0,0)`・`size=元画像寸法` になる（=クロップ対象なし）。
+///
+/// 発火座標の逆変換（normalize後1280空間 → 実機生画像）に用いる:
+/// 入力画像は normalize でコンテンツ領域を 1280 幅へ拡大されるため、1280 空間の座標を
+/// 元画像（黒帯込み）へ戻すには `x_real = x_1280 * width / 1280 + offset_x` のように
+/// コンテンツ領域内でスケールした上で黒帯オフセット分を平行移動させる必要がある。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct CropInfo {
+    /// 元画像（黒帯込み）左上を原点とした、コンテンツ領域左上の X 座標。
+    pub offset_x: u32,
+    /// 元画像（黒帯込み）左上を原点とした、コンテンツ領域左上の Y 座標。
+    pub offset_y: u32,
+    /// コンテンツ領域（黒帯除去後描画領域）の幅。
+    pub width: u32,
+    /// コンテンツ領域（黒帯除去後描画領域）の高さ。
+    pub height: u32,
+}
+
+impl CropInfo {
+    /// コンテンツ領域が元画像全体と一致する（黒帯なし）CropInfo を作る。
+    pub fn full(w: u32, h: u32) -> Self {
+        Self {
+            offset_x: 0,
+            offset_y: 0,
+            width: w,
+            height: h,
+        }
+    }
+}
+
 /// `img` の上下左右の黒帯を検出し、中央の描画領域をクロップして返す。
 ///
 /// 黒帯（平均輝度 < [`BLACK_BAR_LUMINANCE_THRESHOLD`] の端から連続する行/列）が
@@ -42,10 +76,29 @@ pub const MIN_CONTENT_PX: u32 = 64;
 ///
 /// # 戻り値
 /// 黒帯が除去された描画領域画像。入力が空(0x0)の場合は入力の複製を返す。
+///
+/// 黒帯除去後の元画像空間における位置・寸法（[`CropInfo`]）も必要な場合は
+/// [`crop_to_content_with_info`] を使うこと（発火座標の逆変換等）。
 pub fn crop_to_content(img: &DynamicImage) -> DynamicImage {
+    crop_to_content_with_info(img).0
+}
+
+/// [`crop_to_content`] に加え、クロップ後描画領域の元画像空間における位置・寸法（[`CropInfo`]）も返す。
+///
+/// 戻り値は `(クロップ後画像, CropInfo)`。`CropInfo` は:
+/// - 黒帯あり → コンテンツ領域の左上オフセット（`offset_x`/`offset_y`）と寸法。
+/// - 黒帯なし → `offset=(0,0)`, `size=元画像寸法`（[`CropInfo::full`]）。
+/// - フォールバック（全面黒等で残りが [`MIN_CONTENT_PX`] 未満）→ 元画像寸法で `offset=(0,0)`。
+/// - 入力が空(0x0) → `(0,0,0,0)`。
+///
+/// この `CropInfo` は発火座標の逆変換（normalize後1280空間 → 元画像＝黒帯込み生画像）に
+/// 必要。入力画像は [`crate::scale::ScreenScaler::normalize`] でコンテンツ領域が1280幅へ
+/// 拡大されるため、1280空間の座標を元画像へ戻すにはコンテンツ領域内でスケールした上で
+/// `offset` 分の平行移動が必要となる。
+pub fn crop_to_content_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo) {
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 {
-        return img.clone();
+        return (img.clone(), CropInfo::default());
     }
 
     let rgb = img.to_rgb8();
@@ -74,12 +127,12 @@ pub fn crop_to_content(img: &DynamicImage) -> DynamicImage {
     let remaining_w = w.saturating_sub(crop_left + crop_right);
     let remaining_h = h.saturating_sub(crop_top + crop_bottom);
     if remaining_w < MIN_CONTENT_PX || remaining_h < MIN_CONTENT_PX {
-        return img.clone();
+        return (img.clone(), CropInfo::full(w, h));
     }
 
     // 黒帯が一切検出されなければクロップ不要 → 複製を返す（アロケーション節約は呼び出し側で可）。
     if crop_top == 0 && crop_bottom == 0 && crop_left == 0 && crop_right == 0 {
-        return img.clone();
+        return (img.clone(), CropInfo::full(w, h));
     }
 
     let x = crop_left;
@@ -89,7 +142,13 @@ pub fn crop_to_content(img: &DynamicImage) -> DynamicImage {
 
     let cropped: ImageBuffer<Rgb<u8>, Vec<u8>> =
         ImageBuffer::from_fn(cw, ch, |px, py| *rgb.get_pixel(x + px, y + py));
-    DynamicImage::ImageRgb8(cropped)
+    let info = CropInfo {
+        offset_x: x,
+        offset_y: y,
+        width: cw,
+        height: ch,
+    };
+    (DynamicImage::ImageRgb8(cropped), info)
 }
 
 /// 各行の平均輝度を、列範囲 `[x_lo, x_hi)` に限定して計算する。
@@ -351,5 +410,107 @@ mod tests {
             "クロップ後アスペクト比({out_aspect:.3})は16:9({target:.3})へ近づくべき \
              (src_err={src_err:.3}, out_err={out_err:.3})"
         );
+    }
+
+    // ---- CropInfo: crop_to_content_with_info ----
+
+    #[test]
+    fn crop_info_no_bars_is_full_with_zero_offset() {
+        // 黒帯なし画像 → CropInfo は offset=(0,0), size=元画像寸法。
+        let img =
+            DynamicImage::ImageRgb8(ImageBuffer::from_fn(200, 112, |_, _| Rgb([64, 96, 128])));
+        let (out, info) = crop_to_content_with_info(&img);
+        assert_eq!(out.dimensions(), (200, 112));
+        assert_eq!(
+            info,
+            CropInfo::full(200, 112),
+            "黒帯なし → CropInfo は元画像全体、オフセット無し"
+        );
+    }
+
+    #[test]
+    fn crop_info_with_bars_reports_content_offset_and_size() {
+        // 中央 200x112 ＋ 上下左右 15px 黒帯 → 230x142。
+        // crop_to_content は黒帯 15px + MARGIN_PX(2) = 17px ずつ内側へ寄せる。
+        let img = synthetic_with_bars(200, 112, 15);
+        assert_eq!(img.dimensions(), (230, 142));
+        let (out, info) = crop_to_content_with_info(&img);
+        // 画像寸法は crop_to_content と同一。
+        assert_eq!(out.dimensions(), (196, 108));
+        // CropInfo: offset = 17(=15+2), size = 残り寸法。
+        assert_eq!(info.offset_x, 17);
+        assert_eq!(info.offset_y, 17);
+        assert_eq!(info.width, 196);
+        assert_eq!(info.height, 108);
+        // コンテンツ右端 = offset + size は元画像内に収まる（右黒帯17px分の余裕）。
+        assert!(info.offset_x + info.width <= 230);
+        assert!(info.offset_y + info.height <= 142);
+        // コンテンツ右端 + 右黒帯(17) = 元画像寸法（境界整合）。
+        assert_eq!(info.offset_x + info.width + 17, 230);
+        assert_eq!(info.offset_y + info.height + 17, 142);
+    }
+
+    #[test]
+    fn crop_info_letterbox_only_vertical_bars_zero_horizontal_offset() {
+        // レターボックス（上下のみ）。左右黒帯なし → offset_x=0, width=元幅。
+        let mut img: RgbaImage = ImageBuffer::new(160, 130);
+        for y in 0..130 {
+            for x in 0..160 {
+                let in_content = (20..110).contains(&y);
+                let v = if in_content { 100u8 } else { 0u8 };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        let dyn_img = DynamicImage::ImageRgba8(img);
+        let (_out, info) = crop_to_content_with_info(&dyn_img);
+        assert_eq!(info.offset_x, 0, "左右黒帯なしなので offset_x=0");
+        assert_eq!(info.width, 160, "左右黒帯なしなので width=元幅");
+        // 上下は 20+2=22 ずつ。
+        assert_eq!(info.offset_y, 22);
+        assert_eq!(info.height, 130 - 2 * 22);
+    }
+
+    #[test]
+    fn crop_info_fallback_all_black_is_full_with_zero_offset() {
+        // 全面黒 → フォールバック。CropInfo は元画像全体（offset=0）。
+        let img = DynamicImage::ImageRgb8(ImageBuffer::from_fn(100, 100, |_, _| Rgb([0, 0, 0])));
+        let (out, info) = crop_to_content_with_info(&img);
+        assert_eq!(out.dimensions(), (100, 100));
+        assert_eq!(info, CropInfo::full(100, 100));
+    }
+
+    #[test]
+    fn crop_info_zero_size_returns_default() {
+        let img = DynamicImage::ImageRgb8(ImageBuffer::new(0, 0));
+        let (out, info) = crop_to_content_with_info(&img);
+        assert_eq!(out.dimensions(), (0, 0));
+        assert_eq!(info, CropInfo::default());
+    }
+
+    #[test]
+    fn crop_info_real_probe_image_has_zero_or_nonzero_offset() {
+        // 実画像（1918x1048 黒帯入り）。CropInfo が元画像空間の妥当な矩形を指すことだけ検証。
+        let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("../../capture_probe_live.png");
+        if !path.exists() {
+            eprintln!(
+                "skip: capture_probe_live.png not found at {}",
+                path.display()
+            );
+            return;
+        }
+        let img = match image::open(&path) {
+            Ok(i) => i,
+            Err(e) => {
+                eprintln!("skip: cannot open capture_probe_live.png: {e}");
+                return;
+            }
+        };
+        let (w, h) = img.dimensions();
+        let (out, info) = crop_to_content_with_info(&img);
+        // コンテンツ領域は元画像内に収まる。
+        assert!(info.offset_x + info.width <= w, "offset_x+width <= 元幅");
+        assert!(info.offset_y + info.height <= h, "offset_y+height <= 元高");
+        assert_eq!((out.width(), out.height()), (info.width, info.height));
     }
 }
