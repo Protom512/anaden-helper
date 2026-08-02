@@ -12,7 +12,7 @@ template  = "hud_tr.png"
 # ROI: フィールド画面 右上HUD要素。field_pc_probe.png 上で FieldPcHudTopRight が
 # conf=1.0 @ [1056,0,202,100] にマッチする領域を包含する RAW 1258 空間 ROI。
 roi       = [1038, 0, 218, 120]
-threshold = 0.80
+threshold = 0.70  # 暫定: 1258→1280スケール変換でconf低下、Lanczos3導入後に0.80へ戻す予定
 # click_self: 認識したHUD要素(matched_region 中心)を SendInput でタップ。
 # 効果は発火前後キャプチャのシーン変化で誠実判定(T6 pre/post scene diff)。
 action    = { type = "click_self" }
