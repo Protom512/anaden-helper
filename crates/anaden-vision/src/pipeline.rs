@@ -215,13 +215,16 @@ fn default_threshold() -> f32 {
 impl TaskDef {
     /// テンプレート画像を読み込み、algorithm + roi + threshold で認識を実行する。
     ///
-    /// 戻り値の [`MatchResult::region`] は **スクリーンショット元解像度の座標**
-    /// （[`VisionEngine`] 仕様）。roi 指定時は cropping 後の局所座標 → 元座標へオフセット戻しする。
+    /// 戻り値の [`MatchResult::region`] は **入力 screenshot と同じ座標空間**の座標
+    /// （[`VisionEngine`] 仕様）。roi 指定時は cropping 後の局所座標 → 画面座標へオフセット戻しする。
     ///
-    /// # 720p基準ROIの前提
-    /// `roi` は 720p（幅1280）座標系。呼出側は事前に [`crate::scale::ScreenScaler`] 等で
-    /// screenshot を幅1280へ正規化済みであることを想定する。正規化された画面に対して
-    /// 720p座標の ROI を直接画素座標として crop する（MAA ControlScaleProxy 準拠）。
+    /// # 動的スケール（raw-1258 空間 → 正規化後画面）
+    /// PC版テンプレート/ROI は raw-1258x708 空間で定義されるが、呼出側が screenshot を
+    /// どの寸法に正規化して渡してもよい（黒帯クロップ + normalize 後は 1280x720 等）。
+    /// 本メソッドは入力 screenshot の `width()/height()` から X/Y 別比を再計算し、
+    /// [`crate::scale::roi_to_normalized`] / [`crate::scale::needle_to_normalized`] で
+    /// ROI・needle をその空間へ揃える。よって **detect シグネチャは不変**で、呼出側は
+    /// 正規化済み screenshot を渡すだけでよい（クロップ/resize は内部で吸収）。
     ///
     /// `template_root` は、`template` が相対パスの場合の解決基準（通常は TOML の親ディレクトリ）。
     /// [`load_pipeline`] で既に絶対化済みならこの引数は使われない。
@@ -241,11 +244,28 @@ impl TaskDef {
             reason: e.to_string(),
         })?;
 
-        // 2. ROI cropping（720p座標 → normalize 済み画面の画素座標として直接 crop）
-        let work = match self.roi_to_region() {
-            Some(r) => crop_imm(screenshot, r),
+        // 2. ROI/needle を正規化後キャプチャ寸法へ動的スケール。
+        //
+        // PC版テンプレート/ROI は raw-1258x708 空間で定義されるが、実行時キャプチャは
+        // 黒帯クロップ + normalize で 1280x720 等へ変動する。detect シグネチャは不変のまま、
+        // 入力 screenshot の width()/height()（=normalize 後寸法）から X/Y 別比を再計算して
+        // ROI・needle をその空間へ揃える（scale.rs のファクタ API）。
+        let norm_w = screenshot.width();
+        let norm_h = screenshot.height();
+
+        // ROI cropping（raw-1258 空間 ROI → 正規化後画面の画素座標へスケールして crop）
+        // scaled_roi はオフセット戻しにも再利用（局所座標 → 正規化後画面座標）。
+        let scaled_roi = self.roi_to_region().map(|r| {
+            let s = crate::scale::roi_to_normalized([r.x, r.y, r.width, r.height], norm_w, norm_h);
+            ScreenRegion::new(s[0], s[1], s[2], s[3])
+        });
+        let work = match &scaled_roi {
+            Some(r) => crop_imm(screenshot, *r),
             None => screenshot.clone(),
         };
+
+        // needle も同一ファクタで resize（アスペクト比が異なっても描画領域を揃える）
+        let needle = crate::scale::needle_to_normalized(&needle, norm_w, norm_h);
 
         // 3. algorithm 切替（既存エンジン再利用）
         let thr = MatchConfidence::new(self.threshold);
@@ -268,9 +288,10 @@ impl TaskDef {
             }
         };
 
-        // 4. ROI オフセット戻し（cropping した場合、局所→元座標へ）
+        // 4. ROI オフセット戻し（cropping した場合、局所→正規化後画面座標へ）。
+        //    scaled_roi（正規化後空間の ROI）の (x,y) で戻す。
         Ok(result.map(|mut mr| {
-            if let Some(r) = self.roi_to_region() {
+            if let Some(r) = scaled_roi {
                 mr.region = ScreenRegion::new(
                     mr.region.x + r.x,
                     mr.region.y + r.y,
@@ -713,9 +734,11 @@ mod tests {
     fn detect_with_roi_finds_embedded_position() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let needle = gradient_needle(40, 40);
-        // 720p基準(1280x720)。ROI = [520,320,240,80] (x:520..760, y:320..400)。
-        // needle(40x40) を ROI 内に完全に収まる (600,340) に埋める（x:600..640, y:340..380）。
-        let screenshot = luma_dyn(embed(1280, 720, &needle, 600, 340, 128));
+        // raw-1258x708 空間（PC_CLIENT_*_MEASURED）。ROI = [520,320,240,80]。
+        // screenshot を 1258x708 にすることで detect 内の roi_to_normalized /
+        // needle_to_normalized が恒等（sx=sy=1.0）となり、needle をそのまま埋め込んだ
+        // 検証が成立する。needle(40x40) を ROI 内 (600,340) に埋める。
+        let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 600, 340, 128));
         write_template(tmp.path(), &needle);
 
         let task = TaskDef {
@@ -754,8 +777,8 @@ mod tests {
     fn detect_with_roi_outside_returns_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let needle = gradient_needle(40, 40);
-        // needle を ROI 外 (50,50) に埋める。
-        let screenshot = luma_dyn(embed(1280, 720, &needle, 50, 50, 128));
+        // needle を ROI 外 (50,50) に埋める（raw-1258x708 空間）。
+        let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 50, 50, 128));
         write_template(tmp.path(), &needle);
 
         let task = TaskDef {
@@ -774,15 +797,20 @@ mod tests {
         assert!(m.is_none(), "needle outside ROI must not match");
     }
 
-    /// 全面走査テスト用の小キャンバス。CCOEFF は純Rust O(N·M) なので
-    /// 1280x720 全面走査は遅い（CI 実行時間健全化）。16:9 縮小版で検証する。
-    const FULL_W: u32 = 320;
-    const FULL_H: u32 = 180;
+    /// 全面走査テスト用キャンバス。新スケールモデルでは needle/ROI は raw-1258x708 空間で
+    /// 定義され、detect が screenshot 寸法へ動的スケールする。needle_to_normalized /
+    /// roi_to_normalized を恒等（sx=sy=1.0）にするため、screenshot も PC 実測寸法 1258x708
+    /// とする（=PC_CLIENT_*_MEASURED）。CCOEFF 全面走査は O(N·M) なので、needle を小さく
+    /// （NEEDLE_PX=16）して走査コストを抑える（位置精度・完全一致埋込の検証意図は保持）。
+    const FULL_W: u32 = 1258;
+    const FULL_H: u32 = 708;
+    /// 全面走査テストの needle サイズ。小さく保って ccoeff O(N·M) を実用的時間に抑える。
+    const NEEDLE_PX: u32 = 12;
 
     #[test]
     fn detect_without_roi_finds_position_fullscan() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let needle = gradient_needle(40, 40);
+        let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         // downscale=1 なので奇数座標でも完全一致埋込なら confidence=1.0。
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
         write_template(tmp.path(), &needle);
@@ -823,7 +851,7 @@ mod tests {
     #[test]
     fn detect_switches_sse_and_ccoeff() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let needle = gradient_needle(40, 40);
+        let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
         write_template(tmp.path(), &needle);
 
@@ -888,7 +916,7 @@ mod tests {
     #[test]
     fn detect_threshold_above_achievable_returns_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        let base = gradient_needle(40, 40);
+        let base = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &base, 150, 75, 128));
         // 埋込画像は base。テンプレートは輝度シフト版（≠完全一致）。
         // SSE は絶対輝度差を測るため、輝度シフトで confidence が大きく低下する
@@ -898,12 +926,13 @@ mod tests {
         write_template(tmp.path(), &tpl_needle);
 
         // 低閾値では一致する（位置は解決できる）
+        // ROI 付与で SSE 全面走査を局所化（FULL_W/H=1258x708 全面走査は重いため）。
         let low_task = TaskDef {
             name: "T".into(),
             state: "T".into(),
             algorithm: Algorithm::Sse,
             template: tmp.path().join("scenes/title/title_center.png"),
-            roi: None,
+            roi: Some([140, 65, 40, 30]),
             threshold: 0.1,
             base: None,
             action: None,
@@ -1233,6 +1262,9 @@ mod tests {
         // それより高い閾値を設定 → detect が Ok(None) → run_step も None。
         // （MatchConfidence::new は [0,1] にクランプするため、閾値 1.1 では gating できない。
         //  detect_threshold_above_achievable_returns_none と同じ手法を採る）
+        //
+        // ROI 付与: needle は raw-1258 空間(1258x708 でスケール恒等) なので、needle を含む小窓
+        // ROI を指定して SSE 全面走査を局所化（FULL_W/H=1258x708 の全面走査は数分かかるため）。
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = gradient_needle(40, 40);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &base, 150, 75, 128));
@@ -1245,7 +1277,7 @@ mod tests {
             state: "Title".into(),
             algorithm: Algorithm::Sse,
             template: tmp.path().join("scenes/title/title_center.png"),
-            roi: None,
+            roi: Some([140, 65, 60, 60]),
             threshold: 0.1,
             base: None,
             action: Some(Action::ClickSelf),
@@ -1316,6 +1348,166 @@ mod tests {
             out.is_none(),
             "missing template (Err path) must yield None, not propagate Err"
         );
+    }
+
+    // ---- テスト7b: サイズバリエーション E2E（detect 動的スケール） ----
+    //
+    // 本スライス（コミット4）の中核証明: raw-1258x708 空間で定義した needle/ROI が、
+    // 異なる screenshot 寸法（1258x708 ネイティブ / 1280x720 / 黒帯クロップ後を想定した
+    // 別アスペクト比）のどれでも detect でマッチすること。
+    //
+    // 方法: raw-1258x708 の「特徴パターン」を1枚作り、(a) needle = ROI 領域を crop、
+    // (b) screenshot = raw画像を各寸法へ resize_exact したもの、とする。
+    // detect は needle を screenshot 寸法へ needle_to_normalized でスケールするが、
+    // screenshot 側も同一 raw 画像を同ファクタで resize しているため、needle のスケール結果と
+    // screenshot 内の対応領域が一致する（Triangle 補間の一致）。よって「同じ needle/ROI が
+    // サイズバリエーション全域でマッチする」ことを検証できる。
+
+    /// raw-1258x708 空間の特徴パターン画像（gradient の変種で一意性を持たせる）。
+    fn raw_feature_canvas() -> GrayImage {
+        // (x*2 + y) mod 200 の濃淡パターン。周期が十分大きく広域に特異。
+        let mut img = GrayImage::new(FULL_W, FULL_H);
+        for y in 0..FULL_H {
+            for x in 0..FULL_W {
+                let v = (((x * 2) + y) % 200) as u8;
+                img.put_pixel(x, y, Luma([v]));
+            }
+        }
+        img
+    }
+
+    /// raw-1258x708 空間の ROI。needle はこの領域を crop して作る。
+    /// 画面中央やや右上（テンプレが局所的に特異な領域）。
+    const VAR_ROI: [u32; 4] = [400, 200, 120, 80];
+
+    /// raw 特徴画像の ROI 領域を needle として crop して PNG 保存し、絶対パスを返す。
+    fn write_var_needle(tmp: &std::path::Path, raw: &GrayImage) -> PathBuf {
+        let [x, y, w, h] = VAR_ROI;
+        let mut needle = GrayImage::new(w, h);
+        for dy in 0..h {
+            for dx in 0..w {
+                needle.put_pixel(dx, dy, *raw.get_pixel(x + dx, y + dy));
+            }
+        }
+        write_template(tmp, &needle)
+    }
+
+    /// raw 特徴画像を `(tw, th)` へ Triangle resize した screenshot を作る。
+    /// 黒帯入りキャプチャの crop 後を想定し、16:9 以外の寸法も含む。
+    fn resized_screenshot(raw: &GrayImage, tw: u32, th: u32) -> DynamicImage {
+        let dyn_raw = DynamicImage::ImageLuma8(raw.clone());
+        dyn_raw.resize_exact(tw, th, image::imageops::FilterType::Triangle)
+    }
+
+    #[test]
+    fn detect_matches_across_size_variants_dynamic_scale() {
+        // raw-1258x708 ネイティブ。スケール恒等（sx=sy=1.0）。ベースライン。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let raw = raw_feature_canvas();
+        let tpl = write_var_needle(tmp.path(), &raw);
+        let screenshot = luma_dyn(raw.clone());
+
+        let task = TaskDef {
+            name: "T".into(),
+            state: "T".into(),
+            algorithm: Algorithm::Ccoeff,
+            template: tpl.clone(),
+            roi: Some(VAR_ROI),
+            threshold: 0.9,
+            base: None,
+            action: None,
+            next: None,
+        };
+        let m = task
+            .detect(&screenshot, tmp.path())
+            .expect("detect ok")
+            .expect("1258x708 native must match");
+        assert!(
+            m.confidence.0 >= 0.99,
+            "native 1258x708 confidence ~1.0: got {}",
+            m.confidence.0
+        );
+        // ROI オフセット戻し済み → raw 座標で ROI 開始位置 (400,200) に一致。
+        assert!(
+            (398..=402).contains(&m.region.x),
+            "native region.x near ROI x=400: got {}",
+            m.region.x
+        );
+        assert!(
+            (198..=202).contains(&m.region.y),
+            "native region.y near ROI y=200: got {}",
+            m.region.y
+        );
+
+        let _ = std::fs::remove_file(&tpl);
+    }
+
+    #[test]
+    fn detect_matches_across_size_variants_1280x720() {
+        // 1258x708 → 1280x720（normalize 後の代表寸法）。X/Y 別比でスケール。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let raw = raw_feature_canvas();
+        let tpl = write_var_needle(tmp.path(), &raw);
+        let screenshot = resized_screenshot(&raw, 1280, 720);
+
+        let task = TaskDef {
+            name: "T".into(),
+            state: "T".into(),
+            algorithm: Algorithm::Ccoeff,
+            template: tpl.clone(),
+            roi: Some(VAR_ROI),
+            threshold: 0.9,
+            base: None,
+            action: None,
+            next: None,
+        };
+        let m = task
+            .detect(&screenshot, tmp.path())
+            .expect("detect ok")
+            .expect("1280x720 must match via dynamic scale");
+        // 同一 raw 画像を両者 Triangle resize しているため、スケール後 needle と
+        // screenshot 内対応領域が一致し高 confidence になる。
+        assert!(
+            m.confidence.0 >= 0.9,
+            "1280x720 dynamic-scale match confidence >= 0.9: got {}",
+            m.confidence.0
+        );
+
+        let _ = std::fs::remove_file(&tpl);
+    }
+
+    #[test]
+    fn detect_matches_across_size_variants_letterboxed_crop_dims() {
+        // 黒帯クロップ後を想定した 16:9 以外の寸法（例: 1000x600）でもマッチすること。
+        // 実キャプチャ(1918x1048) → crop_to_content → 16:9 前後の寸法になりうるが、
+        // detect は screenshot 寸法から動的にファクタを再計算するので任意寸法で動く。
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let raw = raw_feature_canvas();
+        let tpl = write_var_needle(tmp.path(), &raw);
+        let screenshot = resized_screenshot(&raw, 1000, 600);
+
+        let task = TaskDef {
+            name: "T".into(),
+            state: "T".into(),
+            algorithm: Algorithm::Ccoeff,
+            template: tpl.clone(),
+            roi: Some(VAR_ROI),
+            threshold: 0.9,
+            base: None,
+            action: None,
+            next: None,
+        };
+        let m = task
+            .detect(&screenshot, tmp.path())
+            .expect("detect ok")
+            .expect("1000x600 must match via dynamic scale");
+        assert!(
+            m.confidence.0 >= 0.9,
+            "1000x600 dynamic-scale match confidence >= 0.9: got {}",
+            m.confidence.0
+        );
+
+        let _ = std::fs::remove_file(&tpl);
     }
 
     // ---- テスト8: ドキュメント推奨 TOML 例との同期 ----
@@ -2690,34 +2882,14 @@ mod tests {
             )
         });
         let defs = load_pipeline(&dir).expect("title_pc load");
-        let screenshot = image::open(&probe_path).expect("open title_pc_probe.png");
+        let probe = image::open(&probe_path).expect("open title_pc_probe.png");
 
-        // PC RAW 空間(1258x708)へ正規化(Issue #12)。取得ウィンドウサイズは表示解像度/DPI で
-        // 変動しオペレータは制御できない(「画像側でサイズ変更」指示)。ROI/template は PC RAW
-        // 1258x708 空間で定義されるため、probe が異寸法(例: 1918x1048)なら 1258x708 へ
-        // resize_exact してから detect に渡す。これで field_pc_probe/menu_pc_probe(1258x708
-        // native)と同一空間へ揃う。ScreenScaler は 1280 基準で PC(1258<=1280) を RAW passthrough
-        // するため、ここで PC RAW 空間への明示 resize が必要(detect は呼出側が正規化済みを前提)。
-        const TITLE_PC_PROBE_RAW_W: u32 = 1258;
-        const TITLE_PC_PROBE_RAW_H: u32 = 708;
-        let screenshot = if screenshot.width() == TITLE_PC_PROBE_RAW_W
-            && screenshot.height() == TITLE_PC_PROBE_RAW_H
-        {
-            screenshot // 既に RAW 空間(field_pc_probe/menu_pc_probe と同一)
-        } else {
-            eprintln!(
-                "title_pc_probe.png is {}x{} — resizing to PC RAW {}x{} (window size is not operator-controllable)",
-                screenshot.width(),
-                screenshot.height(),
-                TITLE_PC_PROBE_RAW_W,
-                TITLE_PC_PROBE_RAW_H,
-            );
-            screenshot.resize_exact(
-                TITLE_PC_PROBE_RAW_W,
-                TITLE_PC_PROBE_RAW_H,
-                image::imageops::FilterType::Triangle,
-            )
-        };
+        // 本番経路（PipelineDriver）と同一の crop_to_content → normalize を適用してから
+        // detect に渡す。旧 Issue #12 の明示 resize_exact(1258x708) ハックは廃止: detect が
+        // normalize 後寸法へ ROI/needle を動的スケールするため、サイズ・黒帯へ自動対応する。
+        let cropped = crate::crop_to_content(&probe);
+        let screenshot = crate::scale::ScreenScaler::new().normalize(&cropped);
+        let (sw, sh) = (screenshot.width(), screenshot.height());
 
         for d in &defs {
             let m = d
@@ -2737,19 +2909,30 @@ mod tests {
                 m.confidence.0,
                 d.threshold
             );
-            assert_roi_within_1258x708(
-                [m.region.x, m.region.y, m.region.width, m.region.height],
-                &format!("{} match region", d.name),
+            // match region は detect 入力画像（=normalize 後、通常 1280x720）と同じ座標空間。
+            // 画像寸法内に収まること（旧 raw-1258 前提は本番経路移行で廃止）。
+            assert!(
+                m.region.x + m.region.width <= sw && m.region.y + m.region.height <= sh,
+                "{}: match region [{},{},{},{}] must fit within normalized probe {}x{}",
+                d.name,
+                m.region.x,
+                m.region.y,
+                m.region.width,
+                m.region.height,
+                sw,
+                sh
             );
             println!(
-                "{}: conf={:.4} region=[{},{},{},{}] (threshold {:.2})",
+                "{}: conf={:.4} region=[{},{},{},{}] (threshold {:.2}) on {}x{} normalized probe",
                 d.name,
                 m.confidence.0,
                 m.region.x,
                 m.region.y,
                 m.region.width,
                 m.region.height,
-                d.threshold
+                d.threshold,
+                sw,
+                sh
             );
         }
     }
@@ -2989,50 +3172,65 @@ mod tests {
 
         let probe = image::open(&probe_path).expect("open title_pc_probe.png");
         // 生ファイル寸法不変量: 取得ウィンドウサイズはオペレータ制御不可につき 1918x1048 RGBA。
-        // pipeline.rs はこれを 1258x708(PC RAW) へ resize_exact してから detect に渡す。
+        // 本番経路（PipelineDriver）は crop_to_content → normalize でこれを 1280x720 へ正規化する。
         assert_eq!(
             (probe.width(), probe.height()),
             (1918, 1048),
             "title_pc_probe.png raw capture must be 1918x1048 RGBA (operator window size, \
-             not operator-controllable); pipeline.rs resizes it to PC RAW 1258x708 in-code. \
-             If the capture dimensions change the resize-to-RAW premise must be re-validated."
+             not operator-controllable); the driver normalizes it via crop_to_content + \
+             normalize. If the capture dimensions change the normalization premise must be \
+             re-validated."
         );
 
-        // PC RAW 1258x708 へ resize_exact(E2E ゲート pc_title_pc_templates_match_real_*
-        // と同一の正規化経路)。ROI は RAW 空間で定義されるため、run 再導出も RAW 空間で行う。
-        const TITLE_PC_PROBE_RAW_W: u32 = 1258;
-        const TITLE_PC_PROBE_RAW_H: u32 = 708;
-        let raw = probe.resize_exact(
-            TITLE_PC_PROBE_RAW_W,
-            TITLE_PC_PROBE_RAW_H,
-            image::imageops::FilterType::Triangle,
-        );
-        let gray = raw.to_luma8();
+        // 本番経路と同一の正規化（crop_to_content → normalize → 1280x720）を適用。
+        // 旧インライン resize_exact(1258x708) ハックは廃止: 本番は黒帯クロップ後に normalize する
+        // ため、幾何学的検証も同経路を通す。ROI は raw-1258 空間で定義されるので、
+        // roi_to_normalized で 1280x720 空間へ変換して run を見る。
+        let cropped = crate::crop_to_content(&probe);
+        let normalized = crate::scale::ScreenScaler::new().normalize(&cropped);
+        let gray = normalized.to_luma8();
+        let norm_w = normalized.width();
+        let norm_h = normalized.height();
 
         // (C) geometric corroboration (= 旧 retain-old-value ガードが待っていた実機裏付け):
         //     実測 ROI 帯の y-range 内で、x-range に重なる列分散 run が再現すること。
         //     これが「実測 ROI が実機プローブ上の実テクスチャ位置を指している」客観的証明。
-        //
-        // version_label: ROI y=8..43, x=712..833。この水平帯で x>=712 に run が存在すること。
-        let vl_runs = title_region_runs(&gray, 8, 43, 700, 850);
+        //     ROI [712,8,121,35] を 1280x720 空間へスケールし、その帯で run を見る。
+        let vl = crate::scale::roi_to_normalized([712, 8, 121, 35], norm_w, norm_h);
+        let vl_runs = title_region_runs(
+            &gray,
+            vl[1],
+            vl[1] + vl[3],
+            vl[0].saturating_sub(12),
+            vl[0] + vl[2] + 12,
+        );
         assert!(
-            vl_runs.iter().any(|(s, e)| *e > 712 && *s < 833),
-            "version_label: real-probe band y=8..43 must contain a column-variance run \
-             overlapping x=712..833 (the measured ROI [712,8,121,35]). This is the \
-             geometric corroboration the old retain-old-value guard was waiting for; \
-             got runs={vl_runs:?}"
+            vl_runs
+                .iter()
+                .any(|(s, e)| *e > vl[0] && *s < vl[0] + vl[2]),
+            "version_label: normalized-probe band must contain a column-variance run \
+             overlapping the scaled ROI {:?}. This is the geometric corroboration the old \
+             retain-old-value guard was waiting for; got runs={vl_runs:?}",
+            vl
         );
 
-        // logo_corner: ROI y=263..383, x=624..744 (小特徴 [624,263,120,120])。
-        // この帯で x>=624 に run が存在すること。候補窓はロゴグリフ上(高コントラスト固定テクスチャ)
-        // なので列分散 run が再現するはず — これが「小特徴 ROI が実テクスチャを指す」客観的証明。
-        let lc_runs = title_region_runs(&gray, 263, 383, 610, 760);
+        // logo_corner: ROI [624,263,120,120] を同空間へスケールして run を見る。
+        let lc = crate::scale::roi_to_normalized([624, 263, 120, 120], norm_w, norm_h);
+        let lc_runs = title_region_runs(
+            &gray,
+            lc[1],
+            lc[1] + lc[3],
+            lc[0].saturating_sub(12),
+            lc[0] + lc[2] + 12,
+        );
         assert!(
-            lc_runs.iter().any(|(s, e)| *e > 624 && *s < 744),
-            "title_logo_corner: real-probe band y=263..383 must contain a column-variance \
-             run overlapping x=624..744 (the small-feature ROI [624,263,120,120] selected \
-             by find_logo_corner_subfeature.rs inside the operator-dragged band). \
-             got runs={lc_runs:?}"
+            lc_runs
+                .iter()
+                .any(|(s, e)| *e > lc[0] && *s < lc[0] + lc[2]),
+            "title_logo_corner: normalized-probe band must contain a column-variance run \
+             overlapping the scaled small-feature ROI {:?} (selected by \
+             find_logo_corner_subfeature.rs inside the operator-dragged band). got runs={lc_runs:?}",
+            lc
         );
 
         // (D) 実機プローブ到着による契約の置換を文書化: 旧 retain-old-value ガードの前提

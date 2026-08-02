@@ -153,6 +153,9 @@ pub fn run_exit_code(reason: &anaden_engine::LoopStopReason) -> i32 {
         anaden_engine::LoopStopReason::GoalReached => EXIT_RUN_SUCCESS,
         // ゴール活性時のタイムアウト(成果物出たがゴール未到達) = soft failure(2)。
         anaden_engine::LoopStopReason::GoalTimeout => EXIT_RUN_TIMEOUT,
+        // 外部キャンセル(Ctrl+C / SIGINT) = soft failure(2)。正常終端ではないが
+        // IO 系ハードエラー(1) とも区別する(ユーザー意図の中断)。
+        anaden_engine::LoopStopReason::Interrupted => EXIT_RUN_TIMEOUT,
         // IO 系ハードエラー = exit 1。
         anaden_engine::LoopStopReason::CaptureError => EXIT_RUN_HARDCERROR,
         anaden_engine::LoopStopReason::ExecuteError => EXIT_RUN_HARDCERROR,
@@ -306,15 +309,38 @@ mod tests {
     }
 
     #[test]
+    fn run_exit_code_interrupted_is_two() {
+        // 外部キャンセル(Ctrl+C / SIGINT) = soft failure(2)。正常終端(0) ではなく
+        // IO 系ハードエラー(1) とも区別する(ユーザー意図の中断)。
+        assert_eq!(
+            run_exit_code(&anaden_engine::LoopStopReason::Interrupted),
+            EXIT_RUN_TIMEOUT,
+            "Interrupted must map to timeout exit 2 (soft failure)"
+        );
+        assert_ne!(
+            run_exit_code(&anaden_engine::LoopStopReason::Interrupted),
+            EXIT_RUN_HARDCERROR,
+            "Interrupted must not collapse to hard-error(1)"
+        );
+        assert_ne!(
+            run_exit_code(&anaden_engine::LoopStopReason::Interrupted),
+            EXIT_RUN_SUCCESS,
+            "Interrupted is not a success exit 0"
+        );
+    }
+
+    #[test]
     fn run_exit_code_covers_all_variants() {
         // LoopStopReason へ新バリアントが追加された際、このテストが未対応を検出する。
         // GoalReached / GoalTimeout は Issue #37 で追加済み(T3)。
+        // Interrupted は Ctrl+C/SIGINT 中断(ガード1)。
         let variants = [
             anaden_engine::LoopStopReason::Stop,
             anaden_engine::LoopStopReason::TerminalTask,
             anaden_engine::LoopStopReason::MaxIterations,
             anaden_engine::LoopStopReason::GoalReached,
             anaden_engine::LoopStopReason::GoalTimeout,
+            anaden_engine::LoopStopReason::Interrupted,
             anaden_engine::LoopStopReason::CaptureError,
             anaden_engine::LoopStopReason::ExecuteError,
         ];

@@ -6,12 +6,14 @@
 //! テンプレ PNG(hud_tr.png 96x96) はともに 1280 基準の正規化空間でオーサリングされている。
 //!
 //! 【問題のメカニズム】
-//! `ScreenScaler::normalize`(scale.rs:45-53) は **元画像幅が 1280 以下なら RAW をそのまま返す**
-//! （拡大しない）。PC版キャプチャ(1258x708, 幅1258 <= 1280)は正規化を通過せず RAW のまま。
-//! そのため:
-//! 1. ROI `[1080,150,180,150]` が 1280 基準で計算された座標として 1258 幅フレームへ直接適用され、
-//!    HUD があるべき右上領域を正しく crop できない（X 軸で最大 ~22px のスケールオフセットに加え、
-//!    20:9 と 16:9 では縦横比そのものが異なるため ROI の縦位置も実態と合わない）。
+//! PC版キャプチャ(1258x708, 16:9) は黒帯入り実測サイズ変動対応のため、`ScreenScaler::normalize`
+//! で常に1280幅基準へリサイズされ 1280x720 になる（早期 return 廃止、コミット3）。
+//! PC版テンプレ/ROI は引き続き raw-1258x708 空間で定義され、detect が
+//! roi_to_normalized/needle_to_normalized で1280空間へスケールする設計。
+//!
+//! 一方、20:9 実機向け hud_tr テンプレは 1280x576 空間でオーサリングされている。
+//! これを 16:9 の 1280x720 フレームへそのまま適用すると:
+//! 1. 縦横比そのものが異なる(20:9=1280x576 vs 16:9=1280x720)ため、ROI の縦位置が実態と合わない。
 //! 2. テンプレ PNG 自体が 20:9 正規化空間から crop された画素列であり、16:9 フレームの対応領域とは
 //!    縦横比・解像度特性が異なる → ccoeff 相関が大きく低下する。
 //!
@@ -77,22 +79,23 @@ fn pc_capture_probe_has_measured_1258x708_dimensions() {
 }
 
 #[test]
-fn screen_scaler_passes_through_pc_capture_unnormalized() {
-    // メカニズム証明: 幅 1258 <= 1280(BASE_WIDTH) のため normalize は RAW を返す(拡大しない)。
-    // これが「1280 基準 ROI/テンプレが PC 生フレームへ直接適用される」根本原因。
+fn screen_scaler_normalizes_pc_capture_to_1280_base() {
+    // メカニズム証明（改訂）: normalize は常に1280幅基準へリサイズする（早期 return 廃止）。
+    // PC キャプチャ 1258x708 → 1280x720（アスペクト比 16:9 を保存）。
+    // 20:9 実機テンプレ(1280x576 空間)との縦横比の違いが、この後の劣化証明の根本原因。
     let probe = repo_root().join("templates/captures/field_pc_probe.png");
     let img = image::open(&probe).expect("capture_probe.png");
     let scaler = ScreenScaler::new();
     let normalized = scaler.normalize(&img);
     assert_eq!(
         normalized.width(),
-        PC_FRAME_W,
-        "PC キャプチャ(幅<=1280)は normalize で RAW 通過(拡大なし)"
+        1280,
+        "PC キャプチャは normalize で1280幅へリサイズされる"
     );
     assert_eq!(
         normalized.height(),
-        PC_FRAME_H,
-        "高さも RAW 通過(1258x708 のまま)"
+        720,
+        "高さは 708*(1280/1258)=720.4→720（16:9 を保存）"
     );
 }
 
@@ -111,10 +114,11 @@ fn hud_tr_20to9_template_degrades_to_nonmatch_on_pc_16to9_frame() {
         .unwrap_or_else(|e| panic!("hud_tr.png 読込失敗({e}): 20:9 テンプレが未配置"));
 
     // 実機パスと同じ前処理: pipeline_driver は capture → normalize → tick を経て
-    // TaskDef.detect へ渡す。PC フレームは RAW 通過(上記テスト証明済み)。
+    // TaskDef.detect へ渡す。PC フレーム(1258x708) は normalize で 1280x720 へリサイズされる
+    // （早期 return 廃止）。20:9 実機テンプレは 1280x576 空間なので縦横比が異なる。
     let scaler = ScreenScaler::new();
     let work = scaler.normalize(&pc_frame);
-    assert_eq!((work.width(), work.height()), (PC_FRAME_W, PC_FRAME_H));
+    assert_eq!((work.width(), work.height()), (1280, 720));
 
     // tap_hud_tr.toml の ROI [1080,150,180,150] を 1280 基準座標としてそのまま
     // PC RAW フレーム(1258 幅)の画素座標で crop する(TOML ROI は正規化済み画面の

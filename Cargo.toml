@@ -31,6 +31,9 @@ imageproc = "0.25"
 
 # Async runtime
 tokio = { version = "1", features = ["full"] }
+# tokio 補助ユーティリティ。CancellationToken(Ctrl+C/SIGINT の協調的キャンセル)で使用。
+# tokio-util 0.7 では CancellationToken はデフォルト feature に含まれる(features 指定不要)。
+tokio-util = { version = "0.7" }
 
 # Serialization / Config
 serde = { version = "1", features = ["derive"] }

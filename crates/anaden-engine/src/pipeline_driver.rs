@@ -5,24 +5,34 @@
 //! 最終マイル層。orchestrator(命令型 Strategy ループ) とは独立し、`GameState`/Strategy/
 //! Recovery には依存しない。テンプレ画像は caller が `&[TaskDef]` として渡す。
 //!
-//! 解像度モデル: device 側は生解像度(Pixel 7a なら 2400x1080 等)。capture した画像を
-//! [`ScreenScaler::normalize`] で基準幅(1280)へ縮小して tick に食わせ、発火座標は逆方向に
-//! [`rescale_command`] で実機座標へ戻す。`ScreenScaler::from_base` は幅ベース均一スケール
-//! なので X/Y 同一ファクタで動く。
+//! 解像度モデル: device 側は生解像度(Pixel 7a なら 2400x1080 等 / PC版は黒帯込み生幅)。
+//! capture した画像を黒帯クロップ([`crop_to_content_with_info`]) →
+//! [`ScreenScaler::normalize`] で基準幅(1280)へ縮小して tick に食わせる。
+//! 発火座標は逆方向に [`rescale_command`] が [`CropInfo`]（黒帯オフセット情報）を使って
+//! normalize後1280空間 → 実機生画像（黒帯込み）へ戻す。
+//!
+//! **座標空間の統一（C1/M1 修正）**: 全 [`InputCommand`] は「normalize後1280空間」へ統一。
+//! ClickSelf は matched_region(既に1280空間) をそのまま、ClickRect/Swipe は raw-1258 空間の
+//! roi/from/to を1280空間へ変換してから載せる（[`crate::pipeline_runner::action_to_command`]）。
+//! rescale は黒帯込み実機画像への逆写像として `x_real = x_1280 * crop_w / 1280 + offset_x`、
+//! `y_real = y_1280 * crop_w / 1280 + offset_y` で計算する（両軸とも幅比 `crop_w/1280`）。
+//! 黒帯なし（offset=0, width=device_width）のとき従来の [`ScreenScaler::from_base`] と同等になる。
 
 use std::future::Future;
+use std::path::PathBuf;
 use std::pin::Pin;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime};
 
 use async_trait::async_trait;
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
+use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
 use anaden_core::InputAction;
 use anaden_core::ScreenRegion;
 use anaden_device::{AdbError, InputExecutor, ScreenshotCapture};
-use anaden_vision::{ScreenScaler, TaskDef};
+use anaden_vision::{BASE_WIDTH, CropInfo, ScreenScaler, TaskDef, crop_to_content_with_info};
 
 use crate::pipeline_runner::{InputCommand, PipelineState};
 
@@ -92,31 +102,52 @@ struct GoalEvalInputs<'a> {
     started: Instant,
 }
 
-/// 720p 基準(幅1280)の [`InputCommand`] をデバイス実解像度(device_width)の座標へ変換する純関数。
+/// normalize後1280空間の [`InputCommand`] を、実機生画像（黒帯込み）の座標へ変換する純関数。
 ///
-/// [`ScreenScaler::from_base`] は幅ベースの均一スケール(scale_factor = 1280/src_width)を用いる。
-/// X と Y は同一ファクタで動くため、両軸とも `from_base(device_width, v)` に通せばよい。
-/// IO を持たないため単体テスト可能。
+/// 入力座標は「黒帯除去後描画領域を幅1280基準へ正規化した空間」。normalize は
+/// [`ScreenScaler::normalize`] が **幅基準（幅→1280、高さはアスペクト比保存）** でリサイズ
+/// するため、コンテンツ領域内では X も Y も同じ比 `crop_info.width / 1280` で実ピクセルへ
+/// 戻る。よって [`CropInfo`]（コンテンツ領域の元画像空間における位置・寸法）を使って:
+/// - `x_real = x_1280 * crop_info.width / 1280 + crop_info.offset_x`
+/// - `y_real = y_1280 * crop_info.width / 1280 + crop_info.offset_y`
+///
+/// とする（両軸とも `width/1280`。高さ比 `height/720` を使うと、アスペクト比が 16:9 でない
+/// 端末で normalize 後高さ ≠ 720 となるため Y がズレる）。`crop_info` が「黒帯なし」
+/// （`offset=(0,0)`, `width=device_width`）のとき、この変換は従来の
+/// [`ScreenScaler::from_base`] と完全に同等になる。
+///
+/// `scaler` は後方互換のため残しているが、本実装では crop_info のみを使用する。IO を
+/// 持たないため単体テスト可能。
 pub fn rescale_command(
     cmd: InputCommand,
-    scaler: &ScreenScaler,
+    _scaler: &ScreenScaler,
     device_width: u32,
+    crop_info: &CropInfo,
 ) -> InputCommand {
+    let to_real = |x_1280: u32, y_1280: u32| -> (u32, u32) {
+        // 両軸とも幅比 crop_w/1280 でスケール（normalize が幅基準・アスペクト比保存のため）。
+        let s = (crop_info.width as f64) / (BASE_WIDTH as f64);
+        let x_real = (x_1280 as f64 * s).round() as u64 + crop_info.offset_x as u64;
+        let y_real = (y_1280 as f64 * s).round() as u64 + crop_info.offset_y as u64;
+        // 安全側: device_width でクランプ（実機画像幅を超えないように）。
+        (
+            x_real.min(device_width as u64) as u32,
+            y_real.min(device_width as u64) as u32,
+        )
+    };
     match cmd {
-        InputCommand::Tap { x, y } => InputCommand::Tap {
-            x: scaler.from_base(device_width, x),
-            y: scaler.from_base(device_width, y),
-        },
-        InputCommand::Swipe { from, to } => InputCommand::Swipe {
-            from: (
-                scaler.from_base(device_width, from.0),
-                scaler.from_base(device_width, from.1),
-            ),
-            to: (
-                scaler.from_base(device_width, to.0),
-                scaler.from_base(device_width, to.1),
-            ),
-        },
+        InputCommand::Tap { x, y } => {
+            let (rx, ry) = to_real(x, y);
+            InputCommand::Tap { x: rx, y: ry }
+        }
+        InputCommand::Swipe { from, to } => {
+            let (fx, fy) = to_real(from.0, from.1);
+            let (tx, ty) = to_real(to.0, to.1);
+            InputCommand::Swipe {
+                from: (fx, fy),
+                to: (tx, ty),
+            }
+        }
     }
 }
 
@@ -276,6 +307,19 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// `run_loop_with_goal` が `GoalStatusContext::tick` へ渡すために消費(`take`)する。
     /// 非ゴールパス(`run_loop_with_recovery`)では参照されず、上書きされるだけ。
     last_match: Option<(String, f32, ScreenRegion)>,
+    /// 直近の capture で黒帯クロップした描画領域の、元画像（黒帯込み生幅）空間における
+    /// 位置・寸法。`run_once` / `run_once_verified` が capture→crop 毎に更新し、
+    /// `rescale_command` が発火座標の逆変換（1280空間 → 実機生画像）に使う。
+    /// 初期値は `CropInfo::default()` (0,0,0,0) で、最初の capture で即座に上書きされる。
+    last_crop_info: CropInfo,
+    /// 外部キャンセル口(Ctrl+C 等)。[`Self::with_cancel`] で設定したときのみ有効。
+    /// 各ループ(`run_loop` / `run_loop_with_recovery` / `run_loop_with_goal`)は
+    /// サイクル冒頭で `is_cancelled()` を判定し、sleep 区間を [`tokio::select!`] で
+    /// cancel 待ち受け化する。[`None`] のときは従来の `tokio::time::sleep` のみ(後方互換)。
+    cancel: Option<CancellationToken>,
+    /// スナップショット保存の連番(ガード4)。ANADEN_SNAPSHOT_DIR 設定時に
+    /// NoMatch / FiredUnverified でインクリメントしてファイル名へ埋める。
+    snapshot_counter: u64,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -301,6 +345,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             swipe_duration_ms,
             verify_after_fire: false,
             last_match: None,
+            last_crop_info: CropInfo::default(),
+            cancel: None,
+            snapshot_counter: 0,
         }
     }
 
@@ -314,6 +361,19 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// 既定は検証 OFF(現状維持)。本メソッドを呼ばなければ [`Self::run_once`] 相当の挙動のまま。
     pub fn with_verify(mut self, enabled: bool) -> Self {
         self.verify_after_fire = enabled;
+        self
+    }
+
+    /// 外部キャンセルトークン(Ctrl+C / SIGINT 等)を設定するビルダー。
+    ///
+    /// 呼ばない場合は `cancel = None`(デフォルト = 従来動作、後方互換)。main.rs の
+    /// 呼出元は `.with_verify` と同じビルダーチェーンで重ねるだけでシグネチャを変えない。
+    /// 設定すると各ループ(`run_loop` / `run_loop_with_recovery` / `run_loop_with_goal`)が
+    /// サイクル冒頭で [`CancellationToken::is_cancelled`] を判定して
+    /// [`LoopStopReason::Interrupted`] で停止し、末尾の interval 待ちを
+    /// [`tokio::select!`] で cancel 通知を即時受け取るようになる。
+    pub fn with_cancel(mut self, token: CancellationToken) -> Self {
+        self.cancel = Some(token);
         self
     }
 
@@ -342,8 +402,23 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let capture_ms = t_cap.elapsed().as_secs_f64() * 1000.0;
         let raw_w = screen.width();
         let raw_h = screen.height();
-        // 2. normalize → 基準幅画像(tick は基準座標系前提)
-        let normalized = self.scaler.normalize(&screen);
+        // 2. 黒帯クロップ → 描画領域(16:9)を抽出。黒帯なしならそのまま（copy 不要）。
+        //    normalize の前で行うことで、テンプレ（描画領域空間）とスケールが一致する。
+        //    CropInfo（元画像空間でのコンテンツ位置・寸法）も受け取り、後段の rescale で
+        //    発火座標を黒帯込み実機画像へ逆変換するために保持する。
+        let (cropped, crop_info) = crop_to_content_with_info(&screen);
+        self.last_crop_info = crop_info;
+        let crop_w = cropped.width();
+        let crop_h = cropped.height();
+        if (crop_w, crop_h) != (raw_w, raw_h) {
+            debug!(
+                "letterbox crop: raw={raw_w}x{raw_h} -> content={crop_w}x{crop_h} \
+                 (offset={},{}, black bars removed)",
+                crop_info.offset_x, crop_info.offset_y
+            );
+        }
+        // 3. normalize → 基準幅画像(tick は基準座標系前提)
+        let normalized = self.scaler.normalize(&cropped);
         let norm_w = normalized.width();
         let norm_h = normalized.height();
         // [DEBUG] 生フレーム寸法 + normalize 後寸法。向き/スケール乖離の診断用。
@@ -364,6 +439,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     t_rec.elapsed().as_secs_f64() * 1000.0,
                     t_cycle.elapsed().as_secs_f64() * 1000.0
                 );
+                // ガード4: NoMatch 発生時、ANADEN_SNAPSHOT_DIR 設定時に normalized
+                // フレームを PNG 保存(認識ズレ原因特定用)。未設定時は no-op。
+                self.save_snapshot(&matched_task_name, &normalized);
                 return StepOutcome::NoMatch;
             }
         };
@@ -375,7 +453,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
         // 4. rescale + execute（command があれば発火）
         if let Some(cmd) = tick.command {
-            let device_cmd = rescale_command(cmd, &self.scaler, self.device_width);
+            let device_cmd =
+                rescale_command(cmd, &self.scaler, self.device_width, &self.last_crop_info);
             if let Err(e) = self.execute_command(&device_cmd).await {
                 warn!("pipeline execute error: {e}");
                 return StepOutcome::Error(format!("execute: {e}"));
@@ -467,10 +546,16 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 return StepOutcome::Error(format!("verify_capture: {e}"));
             }
         };
-        let normalized = self.scaler.normalize(&screen);
+        // run_once と同じ黒帯クロップ → normalize 経路（検証も描画領域空間で行う）。
+        // CropInfo は検証では発火しないため保存不要だが、経路の一貫性のため _with_info を使用。
+        let (cropped, _crop_info) = crop_to_content_with_info(&screen);
+        let normalized = self.scaler.normalize(&cropped);
         // run_step を直接呼び、task_name で再認識。マッチ残存 → 対象残存 = 未検証。
         let still_present = anaden_vision::run_step(&self.tasks, &normalized, task_name).is_some();
         if still_present {
+            // ガード4: アクション無効(対象残存)時、ANADEN_SNAPSHOT_DIR 設定時に
+            // 発火後フレームを PNG 保存(偽成功の原因特定用)。未設定時は no-op。
+            self.save_snapshot(task_name, &normalized);
             // current を発火前タスクへ巻き戻す(次サイクルで同じタスクを再試行)。
             self.state.set_current(task_name.to_string());
             StepOutcome::FiredUnverified {
@@ -496,6 +581,81 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         };
         self.input.execute(&action).await
     }
+
+    /// キャンセルトークンが設定済みかつ発火済みか。未設定時は常に [`false`](後方互換)。
+    fn is_cancelled(&self) -> bool {
+        match &self.cancel {
+            Some(token) => token.is_cancelled(),
+            None => false,
+        }
+    }
+
+    /// interval 待ち。キャンセルトークンが設定されていれば [`tokio::select!`] で
+    /// cancel 通知を即時受け取る(そうでなければ従来の [`tokio::time::sleep`])。
+    ///
+    /// 末尾の `select!` は cancel 優先: 両方同時(競合)でも cancel 側を拾い、次サイクル冒頭の
+    /// [`Self::is_cancelled`] で [`LoopStopReason::Interrupted`] 停止へ遷移させる。
+    /// トークン未設定時は sleep のみを await し、cancel 分岐はコンパイル時に存在しない
+    /// (実行時分岐ではないので zero-cost 寄り)。
+    async fn sleep_or_cancelled(&self, interval: Duration) {
+        match &self.cancel {
+            Some(token) => {
+                tokio::select! {
+                    _ = token.cancelled() => debug!("cancel observed during interval sleep"),
+                    _ = tokio::time::sleep(interval) => {}
+                }
+            }
+            None => {
+                tokio::time::sleep(interval).await;
+            }
+        }
+    }
+
+    /// スナップショット保存ディレクトリ(ガード4)。
+    ///
+    /// 環境変数 `ANADEN_SNAPSHOT_DIR` が設定されていればそのパスを、未設定なら [`None`]
+    /// (保存 OFF)を返す。NoMatch / FiredUnverified 発生時の認識ズレ原因特定用。
+    /// Live 実行のデバッグ用途で、未設定時は一切のファイル IO を行わない(後方互換)。
+    fn snapshot_dir() -> Option<PathBuf> {
+        std::env::var_os("ANADEN_SNAPSHOT_DIR").map(PathBuf::from)
+    }
+
+    /// 画像を PNG として best-effort 保存する(ガード4)。
+    ///
+    /// `ANADEN_SNAPSHOT_DIR` 未設定時は no-op([`None`] 早期 return)。設定時は
+    /// `<dir>/<task>_<連番>_<SystemTimeナノ秒>.png` へ `image` の PNG エンコーダで保存する。
+    /// 全てのエラー(ディレクトリ作成失敗・書込失敗・エンコード失敗)は `let _ =` で
+    /// 無視し、ライブラリコードから panic しない(認識失敗時のデバッグ補助が目的で、
+    /// 保存失敗でループを止めない)。連番は `snapshot_counter` をインクリメントして使う。
+    fn save_snapshot(&mut self, task: &str, frame: &DynamicImage) {
+        let Some(dir) = Self::snapshot_dir() else {
+            return;
+        };
+        self.snapshot_counter = self.snapshot_counter.saturating_add(1);
+        // SystemTime のナノ秒で一意性を補強(連番だけでは再実行で衝突するため)。
+        let stamp = SystemTime::now()
+            .duration_since(SystemTime::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0);
+        let path = dir.join(format!(
+            "{task}_{counter}_{stamp}.png",
+            counter = self.snapshot_counter
+        ));
+        // フレームを PNG 保存。best-effort: エラーは全て無視(panic しない)。
+        let _ = std::fs::create_dir_all(&dir);
+        let file = match std::fs::File::create(&path) {
+            Ok(f) => f,
+            Err(e) => {
+                warn!("snapshot create failed ({}): {e}", path.display());
+                return;
+            }
+        };
+        let mut buffered = std::io::BufWriter::new(file);
+        match frame.write_to(&mut buffered, image::ImageFormat::Png) {
+            Ok(()) => debug!("snapshot saved: {}", path.display()),
+            Err(e) => warn!("snapshot write failed ({}): {e}", path.display()),
+        }
+    }
 }
 
 /// run_loop の停止理由。
@@ -518,6 +678,11 @@ pub enum LoopStopReason {
     /// ゴール未到達タイムアウト(最大イテレーション到達だがゴール活性)。
     /// Issue #37 T3: 成果物は出たが宣言的ゴール未到達の soft failure。
     GoalTimeout,
+    /// 外部キャンセル(Ctrl+C / SIGINT)。[`PipelineDriver::with_cancel`] で設定した
+    /// [`CancellationToken`] が発火したときにループが即時停止したことを示す。
+    /// PC版 Live 実行中の緊急停止経路。`#[derive]` Serialize/Deserialize 付きなので
+    /// `interrupted` の snake_case 表現として機械可読(JSON/TOML)に現れる。
+    Interrupted,
 }
 
 /// タスク毎のマッチ回数(UC-3 進捗レポート用)。
@@ -694,6 +859,17 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let started = Instant::now();
         let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
         loop {
+            // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
+            if self.is_cancelled() {
+                return self.build_outcome(
+                    iterations,
+                    fired,
+                    LoopStopReason::Interrupted,
+                    "interrupted",
+                    per_task_matches,
+                    started,
+                );
+            }
             iterations += 1;
             if iterations > max_iterations {
                 return self.build_outcome(
@@ -831,7 +1007,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     );
                 }
             }
-            tokio::time::sleep(interval).await;
+            // interval 待ちを cancel 通知で即時抜けられるように select! 化。
+            // トークン未設定時は cancel 分岐が発火しないので従来の sleep のみ(後方互換)。
+            self.sleep_or_cancelled(interval).await;
         }
     }
 
@@ -887,6 +1065,17 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
         let mut goal_ctx = anaden_core::GoalStatusContext::new();
         loop {
+            // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
+            if self.is_cancelled() {
+                return self.build_outcome(
+                    iterations,
+                    fired,
+                    LoopStopReason::Interrupted,
+                    "interrupted",
+                    per_task_matches,
+                    started,
+                );
+            }
             iterations += 1;
             if iterations > max_iterations {
                 return self.build_outcome(
@@ -1095,7 +1284,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     );
                 }
             }
-            tokio::time::sleep(interval).await;
+            // interval 待ちを cancel 通知で即時抜けられるように select! 化。
+            self.sleep_or_cancelled(interval).await;
         }
     }
 
@@ -1202,35 +1392,6 @@ mod tests {
 
     // ---- pipeline_runner.rs のテストヘルパ相当（複製） ----
 
-    fn gradient_needle(w: u32, h: u32) -> GrayImage {
-        let mut img = GrayImage::new(w, h);
-        for y in 0..h {
-            for x in 0..w {
-                let v = ((x + y) % 64) as u8;
-                img.put_pixel(x, y, Luma([v]));
-            }
-        }
-        img
-    }
-
-    fn embed(
-        haystack_w: u32,
-        haystack_h: u32,
-        needle: &GrayImage,
-        ox: u32,
-        oy: u32,
-        bg: u8,
-    ) -> GrayImage {
-        let mut img = GrayImage::from_pixel(haystack_w, haystack_h, Luma([bg]));
-        for y in 0..needle.height() {
-            for x in 0..needle.width() {
-                let p = needle.get_pixel(x, y)[0];
-                img.put_pixel(ox + x, oy + y, Luma([p]));
-            }
-        }
-        img
-    }
-
     fn luma_dyn(img: GrayImage) -> DynamicImage {
         DynamicImage::ImageLuma8(img)
     }
@@ -1243,16 +1404,77 @@ mod tests {
         p
     }
 
-    const FULL_W: u32 = 320;
-    const FULL_H: u32 = 180;
+    // ---- 新スケールモデル対応の matched-frame ヘルパ ----
+    //
+    // run_once は capture → crop_to_content → normalize(1258→1280x720) → detect を経る。
+    // detect は needle を正規化後寸法(1280x720)へ動的スケールする。旧 embed() 方式（needle を
+    // screenshot に直接埋め込み）は、normalize 拡大と detect needle スケールが異なる resize 経路
+    // となりズレて NoMatch になる。よって needle と screenshot を **同一の raw-1258x708 特徴画像
+    // から生成** し、両者が run_once 通過後に一致するようにする:
+    //   - raw_feature(): 1258x708 の広域 gradient 特徴画像
+    //   - needle = raw_feature の NEEDLE_ROI(12x12) を crop（=raw-1258 空間のテンプレ）
+    //   - screenshot = raw_feature 全体
+    //   - TaskDef.roi = MATCH_ROI（needle を含む小窓）→ detect が crop して走査を局所化。
+    //
+    // 局所化の理由: run_loop 系テストは max_iterations まで複数サイクル回る。1258x708 の全面
+    // ccoeff 走査（O(N·M)）は1サイクルでも重く、複数サイクルで時間・メモリ爆発する。MATCH_ROI で
+    // needle 周辺の小窓のみ走査し、run_loop 制御ロジックの検証を現実的時間に保つ。
+    //
+    // 整合性: detect は TaskDef.roi を roi_to_normalized(roi, norm_w=1280, norm_h=720) でスケール
+    // して crop する。needle も同比(1258→1280)でスケール。screenshot の needle 領域も normalize
+    // (1258→1280) で拡大。三者とも「raw ROI を 1258→1280 比で Triangle 拡大」なので一致する。
+
+    /// テンプレ needle の raw-1258 空間 ROI（左上原点・12x12）。
+    const NEEDLE_ROI: [u32; 4] = [150, 75, 12, 12];
+    /// マッチ走査を局所化する TaskDef.roi（needle を含む小窓）。
+    const MATCH_ROI: [u32; 4] = [140, 65, 48, 36];
+
+    /// raw-1258x708 特徴画像（周期200の広域 gradient）。needle と screenshot の共通原料。
+    fn raw_feature() -> GrayImage {
+        let mut img = GrayImage::new(FULL_W, FULL_H);
+        for y in 0..FULL_H {
+            for x in 0..FULL_W {
+                let v = (((x * 2) + y) % 200) as u8;
+                img.put_pixel(x, y, Luma([v]));
+            }
+        }
+        img
+    }
+
+    /// raw_feature の NEEDLE_ROI 領域を crop してテンプレ PNG として保存し、絶対パスを返す。
+    fn crop_needle_template() -> PathBuf {
+        let raw = raw_feature();
+        let [nx, ny, nw, nh] = NEEDLE_ROI;
+        let mut needle = GrayImage::new(nw, nh);
+        for dy in 0..nh {
+            for dx in 0..nw {
+                needle.put_pixel(dx, dy, *raw.get_pixel(nx + dx, ny + dy));
+            }
+        }
+        write_template_persisted(&needle)
+    }
+
+    /// matched-frame 用の (screenshot, needle_template_path) を生成。
+    /// screenshot は raw-1258x708 特徴画像全体、needle は NEEDLE_ROI 領域の crop。
+    fn matched_frame() -> (DynamicImage, PathBuf) {
+        let raw = raw_feature();
+        let tpl = crop_needle_template();
+        (luma_dyn(raw), tpl)
+    }
+
+    // テスト画面寸法。PC版実測 raw-1258x708 空間（=PC_CLIENT_*_MEASURED）。
+    // raw_feature をこの寸法で作ることで、normalize(1258→1280x720) と detect の needle/ROI
+    // スケール(1258→1280) が同比となり、needle-screenshot が一致してマッチする。
+    const FULL_W: u32 = 1258;
+    const FULL_H: u32 = 708;
 
     fn click_rect_task(name: &str, action: Action, next: Option<Vec<&str>>) -> TaskDef {
         TaskDef {
             name: name.into(),
             state: name.into(),
             algorithm: anaden_vision::Algorithm::Ccoeff,
-            template: write_template_persisted(&gradient_needle(40, 40)),
-            roi: None,
+            template: crop_needle_template(),
+            roi: Some(MATCH_ROI),
             threshold: 0.9,
             base: None,
             action: Some(action),
@@ -1260,25 +1482,33 @@ mod tests {
         }
     }
 
-    // ---- (1) rescale 純関数 ----
+    // ---- (1) rescale 純関数（crop info ベース） ----
+    //
+    // rescale_command は normalize後1280空間 → 実機生画像（黒帯込み）への逆写像。
+    // CropInfo でコンテンツ領域（黒帯除去後描画領域）の元画像空間における位置・寸法を受け取り:
+    //   x_real = x_1280 * crop_w / 1280 + offset_x
+    //   y_real = y_1280 * crop_h / 720  + offset_y
+    // 黒帯なし（offset=0, size=device）のとき従来の ScreenScaler::from_base と同等。
 
     #[test]
-    fn rescale_tap_pixel7a_2400_both_axes_uniform() {
+    fn rescale_tap_no_bars_equivalent_to_from_base_2400() {
+        // 黒帯なし: device_width=2400, content=2400x1080(フル)。CropInfo::full(2400,1080)。
+        // scale_factor = 2400/1280 = 1.875。640*1.875=1200, 360*1.875=675。
         let scaler = ScreenScaler::new();
-        // device_width=2400: scale_factor=1280/2400, 1/factor=1.875
-        // 640*1.875=1200, 360*1.875=675
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 2400);
+        let info = CropInfo::full(2400, 1080);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 2400, &info);
         assert_eq!(out, InputCommand::Tap { x: 1200, y: 675 });
     }
 
     #[test]
-    fn rescale_swipe_pixel7a_2400_both_axes() {
+    fn rescale_swipe_no_bars_equivalent_to_from_base_2400() {
         let scaler = ScreenScaler::new();
+        let info = CropInfo::full(2400, 1080);
         let cmd = InputCommand::Swipe {
             from: (640, 360),
             to: (0, 0),
         };
-        let out = rescale_command(cmd, &scaler, 2400);
+        let out = rescale_command(cmd, &scaler, 2400, &info);
         assert_eq!(
             out,
             InputCommand::Swipe {
@@ -1289,19 +1519,65 @@ mod tests {
     }
 
     #[test]
-    fn rescale_identity_when_device_width_equals_base() {
+    fn rescale_identity_when_device_width_equals_base_no_bars() {
+        // device_width=1280, content=1280x720(フル)。scale=1.0 → 恒等。
         let scaler = ScreenScaler::new();
-        // device_width=1280 (base と同値): scale_factor=1.0, from_base は恒等
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 1280);
+        let info = CropInfo::full(1280, 720);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 1280, &info);
         assert_eq!(out, InputCommand::Tap { x: 640, y: 360 });
     }
 
     #[test]
-    fn rescale_downscale_small_device_width() {
+    fn rescale_downscale_small_device_width_no_bars() {
+        // device_width=640, content=640x360(フル)。scale=0.5。640*0.5=320, 360*0.5=180。
         let scaler = ScreenScaler::new();
-        // device_width=640: scale_factor=2.0, from_base は 1/2 へ縮小
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 640);
+        let info = CropInfo::full(640, 360);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 640, &info);
         assert_eq!(out, InputCommand::Tap { x: 320, y: 180 });
+    }
+
+    #[test]
+    fn rescale_tap_with_letterbox_offset_shifts_coordinates() {
+        // 黒帯入り（M1 検証）: 実機生画像 1918x1048, コンテンツ領域は offset=(120,80) size=(1678,888)。
+        // normalize は幅基準（アスペクト比保存）なので、コンテンツ内では両軸とも crop_w/1280 比。
+        // s = 1678/1280 = 1.3109375。
+        // 1280空間 (640,360) → (640*s, 360*s) = (839.0, 471.94→472) → オフセット加算 (959, 552)。
+        // 従来の from_base(1918) なら (640*1918/1280, 360*1918/1280)=(959,539) となり
+        // Y がズレていた（黒帯を無視して全幅で均一スケールするため）。新実装で Y がコンテンツ
+        // 領域基準（オフセット反映）で正しく 552 になることを検証。
+        let scaler = ScreenScaler::new();
+        let info = CropInfo {
+            offset_x: 120,
+            offset_y: 80,
+            width: 1678,
+            height: 888,
+        };
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 1918, &info);
+        assert_eq!(out, InputCommand::Tap { x: 959, y: 552 });
+    }
+
+    #[test]
+    fn rescale_swipe_with_letterbox_offset() {
+        let scaler = ScreenScaler::new();
+        let info = CropInfo {
+            offset_x: 120,
+            offset_y: 80,
+            width: 1678,
+            height: 888,
+        };
+        // from=(640,360)→(959,552), to=(0,0)→(120,80)（コンテンツ左上=オフセットそのもの）。
+        let cmd = InputCommand::Swipe {
+            from: (640, 360),
+            to: (0, 0),
+        };
+        let out = rescale_command(cmd, &scaler, 1918, &info);
+        assert_eq!(
+            out,
+            InputCommand::Swipe {
+                from: (959, 552),
+                to: (120, 80),
+            }
+        );
     }
 
     // ---- (2) fake Capture/Input ----
@@ -1372,9 +1648,16 @@ mod tests {
 
     #[tokio::test]
     async fn run_once_fires_rescaled_tap_on_click_rect() {
-        // ClickRect roi center は (640,360)（基準座標）。needle を埋めた基準画像を与える。
-        let needle = gradient_needle(40, 40);
-        let screen = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        // ClickRect roi [520,320,240,80] は raw-1258空間。matched_frame() は raw-1258x708（黒帯なし）。
+        // 新スケールモデルでの発火座標導出:
+        //  1. roi を screenshot と同じ空間へ: roi_to_normalized([520,320,240,80],1280,720)
+        //     = [529,325,244,81]。中心 (651,365)。
+        //  2. rescale(crop_info=full(1258,708), device_width=2400): s=1258/1280=0.9828。
+        //     (651*0.9828, 365*0.9828) = (640, 359)。
+        // テストフレーム(raw-1258) と device_width=2400 は不整合だが、CropInfo が full(1258,708)
+        // （フレーム実寸法）なので結果は 1258 周辺になる。raw-1258 実値での厳密検証は
+        // click_rect_fires_at_expected_device_coords_on_raw_1258_roi テスト（C2）で行う。
+        let (screen, _tpl) = matched_frame();
         let frames = frames_of(vec![screen]);
         let fired = new_fired();
 
@@ -1408,23 +1691,22 @@ mod tests {
                 fired: just_fired,
             } => {
                 assert_eq!(next_current.as_deref(), Some("LoadGame"));
-                // 基準 (640,360) → 実機 2400 で (1200,675)
-                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1200, y: 675 }));
+                // 新スケールモデル: raw-1258 roi → 1280空間 → rescale(crop_info=full(1258,708))。
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 640, y: 359 }));
             }
             other => panic!("expected Fired, got {other:?}"),
         }
         // fake input 側にも同じ座標が記録されている
         assert_eq!(
             fired.lock().expect("fired lock").as_slice(),
-            &[InputCommand::Tap { x: 1200, y: 675 }]
+            &[InputCommand::Tap { x: 640, y: 359 }]
         );
         assert_eq!(driver.current(), "LoadGame");
     }
 
     #[tokio::test]
     async fn run_once_stop_yields_nofire_none() {
-        let needle = gradient_needle(40, 40);
-        let screen = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (screen, _tpl) = matched_frame();
         let frames = frames_of(vec![screen]);
         let fired = new_fired();
 
@@ -1520,10 +1802,10 @@ mod tests {
     // ---- (4) run_loop 検証 ----
 
     fn needle_screen(seed: u32) -> DynamicImage {
-        // seed でわずかに変化させた needle を埋めた画面。
-        let needle = gradient_needle(40, 40);
+        // matched-frame（raw-1258 特徴画像）。seed は歴史的互換用で未使用（以前も未使用）。
         let _ = seed;
-        luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128))
+        let (screen, _tpl) = matched_frame();
+        screen
     }
 
     #[tokio::test]
@@ -1576,9 +1858,9 @@ mod tests {
         let outcome = driver.run_loop(Duration::ZERO, 10).await;
         assert_eq!(outcome.reason, LoopStopReason::TerminalTask);
         assert_eq!(outcome.fired_commands.len(), 3);
-        // 全発火座標は rescale 済み (1200,675)
+        // 全発火座標は新スケールモデルで rescale 済み (640,359)
         for c in &outcome.fired_commands {
-            assert_eq!(*c, InputCommand::Tap { x: 1200, y: 675 });
+            assert_eq!(*c, InputCommand::Tap { x: 640, y: 359 });
         }
         assert_eq!(driver.current(), "Terminal");
     }
@@ -1833,8 +2115,7 @@ mod tests {
     async fn verify_success_when_template_disappears() {
         // 発火前フレーム: needle 埋込(マッチ→ClickRect 発火)。
         // 発火後フレーム: 背景のみ(needle 消失) → 検証成功 → Fired。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
         // run_once が1枚目消費、verify_action_effect が2枚目消費。
         let frames = frames_of(vec![matched, blank]);
@@ -1870,7 +2151,7 @@ mod tests {
                 fired: just_fired,
             } => {
                 assert_eq!(next_current.as_deref(), Some("LoadGame"));
-                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1200, y: 675 }));
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 640, y: 359 }));
             }
             other => panic!("expected Fired (verified), got {other:?}"),
         }
@@ -1878,7 +2159,7 @@ mod tests {
         assert_eq!(driver.current(), "LoadGame");
         assert_eq!(
             fired.lock().expect("fired lock").as_slice(),
-            &[InputCommand::Tap { x: 1200, y: 675 }]
+            &[InputCommand::Tap { x: 640, y: 359 }]
         );
     }
 
@@ -1886,8 +2167,7 @@ mod tests {
     async fn verify_fails_when_template_persists() {
         // 発火前フレームも発火後フレームも needle 埋込 → 発火後もテンプレ残存 →
         // FiredUnverified。close_btn 誤キャプチャ等の「偽成功」を防ぐ経路。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let frames = frames_of(vec![matched.clone(), matched]);
         let fired = new_fired();
 
@@ -1921,7 +2201,7 @@ mod tests {
                 next_current,
             } => {
                 // 発火自体は起きた(記録用)。
-                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1200, y: 675 }));
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 640, y: 359 }));
                 // next_current は tick 結果を伝搬(ログ用)。
                 assert_eq!(next_current.as_deref(), Some("LoadGame"));
             }
@@ -1936,15 +2216,14 @@ mod tests {
         // 発火は起きたので fake input に記録される。
         assert_eq!(
             fired.lock().expect("fired lock").as_slice(),
-            &[InputCommand::Tap { x: 1200, y: 675 }]
+            &[InputCommand::Tap { x: 640, y: 359 }]
         );
     }
 
     #[tokio::test]
     async fn verify_skipped_on_nofire_and_nomatch() {
         // Stop(NoFire) は発火しないので検証スキップ → run_once と同じ NoFire(None)。
-        let needle = gradient_needle(40, 40);
-        let screen = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (screen, _tpl) = matched_frame();
         let frames = frames_of(vec![screen]);
         let fired = new_fired();
 
@@ -1973,8 +2252,7 @@ mod tests {
     #[tokio::test]
     async fn verify_capture_error_returns_error() {
         // 発火は成功(1枚目 matched)、事後 capture でフレーム枯渇 → Error(verify_capture)。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         // 2枚目無し → verify_action_effect の capture が "no more frames" エラー。
         let frames = frames_of(vec![matched]);
         let fired = new_fired();
@@ -2011,7 +2289,7 @@ mod tests {
         // 発火は起きたので fake input に記録される。
         assert_eq!(
             fired.lock().expect("fired lock").as_slice(),
-            &[InputCommand::Tap { x: 1200, y: 675 }]
+            &[InputCommand::Tap { x: 640, y: 359 }]
         );
     }
 
@@ -2021,8 +2299,7 @@ mod tests {
         // FiredUnverified が NoMatch streak に加算されること。
         // 全フレーム matched(テンプレ残存) → 毎サイクル FiredUnverified → streak 蓄積 →
         // threshold=2 で recovery hook 発火。current は Title に巻き戻り続ける。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         // run_once(1) + verify(1) で1サイクル2枚消費。十分な枚数。
         let many: Vec<DynamicImage> = (0..40).map(|_| matched.clone()).collect();
         let frames = frames_of(many);
@@ -2089,8 +2366,7 @@ mod tests {
         // with_verify を呼ばない(デフォルト) → run_once と同等 → FiredUnverified は出ない。
         // 1枚目 matched で発火、2枚目も matched だが検証しないので普通の Fired。
         // run_loop は next へ進み、LoadGame タスクが無いので NoMatch ループ → MaxIterations。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let many: Vec<DynamicImage> = (0..20).map(|_| matched.clone()).collect();
         let frames = frames_of(many);
         let fired = new_fired();
@@ -2127,8 +2403,7 @@ mod tests {
     #[tokio::test]
     async fn nomatch_streak_resets_on_fired() {
         // threshold=3 未到達で hook 不発。MaxIterations で停止。
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
 
         // 順序: blank, blank, matched, blank, blank, blank, ...(MaxIterations まで)
@@ -3259,8 +3534,7 @@ mod tests {
     /// Reached を返す → GoalReached で停止。
     #[tokio::test]
     async fn uc2_template_match_goal_reaches_goal_reached_when_matching_template_fires() {
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         // Title 発火後 next=LoadGame へ遷移するが、初回の Fired でゴール到達するので
         // 1 枚で十分(到達前の巻き戻り等は無い)。
         let frames = frames_of(vec![matched]);
@@ -3334,8 +3608,7 @@ mod tests {
     /// 対照を確立し、到達テストが「常に到達する偽陽性」にならないようにする。
     #[tokio::test]
     async fn uc2_template_match_goal_does_not_reach_when_task_name_mismatches() {
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let many: Vec<DynamicImage> = (0..20).map(|_| matched.clone()).collect();
         let frames = frames_of(many);
         let fired = new_fired();
@@ -3513,8 +3786,7 @@ mod tests {
     /// 両方を網羅する(template_match conf>=<c> (task=<t>) 形式の JSON 耐性)。
     #[tokio::test]
     async fn uc2_template_match_outcome_reached_goal_survives_json_roundtrip() {
-        let needle = gradient_needle(40, 40);
-        let matched = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
+        let (matched, _tpl) = matched_frame();
         let frames = frames_of(vec![matched]);
         let fired = new_fired();
 
@@ -3582,6 +3854,444 @@ mod tests {
         assert!(
             !back.fired_commands.is_empty(),
             "fired_commands must survive JSON round-trip non-empty"
+        );
+    }
+
+    // ===== ガード1: CancellationToken 対応(Ctrl+C / SIGINT) =====
+    //
+    // PipelineDriver::with_cancel(token) で外部キャンセル口を設定すると、各ループが
+    // (a) サイクル冒頭で is_cancelled() を判定して LoopStopReason::Interrupted で停止、
+    // (b) 末尾の interval 待ちを tokio::select! で cancel 即時抜けする。
+    // with_cancel を呼ばない(デフォルト)ときは cancel=None で従来動作(後方互換)。
+    // main.rs の呼出元シグネチャを変えないビルダーパターンで実装されているため、
+    // 既存の全 run_loop_* テストは無変更で通過する。
+
+    /// cancel 済み token を with_cancel して run_loop を呼ぶと、最初のサイクル冒頭で
+    /// 即座に Interrupted 停止する(1 tick も消費しない)。
+    #[tokio::test]
+    async fn cancel_pre_cancelled_token_stops_immediately_as_interrupted() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        let token = CancellationToken::new();
+        token.cancel();
+        driver = driver.with_cancel(token);
+
+        let outcome = driver.run_loop(Duration::from_secs(60), 100).await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::Interrupted,
+            "pre-cancelled token must stop with Interrupted"
+        );
+        assert_eq!(outcome.terminal, "interrupted");
+        // 冒頭判定で抜けるので 0 tick(発火も無し)。
+        assert_eq!(outcome.iterations, 0);
+        assert!(outcome.fired_commands.is_empty());
+    }
+
+    /// sleep 中に別タスクから cancel すると、select! が即座に抜けて次サイクル冒頭で
+    /// Interrupted 停止する。interval を長め(100ms)にして sleep 区間内で cancel させる。
+    #[tokio::test]
+    async fn cancel_during_interval_sleep_stops_as_interrupted() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        let token = CancellationToken::new();
+        let cancel_token = token.clone();
+        driver = driver.with_cancel(token);
+
+        // 50ms 後に別タスクで cancel(初回サイクルは sleep 100ms 中に入る)。
+        tokio::spawn(async move {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+            cancel_token.cancel();
+        });
+
+        let outcome = driver.run_loop(Duration::from_millis(100), 1000).await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::Interrupted,
+            "cancel during sleep must stop with Interrupted, got {:?}",
+            outcome.reason
+        );
+        // 最低1サイクルは回っている(冒頭判定は最初は false のため)。
+        assert!(
+            outcome.iterations >= 1,
+            "must have run at least one cycle before cancel"
+        );
+    }
+
+    /// with_cancel を呼ばない(デフォルト cancel=None)ときは従来動作。NoMatch 持続で
+    /// MaxIterations になり、Interrupted にはならない(後方互換)。
+    #[tokio::test]
+    async fn cancel_none_default_preserves_max_iterations_behavior() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        // with_cancel を呼ばない = デフォルト cancel = None。
+        let outcome = driver.run_loop(Duration::ZERO, 5).await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "default (no cancel token) must preserve MaxIterations behavior"
+        );
+        assert_ne!(
+            outcome.reason,
+            LoopStopReason::Interrupted,
+            "Interrupted must not fire without a cancel token"
+        );
+        assert_eq!(outcome.iterations, 5);
+    }
+
+    /// run_loop_with_goal でも with_cancel が効く: cancel 済み token で即時 Interrupted。
+    /// (ゴール評価経路でも cancel 判定がループ冒頭に入っていることの回帰保護。)
+    #[tokio::test]
+    async fn cancel_with_goal_path_stops_as_interrupted() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        let token = CancellationToken::new();
+        token.cancel();
+        driver = driver.with_cancel(token);
+
+        let goal = anaden_core::Goal {
+            name: "g".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 100 },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 1000, 0, None, Some(&goal), clock)
+            .await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::Interrupted,
+            "cancel must take precedence on goal path too"
+        );
+        assert_eq!(outcome.iterations, 0);
+    }
+
+    // ===== ガード4: NoMatch/FiredUnverified スナップショット保存 =====
+    //
+    // ANADEN_SNAPSHOT_DIR 設定時に NoMatch 発生で normalized フレームが PNG 保存され、
+    // 未設定時は no-op(ファイルが1つも作られない)ことを検証する。
+    // env 操作はプロセス全体へ伝播するため、set 後に必ず unset して他テストへ
+    // 影響を与えない(並列実行の nextest でも自己完結)。
+
+    /// NoMatch 発生時、ANADEN_SNAPSHOT_DIR 設定ディレクトリへ PNG が保存される。
+    /// run_once を1回呼び(needle 無し画像 → NoMatch)、dir 内に .png が1つ以上できること。
+    #[tokio::test]
+    async fn snapshot_saved_on_no_match_when_dir_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // env 設定。edition 2024 で set_var/remove_var は unsafe。env はプロセス全域へ
+        // 伝播するため、他テストとの並列競合を避けるよう本テストは set→検証→unset を
+        // 自己完結させる(Drop guard で確実に unset)。
+        unsafe {
+            std::env::set_var("ANADEN_SNAPSHOT_DIR", tmp.path());
+        }
+        // RAII: テスト本体が panic しても env を必ず解除する。
+        struct EnvUnset;
+        impl Drop for EnvUnset {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("ANADEN_SNAPSHOT_DIR");
+                }
+            }
+        }
+        let _unset = EnvUnset;
+
+        let screen = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+        let out = driver.run_once().await;
+        assert_eq!(out, StepOutcome::NoMatch);
+
+        // dir 内に PNG が1つ以上保存されていること。
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case("png"))
+                    .unwrap_or(false)
+            })
+            .collect();
+        assert!(
+            !entries.is_empty(),
+            "ANADEN_SNAPSHOT_DIR set + NoMatch must save at least one PNG"
+        );
+        // ファイル名にタスク名 "Title" が含まれること(cause 追跡用)。
+        let has_task = entries.iter().any(|e| {
+            e.file_name()
+                .to_str()
+                .map(|n| n.starts_with("Title_"))
+                .unwrap_or(false)
+        });
+        assert!(has_task, "snapshot filename must start with task name");
+    }
+
+    /// ANADEN_SNAPSHOT_DIR 未設定時は NoMatch でも保存されない(no-op)。
+    #[tokio::test]
+    async fn snapshot_not_saved_when_dir_unset() {
+        // 未設定状態を保証(他テストの set 残りを排除)。
+        unsafe {
+            std::env::remove_var("ANADEN_SNAPSHOT_DIR");
+        }
+
+        let screen = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+        let out = driver.run_once().await;
+        assert_eq!(out, StepOutcome::NoMatch);
+
+        // snapshot_dir() が None → 保存経路に入っていないことの直接検証。
+        assert!(
+            PipelineDriver::<FakeCapture, FakeInput>::snapshot_dir().is_none(),
+            "snapshot_dir must be None when ANADEN_SNAPSHOT_DIR unset"
+        );
+        // カウンタもインクリメントされていない(save_snapshot 早期 return)。
+        assert_eq!(
+            driver.snapshot_counter, 0,
+            "counter must not increment when dir unset"
+        );
+    }
+
+    // ---- (C2) ClickRect 発火テスト: raw-1258 実値化 + 黒帯オフセット検証 ----
+    //
+    // 旧 run_once_fires_rescaled_tap_on_click_rect は ClickRect の roi を「1280基準座標」として
+    // 扱い、raw-1258 実値（TapToStartPc の [900,466,30,30] 等）で検証していなかった（silent 無効化）。
+    // ここでは実 TOML 定義と同じ raw-1258 空間の roi を与え、新スケールモデルで正しい実機座標へ
+    // 変換されることを検証する。さらに黒帯入りフレームで ClickSelf 発火座標に黒帯オフセットが
+    // 反映されることを検証する（M1）。
+
+    /// `matched_frame()` のコンテンツ（raw-1258x708 特徴画像）の周囲に黒帯を加えた画像を返す。
+    /// `bar_x`/`bar_y` は左右/上下の黒帯ピクセル幅。コンテンツは (bar_x, bar_y) に配置。
+    fn matched_frame_with_bars(bar_x: u32, bar_y: u32) -> DynamicImage {
+        let raw = raw_feature();
+        let full_w = FULL_W + 2 * bar_x;
+        let full_h = FULL_H + 2 * bar_y;
+        let mut img = GrayImage::from_pixel(full_w, full_h, Luma([0u8]));
+        for y in 0..FULL_H {
+            for x in 0..FULL_W {
+                let p = *raw.get_pixel(x, y);
+                img.put_pixel(bar_x + x, bar_y + y, p);
+            }
+        }
+        luma_dyn(img)
+    }
+
+    #[tokio::test]
+    async fn click_rect_fires_at_expected_device_coords_on_raw_1258_roi() {
+        // TapToStartPc 相当の ClickRect roi [900,466,30,30]（raw-1258 空間の実 TOML 値）。
+        // フレーム raw-1258x708（黒帯なし）、device_width=1258（フレームと一致）。
+        //
+        // 期待発火座標の導出:
+        //  1. roi → screenshot と同じ空間へ: roi_to_normalized([900,466,30,30],1280,720)
+        //     = [916,474,31,31]（1258→1280 は拡大、高さ 708→720 も拡大）。
+        //     中心 = (916+15, 474+15) = (931, 489)。
+        //  2. rescale(crop_info=full(1258,708), device_width=1258): s=1258/1280=0.9828。
+        //     (931*0.9828, 489*0.9828) = (915, 481)。
+        let (screen, _tpl) = matched_frame();
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let task = TaskDef {
+            name: "TapToStart".into(),
+            state: "TapToStart".into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: crop_needle_template(),
+            roi: Some(MATCH_ROI),
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickRect {
+                roi: ScreenRegion::new(900, 466, 30, 30),
+            }),
+            next: Some(vec!["LoadGamePc".into()]),
+        };
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("TapToStart"),
+            vec![task],
+            1258, // device_width（フレーム raw-1258 と一致）
+            300,
+        );
+
+        let out = driver.run_once().await;
+        match out {
+            StepOutcome::Fired {
+                fired: just_fired, ..
+            } => {
+                // raw-1258 実値 roi が正しい実機座標 (915,481) へ変換されること。
+                assert_eq!(
+                    just_fired,
+                    Some(InputCommand::Tap { x: 915, y: 481 }),
+                    "raw-1258 roi [900,466,30,30] は (915,481) へ変換されるべき"
+                );
+            }
+            other => panic!("expected Fired, got {other:?}"),
+        }
+        assert_eq!(
+            fired.lock().expect("fired lock").as_slice(),
+            &[InputCommand::Tap { x: 915, y: 481 }]
+        );
+    }
+
+    #[tokio::test]
+    async fn click_self_fires_with_letterbox_offset_on_bars() {
+        // M1 検証: 黒帯入りフレームで ClickSelf 発火座標に黒帯オフセットが反映されること。
+        // 黒帯なしフレームでの発火座標と、黒帯入りフレームでの発火座標の差が、
+        // 黒帯オフセット（コンテンツ左上の元画像座標）に一致することを検証する。
+        //
+        // matched_frame() の needle は NEEDLE_ROI=[150,75,12,12]（raw-1258）。黒帯入りでは
+        // コンテンツを (bar_x,bar_y) に配置するため、crop でコンテンツだけ抜けば detect 結果
+        // （matched_region）は黒帯なしと同空間になる。よって InputCommand の1280空間座標は両者で
+        // 同じ。差は rescale 時の crop_info.offset のみから生じる。
+        let bar_x = 100u32;
+        let bar_y = 50u32;
+
+        // 黒帯なし: matched_frame() は raw-1258x708。crop_info=full(1258,708), offset=(0,0)。
+        let (screen_nobar, _tpl) = matched_frame();
+        let frames_nobar = frames_of(vec![screen_nobar]);
+        let fired_nobar = new_fired();
+        let task_nobar = TaskDef {
+            name: "Title".into(),
+            state: "Title".into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: crop_needle_template(),
+            roi: Some(MATCH_ROI),
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickSelf),
+            next: Some(vec!["LoadGame".into()]),
+        };
+        let mut driver_nobar = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_nobar.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired_nobar.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task_nobar],
+            1458, // device_width（黒帯入り全体幅 1258+2*100 と同じ値を使うが、黒帯なしなので影響しない）
+            300,
+        );
+        let out_nobar = driver_nobar.run_once().await;
+        let fired_nobar_cmd = match out_nobar {
+            StepOutcome::Fired { fired: c, .. } => c,
+            other => panic!("expected Fired (no-bar), got {other:?}"),
+        };
+
+        // 黒帯入り: コンテンツ1258x708 を (100,50) に配置 → 全体 1458x808。
+        // crop_to_content が黒帯を除去し CropInfo{offset:(100,50), size:(1258,708)} を返す。
+        let screen_bar = matched_frame_with_bars(bar_x, bar_y);
+        let frames_bar = frames_of(vec![screen_bar]);
+        let fired_bar = new_fired();
+        let task_bar = TaskDef {
+            name: "Title".into(),
+            state: "Title".into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: crop_needle_template(),
+            roi: Some(MATCH_ROI),
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickSelf),
+            next: Some(vec!["LoadGame".into()]),
+        };
+        let mut driver_bar = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_bar.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired_bar.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task_bar],
+            1458, // device_width（黒帯入り全体幅と一致）
+            300,
+        );
+        let out_bar = driver_bar.run_once().await;
+        let fired_bar_cmd = match out_bar {
+            StepOutcome::Fired { fired: c, .. } => c,
+            other => panic!("expected Fired (with-bar), got {other:?}"),
+        };
+
+        // 両者とも発火していること。
+        let nobar = fired_nobar_cmd.expect("no-bar must fire");
+        let bar = fired_bar_cmd.expect("with-bar must fire");
+        let (nx, ny) = match nobar {
+            InputCommand::Tap { x, y } => (x, y),
+            other => panic!("expected Tap (no-bar), got {other:?}"),
+        };
+        let (bx, by) = match bar {
+            InputCommand::Tap { x, y } => (x, y),
+            other => panic!("expected Tap (with-bar), got {other:?}"),
+        };
+        // 黒帯入りフレームではコンテンツが (bar_x,bar_y) に配置されるため、rescale 時の
+        // CropInfo.offset が (bar_x,bar_y) となり発火座標へ平行移動分が加算される。
+        // matched_region 自体は detect の丸めで両者で数px 異なりうるため、差が「オフセット方向に
+        // 有意（bar の半分以上）」であることを検証する（厳密なオフセット一致は純関数
+        // rescale_tap_with_letterbox_offset_shifts_coordinates で検証済み）。
+        let dx = bx as i64 - nx as i64;
+        let dy = by as i64 - ny as i64;
+        assert!(
+            dx >= (bar_x as i64) / 2,
+            "黒帯入りX座標({bx}) - 黒帯なし({nx}) = {dx} は bar_x={bar_x} の半分以上であるべき \
+            （黒帯オフセットが rescale に反映された証拠）"
+        );
+        assert!(
+            dy >= (bar_y as i64) / 2,
+            "黒帯入りY座標({by}) - 黒帯なし({ny}) = {dy} は bar_y={bar_y} の半分以上であるべき \
+            （黒帯オフセットが rescale に反映された証拠）"
+        );
+        // fake input にも反映されている。
+        assert_eq!(
+            fired_bar.lock().expect("fired lock").as_slice(),
+            &[InputCommand::Tap { x: bx, y: by }]
         );
     }
 }
