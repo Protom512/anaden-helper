@@ -3527,8 +3527,7 @@ mod tests {
         };
         let desc = goal_descriptor(&nested);
         assert_eq!(
-            desc,
-            "all[2](loop_count=5, any[2](timeout=10, loop_count=9))",
+            desc, "all[2](loop_count=5, any[2](timeout=10, loop_count=9))",
             "nested composition must recurse into child descriptors"
         );
     }

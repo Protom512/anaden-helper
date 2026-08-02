@@ -3649,8 +3649,7 @@ mod tests {
             "#,
         );
 
-        let err =
-            load_pipeline_manifest(tmp.path()).expect_err("unknown field on All must reject");
+        let err = load_pipeline_manifest(tmp.path()).expect_err("unknown field on All must reject");
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
