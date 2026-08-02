@@ -358,27 +358,18 @@ mod tests {
 
     // ---- 実画像検証（capture_probe_live.png = 1918x1048, 黒帯入り実測） ----
     //
-    // このテストはリポジトリルートの capture_probe_live.png が存在する場合のみ実行。
-    // CI 環境等でファイル不在なら skip（ファイル有無で分岐、panic しない）。
+    // ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
+    // `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
+    // プローブ不在時は absence-skip せず image::open が fail-loud で panic する
+    // (CI/fresh-clone が missing-probe を偽 green で報告しないための不変量)。
 
     #[test]
+    #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn crop_real_probe_image_removes_letterbox() {
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../capture_probe_live.png");
-        if !path.exists() {
-            eprintln!(
-                "skip: capture_probe_live.png not found at {}",
-                path.display()
-            );
-            return;
-        }
-        let img = match image::open(&path) {
-            Ok(i) => i,
-            Err(e) => {
-                eprintln!("skip: cannot open capture_probe_live.png: {e}");
-                return;
-            }
-        };
+        let img = image::open(&path)
+            .unwrap_or_else(|e| panic!("open capture_probe_live.png at {}: {e}", path.display()));
         let (w, h) = img.dimensions();
         assert_eq!((w, h), (1918, 1048), "実測キャプチャは 1918x1048");
 
@@ -487,25 +478,17 @@ mod tests {
         assert_eq!(info, CropInfo::default());
     }
 
+    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
+    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
+    /// プローブ不在時は absence-skip せず image::open が fail-loud で panic する。
     #[test]
+    #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn crop_info_real_probe_image_has_zero_or_nonzero_offset() {
         // 実画像（1918x1048 黒帯入り）。CropInfo が元画像空間の妥当な矩形を指すことだけ検証。
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../capture_probe_live.png");
-        if !path.exists() {
-            eprintln!(
-                "skip: capture_probe_live.png not found at {}",
-                path.display()
-            );
-            return;
-        }
-        let img = match image::open(&path) {
-            Ok(i) => i,
-            Err(e) => {
-                eprintln!("skip: cannot open capture_probe_live.png: {e}");
-                return;
-            }
-        };
+        let img = image::open(&path)
+            .unwrap_or_else(|e| panic!("open capture_probe_live.png at {}: {e}", path.display()));
         let (w, h) = img.dimensions();
         let (out, info) = crop_to_content_with_info(&img);
         // コンテンツ領域は元画像内に収まる。

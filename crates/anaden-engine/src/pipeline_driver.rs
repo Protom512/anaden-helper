@@ -15,8 +15,8 @@
 //! ClickSelf は matched_region(既に1280空間) をそのまま、ClickRect/Swipe は raw-1258 空間の
 //! roi/from/to を1280空間へ変換してから載せる（[`crate::pipeline_runner::action_to_command`]）。
 //! rescale は黒帯込み実機画像への逆写像として `x_real = x_1280 * crop_w / 1280 + offset_x`、
-//! `y_real = y_1280 * crop_h / 720 + offset_y` で計算する。黒帯なし（offset=0, width=device_width）
-//! のとき従来の [`ScreenScaler::from_base`] と同等になる。
+//! `y_real = y_1280 * crop_w / 1280 + offset_y` で計算する（両軸とも幅比 `crop_w/1280`）。
+//! 黒帯なし（offset=0, width=device_width）のとき従来の [`ScreenScaler::from_base`] と同等になる。
 
 use std::future::Future;
 use std::path::PathBuf;
