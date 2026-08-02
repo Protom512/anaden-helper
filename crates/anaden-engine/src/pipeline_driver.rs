@@ -806,10 +806,24 @@ pub fn format_progress_report(outcome: &LoopOutcome) -> String {
 /// - `LoopCount { target }` → `loop_count=<target>`
 /// - `TemplateMatch { task, confidence }` → `template_match conf>=<confidence> (task=<task>)`
 /// - `Timeout { secs }` → `timeout=<secs>`
+/// - `All { conditions }` → `all[N](<c0>, <c1>, ...)`（子記述子をカンマ区切りで集約）
+/// - `Any { conditions }` → `any[N](<c0>, <c1>, ...)`（同上）
+///
+/// `All`/`Any` は再帰的に展開し、ネストした合成も括弧対応の取れた単一文字列になる。
+/// この文字列は `reached_goal` として JSON round-trip する既存契約を維持する
+/// （`progress_report` が JSON serialize される際の単一文字列フィールド）。
 ///
 /// I/O・時間・乱数に依存しない。`pub(crate)` でテストからも参照可能。
 fn goal_descriptor(goal: &anaden_core::Goal) -> String {
-    match &goal.stop {
+    stop_condition_descriptor(&goal.stop)
+}
+
+/// [`StopCondition`] 単体から記述子を導出する再帰的ヘルパー。
+///
+/// `goal_descriptor` から分離したのは、`All`/`Any` の子要素が `StopCondition`
+/// （`Goal` ではない）だから。子を再帰的に展開するために本関数が必要。
+fn stop_condition_descriptor(stop: &anaden_core::StopCondition) -> String {
+    match stop {
         anaden_core::StopCondition::LoopCount { target } => {
             format!("loop_count={target}")
         }
@@ -817,6 +831,22 @@ fn goal_descriptor(goal: &anaden_core::Goal) -> String {
             format!("template_match conf>={confidence} (task={task})")
         }
         anaden_core::StopCondition::Timeout { secs } => format!("timeout={secs}"),
+        anaden_core::StopCondition::All { conditions } => {
+            let inner = conditions
+                .iter()
+                .map(stop_condition_descriptor)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("all[{}]({inner})", conditions.len())
+        }
+        anaden_core::StopCondition::Any { conditions } => {
+            let inner = conditions
+                .iter()
+                .map(stop_condition_descriptor)
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("any[{}]({inner})", conditions.len())
+        }
     }
 }
 
@@ -3384,6 +3414,7 @@ mod tests {
 
     /// 記述子生成器が全 StopCondition バリアントをカバーし、
     /// 既存 fixtures(`loop_count=7`, `template_match conf>=0.85`)の形式と一致する。
+    /// Issue #50: All/Any 合成バリアントもカバー（子記述子の集約）。
     #[test]
     fn goal_descriptor_covers_all_variants() {
         let lc = anaden_core::Goal {
@@ -3406,6 +3437,100 @@ mod tests {
             stop: anaden_core::StopCondition::Timeout { secs: 30 },
         };
         assert_eq!(goal_descriptor(&to), "timeout=30");
+
+        // Issue #50: All 合成（子記述子をカンマ区切りで集約、先頭に all[N] 接頭辞）
+        let all = anaden_core::Goal {
+            name: "n".into(),
+            stop: anaden_core::StopCondition::All {
+                conditions: vec![
+                    anaden_core::StopCondition::LoopCount { target: 7 },
+                    anaden_core::StopCondition::Timeout { secs: 30 },
+                ],
+            },
+        };
+        assert_eq!(
+            goal_descriptor(&all),
+            "all[2](loop_count=7, timeout=30)",
+            "All descriptor must aggregate child descriptors with count prefix"
+        );
+
+        // Issue #50: Any 合成
+        let any = anaden_core::Goal {
+            name: "n".into(),
+            stop: anaden_core::StopCondition::Any {
+                conditions: vec![
+                    anaden_core::StopCondition::TemplateMatch {
+                        task: "X".into(),
+                        confidence: 0.85,
+                    },
+                    anaden_core::StopCondition::LoopCount { target: 7 },
+                ],
+            },
+        };
+        assert_eq!(
+            goal_descriptor(&any),
+            "any[2](template_match conf>=0.85 (task=X), loop_count=7)",
+            "Any descriptor must aggregate child descriptors with count prefix"
+        );
+    }
+
+    /// Issue #50: All/Any 記述子の子要素数が接頭辞 `all[N]`/`any[N]` に正しく反映される。
+    #[test]
+    fn goal_descriptor_composition_count_reflects_children() {
+        let single = anaden_core::Goal {
+            name: "n".into(),
+            stop: anaden_core::StopCondition::All {
+                conditions: vec![anaden_core::StopCondition::LoopCount { target: 1 }],
+            },
+        };
+        let desc = goal_descriptor(&single);
+        assert!(
+            desc.starts_with("all[1]("),
+            "single-child All must report count=1, got: {desc}"
+        );
+
+        let triple = anaden_core::Goal {
+            name: "n".into(),
+            stop: anaden_core::StopCondition::Any {
+                conditions: vec![
+                    anaden_core::StopCondition::LoopCount { target: 1 },
+                    anaden_core::StopCondition::LoopCount { target: 2 },
+                    anaden_core::StopCondition::LoopCount { target: 3 },
+                ],
+            },
+        };
+        let desc = goal_descriptor(&triple);
+        assert!(
+            desc.starts_with("any[3]("),
+            "triple-child Any must report count=3, got: {desc}"
+        );
+    }
+
+    /// Issue #50: ネストした合成（All の子に Any を含む）も記述子が再帰的に展開される。
+    /// descriptor が reached_goal 文字列として JSON round-trip する既存契約を維持するため、
+    /// 文字列は人間可読かつ括弧対応が取れる必要がある。
+    #[test]
+    fn goal_descriptor_nested_composition_recurses() {
+        let nested = anaden_core::Goal {
+            name: "n".into(),
+            stop: anaden_core::StopCondition::All {
+                conditions: vec![
+                    anaden_core::StopCondition::LoopCount { target: 5 },
+                    anaden_core::StopCondition::Any {
+                        conditions: vec![
+                            anaden_core::StopCondition::Timeout { secs: 10 },
+                            anaden_core::StopCondition::LoopCount { target: 9 },
+                        ],
+                    },
+                ],
+            },
+        };
+        let desc = goal_descriptor(&nested);
+        assert_eq!(
+            desc,
+            "all[2](loop_count=5, any[2](timeout=10, loop_count=9))",
+            "nested composition must recurse into child descriptors"
+        );
     }
 
     // ===== T-wire-match-info: UC-2 E2E (TemplateMatch ゴール到達) =====

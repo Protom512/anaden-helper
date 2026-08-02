@@ -14,10 +14,20 @@
 //! これは UC-1 の `loop_count=50` を「パイプラインを50周したら停止」という
 //! 時間駆動の意味に固定し、認識成功率に依存しない終端保証を与える。
 //!
+//! ## 複数ゴールの AND/OR 合成
+//!
+//! [`StopCondition::All`] / [`StopCondition::Any`] で複数条件を合成できる:
+//! - `All`: 全ての子条件が `Reached` になったら `Reached`。1つでも `Failed` なら `Failed`。
+//! - `Any`: **`Failed` 優先（安全弁）**。子に `Failed` が1つでもあれば `Failed`
+//!   （異常を正常で上書きしない）。`Failed` がなければ、1つでも `Reached` があれば
+//!   `Reached`。全て `NotYet` なら `NotYet`。評価順序に依存しない。
+//!
+//! 合成は [`evaluate`] 内で再帰的に解決するため、上位層（`pipeline_driver`）の
+//! `run_loop_with_goal` 本体ロジックは変更不要。
+//!
 //! ## 非スコープ
 //!
-//! 複数ゴールの AND/OR 合成、自動リスタート、動的ゴール変更は扱わない。
-//! 1つの [`Goal`] は単一バリアントの [`StopCondition`] のみを持つ。
+//! 自動リスタート、動的ゴール変更は扱わない。
 
 use serde::{Deserialize, Serialize};
 
@@ -29,6 +39,7 @@ use crate::ScreenRegion;
 /// - `LoopCount`: UC-1（指定回数の反復で停止）
 /// - `TemplateMatch`: UC-2（テンプレートマッチで停止）
 /// - `Timeout`: UC-3（指定秒数経過で停止）
+/// - `All` / `Any`: 複数条件の AND/OR 合成（Issue #50）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum StopCondition {
@@ -53,6 +64,19 @@ pub enum StopCondition {
         /// タイムアウトまでの秒数。1以上。
         secs: u64,
     },
+    /// 全ての子条件が `Reached` になったら `Reached`（AND 合成）。
+    /// 1つでも `Failed` があれば `Failed`。空リストは `validate` で拒否。
+    All {
+        /// 合成する子停止条件群。1以上（空は `validate` で拒否）。
+        conditions: Vec<StopCondition>,
+    },
+    /// いずれかの子条件が `Reached` になったら `Reached`（OR 合成）。
+    /// `Failed` と `Reached` が混在する場合は `Reached` を優先（到達可能性優先）。
+    /// 空リストは `validate` で拒否。
+    Any {
+        /// 合成する子停止条件群。1以上（空は `validate` で拒否）。
+        conditions: Vec<StopCondition>,
+    },
 }
 
 /// ゴール検証エラー。
@@ -69,6 +93,12 @@ pub enum GoalError {
     InvalidConfidence {
         /// 入力された信頼度。
         value: f32,
+    },
+    /// `All` / `Any` の `conditions` が空だった。
+    #[error("composition variant `{variant}` requires at least 1 condition")]
+    EmptyComposition {
+        /// 空だったバリアント名（`"All"` / `"Any"`）。
+        variant: &'static str,
     },
 }
 
@@ -98,6 +128,24 @@ impl StopCondition {
             Self::Timeout { secs } => {
                 if *secs == 0 {
                     return Err(GoalError::NonPositive { field: "secs" });
+                }
+                Ok(())
+            }
+            Self::All { conditions } => {
+                if conditions.is_empty() {
+                    return Err(GoalError::EmptyComposition { variant: "All" });
+                }
+                for c in conditions {
+                    c.validate()?;
+                }
+                Ok(())
+            }
+            Self::Any { conditions } => {
+                if conditions.is_empty() {
+                    return Err(GoalError::EmptyComposition { variant: "Any" });
+                }
+                for c in conditions {
+                    c.validate()?;
                 }
                 Ok(())
             }
@@ -239,7 +287,88 @@ pub fn evaluate(goal: &Goal, ctx: &GoalStatusContext, elapsed_secs: u64) -> Goal
                 GoalStatus::NotYet
             }
         }
+        StopCondition::All { conditions } => {
+            let mut failed: Option<GoalReport> = None;
+            for c in conditions {
+                let child = evaluate_child(c, goal, ctx, elapsed_secs);
+                match child {
+                    GoalStatus::NotYet => return GoalStatus::NotYet,
+                    GoalStatus::Failed(report) => {
+                        failed = Some(report);
+                        break;
+                    }
+                    GoalStatus::Reached(_) => { /* 続行: 全て Reached が必要 */ }
+                }
+            }
+            match failed {
+                Some(report) => GoalStatus::Failed(GoalReport {
+                    goal: goal.name.clone(),
+                    iterations: ctx.iterations,
+                    reason: format!("All: child failed ({})", report.reason),
+                    last_match: ctx.last_match.clone(),
+                }),
+                None => GoalStatus::Reached(GoalReport {
+                    goal: goal.name.clone(),
+                    iterations: ctx.iterations,
+                    reason: "All: all children reached".to_string(),
+                    last_match: ctx.last_match.clone(),
+                }),
+            }
+        }
+        StopCondition::Any { conditions } => {
+            // Failed 優先（安全弁）: 子に `Failed` が1つでもあれば `Failed` を返す。
+            // 順序非依存で全子を評価し、`Failed` を `Reached` より優先する
+            // （異常を正常で上書きしない）。`docs/goal-manifest.md` の exit code 分岐
+            // （`EXIT_run_TIMEOUT = 2`）に直結する意味論。
+            let mut has_reached = false;
+            let mut first_failure: Option<GoalReport> = None;
+            for c in conditions {
+                match evaluate_child(c, goal, ctx, elapsed_secs) {
+                    GoalStatus::Failed(report) => {
+                        if first_failure.is_none() {
+                            first_failure = Some(report);
+                        }
+                    }
+                    GoalStatus::Reached(_) => {
+                        has_reached = true;
+                    }
+                    GoalStatus::NotYet => {}
+                }
+            }
+            match first_failure {
+                Some(report) => GoalStatus::Failed(GoalReport {
+                    goal: goal.name.clone(),
+                    iterations: ctx.iterations,
+                    reason: format!("Any: child failed ({})", report.reason),
+                    last_match: ctx.last_match.clone(),
+                }),
+                None if has_reached => GoalStatus::Reached(GoalReport {
+                    goal: goal.name.clone(),
+                    iterations: ctx.iterations,
+                    reason: "Any: a child reached".to_string(),
+                    last_match: ctx.last_match.clone(),
+                }),
+                None => GoalStatus::NotYet,
+            }
+        }
     }
+}
+
+/// 子停止条件を評価するためのヘルパー。
+///
+/// 親ゴール名（`Goal.name`）を継承した一時 [`Goal`] を構築して
+/// [`evaluate`] に委譲する。子の [`GoalReport::goal`] は親名で上書きされる。
+fn evaluate_child(
+    cond: &StopCondition,
+    parent: &Goal,
+    ctx: &GoalStatusContext,
+    elapsed_secs: u64,
+) -> GoalStatus {
+    let child_goal = Goal {
+        name: parent.name.clone(),
+        stop: cond.clone(),
+    };
+    evaluate(&child_goal, ctx, elapsed_secs)
 }
 
 #[cfg(test)]
@@ -657,5 +786,413 @@ mod tests {
             report.last_match,
             Some(("boss_half".to_string(), 0.71, region()))
         );
+    }
+
+    // ===== validate: composition (All / Any) =====
+
+    #[test]
+    fn validate_all_with_valid_children_ok() {
+        let s = StopCondition::All {
+            conditions: vec![
+                StopCondition::LoopCount { target: 1 },
+                StopCondition::Timeout { secs: 1 },
+            ],
+        };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_any_with_valid_children_ok() {
+        let s = StopCondition::Any {
+            conditions: vec![StopCondition::LoopCount { target: 1 }],
+        };
+        assert!(s.validate().is_ok());
+    }
+
+    #[test]
+    fn validate_all_empty_conditions_rejected() {
+        let s = StopCondition::All { conditions: vec![] };
+        let err = s.validate().unwrap_err();
+        assert_eq!(err, GoalError::EmptyComposition { variant: "All" });
+    }
+
+    #[test]
+    fn validate_any_empty_conditions_rejected() {
+        let s = StopCondition::Any { conditions: vec![] };
+        let err = s.validate().unwrap_err();
+        assert_eq!(err, GoalError::EmptyComposition { variant: "Any" });
+    }
+
+    #[test]
+    fn validate_all_recurses_into_invalid_child() {
+        let s = StopCondition::All {
+            conditions: vec![
+                StopCondition::LoopCount { target: 1 },
+                StopCondition::LoopCount { target: 0 },
+            ],
+        };
+        let err = s.validate().unwrap_err();
+        assert_eq!(err, GoalError::NonPositive { field: "target" });
+    }
+
+    #[test]
+    fn validate_any_recurses_into_invalid_child() {
+        let s = StopCondition::Any {
+            conditions: vec![StopCondition::Timeout { secs: 0 }],
+        };
+        let err = s.validate().unwrap_err();
+        assert_eq!(err, GoalError::NonPositive { field: "secs" });
+    }
+
+    #[test]
+    fn validate_all_deeply_nested_recurses() {
+        // All(LoopCount(1), Any(LoopCount(0)))
+        let inner_bad = StopCondition::Any {
+            conditions: vec![StopCondition::LoopCount { target: 0 }],
+        };
+        let s = StopCondition::All {
+            conditions: vec![StopCondition::LoopCount { target: 1 }, inner_bad],
+        };
+        assert!(matches!(
+            s.validate().unwrap_err(),
+            GoalError::NonPositive { field: "target" }
+        ));
+    }
+
+    #[test]
+    fn validate_all_with_invalid_confidence_child_recurses() {
+        let s = StopCondition::All {
+            conditions: vec![StopCondition::TemplateMatch {
+                task: "t".to_string(),
+                confidence: 1.5,
+            }],
+        };
+        assert!(matches!(
+            s.validate().unwrap_err(),
+            GoalError::InvalidConfidence { .. }
+        ));
+    }
+
+    #[test]
+    fn goal_validate_recurses_into_composition() {
+        let goal = Goal {
+            name: "g".to_string(),
+            stop: StopCondition::Any {
+                conditions: vec![StopCondition::LoopCount { target: 0 }],
+            },
+        };
+        assert!(goal.validate().is_err());
+    }
+
+    #[test]
+    fn goal_error_empty_composition_display_is_nonempty() {
+        let err = GoalError::EmptyComposition { variant: "All" };
+        let msg = format!("{err}");
+        assert!(!msg.is_empty());
+        assert!(msg.contains("All"));
+    }
+
+    // ===== serde: composition round-trip =====
+
+    #[test]
+    fn deserialize_all_inline_table() {
+        let toml = r#"
+        name = "combo"
+        [stop.All]
+        conditions = [
+          { LoopCount = { target = 50 } },
+          { Timeout = { secs = 3600 } },
+        ]
+        "#;
+        let goal: Goal = toml::from_str(toml).unwrap();
+        match goal.stop {
+            StopCondition::All { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert_eq!(conditions[0], StopCondition::LoopCount { target: 50 });
+                assert_eq!(conditions[1], StopCondition::Timeout { secs: 3600 });
+            }
+            other => panic!("expected All, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_any_inline_table() {
+        let toml = r#"
+        name = "either"
+        [stop.Any]
+        conditions = [{ Timeout = { secs = 60 } }]
+        "#;
+        let goal: Goal = toml::from_str(toml).unwrap();
+        match goal.stop {
+            StopCondition::Any { conditions } => {
+                assert_eq!(conditions.len(), 1);
+                assert_eq!(conditions[0], StopCondition::Timeout { secs: 60 });
+            }
+            other => panic!("expected Any, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_all_unknown_field_rejected() {
+        let toml = r#"
+        name = "g"
+        [stop.All]
+        bogus = 1
+        conditions = []
+        "#;
+        assert!(toml::from_str::<Goal>(toml).is_err());
+    }
+
+    #[test]
+    fn deserialize_all_nested_subtable() {
+        // サブテーブル + [[stop.All.conditions]] 形式の round-trip
+        let toml = r#"
+        name = "nested"
+        [[stop.All.conditions]]
+        LoopCount = { target = 5 }
+        [[stop.All.conditions]]
+        Timeout = { secs = 10 }
+        "#;
+        let goal: Goal = toml::from_str(toml).unwrap();
+        match goal.stop {
+            StopCondition::All { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert_eq!(conditions[0], StopCondition::LoopCount { target: 5 });
+                assert_eq!(conditions[1], StopCondition::Timeout { secs: 10 });
+            }
+            other => panic!("expected All, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn deserialize_any_nested_subtable() {
+        let toml = r#"
+        name = "any_nested"
+        [[stop.Any.conditions]]
+        TemplateMatch = { task = "boss", confidence = 0.8 }
+        [[stop.Any.conditions]]
+        Timeout = { secs = 100 }
+        "#;
+        let goal: Goal = toml::from_str(toml).unwrap();
+        match goal.stop {
+            StopCondition::Any { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert_eq!(
+                    conditions[0],
+                    StopCondition::TemplateMatch {
+                        task: "boss".to_string(),
+                        confidence: 0.8,
+                    }
+                );
+                assert_eq!(conditions[1], StopCondition::Timeout { secs: 100 });
+            }
+            other => panic!("expected Any, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn serialize_deserialize_all_roundtrip() {
+        // 再帰的にネストした All(LoopCount, Any(TemplateMatch, Timeout)) の
+        // serialize → deserialize 完全往復テスト (R4 最高リスク項目)
+        let goal = Goal {
+            name: "rt".to_string(),
+            stop: StopCondition::All {
+                conditions: vec![
+                    StopCondition::LoopCount { target: 3 },
+                    StopCondition::Any {
+                        conditions: vec![
+                            StopCondition::TemplateMatch {
+                                task: "t".to_string(),
+                                confidence: 0.9,
+                            },
+                            StopCondition::Timeout { secs: 30 },
+                        ],
+                    },
+                ],
+            },
+        };
+        let toml_str = toml::to_string(&goal).unwrap();
+        let back: Goal = toml::from_str(&toml_str).unwrap();
+        assert_eq!(goal, back);
+    }
+
+    // ===== evaluate: All/Any 合成（UC-1 AND / UC-2 OR）=====
+
+    #[test]
+    fn evaluate_all_all_reached_returns_reached() {
+        let goal = Goal {
+            name: "and".to_string(),
+            stop: StopCondition::All {
+                conditions: vec![
+                    StopCondition::LoopCount { target: 1 },
+                    StopCondition::LoopCount { target: 1 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        assert!(matches!(evaluate(&goal, &ctx, 0), GoalStatus::Reached(_)));
+    }
+
+    #[test]
+    fn evaluate_all_one_failed_returns_failed() {
+        // Timeout(60) @elapsed=70 → Failed。LoopCount(1)=Reached。All は1つでも Failed で Failed。
+        let goal = Goal {
+            name: "and".to_string(),
+            stop: StopCondition::All {
+                conditions: vec![
+                    StopCondition::Timeout { secs: 60 },
+                    StopCondition::LoopCount { target: 1 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        match evaluate(&goal, &ctx, 70) {
+            GoalStatus::Failed(report) => assert!(report.reason.contains("child failed")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_all_one_not_yet_returns_not_yet() {
+        // LoopCount(1)=Reached、Timeout(60)=NotYet → All NotYet
+        let goal = Goal {
+            name: "and".to_string(),
+            stop: StopCondition::All {
+                conditions: vec![
+                    StopCondition::LoopCount { target: 1 },
+                    StopCondition::Timeout { secs: 60 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        assert_eq!(evaluate(&goal, &ctx, 0), GoalStatus::NotYet);
+    }
+
+    #[test]
+    fn evaluate_any_one_reached_no_failed_returns_reached() {
+        // LoopCount(1)=Reached、Timeout(60)=NotYet、Failed なし → Any Reached
+        let goal = Goal {
+            name: "or".to_string(),
+            stop: StopCondition::Any {
+                conditions: vec![
+                    StopCondition::LoopCount { target: 1 },
+                    StopCondition::Timeout { secs: 60 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        assert!(matches!(evaluate(&goal, &ctx, 0), GoalStatus::Reached(_)));
+    }
+
+    #[test]
+    fn evaluate_any_failed_and_reached_prefers_failed() {
+        // Failed 優先: LoopCount(1)=Reached、Timeout(60)@70=Failed → Any Failed
+        let goal = Goal {
+            name: "or".to_string(),
+            stop: StopCondition::Any {
+                conditions: vec![
+                    StopCondition::LoopCount { target: 1 },
+                    StopCondition::Timeout { secs: 60 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        assert!(matches!(evaluate(&goal, &ctx, 70), GoalStatus::Failed(_)));
+    }
+
+    #[test]
+    fn evaluate_any_failed_and_reached_prefers_failed_reversed() {
+        // 順序非依存: Timeout(60)@70=Failed、LoopCount(1)=Reached → Any Failed
+        let goal = Goal {
+            name: "or".to_string(),
+            stop: StopCondition::Any {
+                conditions: vec![
+                    StopCondition::Timeout { secs: 60 },
+                    StopCondition::LoopCount { target: 1 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        assert!(matches!(evaluate(&goal, &ctx, 70), GoalStatus::Failed(_)));
+    }
+
+    #[test]
+    fn evaluate_any_all_not_yet_returns_not_yet() {
+        let goal = Goal {
+            name: "or".to_string(),
+            stop: StopCondition::Any {
+                conditions: vec![
+                    StopCondition::LoopCount { target: 5 },
+                    StopCondition::Timeout { secs: 60 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        assert_eq!(evaluate(&goal, &ctx, 0), GoalStatus::NotYet);
+    }
+
+    #[test]
+    fn evaluate_any_failed_and_not_yet_returns_failed() {
+        // Timeout(60)@70=Failed、LoopCount(5)=NotYet → Any Failed
+        let goal = Goal {
+            name: "or".to_string(),
+            stop: StopCondition::Any {
+                conditions: vec![
+                    StopCondition::Timeout { secs: 60 },
+                    StopCondition::LoopCount { target: 5 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        assert!(matches!(evaluate(&goal, &ctx, 70), GoalStatus::Failed(_)));
+    }
+
+    #[test]
+    fn evaluate_nested_all_any_recurses() {
+        // All{LoopCount(1), Any{Timeout(60), LoopCount(1)}}
+        // iterations=1: LoopCount=Reached、Any(Timeout NotYet, LoopCount Reached)=Reached → All Reached
+        let goal = Goal {
+            name: "nested".to_string(),
+            stop: StopCondition::All {
+                conditions: vec![
+                    StopCondition::LoopCount { target: 1 },
+                    StopCondition::Any {
+                        conditions: vec![
+                            StopCondition::Timeout { secs: 60 },
+                            StopCondition::LoopCount { target: 1 },
+                        ],
+                    },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        assert!(matches!(evaluate(&goal, &ctx, 0), GoalStatus::Reached(_)));
     }
 }

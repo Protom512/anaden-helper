@@ -3469,6 +3469,223 @@ mod tests {
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
+    // ---- T5 (Issue #50): StopCondition::All / Any 合成バリアントの manifest round-trip ----
+    //
+    // Goal シリアライズ表記の再帰的ネスト（All/Any が Vec<StopCondition> を持つ）を
+    // manifest ロード層が透過的にパースできること、および deny_unknown_fields が
+    // 合成階層でも効くことを検証する。serde が間接再帰を自動処理するため
+    // load_pipeline_manifest 本体のコード変更は不要（no-change であることの回帰証明）。
+
+    /// UC-1 系 All 合成（inline-table 形式）: 複数の子条件が1つの All にまとめて
+    /// パースされること。R4 で最高リスクとされた「inline table 形式の round-trip」。
+    #[test]
+    fn manifest_parses_all_inline_table_form() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "Farm"
+
+            [[goal]]
+            name = "loop_and_timeout"
+            [goal.stop.All]
+            conditions = [
+              { LoopCount = { target = 50 } },
+              { Timeout = { secs = 3600 } },
+            ]
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        let goal = &manifest.goals[0];
+        assert_eq!(goal.name, "loop_and_timeout");
+        match &goal.stop {
+            anaden_core::StopCondition::All { conditions } => {
+                assert_eq!(conditions.len(), 2, "All must carry 2 children");
+                assert_eq!(
+                    conditions[0],
+                    anaden_core::StopCondition::LoopCount { target: 50 }
+                );
+                assert_eq!(
+                    conditions[1],
+                    anaden_core::StopCondition::Timeout { secs: 3600 }
+                );
+            }
+            other => panic!("expected All, got {other:?}"),
+        }
+    }
+
+    /// UC-2 系 Any 合成（sub-table 形式）: [[goal.stop.Any.conditions]] 配列表記で
+    /// 子条件が順序保持でパースされること。R4 のもう一方の表記（sub-table 形式）。
+    #[test]
+    fn manifest_parses_any_subtable_array_form() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "Farm"
+
+            [[goal]]
+            name = "match_either"
+            [goal.stop.Any]
+            [[goal.stop.Any.conditions]]
+            TemplateMatch = { task = "clear_button", confidence = 0.85 }
+            [[goal.stop.Any.conditions]]
+            TemplateMatch = { task = "boss_dead", confidence = 0.9 }
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        let goal = &manifest.goals[0];
+        match &goal.stop {
+            anaden_core::StopCondition::Any { conditions } => {
+                assert_eq!(conditions.len(), 2, "Any must carry 2 children in order");
+                assert!(matches!(
+                    conditions[0],
+                    anaden_core::StopCondition::TemplateMatch { ref task, .. } if task == "clear_button"
+                ));
+                assert!(matches!(
+                    conditions[1],
+                    anaden_core::StopCondition::TemplateMatch { ref task, .. } if task == "boss_dead"
+                ));
+            }
+            other => panic!("expected Any, got {other:?}"),
+        }
+    }
+
+    /// ネストした合成（All の中に Any）が再帰的にパースされること。
+    /// serde の間接再帰デシリアライズが深い階層でも破綻しないことの証明。
+    #[test]
+    fn manifest_parses_nested_all_containing_any() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "Farm"
+
+            [[goal]]
+            name = "complex"
+            [goal.stop.All]
+            conditions = [
+              { LoopCount = { target = 10 } },
+              { Any = { conditions = [ { Timeout = { secs = 60 } }, { LoopCount = { target = 5 } } ] } },
+            ]
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        let goal = &manifest.goals[0];
+        match &goal.stop {
+            anaden_core::StopCondition::All { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    conditions[0],
+                    anaden_core::StopCondition::LoopCount { target: 10 }
+                ));
+                match &conditions[1] {
+                    anaden_core::StopCondition::Any { conditions: inner } => {
+                        assert_eq!(inner.len(), 2);
+                        assert!(matches!(
+                            inner[0],
+                            anaden_core::StopCondition::Timeout { secs: 60 }
+                        ));
+                        assert!(matches!(
+                            inner[1],
+                            anaden_core::StopCondition::LoopCount { target: 5 }
+                        ));
+                    }
+                    other => panic!("expected nested Any, got {other:?}"),
+                }
+            }
+            other => panic!("expected All, got {other:?}"),
+        }
+    }
+
+    /// deny_unknown_fields が合成階層でも効くこと（R4）。
+    /// All.conditions 配列内の子 StopCondition に未知フィールドがあれば拒否される。
+    #[test]
+    fn manifest_rejects_unknown_field_in_composition_child() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "Farm"
+
+            [[goal]]
+            name = "bad_child"
+            [goal.stop.All]
+            conditions = [
+              { LoopCount = { target = 50 } },
+              { LoopCount = { target = 1, bogus = 2 } },
+            ]
+            "#,
+        );
+
+        let err = load_pipeline_manifest(tmp.path())
+            .expect_err("unknown field inside composition child must reject");
+        assert!(matches!(err, TaskDefError::ParseFailed { .. }));
+    }
+
+    /// deny_unknown_fields: All テーブル直下の未知フィールドも拒否されること。
+    /// （`conditions` 以外のキーを All に置けないことの証明。）
+    #[test]
+    fn manifest_rejects_unknown_field_on_all_variant() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "Farm"
+
+            [[goal]]
+            name = "bad_all"
+            [goal.stop.All]
+            extra_key = true
+            conditions = [{ LoopCount = { target = 1 } }]
+            "#,
+        );
+
+        let err =
+            load_pipeline_manifest(tmp.path()).expect_err("unknown field on All must reject");
+        assert!(matches!(err, TaskDefError::ParseFailed { .. }));
+    }
+
+    /// manifest 経路でも `Goal::validate` 相当の不変量（空 conditions 拒否）が
+    /// serde レベルではなく呼出側で検出可能であることの境界確認。
+    /// ※ load_pipeline_manifest 自体は validate を呼ばない（driver 層の責務）ため、
+    /// ここでは空 conditions でもパース自体は成功し、value が構築されることのみ検証する。
+    /// validate 拒否は anaden-core 側のテストで担保済み。
+    #[test]
+    fn manifest_parses_empty_conditions_without_runtime_panic() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "Farm"
+
+            [[goal]]
+            name = "empty_all"
+            [goal.stop.All]
+            conditions = []
+            "#,
+        );
+
+        // manifest ロード層は構文解析のみ。空 conditions はパース時点では Err ではなく、
+        // 値が構築される（validate は上位層）。パニックしないことの回帰。
+        let parsed = load_pipeline_manifest(tmp.path());
+        let manifest = parsed.expect("empty conditions parses at manifest layer (no panic)");
+        assert_eq!(manifest.goals.len(), 1);
+        assert!(matches!(
+            &manifest.goals[0].stop,
+            anaden_core::StopCondition::All { conditions } if conditions.is_empty()
+        ));
+    }
+
     /// 複数 goal 宣言: [[goal]] 配列として2つ以上の goal が順序保持でパースされること。
     /// （goal.rs モジュールは AND/OR 合成を扱わないが、manifest 層は複数宣言を受容し、
     /// driver 層が最初の1つを評価する等の将来拡張を妨げない。）
