@@ -100,6 +100,14 @@ pub enum GoalError {
         /// 空だったバリアント名（`"All"` / `"Any"`）。
         variant: &'static str,
     },
+    /// `All` / `Any` のネスト深度が上限を超えた（DoS / stack overflow 対策）。
+    #[error("composition depth {depth} exceeds limit {max}")]
+    CompositionTooDeep {
+        /// 検出時の深度。
+        depth: u32,
+        /// 上限値（[`StopCondition::MAX_COMPOSITION_DEPTH`]）。
+        max: u32,
+    },
 }
 
 impl StopCondition {
@@ -111,7 +119,30 @@ impl StopCondition {
     ///
     /// # Errors
     /// 不変量違反の場合、対応する [`GoalError`] バリアントを返す。
+    /// `All` / `Any` 合成の最大ネスト深度（DoS / stack overflow 対策）。
+    pub const MAX_COMPOSITION_DEPTH: u32 = 16;
+
+    /// 停止条件の不変量を検証する。
+    ///
+    /// - `LoopCount { target }`: `target > 0`
+    /// - `TemplateMatch { confidence, .. }`: `0.0 < confidence <= 1.0`
+    /// - `Timeout { secs }`: `secs > 0`
+    /// - `All` / `Any`: ネスト深度 <= [`MAX_COMPOSITION_DEPTH`]
+    ///
+    /// # Errors
+    /// 不変量違反の場合、対応する [`GoalError`] バリアントを返す。
     pub fn validate(&self) -> Result<(), GoalError> {
+        self.validate_with_depth(0)
+    }
+
+    /// 深度追跡付きの内部 validate。`All` / `Any` 再帰時に `depth + 1` を渡す。
+    fn validate_with_depth(&self, depth: u32) -> Result<(), GoalError> {
+        if depth > Self::MAX_COMPOSITION_DEPTH {
+            return Err(GoalError::CompositionTooDeep {
+                depth,
+                max: Self::MAX_COMPOSITION_DEPTH,
+            });
+        }
         match self {
             Self::LoopCount { target } => {
                 if *target == 0 {
@@ -136,7 +167,7 @@ impl StopCondition {
                     return Err(GoalError::EmptyComposition { variant: "All" });
                 }
                 for c in conditions {
-                    c.validate()?;
+                    c.validate_with_depth(depth + 1)?;
                 }
                 Ok(())
             }
@@ -145,7 +176,7 @@ impl StopCondition {
                     return Err(GoalError::EmptyComposition { variant: "Any" });
                 }
                 for c in conditions {
-                    c.validate()?;
+                    c.validate_with_depth(depth + 1)?;
                 }
                 Ok(())
             }
@@ -1194,5 +1225,18 @@ mod tests {
             last_match: None,
         };
         assert!(matches!(evaluate(&goal, &ctx, 0), GoalStatus::Reached(_)));
+    }
+
+    #[test]
+    fn validate_rejects_excessive_composition_depth() {
+        // MAX_COMPOSITION_DEPTH + 1 層の All ネスト → CompositionTooDeep
+        let mut cond = StopCondition::LoopCount { target: 1 };
+        for _ in 0..(StopCondition::MAX_COMPOSITION_DEPTH + 2) {
+            cond = StopCondition::All {
+                conditions: vec![cond],
+            };
+        }
+        let err = cond.validate().unwrap_err();
+        assert!(matches!(err, GoalError::CompositionTooDeep { .. }));
     }
 }
