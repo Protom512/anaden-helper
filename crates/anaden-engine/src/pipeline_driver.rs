@@ -116,14 +116,8 @@ struct GoalEvalInputs<'a> {
 /// （`offset=(0,0)`, `width=device_width`）のとき、この変換は従来の
 /// [`ScreenScaler::from_base`] と完全に同等になる。
 ///
-/// `scaler` は後方互換のため残しているが、本実装では crop_info のみを使用する。IO を
-/// 持たないため単体テスト可能。
-pub fn rescale_command(
-    cmd: InputCommand,
-    _scaler: &ScreenScaler,
-    device_width: u32,
-    crop_info: &CropInfo,
-) -> InputCommand {
+/// IO を持たないため単体テスト可能。
+pub fn rescale_command(cmd: InputCommand, device_width: u32, crop_info: &CropInfo) -> InputCommand {
     let to_real = |x_1280: u32, y_1280: u32| -> (u32, u32) {
         // 両軸とも幅比 crop_w/1280 でスケール（normalize が幅基準・アスペクト比保存のため）。
         let s = (crop_info.width as f64) / (BASE_WIDTH as f64);
@@ -453,8 +447,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
         // 4. rescale + execute（command があれば発火）
         if let Some(cmd) = tick.command {
-            let device_cmd =
-                rescale_command(cmd, &self.scaler, self.device_width, &self.last_crop_info);
+            let device_cmd = rescale_command(cmd, self.device_width, &self.last_crop_info);
             if let Err(e) = self.execute_command(&device_cmd).await {
                 warn!("pipeline execute error: {e}");
                 return StepOutcome::Error(format!("execute: {e}"));
@@ -1524,21 +1517,19 @@ mod tests {
     fn rescale_tap_no_bars_equivalent_to_from_base_2400() {
         // 黒帯なし: device_width=2400, content=2400x1080(フル)。CropInfo::full(2400,1080)。
         // scale_factor = 2400/1280 = 1.875。640*1.875=1200, 360*1.875=675。
-        let scaler = ScreenScaler::new();
         let info = CropInfo::full(2400, 1080);
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 2400, &info);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 2400, &info);
         assert_eq!(out, InputCommand::Tap { x: 1200, y: 675 });
     }
 
     #[test]
     fn rescale_swipe_no_bars_equivalent_to_from_base_2400() {
-        let scaler = ScreenScaler::new();
         let info = CropInfo::full(2400, 1080);
         let cmd = InputCommand::Swipe {
             from: (640, 360),
             to: (0, 0),
         };
-        let out = rescale_command(cmd, &scaler, 2400, &info);
+        let out = rescale_command(cmd, 2400, &info);
         assert_eq!(
             out,
             InputCommand::Swipe {
@@ -1551,18 +1542,16 @@ mod tests {
     #[test]
     fn rescale_identity_when_device_width_equals_base_no_bars() {
         // device_width=1280, content=1280x720(フル)。scale=1.0 → 恒等。
-        let scaler = ScreenScaler::new();
         let info = CropInfo::full(1280, 720);
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 1280, &info);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 1280, &info);
         assert_eq!(out, InputCommand::Tap { x: 640, y: 360 });
     }
 
     #[test]
     fn rescale_downscale_small_device_width_no_bars() {
         // device_width=640, content=640x360(フル)。scale=0.5。640*0.5=320, 360*0.5=180。
-        let scaler = ScreenScaler::new();
         let info = CropInfo::full(640, 360);
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 640, &info);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 640, &info);
         assert_eq!(out, InputCommand::Tap { x: 320, y: 180 });
     }
 
@@ -1575,20 +1564,18 @@ mod tests {
         // 従来の from_base(1918) なら (640*1918/1280, 360*1918/1280)=(959,539) となり
         // Y がズレていた（黒帯を無視して全幅で均一スケールするため）。新実装で Y がコンテンツ
         // 領域基準（オフセット反映）で正しく 552 になることを検証。
-        let scaler = ScreenScaler::new();
         let info = CropInfo {
             offset_x: 120,
             offset_y: 80,
             width: 1678,
             height: 888,
         };
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, &scaler, 1918, &info);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 1918, &info);
         assert_eq!(out, InputCommand::Tap { x: 959, y: 552 });
     }
 
     #[test]
     fn rescale_swipe_with_letterbox_offset() {
-        let scaler = ScreenScaler::new();
         let info = CropInfo {
             offset_x: 120,
             offset_y: 80,
@@ -1600,7 +1587,7 @@ mod tests {
             from: (640, 360),
             to: (0, 0),
         };
-        let out = rescale_command(cmd, &scaler, 1918, &info);
+        let out = rescale_command(cmd, 1918, &info);
         assert_eq!(
             out,
             InputCommand::Swipe {
@@ -3527,8 +3514,7 @@ mod tests {
         };
         let desc = goal_descriptor(&nested);
         assert_eq!(
-            desc,
-            "all[2](loop_count=5, any[2](timeout=10, loop_count=9))",
+            desc, "all[2](loop_count=5, any[2](timeout=10, loop_count=9))",
             "nested composition must recurse into child descriptors"
         );
     }

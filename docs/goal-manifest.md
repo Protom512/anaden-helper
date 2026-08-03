@@ -80,7 +80,7 @@ Timeout = { secs = 3600 }
 
 ### 再帰合成
 
-`conditions` の要素もまた `All` / `Any` になれる（再帰合成可）。これにより `(A AND B) OR C` のような任意のブール木を表現できる。深さに制限は設けないが、実用上は 2〜3 階層程度にとどめることが推奨される（可読性・デバッグ性）。
+`conditions` の要素もまた `All` / `Any` になれる（再帰合成可）。これにより `(A AND B) OR C` のような任意のブール木を表現できる。深さは `StopCondition::MAX_COMPOSITION_DEPTH`(16) に制限（DoS / stack overflow 対策）。超過は `GoalError::CompositionTooDeep` で弾く。実用上は 2〜3 階層程度にとどめることが推奨される（可読性・デバッグ性）。
 
 ### UC-AND（All）: 複数条件の AND
 
