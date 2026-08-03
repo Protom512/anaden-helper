@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_excessive_composition_depth() {
-        // MAX_COMPOSITION_DEPTH + 2 回 All でラップ → 最深ノード depth = MAX+1(17) > MAX(16) で拒否
+        // MAX_COMPOSITION_DEPTH + 2 回 All でラップ → 最深ノード depth = MAX+2(18) > MAX(16) で拒否
         let mut cond = StopCondition::LoopCount { target: 1 };
         for _ in 0..(StopCondition::MAX_COMPOSITION_DEPTH + 2) {
             cond = StopCondition::All {
