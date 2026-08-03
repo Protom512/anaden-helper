@@ -1221,7 +1221,7 @@ mod tests {
 
     #[test]
     fn validate_rejects_excessive_composition_depth() {
-        // MAX_COMPOSITION_DEPTH + 1 層の All ネスト → CompositionTooDeep
+        // MAX_COMPOSITION_DEPTH + 2 回 All でラップ → 最深ノード depth = MAX+1(17) > MAX(16) で拒否
         let mut cond = StopCondition::LoopCount { target: 1 };
         for _ in 0..(StopCondition::MAX_COMPOSITION_DEPTH + 2) {
             cond = StopCondition::All {
@@ -1230,5 +1230,17 @@ mod tests {
         }
         let err = cond.validate().unwrap_err();
         assert!(matches!(err, GoalError::CompositionTooDeep { .. }));
+    }
+
+    #[test]
+    fn validate_accepts_composition_depth_at_limit() {
+        // MAX_COMPOSITION_DEPTH(16) 回 All でラップ → 最深ノード depth=16（境界値）。許容される。
+        let mut cond = StopCondition::LoopCount { target: 1 };
+        for _ in 0..StopCondition::MAX_COMPOSITION_DEPTH {
+            cond = StopCondition::All {
+                conditions: vec![cond],
+            };
+        }
+        assert!(cond.validate().is_ok());
     }
 }
