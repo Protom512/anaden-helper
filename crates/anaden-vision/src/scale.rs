@@ -13,6 +13,10 @@ pub const BASE_WIDTH: u32 = 1280;
 #[allow(dead_code)] // 文脈参照用。基準幅(1280)ベースのスケールで実質使用。
 pub const BASE_HEIGHT: u32 = 720;
 
+/// テンプレート(needle) のスケール補間方式。Lanczos3 は高品質で、1258→1280 等の
+/// 微細な拡大でテンプレートマッチの conf 低下を防ぐ（review 指摘 Lanczos3 検討の具現化）。
+pub const NEEDLE_FILTER: FilterType = FilterType::Lanczos3;
+
 /// PC版実測クライアント幅(1258)。GetClientRect 実測値(capture_probe.png = 1258x708)。
 ///
 /// PC版テンプレート/ROI はこの raw-1258x708 空間で定義されている。
@@ -106,7 +110,7 @@ pub fn roi_to_normalized(roi: [u32; 4], norm_w: u32, norm_h: u32) -> [u32; 4] {
 }
 
 /// raw-1258x708 空間のテンプレート画像を、正規化後キャプチャ寸法 `(norm_w, norm_h)` へ
-/// スケール（Triangle 補間）して返す。
+/// スケール（Lanczos3 補間）して返す。
 ///
 /// `roi_to_normalized` と同じ X/Y 別比でリサイズする。キャプチャ寸法が 0 の場合は
 /// 入力画像を複製して返す。
@@ -121,7 +125,7 @@ pub fn needle_to_normalized(needle: &DynamicImage, norm_w: u32, norm_h: u32) -> 
     if nw == 0 || nh == 0 {
         return needle.clone();
     }
-    needle.resize_exact(nw, nh, FilterType::Triangle)
+    needle.resize_exact(nw, nh, NEEDLE_FILTER)
 }
 
 #[cfg(test)]
