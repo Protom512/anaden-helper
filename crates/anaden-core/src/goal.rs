@@ -111,14 +111,6 @@ pub enum GoalError {
 }
 
 impl StopCondition {
-    /// 停止条件の不変量を検証する。
-    ///
-    /// - `LoopCount { target }`: `target > 0`
-    /// - `TemplateMatch { confidence, .. }`: `0.0 < confidence <= 1.0`
-    /// - `Timeout { secs }`: `secs > 0`
-    ///
-    /// # Errors
-    /// 不変量違反の場合、対応する [`GoalError`] バリアントを返す。
     /// `All` / `Any` 合成の最大ネスト深度（DoS / stack overflow 対策）。
     pub const MAX_COMPOSITION_DEPTH: u32 = 16;
 
@@ -127,7 +119,7 @@ impl StopCondition {
     /// - `LoopCount { target }`: `target > 0`
     /// - `TemplateMatch { confidence, .. }`: `0.0 < confidence <= 1.0`
     /// - `Timeout { secs }`: `secs > 0`
-    /// - `All` / `Any`: ネスト深度 <= [`MAX_COMPOSITION_DEPTH`]
+    /// - `All` / `Any`: ネスト深度 <= [`Self::MAX_COMPOSITION_DEPTH`]
     ///
     /// # Errors
     /// 不変量違反の場合、対応する [`GoalError`] バリアントを返す。
