@@ -16,10 +16,13 @@ templates/anaden_screen*.png
 templates/test_capture.png
 capture_probe.png
 .claude/
-target
+.claude.old/
 
+# OMC 状態保持ディレクトリ(削除せず ignore のみ)
+.omc/
+.understand-anything/
 
-# temporary live probe captures (regeneratable via examples)
+# temporary live probe captures (regeneratable via examples) + snapshot scratch (Issue #61)
 probe_live*.png
 capture_probe_live.png
 version_label_orig.png

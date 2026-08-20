@@ -19,7 +19,7 @@ use anaden_core::Goal;
 use anaden_engine::{AutomationConfig, Orchestrator};
 
 #[derive(Parser, Debug)]
-#[command(name = "anaden", about = "Another Eden automation helper")]
+#[command(name = "anaden", version, about = "Another Eden automation helper")]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -1381,6 +1381,28 @@ mod tests {
     //
     // 本 helper は純粋関数(I/O は --goal-file の fs::read_to_string のみ)で、
     // --goal と --goal-file の両方 None なら None を返す(後方互換: 無限ループ維持)。
+
+    // ---- --version 表示 (軽量自己完結機能, Issue #61) ----
+    // 従来 `anaden --version` は "unexpected argument" エラーになった(version 属性未設定)。
+    // `#[command(version)]` により Cargo.toml の version が表示されることを検証する。
+
+    #[test]
+    fn version_flag_renders_crate_version() {
+        use clap::CommandFactory;
+        let rendered = Cli::command().render_version();
+        assert!(
+            rendered.contains(concat!("anaden ", env!("CARGO_PKG_VERSION"))),
+            "--version must render `anaden <crate version>`, got: {rendered}"
+        );
+    }
+
+    #[test]
+    fn version_flag_matches_cargo_pkg_version() {
+        use clap::CommandFactory;
+        let cmd = Cli::command();
+        let v = cmd.get_version().expect("version must be set on Cli");
+        assert_eq!(v, env!("CARGO_PKG_VERSION"));
+    }
 
     #[test]
     fn parse_goal_flag_both_none_returns_none() {
