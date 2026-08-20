@@ -9,11 +9,11 @@ algorithm = "ccoeff"
 #
 # 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。
 #
-# 検出テンプレ: scenes/title_pc/version_label.png(右下固定 version 表示帯・点滅非依存)。
+# 検出テンプレ: scenes/title_pc/version_label.png(左上固定 version 表示帯・点滅非依存)。
 #   legacy title_center/load_game_area(大型) は背景差に弱いが、version_label は固定テクスチャ。
 template  = "../../scenes/title_pc/version_label.png"
-# 検出 ROI: version_label と同じ右下帯。
-roi       = [1046, 668, 112, 28]
+# 検出 ROI: version_label と同じ左上帯。
+roi       = [65, 7, 121, 35]
 threshold = 0.80
 # タップ位置: "Tap to Start" 正規化座標 (930,488)。
 #   1280x720 正規化 → RAW 1258x708 換算(比率維持): x≈914, y≈480。

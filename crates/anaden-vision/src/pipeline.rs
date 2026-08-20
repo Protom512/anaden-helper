@@ -1926,6 +1926,16 @@ mod tests {
             "TapToStartPc and LoadGamePc must use distinct title_pc sub-templates \
              (avoids duplicate detection across cold-start steps)"
         );
+
+        // Issue #57: TapToStartPc の検出 ROI は左上 version 表示帯 [65,7,121,35] に固定。
+        // 旧値 [1046,668,112,28] は 20:9 自己クロップ由来の右下暫定値で実機(左上帯)と
+        // 不一致だった。テンプレ差し替え(version_label.png 再生成)と ROI は対で更新される
+        // ため、片方だけ戻る回帰をこのテストで弁別する。
+        assert_eq!(
+            tap_roi,
+            [65, 7, 121, 35],
+            "TapToStartPc ROI must be the top-left version label band (Issue #57)"
+        );
     }
 
     // ---- T1: nav_to_field_pc コールドスタート next チェーン接続 (Task#1 / Issue#5) ----
@@ -3649,8 +3659,7 @@ mod tests {
             "#,
         );
 
-        let err =
-            load_pipeline_manifest(tmp.path()).expect_err("unknown field on All must reject");
+        let err = load_pipeline_manifest(tmp.path()).expect_err("unknown field on All must reject");
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
