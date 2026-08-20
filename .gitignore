@@ -18,3 +18,9 @@ capture_probe.png
 .claude/
 target
 
+
+# temporary live probe captures (regeneratable via examples)
+probe_live*.png
+capture_probe_live.png
+version_label_orig.png
+snapshots/
