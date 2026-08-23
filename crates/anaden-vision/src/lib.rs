@@ -5,6 +5,7 @@
 
 mod ccoeff;
 mod collector;
+mod diagnose;
 mod engine;
 mod letterbox;
 mod matcher;
@@ -18,6 +19,7 @@ pub use collector::{
     ScreenGroup, TileCandidate, VerifyResult, collect_templates, compute_similarity,
     extract_stable_tiles, group_captures, verify_templates,
 };
+pub use diagnose::{DiagnoseEntry, diagnose_all, diagnose_task, format_diagnose_report};
 pub use engine::{SseVisionEngine, VisionEngine};
 pub use letterbox::{CropInfo, crop_to_content, crop_to_content_with_info};
 pub use matcher::{MatchResult, TemplateMatcher};

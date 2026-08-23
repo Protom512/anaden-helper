@@ -314,6 +314,9 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// スナップショット保存の連番(ガード4)。ANADEN_SNAPSHOT_DIR 設定時に
     /// NoMatch / FiredUnverified でインクリメントしてファイル名へ埋める。
     snapshot_counter: u64,
+    /// 診断レポート保存の連番(Issue #71)。ANADEN_DIAG_REPORT 設定時に
+    /// NoMatch 発生でインクリメントしてファイル名へ埋める。
+    diag_counter: u64,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -342,6 +345,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             last_crop_info: CropInfo::default(),
             cancel: None,
             snapshot_counter: 0,
+            diag_counter: 0,
         }
     }
 
@@ -436,6 +440,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 // ガード4: NoMatch 発生時、ANADEN_SNAPSHOT_DIR 設定時に normalized
                 // フレームを PNG 保存(認識ズレ原因特定用)。未設定時は no-op。
                 self.save_snapshot(&matched_task_name, &normalized);
+                // Issue #71: NoMatch 診断モード。ANADEN_SNAPSHOT_DIR 設定時または
+                // ANADEN_DIAG_REPORT=1 時にフレームダンプ + テンプレート別 conf 内訳
+                // レポートを保存する。未設定時は no-op(ファイル IO ゼロ・後方互換)。
+                self.save_diagnose_report(&matched_task_name, &normalized);
                 return StepOutcome::NoMatch;
             }
         };
@@ -648,6 +656,30 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             Ok(()) => debug!("snapshot saved: {}", path.display()),
             Err(e) => warn!("snapshot write failed ({}): {e}", path.display()),
         }
+    }
+
+    /// NoMatch 診断レポート保存(Issue #71)。
+    ///
+    /// 環境変数 `ANADEN_SNAPSHOT_DIR` 設定時、または `ANADEN_DIAG_REPORT=1` 設定時に
+    /// フレームダンプ(PNG)と全テンプレート別 conf 内訳レポート(markdown)を保存する。
+    /// 未設定時は no-op(ファイル IO ゼロ・後方互換)。実処理は
+    /// [`crate::diagnostics::save_diagnose_report`] へ委譲(薄い env ラッパ)。
+    /// `ANADEN_SNAPSHOT_DIR` 設定時は `save_snapshot` が PNG を保存済みのため
+    /// フレームダンプをスキップし二重保存を避ける(レポート MD のみ出力)。
+    fn save_diagnose_report(&mut self, task: &str, frame: &DynamicImage) {
+        let Some(dir) = crate::diagnostics::diag_report_dir() else {
+            return;
+        };
+        self.diag_counter = self.diag_counter.saturating_add(1);
+        let dump_frame = std::env::var_os("ANADEN_SNAPSHOT_DIR").is_none();
+        crate::diagnostics::save_diagnose_report(
+            &dir,
+            task,
+            self.diag_counter,
+            frame,
+            &self.tasks,
+            dump_frame,
+        );
     }
 }
 
@@ -1409,7 +1441,7 @@ mod tests {
     use anaden_vision::Action;
     use image::{DynamicImage, GrayImage, Luma};
     use std::collections::VecDeque;
-    use std::path::PathBuf;
+    use std::path::{Path, PathBuf};
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::{Arc, Mutex};
 
@@ -4197,6 +4229,8 @@ mod tests {
             driver.snapshot_counter, 0,
             "counter must not increment when dir unset"
         );
+        // 診断カウンタも未インクリメント(ANADEN_DIAG_REPORT 未設定のため no-op)。
+        assert_eq!(driver.diag_counter, 0);
     }
 
     // ---- (C2) ClickRect 発火テスト: raw-1258 実値化 + 黒帯オフセット検証 ----
@@ -4404,5 +4438,292 @@ mod tests {
             fired_bar.lock().expect("fired lock").as_slice(),
             &[InputCommand::Tap { x: bx, y: by }]
         );
+    }
+
+    // ===== Issue #71: NoMatch 診断モード(フレームダンプ + conf 内訳レポート) =====
+    //
+    // ANADEN_DIAG_REPORT 設定 + NoMatch 発生で diag_<task>_<n>.png と .md が保存され、
+    // 未設定時はファイル IO ゼロ(後方互換)。
+    // env 操作はプロセス全体へ伝播するため、set→検証→unset を Drop guard で自己完結させる
+    // (nextest 並列実行でも他テストへ影響しない)。
+
+    /// NoMatch フレーム用の diagnostic テストドライバを構築する共通ヘルパ。
+    /// フレームは灰色一色 = 全テンプレ NoMatch。
+    fn diag_no_match_driver(
+        frames: Arc<Mutex<VecDeque<DynamicImage>>>,
+        tasks: Vec<TaskDef>,
+    ) -> PipelineDriver<FakeCapture, FakeInput> {
+        let fired = new_fired();
+        PipelineDriver::new(
+            FakeCapture {
+                frames,
+                fail: false,
+            },
+            FakeInput { fired, fail: false },
+            PipelineState::new("Title"),
+            tasks,
+            2400,
+            300,
+        )
+    }
+
+    /// (a) NoMatch フレームでダンプ + レポート両方が指定 dir に生成される。
+    ///
+    /// ゲーティング設計: `ANADEN_SNAPSHOT_DIR` 指定 dir に save_snapshot の PNG
+    /// ダンプと診断 MD レポートの両方が並ぶ(SNAPSHOT_DIR 優先・二重 PNG 保存なし)。
+    #[tokio::test]
+    async fn diag_report_and_frame_dump_saved_on_no_match_when_env_set() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            std::env::remove_var("ANADEN_DIAG_REPORT");
+            std::env::set_var("ANADEN_SNAPSHOT_DIR", tmp.path());
+        }
+        struct EnvUnset;
+        impl Drop for EnvUnset {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("ANADEN_SNAPSHOT_DIR");
+                }
+            }
+        }
+        let _unset = EnvUnset;
+
+        // needle なし灰色フレーム → click_rect_task の needle は埋め込まれていないので NoMatch。
+        let screen = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let mut driver = diag_no_match_driver(
+            frames_of(vec![screen]),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+        );
+
+        let out = driver.run_once().await;
+        assert_eq!(out, StepOutcome::NoMatch);
+
+        // PNG ダンプ + MD レポートの両方が生成されていること。
+        let png_count = count_entries(tmp.path(), "png");
+        let md_count = count_entries(tmp.path(), "md");
+        assert!(png_count >= 1, "frame dump (png) must be saved");
+        assert!(md_count >= 1, "diagnose report (md) must be saved");
+
+        // レポート本文検証: ヘッダ + タスク行。
+        let md_body = read_first_matching(tmp.path(), "md").expect("report file readable");
+        assert!(md_body.contains("# NoMatch Diagnose Report"));
+        assert!(md_body.contains("Title"), "report must list template row");
+    }
+
+    /// (b) レポート内訳が diagnose_all の降順と一致する。
+    ///
+    /// 2テンプレ(NeedleA 埋込・NeedleB 非埋込)で NoMatch 起こさないとレポートが
+    /// 出ないため、カレントタスク「Title」を非埋込にして NoMatch を発生させつつ、
+    /// 同フレームに対する `diagnose_all` の期待順序とレポート行順を突き合わせる。
+    #[tokio::test]
+    async fn diag_report_row_order_matches_diagnose_all_descending() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            std::env::remove_var("ANADEN_DIAG_REPORT");
+            std::env::set_var("ANADEN_SNAPSHOT_DIR", tmp.path());
+        }
+        struct EnvUnset;
+        impl Drop for EnvUnset {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("ANADEN_SNAPSHOT_DIR");
+                }
+            }
+        }
+        let _unset = EnvUnset;
+
+        // raw_feature から2種の needle を作る。NeedleB はフレームに埋め込むが
+        // threshold を 1.1(到達不能)にして NoMatch を発生させる。
+        let raw = raw_feature();
+        let tpl_path = crop_needle_template();
+
+        let mk_task = |name: &str, thr: f32| TaskDef {
+            name: name.into(),
+            state: name.into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: tpl_path.clone(),
+            roi: Some(MATCH_ROI),
+            threshold: thr,
+            base: None,
+            action: Some(Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            }),
+            next: Some(vec!["LoadGame".into()]),
+        };
+        // Title: needle はフレーム内に存在するが threshold=1.1 で到達不能 → NoMatch。
+        // Other: 同一 needle・threshold=0.5 ならマッチする(内訳では上位)。
+        let tasks = vec![mk_task("Title", 1.1), mk_task("Other", 1.1)];
+
+        let screen = luma_dyn(raw.clone());
+        let mut driver = diag_no_match_driver(frames_of(vec![screen.clone()]), tasks.clone());
+        let out = driver.run_once().await;
+        assert_eq!(out, StepOutcome::NoMatch);
+
+        // 期待値: run_once と同じ前処理(crop_to_content→normalize)を通した
+        // フレームに対する diagnose_all の順序。
+        let (cropped, _) = anaden_vision::crop_to_content_with_info(&screen);
+        let normalized = ScreenScaler::new().normalize(&cropped);
+        let expected = anaden_vision::diagnose_all(&tasks, &normalized);
+        assert_eq!(expected.len(), 2);
+        let expected_tasks: Vec<&str> = expected.iter().map(|e| e.task.as_str()).collect();
+
+        let md_body = read_first_matching(tmp.path(), "md").expect("report file readable");
+        let pos = |name: &str| {
+            md_body
+                .find(&format!("| {name} |"))
+                .expect("task row present")
+        };
+        let idx = |name: &str| {
+            md_body
+                .lines()
+                .position(|l| l.contains(&format!("| {name} |")))
+                .expect("task row present")
+        };
+        // レポート行順が diagnose_all の降順と一致。
+        assert!(
+            idx(expected_tasks[0]) < idx(expected_tasks[1]),
+            "report rows must follow diagnose_all descending order: {expected_tasks:?}"
+        );
+        // 両タスク行が存在すること(内訳に全テンプレが載る)。
+        let _ = pos(expected_tasks[0]);
+        let _ = pos(expected_tasks[1]);
+    }
+
+    /// (c) 空テンプレ/needle 過大でレポートが skipped 行を出し panic しない。
+    #[tokio::test]
+    async fn diag_report_skips_broken_template_without_panic() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        unsafe {
+            std::env::remove_var("ANADEN_DIAG_REPORT");
+            std::env::set_var("ANADEN_SNAPSHOT_DIR", tmp.path());
+        }
+        struct EnvUnset;
+        impl Drop for EnvUnset {
+            fn drop(&mut self) {
+                unsafe {
+                    std::env::remove_var("ANADEN_SNAPSHOT_DIR");
+                }
+            }
+        }
+        let _unset = EnvUnset;
+
+        // 空テンプレート(0バイト = 読込失敗)と needle 過大(フレーム全面サイズ)の2タスク。
+        let empty_tpl = tmp.path().join("empty.png");
+        std::fs::write(&empty_tpl, b"").expect("write empty template");
+        let big_tpl = {
+            let p = tmp.path().join("big.png");
+            GrayImage::from_pixel(FULL_W + 100, FULL_H + 100, Luma([200u8]))
+                .save(&p)
+                .expect("save big needle");
+            p
+        };
+        let mk_task = |name: &str, tpl: PathBuf| TaskDef {
+            name: name.into(),
+            state: name.into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: tpl,
+            roi: None,
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickRect {
+                roi: ScreenRegion::new(520, 320, 240, 80),
+            }),
+            next: Some(vec!["LoadGame".into()]),
+        };
+        let tasks = vec![mk_task("Broken", empty_tpl), mk_task("Oversized", big_tpl)];
+
+        let screen = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let mut driver = diag_no_match_driver(frames_of(vec![screen]), tasks);
+
+        // panic せず NoMatch を返すこと。
+        let out = driver.run_once().await;
+        assert_eq!(out, StepOutcome::NoMatch);
+
+        // レポートに skipped 行(両タスク)と理由が出ること。
+        let md_body = read_first_matching(tmp.path(), "md").expect("report file readable");
+        assert!(md_body.contains("Broken"), "broken template row");
+        assert!(md_body.contains("Oversized"), "oversized needle row");
+        assert!(
+            md_body.contains("template load failed"),
+            "skip reason for broken template"
+        );
+    }
+
+    /// (d) 環境変数未設定時はファイル IO ゼロ(既存後方互換)。
+    #[tokio::test]
+    async fn diag_report_not_written_when_env_unset() {
+        // 未設定状態を保証(他テストの set 残りを排除)。
+        unsafe {
+            std::env::remove_var("ANADEN_DIAG_REPORT");
+            std::env::remove_var("ANADEN_SNAPSHOT_DIR");
+        }
+
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let screen = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let mut driver = diag_no_match_driver(
+            frames_of(vec![screen]),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+        );
+
+        let out = driver.run_once().await;
+        assert_eq!(out, StepOutcome::NoMatch);
+
+        // 診断ファイルが1つも作られないこと。ANADEN_SNAPSHOT_DIR も同時に未設定保証
+        // (snapshot 保存との混入を防ぐ)。
+        unsafe {
+            std::env::remove_var("ANADEN_SNAPSHOT_DIR");
+        }
+        let entries: Vec<_> = std::fs::read_dir(tmp.path())
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .collect();
+        assert!(
+            entries.is_empty(),
+            "no file IO when ANADEN_DIAG_REPORT unset: {:?}",
+            entries.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+        );
+        assert_eq!(driver.diag_counter, 0, "counter must not increment");
+    }
+
+    /// dir 内の指定拡張子ファイル数を数えるテストヘルパ。
+    fn count_entries(dir: &Path, ext: &str) -> usize {
+        std::fs::read_dir(dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .filter(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case(ext))
+                    .unwrap_or(false)
+            })
+            .count()
+    }
+
+    /// dir 内の指定拡張子ファイルを1つ読んで内容を返すテストヘルパ。
+    fn read_first_matching(dir: &Path, ext: &str) -> Option<String> {
+        std::fs::read_dir(dir)
+            .expect("read_dir")
+            .filter_map(|e| e.ok())
+            .find(|e| {
+                e.path()
+                    .extension()
+                    .and_then(|x| x.to_str())
+                    .map(|x| x.eq_ignore_ascii_case(ext))
+                    .unwrap_or(false)
+            })
+            .and_then(|e| std::fs::read_to_string(e.path()).ok())
     }
 }
