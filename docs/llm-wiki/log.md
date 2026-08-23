@@ -18,3 +18,6 @@
 
 ## [2026-06-14] ingest | Task Orchestration
 - Analyzed `MaaCore/Task` and documented the task hierarchy and lifecycle.
+
+## 2026-08-24
+- Added concepts/AgentVerification.md (Issue #69 agent verification report, UC-1..UC-3 all PASS).

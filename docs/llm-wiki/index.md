@@ -10,3 +10,4 @@
 ## Concepts
 - [[concepts/ImageRecognitionPipeline|Image Recognition Pipeline]]: The core vision logic for game state detection.
 - [[concepts/TaskOrchestration|Task Orchestration]]: The hierarchical system for managing game automation goals.
+- [[concepts/AgentVerification|Agent Verification]]: Issue #69 エージェント実動作検証の報告（UC-1〜UC-3）。
