@@ -1,0 +1,105 @@
+{
+  "meta": {
+    "feature": "review-gate 定量検証 (#76 / #77) — Task 4: 実測 (upper-bound) + 構造分析",
+    "date": "2026-08-25",
+    "tooling": {
+      "setup_script": "scripts/run_review_gate_eval.sh --keep 58 62 70 72 75",
+      "aggregator": "scripts/review_gate_eval (cargo run --release -- data/results.json)"
+    },
+    "methodology": "upper-bound: 単発 LLM reviewer 実行は非決定性のためのサンプル1点であり母集団推定ではない。本成果物は (a) worktree による staged diff 再現の実証と (b) reviewer の MANDATORY チェックと同価の決定論的コマンド実測 (fmt/clippy/nextest) を upper-bound 証拠として記録し、LLM 指摘レイヤー (findings) は承認条件どおり点推定を報告しない (N=0 → rate=null)。定量結論の解釈は構造分析セクションと併読すること。",
+    "upper_bound_rationale": [
+      "golden 問題は pre-fix 状態の問題である一方、worktree で再現されるのは post-fix の最終 PR diff。再実行 reviewer が元バグを '検出' することは原理的に不可能で、観測できるのは回帰テストの存在のみ。ゆえに recall の再実行ベース実測は 0 に構造的に張り付き、upper-bound としてすら情報量を持たない。",
+      "LLM reviewer の指摘集合は実行ごとに変動する。単発実行の fp 点推定は承認条件 (N + Wilson 95% CI 併記、点推定のみ報告禁止) に反するため findings を空とし fp_rate.total_findings=0 → rate=null を返す。",
+      "決定論的レイヤー (fmt/clippy/nextest) は reviewer prompt の MANDATORY チェックと同一コマンドであり、upper-bound の再現可能な下限保証を与える。"
+    ],
+    "evidence": [
+      {
+        "pr": 58,
+        "merge_commit": "d284fcc",
+        "diff_size": "5 files, +264/-5 (11176 bytes staged diff)",
+        "deterministic_checks": { "fmt": "PASS", "nextest": "406 passed / 0 failed / 7 skipped" },
+        "note": "worktree 再現で staged diff の内容・行数が PR と一致することを確認。golden g58-1 (ROI 乖離) は本 diff で修正済み + 回帰テスト (assert_eq!(tap_roi,[65,7,121,35])) が追加されている。reviewer が検出可能なのは回帰テストの存在のみ。"
+      },
+      {
+        "pr": 62,
+        "merge_commit": "0617c6d",
+        "diff_size": "2 files, +28/-3 (2384 bytes staged diff)",
+        "deterministic_checks": { "fmt": "PASS", "nextest": "408 passed / 0 failed / 7 skipped" },
+        "note": "PR 本文が Release Review NO-GO で捕捉された3問題 (stale commit message / .gitignore 重複 / master 競合) を明記。うち diff 内で検出可能なのは .gitignore 重複解消のみ → g62-1。"
+      },
+      {
+        "pr": 70,
+        "merge_commit": "0815367",
+        "diff_size": "6 files, +208/-0 (16985 bytes staged diff)",
+        "deterministic_checks": { "fmt": "PASS", "nextest": "409 passed / 0 failed / 7 skipped" },
+        "note": "docs/test 追加のみ。golden 相当の「修正された不具合」記述なし。"
+      },
+      {
+        "pr": 72,
+        "merge_commit": "4c22106",
+        "diff_size": "6 files, +1104/-1 (49950 bytes staged diff)",
+        "deterministic_checks": { "fmt": "PASS", "nextest": "432 passed / 0 failed / 7 skipped" },
+        "note": "新規診断モード追加。pure computation 層 (diagnose.rs, IOなし) と env-gated IO wrapper の分離は review-gate Maintainability レビュー観点 (anti-pattern, doc) に沿う構造。実機 top.png NoMatch 再現は operator-gated のため実測対象外 (deferred)。"
+      },
+      {
+        "pr": 75,
+        "merge_commit": "a4515e6",
+        "diff_size": "1 file, +28/-0 (2709 bytes staged diff)",
+        "deterministic_checks": { "fmt": "PASS", "clippy": "PASS (-D warnings, exit 0)", "nextest": "432 passed / 0 failed / 7 skipped" },
+        "note": "doc コメント追加のみ。実行コード変更なし。"
+      }
+    ],
+    "structural_analysis": [
+      {
+        "issue": 78,
+        "axis": "recall",
+        "finding": "review-gate (.claude/workflows/review-gate.js) の Analyze phase は changedFiles (ファイル名リスト) のみを reviewer に渡し diff コンテンツを渡さない。R8 diff-inject (feature-pipeline.js の gate:fetch-diff) は review-gate.js には未適用。ゆえに指摘が PR diff 由来である保証がなく、recall の構造的下限は diff 非依存の一般論レビューに沈む。"
+      },
+      {
+        "issue": 79,
+        "axis": "fp_rate",
+        "finding": "findings の重複除去・正規化機構が存在しない。3レビューで同一問題 (例: clippy 警告) が3カウントされ、fp_rate 分母を膨らませ実態より過大評価する方向にバイアス。"
+      },
+      {
+        "issue": 80,
+        "axis": "consensus",
+        "finding": "コンセンサスは完全 AND (全員 GO でのみ GO)。単一レビュアーの偽陽性確率 p に対し全体偽ブロック率は 1-(1-p)^3 に増幅。判定割れの記録スキーマも不在のため妥当性の事後検証が不可能。"
+      },
+      {
+        "issue": 77,
+        "axis": "methodology",
+        "finding": "上記3構造弱点が修正されるまで、単発実測の数値は upper-bound としても解釈不能。Jaccard 類似度による反復試行を主指標とする方法論を #77 で維持。"
+      }
+    ],
+    "limitations": [
+      "golden 抽出は本評価者が行っており (PR 本文ベース・抽出基準は README)、抽出者バイアスがありうる。多重チェックは未実施。",
+      "サンプル PR 数 N=5、golden 分母 2。Wilson 95% CI は広く (fp 0 観測でも下限 0)、検出力は実用に足りない。数値の強さは構造分析の定性結論が主で、定量は参考値。",
+      "LLM reviewer 実行 (Claude Code 手動起動) は operator 依存のため本タスクでは未実施。決定論的コマンド層の実測で代替した。"
+    ],
+    "substituted_prs": "全 PR (#58 #62 #70 #72 #75) — LLM 3レビュアー指摘収集は未実施、決定論的チェック + 構造分析で代替",
+    "cross_reference": "3レーン合成による参考値 (recall/fp_rate 数値付き) は data/input.json + data/metrics.json および README「評価結果」節を参照。本ファイルは Task 4 の代替レーン実測記録 (findings 空・fp_rate N=0 → null) であり、数値の二重報告を避けるため metrics は input.json 由来の数値を含まない。"
+  },
+  "input": {
+    "golden_issues": [
+      { "pr": 58, "id": "g58-1", "description": "tap_to_start ROI [1046,668,112,28] が実測左上帯 [65,7,121,35] と乖離 (Issue #57)。diff 内に回帰テストとして可視化" },
+      { "pr": 62, "id": "g62-1", "description": ".gitignore 実装タスクが重複エントリを追加 (Release Review 指摘、PR 本文に明記、最終 diff で解消済み)" }
+    ],
+    "findings": [],
+    "consensus": [
+      { "pr": 58, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] },
+      { "pr": 62, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] },
+      { "pr": 70, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] },
+      { "pr": 72, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] },
+      { "pr": 75, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] }
+    ]
+  },
+  "metrics": {
+    "recall": { "total_golden": 2, "detected_golden": 0 },
+    "recall_per_pr": [
+      { "pr": 58, "total_golden": 1, "detected_golden": 0 },
+      { "pr": 62, "total_golden": 1, "detected_golden": 0 }
+    ],
+    "fp_rate": { "n": 0, "false_positives": 0 },
+    "consensus": { "tp": 0, "fp": 0, "tn": 5, "false_negatives": 0, "nogo_merged_prs": [] }
+  }
+}
