@@ -1,0 +1,58 @@
+{
+  "recall": {
+    "total_golden": 16,
+    "detected_golden": 16
+  },
+  "recall_per_pr": [
+    {
+      "pr": 54,
+      "total_golden": 3,
+      "detected_golden": 3
+    },
+    {
+      "pr": 55,
+      "total_golden": 2,
+      "detected_golden": 2
+    },
+    {
+      "pr": 56,
+      "total_golden": 2,
+      "detected_golden": 2
+    },
+    {
+      "pr": 58,
+      "total_golden": 3,
+      "detected_golden": 3
+    },
+    {
+      "pr": 62,
+      "total_golden": 3,
+      "detected_golden": 3
+    },
+    {
+      "pr": 72,
+      "total_golden": 3,
+      "detected_golden": 3
+    }
+  ],
+  "fp_rate": {
+    "n": 33,
+    "false_positives": 17
+  },
+  "consensus": {
+    "tp": 3,
+    "fp": 0,
+    "tn": 6,
+    "false_negatives": 0,
+    "nogo_merged_prs": [
+      {
+        "pr": 75,
+        "verdict": "NO_GO",
+        "merged": true,
+        "post_merge_issue_ids": [
+          "gate-evidence:wrong-ticket-closable"
+        ]
+      }
+    ]
+  }
+}
