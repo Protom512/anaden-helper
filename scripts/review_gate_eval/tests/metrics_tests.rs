@@ -33,43 +33,59 @@ mod tests {
                 pr: 58,
                 reviewer: "architecture".into(),
                 matched_golden: Some("g58-1".into()),
+                confidence: None,
+                command_results: None,
             },
             Finding {
                 pr: 58,
                 reviewer: "functional".into(),
                 matched_golden: Some("g58-1".into()),
+                confidence: None,
+                command_results: None,
             },
             Finding {
                 pr: 58,
                 reviewer: "maintainability".into(),
                 matched_golden: None,
+                confidence: None,
+                command_results: None,
             },
             Finding {
                 pr: 58,
                 reviewer: "maintainability".into(),
                 matched_golden: None,
+                confidence: None,
+                command_results: None,
             },
             // PR62: golden g62-1 を検出せず、偽陽性2件
             Finding {
                 pr: 62,
                 reviewer: "architecture".into(),
                 matched_golden: None,
+                confidence: None,
+                command_results: None,
             },
             Finding {
                 pr: 62,
                 reviewer: "functional".into(),
                 matched_golden: None,
+                confidence: None,
+                command_results: None,
             },
             // PR72: 両golden検出、偽陽性0
             Finding {
                 pr: 72,
                 reviewer: "architecture".into(),
                 matched_golden: Some("g72-1".into()),
+                confidence: None,
+                command_results: None,
             },
             Finding {
                 pr: 72,
                 reviewer: "functional".into(),
                 matched_golden: Some("g72-2".into()),
+                confidence: None,
+                command_results: None,
             },
         ];
         let consensus = vec![
@@ -79,6 +95,7 @@ mod tests {
                 verdict: Verdict::NoGo,
                 merged: true,
                 post_merge_issue_ids: vec![],
+                split_info: None,
             },
             // Go + マージ + 事後問題なし => 正しいTN
             ConsensusRecord {
@@ -86,6 +103,7 @@ mod tests {
                 verdict: Verdict::Go,
                 merged: true,
                 post_merge_issue_ids: vec![],
+                split_info: None,
             },
             // Go + マージ + 事後問題1件 => 見逃し (FN)
             ConsensusRecord {
@@ -93,6 +111,7 @@ mod tests {
                 verdict: Verdict::Go,
                 merged: true,
                 post_merge_issue_ids: vec!["post-72-1".into()],
+                split_info: None,
             },
         ];
         EvalInput {
@@ -268,7 +287,186 @@ mod tests {
             pr: 58,
             reviewer: "architecture".into(),
             matched_golden: Some("g-nonexistent".into()),
+            confidence: None,
+            command_results: None,
         });
         assert!(aggregate(&f).is_err()); // 正解リスト外の match は集計エラー
+    }
+
+    // --- #80 新スキーマ: confidence / command_results ---
+
+    #[test]
+    fn finding_parses_confidence_and_command_results() {
+        let js = r#"{
+            "pr": 58,
+            "reviewer": "architecture",
+            "matched_golden": null,
+            "confidence": 0.3,
+            "command_results": {"clippy": "PASS", "nextest": "FAIL"}
+        }"#;
+        let f: Finding = serde_json::from_str(js).unwrap();
+        assert!((f.confidence.unwrap() - 0.3).abs() < 1e-9);
+        let cmd = f.command_results.unwrap();
+        assert_eq!(cmd.clippy, Some(CommandStatus::Pass));
+        assert_eq!(cmd.nextest, Some(CommandStatus::Fail));
+        assert!(cmd.any_fail());
+    }
+
+    #[test]
+    fn legacy_finding_without_new_fields_defaults_to_none() {
+        // 旧 results.json の findings には confidence / command_results がない
+        let js = r#"{"pr": 58, "reviewer": "functional", "matched_golden": null}"#;
+        let f: Finding = serde_json::from_str(js).unwrap();
+        assert!(f.confidence.is_none());
+        assert!(f.command_results.is_none()); // 欠損は fail 判定に寄与しない
+    }
+
+    #[test]
+    fn command_missing_is_distinct_from_fail() {
+        let missing = CommandResults {
+            clippy: None,
+            nextest: None,
+        };
+        assert!(!missing.any_fail(), "欠損 (None) は強制 NO-GO にしない");
+        let pass = CommandResults {
+            clippy: Some(CommandStatus::Pass),
+            nextest: Some(CommandStatus::Pass),
+        };
+        assert!(!pass.any_fail());
+        let fail = CommandResults {
+            clippy: Some(CommandStatus::Pass),
+            nextest: Some(CommandStatus::Fail),
+        };
+        assert!(fail.any_fail());
+    }
+
+    // --- #80: split_info による再集計で偽ブロック (fp) が構造的に低下 ---
+
+    fn judgment(reviewer: &str, verdict: Verdict, confidence: Option<f64>) -> ReviewerJudgment {
+        ReviewerJudgment {
+            reviewer: reviewer.into(),
+            verdict,
+            confidence,
+            has_critical: false,
+        }
+    }
+
+    /// PR58 と同一の帰結 (マージ済み・事後問題なし) で、レビュアー判定が
+    /// 「2名 GO + 1名 低confidence NO-GO」だった場合の split_info。
+    /// 旧 AND コンセンサスなら NO-GO (fp) だが、majority なら GO (tn) になる。
+    fn pr58_majority_split() -> SplitInfo {
+        SplitInfo {
+            judgments: vec![
+                judgment("architecture", Verdict::Go, Some(0.9)),
+                judgment("functional", Verdict::Go, Some(0.85)),
+                judgment("maintainability", Verdict::NoGo, Some(0.3)), // 低confidence
+            ],
+            veto_activated: false,
+            command_fail_forced_nogo: false,
+        }
+    }
+
+    #[test]
+    fn aggregate_prefers_split_info_effective_verdict() {
+        let mut f = fixture();
+        let pr58 = f
+            .consensus
+            .iter_mut()
+            .find(|r| r.pr == 58)
+            .expect("pr58 record");
+        pr58.split_info = Some(pr58_majority_split());
+        let m = aggregate(&f).unwrap();
+        // verdict フィールドは旧 AND ロジックの NO-GO のままだが、
+        // effective_verdict (majority GO) が混同行列に反映される → fp が低下
+        assert_eq!(m.consensus.fp, 0);
+        assert_eq!(m.consensus.tn, 2); // PR62 + PR58(majority GO)
+    }
+
+    #[test]
+    fn aggregate_without_split_info_keeps_legacy_verdict() {
+        // split_info 欠損 (旧データ) は従来どおり verdict フィールドで集計
+        let m = aggregate(&fixture()).unwrap();
+        assert_eq!(m.consensus.fp, 1);
+        assert_eq!(m.consensus.tn, 1);
+    }
+
+    #[test]
+    fn command_fail_split_info_forces_nogo_in_aggregation() {
+        // 全員 GO でも command_fail_forced_nogo 付き split_info は NO-GO として集計
+        let mut f = fixture();
+        let pr62 = f
+            .consensus
+            .iter_mut()
+            .find(|r| r.pr == 62)
+            .expect("pr62 record");
+        pr62.verdict = Verdict::Go;
+        pr62.post_merge_issue_ids = vec!["cmd-fail".into()]; // 問題あり → NoGo なら TP
+        pr62.split_info = Some(SplitInfo {
+            judgments: vec![
+                judgment("architecture", Verdict::Go, Some(0.9)),
+                judgment("functional", Verdict::Go, Some(0.9)),
+                judgment("maintainability", Verdict::Go, Some(0.9)),
+            ],
+            veto_activated: false,
+            command_fail_forced_nogo: true,
+        });
+        let m = aggregate(&f).unwrap();
+        assert_eq!(m.consensus.tp, 1); // 強制 NO-GO & 実際に問題あり
+        assert_eq!(m.consensus.tn, 0);
+    }
+
+    #[test]
+    fn critical_veto_split_info_forces_nogo_even_with_majority_go() {
+        let mut f = fixture();
+        let pr62 = f
+            .consensus
+            .iter_mut()
+            .find(|r| r.pr == 62)
+            .expect("pr62 record");
+        pr62.post_merge_issue_ids = vec!["critical-bug".into()];
+        let mut maint = judgment("maintainability", Verdict::Go, Some(0.9));
+        maint.has_critical = true;
+        pr62.split_info = Some(SplitInfo {
+            judgments: vec![
+                judgment("architecture", Verdict::Go, Some(0.9)),
+                judgment("functional", Verdict::Go, Some(0.9)),
+                maint,
+            ],
+            veto_activated: true,
+            command_fail_forced_nogo: false,
+        });
+        let m = aggregate(&f).unwrap();
+        assert_eq!(m.consensus.tp, 1); // veto NO-GO & 問題あり
+    }
+
+    /// 偽ブロック率の構造比較: reviewer 1名あたりの偽 NO-GO 確率 p のとき
+    /// 3 reviewer AND は 1-(1-p)^3 に増幅、majority (2/3 GO で GO) は
+    /// 3p^2(1-p)+p^3 に低下する (#80 主張の固定)。
+    #[test]
+    fn majority_consensus_structurally_reduces_false_block_rate() {
+        for p in [0.05_f64, 0.1, 0.2, 0.3, 0.5] {
+            let and_fp = 1.0 - (1.0 - p).powi(3);
+            let majority_fp = 3.0 * p * p * (1.0 - p) + p * p * p;
+            assert!(
+                majority_fp < and_fp,
+                "p={p}: majority({majority_fp:.4}) must be < AND({and_fp:.4})"
+            );
+        }
+        // p=0.1 の具体値: AND 27.1% vs majority 2.8% (README 記載値と整合)
+        let p = 0.1_f64;
+        let and_fp = 1.0 - (1.0 - p).powi(3);
+        let majority_fp = 3.0 * p * p * 0.9 + p * p * p;
+        assert!((and_fp - 0.271).abs() < 1e-3);
+        assert!((majority_fp - 0.028).abs() < 1e-3);
+    }
+
+    #[test]
+    fn consensus_record_serializes_split_info() {
+        let mut f = fixture();
+        let pr58 = f.consensus.iter_mut().find(|r| r.pr == 58).unwrap();
+        pr58.split_info = Some(pr58_majority_split());
+        let js = serde_json::to_string(&f.consensus).unwrap();
+        assert!(js.contains("\"split_info\""));
+        assert!(js.contains("judgments"));
     }
 }

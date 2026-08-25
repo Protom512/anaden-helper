@@ -51,7 +51,8 @@
         "merged": true,
         "post_merge_issue_ids": [
           "gate-evidence:wrong-ticket-closable"
-        ]
+        ],
+        "split_info": null
       }
     ]
   }
