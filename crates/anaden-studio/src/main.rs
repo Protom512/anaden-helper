@@ -9,6 +9,7 @@ mod batch;
 mod canvas;
 mod childproc;
 mod library;
+mod log_view;
 mod proposals;
 mod runner;
 mod scoring;
@@ -121,7 +122,9 @@ fn main() -> eframe::Result {
             options,
             Box::new(|cc| {
                 setup_japanese_fonts(&cc.egui_ctx);
-                Ok(Box::new(runner::PipelineRunnerApp::new("anaden")))
+                // anaden バイナリを ANADEN_BIN → target/{debug,release} → PATH
+                // の順で明示パス解決する（Issue #85）。
+                Ok(Box::new(runner::PipelineRunnerApp::with_resolved_anaden()))
             }),
         );
     }
