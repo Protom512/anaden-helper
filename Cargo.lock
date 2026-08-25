@@ -252,6 +252,9 @@ name = "anaden-strategies"
 version = "0.1.0"
 dependencies = [
  "anaden-core",
+ "serde",
+ "thiserror 2.0.18",
+ "toml",
  "tracing",
 ]
 
@@ -262,13 +265,16 @@ dependencies = [
  "ab_glyph",
  "anaden-core",
  "anaden-device",
+ "anaden-strategies",
  "anaden-vision",
  "anyhow",
  "eframe",
+ "egui",
  "image",
  "rfd",
  "serde",
  "tempfile",
+ "thiserror 2.0.18",
  "toml",
 ]
 

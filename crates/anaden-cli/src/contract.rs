@@ -9,6 +9,8 @@
 //!   - 終了コードへの射影は CLI 層の関心事なので `anaden_cli_contract`(本モジュール)へ置く。
 //!     デバイス層へ終了コード知識を漏れ出させない。
 
+pub mod pipeline;
+
 use anaden_device::EnsureOutcome;
 
 /// AlreadyOpen / Launched の両方が返す成功終了コード。
