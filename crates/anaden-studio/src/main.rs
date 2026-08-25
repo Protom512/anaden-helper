@@ -7,10 +7,13 @@
 mod app;
 mod batch;
 mod canvas;
+mod childproc;
 mod library;
 mod proposals;
+mod runner;
 mod scoring;
 mod source;
+mod strategy_ui;
 
 use eframe::egui;
 
@@ -23,6 +26,8 @@ struct CliArgs {
     target: Target,
     /// PC版(Windows)対象プロセスの exe 名。未指定時は GUI 既定値(AnotherEden.exe)。
     exe: Option<String>,
+    /// pipeline 実行ランナーGUI モード(Issue #83 シャード1 スケルトン)。
+    pipeline: bool,
 }
 
 /// 手動でコマンドライン引数をパースする(clap 依存を避けるため)。
@@ -37,6 +42,7 @@ fn parse_args() -> CliArgs {
     let mut args = CliArgs {
         target: Target::default(),
         exe: None,
+        pipeline: false,
     };
     let mut iter = std::env::args().skip(1);
     while let Some(arg) = iter.next() {
@@ -73,16 +79,24 @@ fn parse_args() -> CliArgs {
                     args.exe = Some(v);
                 }
             }
+            "--pipeline" => {
+                args.pipeline = true;
+            }
             "-h" | "--help" => {
                 println!("anaden-studio — テンプレート作成GUI");
                 println!();
-                println!("USAGE: anaden-studio [--target android|windows] [--exe <name>]");
+                println!(
+                    "USAGE: anaden-studio [--target android|windows] [--exe <name>] [--pipeline]"
+                );
                 println!();
                 println!("OPTIONS:");
                 println!("  --target <android|windows>  キャプチャバックエンド(既定: android)");
                 println!("      windows は Windows ビルドでのみ有効。Linux では無視されます。");
                 println!("  --exe <name>                Windows バックエンドの対象 exe 名");
                 println!("                              (既定: AnotherEden.exe)");
+                println!(
+                    "  --pipeline                  pipeline 実行ランナーGUI を起動 (Issue #83)"
+                );
                 println!("  -h, --help                  このヘルプを表示");
                 std::process::exit(0);
             }
@@ -101,6 +115,16 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]),
         ..Default::default()
     };
+    if cli.pipeline {
+        return eframe::run_native(
+            "anaden-studio — pipeline 実行",
+            options,
+            Box::new(|cc| {
+                setup_japanese_fonts(&cc.egui_ctx);
+                Ok(Box::new(runner::PipelineRunnerApp::new("anaden")))
+            }),
+        );
+    }
     eframe::run_native(
         "anaden-studio — テンプレート作成",
         options,
