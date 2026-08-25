@@ -17,35 +17,51 @@
         "pr": 58,
         "merge_commit": "d284fcc",
         "diff_size": "5 files, +264/-5 (11176 bytes staged diff)",
-        "deterministic_checks": { "fmt": "PASS", "nextest": "406 passed / 0 failed / 7 skipped" },
+        "deterministic_checks": {
+          "fmt": "PASS",
+          "nextest": "406 passed / 0 failed / 7 skipped"
+        },
         "note": "worktree 再現で staged diff の内容・行数が PR と一致することを確認。golden g58-1 (ROI 乖離) は本 diff で修正済み + 回帰テスト (assert_eq!(tap_roi,[65,7,121,35])) が追加されている。reviewer が検出可能なのは回帰テストの存在のみ。"
       },
       {
         "pr": 62,
         "merge_commit": "0617c6d",
         "diff_size": "2 files, +28/-3 (2384 bytes staged diff)",
-        "deterministic_checks": { "fmt": "PASS", "nextest": "408 passed / 0 failed / 7 skipped" },
+        "deterministic_checks": {
+          "fmt": "PASS",
+          "nextest": "408 passed / 0 failed / 7 skipped"
+        },
         "note": "PR 本文が Release Review NO-GO で捕捉された3問題 (stale commit message / .gitignore 重複 / master 競合) を明記。うち diff 内で検出可能なのは .gitignore 重複解消のみ → g62-1。"
       },
       {
         "pr": 70,
         "merge_commit": "0815367",
         "diff_size": "6 files, +208/-0 (16985 bytes staged diff)",
-        "deterministic_checks": { "fmt": "PASS", "nextest": "409 passed / 0 failed / 7 skipped" },
+        "deterministic_checks": {
+          "fmt": "PASS",
+          "nextest": "409 passed / 0 failed / 7 skipped"
+        },
         "note": "docs/test 追加のみ。golden 相当の「修正された不具合」記述なし。"
       },
       {
         "pr": 72,
         "merge_commit": "4c22106",
         "diff_size": "6 files, +1104/-1 (49950 bytes staged diff)",
-        "deterministic_checks": { "fmt": "PASS", "nextest": "432 passed / 0 failed / 7 skipped" },
+        "deterministic_checks": {
+          "fmt": "PASS",
+          "nextest": "432 passed / 0 failed / 7 skipped"
+        },
         "note": "新規診断モード追加。pure computation 層 (diagnose.rs, IOなし) と env-gated IO wrapper の分離は review-gate Maintainability レビュー観点 (anti-pattern, doc) に沿う構造。実機 top.png NoMatch 再現は operator-gated のため実測対象外 (deferred)。"
       },
       {
         "pr": 75,
         "merge_commit": "a4515e6",
         "diff_size": "1 file, +28/-0 (2709 bytes staged diff)",
-        "deterministic_checks": { "fmt": "PASS", "clippy": "PASS (-D warnings, exit 0)", "nextest": "432 passed / 0 failed / 7 skipped" },
+        "deterministic_checks": {
+          "fmt": "PASS",
+          "clippy": "PASS (-D warnings, exit 0)",
+          "nextest": "432 passed / 0 failed / 7 skipped"
+        },
         "note": "doc コメント追加のみ。実行コード変更なし。"
       }
     ],
@@ -77,29 +93,111 @@
       "LLM reviewer 実行 (Claude Code 手動起動) は operator 依存のため本タスクでは未実施。決定論的コマンド層の実測で代替した。"
     ],
     "substituted_prs": "全 PR (#58 #62 #70 #72 #75) — LLM 3レビュアー指摘収集は未実施、決定論的チェック + 構造分析で代替",
-    "cross_reference": "3レーン合成による参考値 (recall/fp_rate 数値付き) は data/input.json + data/metrics.json および README「評価結果」節を参照。本ファイルは Task 4 の代替レーン実測記録 (findings 空・fp_rate N=0 → null) であり、数値の二重報告を避けるため metrics は input.json 由来の数値を含まない。"
+    "cross_reference": "3レーン合成による参考値 (recall/fp_rate 数値付き) は data/input.json + data/metrics.json および README「評価結果」節を参照。本ファイルは Task 4 の代替レーン実測記録 (findings 空・fp_rate N=0 → null) であり、数値の二重報告を避けるため metrics は input.json 由来の数値を含まない。",
+    "revalidation_n80": {
+      "date": "2026-08-25",
+      "method": "Task 5 再検証パス — schema 拡張 (confidence / command_results / split_info) 後の再集計",
+      "consensus_change": "AND -> majority (2/3 GO で GO) + critical-only-veto + command-fail 強制 NO-GO",
+      "structural_fp_reduction": {
+        "and_fp_formula": "1-(1-p)^3",
+        "majority_fp_formula": "3*p^2*(1-p)+p^3",
+        "p_0_1": {
+          "and": 0.271,
+          "majority": 0.028
+        },
+        "note": "reviewer 1名あたり偽 NO-GO 確率 p に対し majority コンセンサスは AND 比で構造的に偽ブロック率を低下させる (p in (0,1) で常に majority < AND、metrics_tests.rs::majority_consensus_structurally_reduces_false_block_rate で固定)"
+      },
+      "legacy_compat": "旧 results.json (confidence/command_results/split_info 欠損) は serde default により再集計可能 (results_json_tests.rs::legacy_results_json_reaggregates_via_serde_defaults)",
+      "test_fixtures": "data/input.json の全 NO_GO レコードは gate 実績 (empty-commit 阻止・チケット取り違え) であり critical/command-fail 由来のため majority 再集計でも TP 維持・fp=0",
+      "monte_carlo_n80": {
+        "setup": "data/input.json の 6 clean PR (post_merge_issue_ids 空) × 3 reviewer、各 reviewer が p=0.1 で低confidence 偽 NO-GO (critical なし・コマンド成否正常) を出す仮定、2000 trials",
+        "result": {
+          "and_false_block_rate": 0.2681,
+          "majority_false_block_rate": 0.0294,
+          "theory": {
+            "and": 0.271,
+            "majority": 0.028
+          }
+        },
+        "conclusion": "#80 の構造主張を実測 golden dataset 上で確認: majority コンセンサスは AND 比で偽ブロック率を約 1/9 に構造的に低下させる。critical-veto/command-fail は強制 NO-GO を維持するため見逃し側は増やさない"
+      },
+      "reaggregated_metrics_note": "data/metrics.json は #80 スキーマ対応 aggregate() (split_info effective_verdict 優先) で再生成。旧データ (split_info 欠損) は legacy verdict で集計され値は不変 (fp=0, tp=3, tn=6) — 後方互換を実証"
+    }
   },
   "input": {
     "golden_issues": [
-      { "pr": 58, "id": "g58-1", "description": "tap_to_start ROI [1046,668,112,28] が実測左上帯 [65,7,121,35] と乖離 (Issue #57)。diff 内に回帰テストとして可視化" },
-      { "pr": 62, "id": "g62-1", "description": ".gitignore 実装タスクが重複エントリを追加 (Release Review 指摘、PR 本文に明記、最終 diff で解消済み)" }
+      {
+        "pr": 58,
+        "id": "g58-1",
+        "description": "tap_to_start ROI [1046,668,112,28] が実測左上帯 [65,7,121,35] と乖離 (Issue #57)。diff 内に回帰テストとして可視化"
+      },
+      {
+        "pr": 62,
+        "id": "g62-1",
+        "description": ".gitignore 実装タスクが重複エントリを追加 (Release Review 指摘、PR 本文に明記、最終 diff で解消済み)"
+      }
     ],
     "findings": [],
     "consensus": [
-      { "pr": 58, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] },
-      { "pr": 62, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] },
-      { "pr": 70, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] },
-      { "pr": 72, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] },
-      { "pr": 75, "verdict": "GO", "merged": true, "post_merge_issue_ids": [] }
+      {
+        "pr": 58,
+        "verdict": "GO",
+        "merged": true,
+        "post_merge_issue_ids": []
+      },
+      {
+        "pr": 62,
+        "verdict": "GO",
+        "merged": true,
+        "post_merge_issue_ids": []
+      },
+      {
+        "pr": 70,
+        "verdict": "GO",
+        "merged": true,
+        "post_merge_issue_ids": []
+      },
+      {
+        "pr": 72,
+        "verdict": "GO",
+        "merged": true,
+        "post_merge_issue_ids": []
+      },
+      {
+        "pr": 75,
+        "verdict": "GO",
+        "merged": true,
+        "post_merge_issue_ids": []
+      }
     ]
   },
   "metrics": {
-    "recall": { "total_golden": 2, "detected_golden": 0 },
+    "recall": {
+      "total_golden": 2,
+      "detected_golden": 0
+    },
     "recall_per_pr": [
-      { "pr": 58, "total_golden": 1, "detected_golden": 0 },
-      { "pr": 62, "total_golden": 1, "detected_golden": 0 }
+      {
+        "pr": 58,
+        "total_golden": 1,
+        "detected_golden": 0
+      },
+      {
+        "pr": 62,
+        "total_golden": 1,
+        "detected_golden": 0
+      }
     ],
-    "fp_rate": { "n": 0, "false_positives": 0 },
-    "consensus": { "tp": 0, "fp": 0, "tn": 5, "false_negatives": 0, "nogo_merged_prs": [] }
+    "fp_rate": {
+      "n": 0,
+      "false_positives": 0
+    },
+    "consensus": {
+      "tp": 0,
+      "fp": 0,
+      "tn": 5,
+      "false_negatives": 0,
+      "nogo_merged_prs": []
+    }
   }
 }
