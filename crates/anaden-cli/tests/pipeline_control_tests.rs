@@ -51,7 +51,10 @@ fn validate_rejects_empty_start_task() {
 fn validate_rejects_unknown_capture_mode() {
     // 文字列からの解決は RunOptions::from_str 的な経路ではなく resolve_* 純粋関数で弾く。
     let err = anaden_cli_contract::pipeline::resolve_capture_mode("movie").unwrap_err();
-    assert!(err.contains("screencap") && err.contains("scrcpy"), "got: {err}");
+    assert!(
+        err.contains("screencap") && err.contains("scrcpy"),
+        "got: {err}"
+    );
 }
 
 #[test]
@@ -153,7 +156,9 @@ fn valid_opts() -> RunOptions {
         target: RunTarget::Android,
         serial: Some("localhost:5555".to_string()),
         pipeline_dir: field_loop_pc_dir(),
-        start_task: "tap_bottom".to_string(),
+        // templates/pipelines/field_loop_pc/tap_bottom.toml の TaskDef name と一致
+        // させること(validate は load_pipeline の TaskDef.name と照合する)。
+        start_task: "TapBottomStablePc".to_string(),
         algorithm: None,
         interval_secs: 1,
         max_iters: 3,
@@ -177,10 +182,7 @@ fn slow_then_max_iters(
     opts: RunOptions,
     cancel: CancellationToken,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<anaden_engine::LoopOutcome, anyhow::Error>>
-            + Send,
-    >,
+    Box<dyn std::future::Future<Output = Result<anaden_engine::LoopOutcome, anyhow::Error>> + Send>,
 > {
     Box::pin(async move {
         // キャンセルまたは固定時間で完了。
@@ -202,10 +204,7 @@ fn immediate_cancel_outcome(
     _opts: RunOptions,
     cancel: CancellationToken,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<anaden_engine::LoopOutcome, anyhow::Error>>
-            + Send,
-    >,
+    Box<dyn std::future::Future<Output = Result<anaden_engine::LoopOutcome, anyhow::Error>> + Send>,
 > {
     Box::pin(async move {
         cancel.cancelled().await;
@@ -230,11 +229,15 @@ async fn controller_rejects_second_start_while_running() {
     let ctrl = PipelineController::new();
     let opts = valid_opts();
     // start 前に validate を通す前提(opts は valid fixture)。
-    let jh1 = ctrl.try_start(opts.clone(), immediate_cancel_outcome).unwrap();
-    let err = ctrl.try_start(opts.clone(), slow_then_max_iters).unwrap_err();
+    let jh1 = ctrl
+        .try_start(opts.clone(), immediate_cancel_outcome)
+        .unwrap();
+    let err = ctrl
+        .try_start(opts.clone(), slow_then_max_iters)
+        .unwrap_err();
     assert!(err.is_already_running(), "got: {err:?}");
     // 1 本目を完了させて後始末。
-    ctrl.cancel();
+    ctrl.cancel().await;
     let _ = jh1.await;
     assert_eq!(ctrl.state(), RunState::Finished);
 }
@@ -243,10 +246,12 @@ async fn controller_rejects_second_start_while_running() {
 async fn controller_stop_transitions_to_finished_with_interrupted_reason() {
     let ctrl = PipelineController::new();
     let opts = valid_opts();
-    let jh = ctrl.try_start(opts.clone(), immediate_cancel_outcome).unwrap();
+    let jh = ctrl
+        .try_start(opts.clone(), immediate_cancel_outcome)
+        .unwrap();
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(ctrl.state(), RunState::Running);
-    ctrl.cancel();
+    ctrl.cancel().await;
     let outcome = jh.await.unwrap().unwrap();
     assert_eq!(outcome.reason, anaden_engine::LoopStopReason::Interrupted);
     assert_eq!(ctrl.state(), RunState::Finished);
@@ -269,8 +274,10 @@ async fn controller_can_restart_after_finish() {
     }
     assert_eq!(ctrl.state(), RunState::Finished);
     // 2 回目: 再開できる(二重起動防止は実行中のみ)。
-    let jh2 = ctrl.try_start(opts.clone(), immediate_cancel_outcome).unwrap();
-    ctrl.cancel();
+    let jh2 = ctrl
+        .try_start(opts.clone(), immediate_cancel_outcome)
+        .unwrap();
+    ctrl.cancel().await;
     let _ = jh2.await;
     assert_eq!(ctrl.state(), RunState::Finished);
 }

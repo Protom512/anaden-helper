@@ -37,6 +37,8 @@ pub struct PipelineRunnerApp {
     program: String,
     /// 直近のエラー表示(UI 表示用)。
     last_error: Option<String>,
+    /// 戦略選択パネル(シャード3スコープ、runner に統合)。
+    strategy_panel: crate::strategy_ui::StrategyPanel,
 }
 
 impl PipelineRunnerApp {
@@ -46,6 +48,7 @@ impl PipelineRunnerApp {
             child: ChildProcess::new(),
             program: program.into(),
             last_error: None,
+            strategy_panel: crate::strategy_ui::StrategyPanel::default(),
         }
     }
 
@@ -108,6 +111,10 @@ impl eframe::App for PipelineRunnerApp {
             if let Some(err) = self.last_error() {
                 ui.colored_label(egui::Color32::RED, format!("エラー: {err}"));
             }
+
+            ui.separator();
+            // 戦略選択パネル（シャード3）。描画メソッドを呼んで dead_code を解消。
+            self.strategy_panel.ui(ui);
         });
     }
 }

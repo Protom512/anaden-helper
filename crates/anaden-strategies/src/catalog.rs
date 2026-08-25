@@ -133,9 +133,7 @@ impl StrategySelection {
         if let Some(id) = &self.strategy
             && catalog.find(id).is_none()
         {
-            return Err(SelectionError::UnknownStrategy {
-                id: id.clone(),
-            });
+            return Err(SelectionError::UnknownStrategy { id: id.clone() });
         }
         Ok(())
     }
@@ -217,16 +215,21 @@ mod tests {
     #[test]
     fn validate_rejects_unknown_strategy() {
         let catalog = StrategyCatalog::builtin();
-        let mut sel = StrategySelection::default();
-        sel.strategy = Some("bogus".to_string());
+        let mut sel = StrategySelection {
+            strategy: Some("bogus".to_string()),
+            ..Default::default()
+        };
         assert!(matches!(
             sel.validate(&catalog),
             Err(SelectionError::UnknownStrategy { .. })
         ));
 
-        sel.strategy = Some("fishing".to_string());
+        sel = StrategySelection {
+            strategy: Some("fishing".to_string()),
+            ..Default::default()
+        };
         assert!(sel.validate(&catalog).is_ok());
-        sel.strategy = None;
+        sel = StrategySelection::default();
         assert!(sel.validate(&catalog).is_ok());
     }
 }

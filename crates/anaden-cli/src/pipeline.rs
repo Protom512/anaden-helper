@@ -169,7 +169,13 @@ impl RunOptions {
         }
         match self.target {
             RunTarget::Android => {
-                if self.serial.as_deref().map(str::trim).unwrap_or("").is_empty() {
+                if self
+                    .serial
+                    .as_deref()
+                    .map(str::trim)
+                    .unwrap_or("")
+                    .is_empty()
+                {
                     anyhow::bail!("android ターゲットでは serial が必須です");
                 }
             }
@@ -251,14 +257,12 @@ impl std::error::Error for StartError {}
 
 /// 注入される pipeline 実行関数の型。`RunOptions` とキャンセルトークンから
 /// `LoopOutcome` を産出する future を返す(実機経路は main.rs 側で後続シャードが
-//! 配線、テストは mock を注入)。
+/// 配線、テストは mock を注入)。
 pub type RunFn = fn(
     RunOptions,
     CancellationToken,
 ) -> std::pin::Pin<
-    Box<
-        dyn std::future::Future<Output = Result<anaden_engine::LoopOutcome, anyhow::Error>> + Send,
-    >,
+    Box<dyn std::future::Future<Output = Result<anaden_engine::LoopOutcome, anyhow::Error>> + Send>,
 >;
 
 /// 実行スロット(1 本のみ)。Mutex で排他し、二重起動を構造的に防止する。
@@ -319,8 +323,10 @@ impl PipelineController {
         &self,
         opts: RunOptions,
         run: RunFn,
-    ) -> Result<tokio::task::JoinHandle<Result<anaden_engine::LoopOutcome, anyhow::Error>>, StartError>
-    {
+    ) -> Result<
+        tokio::task::JoinHandle<Result<anaden_engine::LoopOutcome, anyhow::Error>>,
+        StartError,
+    > {
         if let Err(e) = opts.validate() {
             return Err(StartError::InvalidOptions(e));
         }

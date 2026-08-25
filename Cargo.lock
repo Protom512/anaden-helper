@@ -269,6 +269,7 @@ dependencies = [
  "anaden-vision",
  "anyhow",
  "eframe",
+ "egui",
  "image",
  "rfd",
  "serde",
