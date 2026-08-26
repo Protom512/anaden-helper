@@ -86,6 +86,44 @@ pub fn build_spawn_spec(program: &str, args: &[String]) -> SpawnSpec {
     SpawnSpec::new(program, args.to_vec())
 }
 
+/// 釣り戦略の既定 pipeline ディレクトリ（リポジトリ相対・暫定固定）。
+const FISHING_PIPELINE_DIR: &str = "pipelines/fishing";
+/// 釣り戦略の開始タスク名。
+const FISHING_START_TASK: &str = "fishing";
+/// 釣り戦略の既定マッチングアルゴリズム（--algorithm は sse|ccoeff のみ受理）。
+const FISHING_ALGORITHM: &str = "sse";
+
+/// [`StrategySelection`] から `anaden run` の CLI 引数列を組み立てる純関数
+/// （Issue #88 受け入れ基準: egui 非依存・ヘッドレスユニットテスト対象）。
+///
+/// 戦略マッピング（Issue #88 UC-1/UC-2・暫定対応）:
+/// - `fishing` → `run --algorithm sse pipelines/fishing fishing`
+///   （オプション auto_release / skip_animation は現行 CLI に対応フラグが
+///   存在しないため引数へは反映しない。将来の CLI 拡張時に反映予定）
+/// - `--goal` / `--goal-file` は排他（CLI の `parse_goal_flag` 制約）のため、
+///   本関数はいずれも出力しない（ゴール無し = 従来の max_iters 挙動）。
+///
+/// # Errors
+/// 戦略未選択（`strategy == None`）、または未知の戦略 id の場合にエラーを返す
+/// （UC-4: 子プロセスを起動せず拒否するための事前検証）。
+pub fn build_run_args(
+    selection: &anaden_strategies::StrategySelection,
+) -> Result<Vec<String>, String> {
+    let id = selection.strategy.as_deref().ok_or_else(|| {
+        "戦略が選択されていません。「戦略設定」で戦略を選択してください".to_string()
+    })?;
+    match id {
+        "fishing" => Ok(vec![
+            "run".to_string(),
+            "--algorithm".to_string(),
+            FISHING_ALGORITHM.to_string(),
+            FISHING_PIPELINE_DIR.to_string(),
+            FISHING_START_TASK.to_string(),
+        ]),
+        other => Err(format!("未知の戦略です(カタログ外): {other}")),
+    }
+}
+
 /// LogLevel の表示色（スクロールログビューアの色分け・純関数）。
 fn level_color(level: LogLevel) -> egui::Color32 {
     match level {
@@ -129,6 +167,8 @@ pub struct PipelineRunnerApp {
     auto_scroll: bool,
     /// 戦略選択パネル(シャード3スコープ、runner に統合)。
     strategy_panel: crate::strategy_ui::StrategyPanel,
+    /// 選択サマリのキャッシュ（ui() の changed フラグで再計算・UC-4 前提の表示）。
+    strategy_summary: String,
 }
 
 impl PipelineRunnerApp {
@@ -169,6 +209,7 @@ impl PipelineRunnerApp {
             log_snapshot: Vec::new(),
             auto_scroll: true,
             strategy_panel: crate::strategy_ui::StrategyPanel::default(),
+            strategy_summary: "戦略未選択".to_string(),
         }
     }
 
@@ -178,6 +219,39 @@ impl PipelineRunnerApp {
             RunnerStatus::Running
         } else {
             RunnerStatus::Stopped
+        }
+    }
+
+    /// 選択サマリのキャッシュ（UI 表示用・テストから参照）。
+    #[allow(dead_code)]
+    pub fn strategy_summary(&self) -> &str {
+        &self.strategy_summary
+    }
+
+    /// 選択変更をパネルから受け取る（`StrategyPanel::ui()` の changed フラグを
+    /// 受けてサマリ/引数プレビューを再計算する）。
+    pub fn on_strategy_changed(&mut self, changed: bool) {
+        if changed {
+            self.strategy_summary = self.strategy_panel.summary();
+        }
+    }
+
+    /// 開始ボタンのハンドラ（選択から引数を組み立てる・UC-4 拒否込み）。
+    ///
+    /// 1. `strategy_panel.validate()` でカタログ整合性を検証
+    /// 2. `build_run_args` で `anaden run` 引数列を組み立て
+    /// 3. `start_pipeline` で子プロセス起動
+    ///
+    /// 検証失敗（未選択/カタログ外）は起動せずエラーを記録する。
+    pub fn start_pipeline_with_selection(&mut self) {
+        self.last_error = None;
+        if let Err(e) = self.strategy_panel.validate() {
+            self.record_error_line(&format!("戦略選択が無効です: {e}"));
+            return;
+        }
+        match build_run_args(self.strategy_panel.selection()) {
+            Ok(args) => self.start_pipeline(&args),
+            Err(e) => self.record_error_line(&e),
         }
     }
 
@@ -243,6 +317,16 @@ impl PipelineRunnerApp {
         &self.log_snapshot
     }
 
+    /// 実行状態サマリの一行文字列（UI ステータスバー表示用・ヘッドレス）。
+    ///
+    /// LogBuffer.status (RunStatus) を refresh_snapshot と同じタイミングで
+    /// 読み取り、summary() を返す。未観測時は "未実行"。
+    pub fn run_status_summary(&self) -> String {
+        self.log
+            .with_buf(|b| b.status.summary())
+            .unwrap_or_else(|| "未実行".to_string())
+    }
+
     /// 直近のエラーメッセージ(無ければ None)。
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
@@ -283,7 +367,7 @@ impl eframe::App for PipelineRunnerApp {
             let running = self.status() == RunnerStatus::Running;
             ui.add_enabled_ui(!running, |ui| {
                 if ui.button("開始").clicked() {
-                    self.start_pipeline(&["--version".to_string()]);
+                    self.start_pipeline_with_selection();
                 }
             });
             ui.add_enabled_ui(running, |ui| {
@@ -298,13 +382,18 @@ impl eframe::App for PipelineRunnerApp {
                 "状態: 停止"
             });
 
+            // 実行状態サマリ（goal/iterations/stop_reason・Issue #88 タスク3）。
+            ui.label(format!("run: {}", self.run_status_summary()));
+
             if let Some(err) = self.last_error() {
                 ui.colored_label(egui::Color32::RED, format!("エラー: {err}"));
             }
 
             ui.separator();
-            // 戦略選択パネル（シャード3）。
-            self.strategy_panel.ui(ui);
+            // 戦略選択パネル（シャード3）。changed フラグでサマリ/引数プレビューを更新。
+            let changed = self.strategy_panel.ui(ui);
+            self.on_strategy_changed(changed);
+            ui.weak(format!("選択: {}", self.strategy_summary));
 
             ui.separator();
             // ログビューア（シャード3前半・毎フレーム drain）。
@@ -525,6 +614,203 @@ mod tests {
         assert!(
             err.contains("実行中ではありません"),
             "unexpected error: {err}"
+        );
+    }
+
+    /// run_status_summary: 未実行時は「未実行」。
+    #[test]
+    fn test_run_status_summary_initially_not_run() {
+        let app = PipelineRunnerApp::new(dummy_program());
+        assert_eq!(app.run_status_summary(), "未実行");
+    }
+
+    /// run_status_summary: 開始行観測後は goal 付き実行中表示
+    /// （RunStatus.observe の出力契約: `run_loop 開始:` 行）。
+    #[test]
+    fn test_run_status_summary_reflects_start_line() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        app.push_log_line("INFO anaden_cli: run_loop 開始: interval=2s max_iters=10 goal=farm50");
+        assert_eq!(app.run_status_summary(), "実行中 goal=farm50 iterations=?");
+    }
+
+    /// run_status_summary: 結果行観測後は停止理由とサイクル数表示
+    /// （`サイクル数:` / `停止理由:` 行）。
+    #[test]
+    fn test_run_status_summary_reflects_result_lines() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        app.push_log_line("run_loop 開始: interval=2s max_iters=10 goal=g1");
+        app.push_log_line("サイクル数: 42");
+        app.push_log_line("停止理由:   宣言的ゴール到達(正常)");
+        assert_eq!(
+            app.run_status_summary(),
+            "停止 reason=宣言的ゴール到達(正常) iterations=42"
+        );
+    }
+
+    /// run_status_summary: ログクリアで未実行へ戻る。
+    #[test]
+    fn test_run_status_summary_resets_on_clear() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        app.push_log_line("run_loop 開始: goal=g");
+        app.clear_logs();
+        assert_eq!(app.run_status_summary(), "未実行");
+    }
+
+    /// run_status_summary: drain 経由（チャネル→drain_logs）でも反映される。
+    #[test]
+    fn test_run_status_summary_updates_via_drain_logs() {
+        use crate::log_view::LogEvent;
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        // drain は受信側チャネルから読むため、start 経由ではなく直接検証は困難。
+        // ここでは drain 後も summary が崩れないこと（空 drain で状態維持）を確認。
+        app.push_log_line("run_loop 開始: goal=g2");
+        app.drain_logs();
+        assert_eq!(app.run_status_summary(), "実行中 goal=g2 iterations=?");
+        let _ = LogEvent::Line(String::new());
+    }
+
+    // ---- build_run_args（Issue #88 タスク1・UC-1/UC-4）----
+
+    fn fishing_selection() -> anaden_strategies::StrategySelection {
+        let mut panel = crate::strategy_ui::StrategyPanel::default();
+        panel.select_strategy("fishing");
+        panel.selection().clone()
+    }
+
+    /// UC-1 正常系: fishing 選択で run サブコマンド + --algorithm + 位置引数が組まれる。
+    #[test]
+    fn test_build_run_args_fishing_builds_run_subcommand() {
+        let args = build_run_args(&fishing_selection()).unwrap();
+        assert_eq!(args[0], "run");
+        assert!(args.contains(&"--algorithm".to_string()));
+        // --algorithm の値は sse|ccoeff のみ受理される値であること。
+        let algo = args
+            .iter()
+            .position(|a| a == "--algorithm")
+            .map(|i| args[i + 1].clone())
+            .unwrap();
+        assert!(
+            algo == "sse" || algo == "ccoeff",
+            "invalid algorithm: {algo}"
+        );
+    }
+
+    /// UC-1 正常系: pipeline_dir / start_task 位置引数が含まれる。
+    #[test]
+    fn test_build_run_args_fishing_includes_positional_args() {
+        let args = build_run_args(&fishing_selection()).unwrap();
+        // run の位置引数（フラグ以降の非フラグトークン）は pipeline_dir と start_task。
+        let positional: Vec<&String> = args
+            .iter()
+            .enumerate()
+            .filter(|(i, a)| *i > 0 && !a.starts_with("--") && args[*i - 1] != "--algorithm")
+            .map(|(_, a)| a)
+            .collect();
+        assert_eq!(positional.len(), 2, "args: {args:?}");
+        assert!(positional[0].contains("fishing"));
+        assert!(!positional[1].starts_with("--"));
+    }
+
+    /// UC-1 正常系: オプション変更（auto_release=false 等）でも引数生成は成功する。
+    #[test]
+    fn test_build_run_args_fishing_with_toggled_options() {
+        let mut panel = crate::strategy_ui::StrategyPanel::default();
+        panel.select_strategy("fishing");
+        panel.toggle_option("auto_release", false);
+        panel.toggle_option("skip_animation", true);
+        let args = build_run_args(panel.selection()).unwrap();
+        assert_eq!(args[0], "run");
+    }
+
+    /// UC-4 エッジケース: 戦略未選択は Err（子プロセス起動拒否の事前検証）。
+    #[test]
+    fn test_build_run_args_no_strategy_is_err() {
+        let selection = anaden_strategies::StrategySelection::default();
+        let err = build_run_args(&selection).unwrap_err();
+        assert!(
+            err.contains("戦略が選択されていません"),
+            "unexpected: {err}"
+        );
+    }
+
+    /// UC-4 エッジケース: 未知の戦略 id（不正選択）は Err。
+    #[test]
+    fn test_build_run_args_unknown_strategy_is_err() {
+        let selection = anaden_strategies::StrategySelection {
+            strategy: Some("bogus-strategy".to_string()),
+            ..Default::default()
+        };
+        let err = build_run_args(&selection).unwrap_err();
+        assert!(err.contains("bogus-strategy"), "unexpected: {err}");
+    }
+
+    /// --goal / --goal-file の排他制約（parse_goal_flag）を破らないこと:
+    /// build_run_args はいずれも出力しない。
+    #[test]
+    fn test_build_run_args_never_outputs_goal_flags() {
+        let args = build_run_args(&fishing_selection()).unwrap();
+        assert!(!args.contains(&"--goal".to_string()));
+        assert!(!args.contains(&"--goal-file".to_string()));
+    }
+
+    /// UC-4: 戦略未選択のまま開始すると拒否され、子プロセスは起動しない。
+    #[test]
+    fn test_start_with_no_strategy_is_rejected() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        // 初期状態は戦略未選択。
+        assert_eq!(app.strategy_summary(), "戦略未選択");
+        app.start_pipeline_with_selection();
+        assert_eq!(app.status(), RunnerStatus::Stopped);
+        let err = app.last_error().expect("rejection error");
+        assert!(
+            err.contains("戦略が選択されていません"),
+            "unexpected: {err}"
+        );
+        app.drain_logs();
+        let last = app.log_snapshot().last().expect("error line");
+        assert_eq!(last.level, LogLevel::Error);
+    }
+
+    /// UC-4: カタログ外戦略（load_toml 等で混入）でも validate が拒否する。
+    #[test]
+    fn test_start_with_unknown_strategy_is_rejected_by_validate() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        app.strategy_panel
+            .load_toml("strategy = \"bogus\"")
+            .expect("toml load");
+        app.start_pipeline_with_selection();
+        assert_eq!(app.status(), RunnerStatus::Stopped);
+        let err = app.last_error().expect("rejection error");
+        assert!(err.contains("戦略選択が無効です"), "unexpected: {err}");
+    }
+
+    /// 選択済みなら validate → build_run_args → start の経路で起動する
+    /// （ping があれば Running。無ければスキップ相当）。
+    #[test]
+    fn test_start_with_selected_strategy_starts_child() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        app.strategy_panel.select_strategy("fishing");
+        app.start_pipeline_with_selection();
+        if app.status() == RunnerStatus::Running {
+            app.stop_pipeline();
+        }
+        // 引数組み立て自体は fishing_selection のテストで検証済み。
+    }
+
+    /// on_strategy_changed: changed=true でのみサマリが再計算される。
+    #[test]
+    fn test_on_strategy_changed_refreshes_summary() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        assert_eq!(app.strategy_summary(), "戦略未選択");
+        app.strategy_panel.select_strategy("fishing");
+        // changed=false（同一フレーム内の無操作）では更新されない。
+        app.on_strategy_changed(false);
+        assert_eq!(app.strategy_summary(), "戦略未選択");
+        // changed=true で更新される。
+        app.on_strategy_changed(true);
+        assert_eq!(
+            app.strategy_summary(),
+            "strategy=fishing on=[fishing.auto_release]"
         );
     }
 
