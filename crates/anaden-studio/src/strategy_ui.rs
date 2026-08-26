@@ -114,6 +114,29 @@ impl StrategyPanel {
         Ok(())
     }
 
+    /// 現在の選択のサマリ文字列（引数プレビュー表示用の純関数）。
+    ///
+    /// 未選択時は「戦略未選択」、選択時は戦略 id と ON のオプション一覧を返す。
+    /// `ui()` の changed フラグが立った際の再計算に使う。
+    #[must_use]
+    pub fn summary(&self) -> String {
+        let Some(id) = self.selection.strategy.as_deref() else {
+            return "戦略未選択".to_string();
+        };
+        let enabled: Vec<String> = self
+            .selection
+            .options
+            .iter()
+            .filter(|(k, v)| **v && k.starts_with(&format!("{id}.")))
+            .map(|(k, _)| k.clone())
+            .collect();
+        if enabled.is_empty() {
+            format!("strategy={id} (オプションなし)")
+        } else {
+            format!("strategy={id} on=[{}]", enabled.join(","))
+        }
+    }
+
     /// パネルを描画する。戻り値は「選択状態が変化した」フラグ。
     pub fn ui(&mut self, ui: &mut Ui) -> bool {
         let mut changed = false;
@@ -279,6 +302,36 @@ mod tests {
 
         assert_eq!(restored.selection(), panel.selection());
         assert!(restored.validate().is_ok());
+    }
+
+    #[test]
+    fn summary_unselected_is_placeholder() {
+        let panel = StrategyPanel::default();
+        assert_eq!(panel.summary(), "戦略未選択");
+    }
+
+    #[test]
+    fn summary_selected_lists_enabled_options() {
+        let mut panel = StrategyPanel::default();
+        panel.select_strategy("fishing");
+        // 既定: auto_release=true, skip_animation=false。
+        assert_eq!(
+            panel.summary(),
+            "strategy=fishing on=[fishing.auto_release]"
+        );
+        panel.toggle_option("skip_animation", true);
+        assert_eq!(
+            panel.summary(),
+            "strategy=fishing on=[fishing.auto_release,fishing.skip_animation]"
+        );
+    }
+
+    #[test]
+    fn summary_selected_all_off_shows_no_options() {
+        let mut panel = StrategyPanel::default();
+        panel.select_strategy("fishing");
+        panel.toggle_option("auto_release", false);
+        assert_eq!(panel.summary(), "strategy=fishing (オプションなし)");
     }
 
     #[test]
