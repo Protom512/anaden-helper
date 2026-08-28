@@ -6,77 +6,119 @@
 2. [アーキテクチャ](#2-アーキテクチャ)
 3. [クイックスタート](#3-クイックスタート)
 4. [ツールリファレンス](#4-ツールリファレンス)
-5. [テンプレート収集ガイド](#5-テンプレート収集ガイド)
-6. [実機で判明した事柄](#6-実機で判明した事柄)
+5. [テンプレート作成・評価ガイド](#5-テンプレート作成評価ガイド)
+6. [プラットフォーム・実機の知見](#6-プラットフォーム実機の知見)
 7. [技術的な意思決定](#7-技術的な意思決定)
-8. [将来の改善アイディア](#8-将来の改善アイディア)
+8. [将来の改善アイディア・検証基盤](#8-将来の改善アイディア検証基盤)
 
 ---
 
 ## 1. プロジェクト概要
 
-ADB 経由で接続した Android 端末上の **アナザーエデン（Another Eden）** を自動操作するツール。
+Android 端末（Pixel 7a）および Windows PC 版（AnotherEden.exe）上の **アナザーエデン（Another Eden）** を自動操作・支援するツール群。
 
 **コア機能:**
-- 画面キャプチャ → テンプレートマッチングによるゲーム状態認識
-- 状態に応じた自動操作（タップ・スワイプ・長押し）
-- ミニゲームごとの戦略パターン（Strategy pattern）
+- **マルチプラットフォーム対応**: Android（ADB / scrcpy 常駐受信・タッチインジェクション）および Windows PC（`PrintWindow` キャプチャ / `SendInput` マウス合成入力）。
+- **高精度画像認識**: `imageproc`（純 Rust）による正規化 SSE / TM_CCOEFF_NORMD、Needle 補間に `Lanczos3` を採用した 720p（幅 1280）基準スケーリング。
+- **宣言的パイプライン駆動**: TOML ファイルで画面遷移・操作タスクを宣言し、`PipelineDriver` によるループ実行・ゴール評価・発火後検証（誠実検証）。
+- **統合デスクトップ GUI（`anaden-studio`）**: ROI ドラッグ選択・正例/負例ライブスコア評価・ヒートマップ可視化・バッチ混同行列評価・パイプライン実行監視・実行履歴管理。
 
 **開発環境:**
 - 言語: Rust（edition 2024）
-- 対象デバイス: Pixel 7a（シリアル: `<DEVICE_SERIAL>`）
-- ゲーム解像度: 2400×1080（横画面）
-- 画像認識: `imageproc`（純 Rust、OpenCV 不要）
+- Android 対象機: Google Pixel 7a（2400×1080 横画面）
+- Windows 対象環境: AnotherEden.exe（1258×708 RAW クライアント領域）
+- 画像認識: `imageproc` + `image`（Rayon 並列化、OpenCV C++ 非依存）
 
 ---
 
 ## 2. アーキテクチャ
 
-### 全体構成（Cargo workspace 6 crate）
+### 全体構成（Cargo workspace 7 crate）
 
 ```
 anaden-helper/
 ├── crates/
-│   ├── anaden-core/        ← ドメイン型・trait（副作用なし）
-│   ├── anaden-device/      ← ADB 通信（スクリーンショット・入力）
-│   ├── anaden-vision/      ← テンプレートマッチング・画面認識
-│   ├── anaden-engine/      ← Sense→Think→Act メインループ
+│   ├── anaden-core/        ← ドメイン型・trait・Goal 評価（副作用なし）
+│   ├── anaden-device/      ← デバイス通信（Android ADB/scrcpy + Windows PC Win32 API）
+│   ├── anaden-vision/      ← テンプレートマッチング・画面認識・スケーリング
+│   ├── anaden-engine/      ← Sense→Think→Act メインループ・PipelineDriver・回復
 │   ├── anaden-strategies/  ← ミニゲーム戦略の実装
-│   └── anaden-cli/         ← CLI エントリポイント + ツール
+│   ├── anaden-cli/         ← CLI エントリポイント（anaden / anaden-tool）
+│   └── anaden-studio/      ← GUI ツール（ROI 選択・評価・パイプライン実行・履歴）
 ├── templates/              ← テンプレート画像・キャプチャ
-│   ├── scenes/             ← 画面判定用テンプレート（GameState 別ディレクトリ）
-│   └── captures/           ← キャプチャ保存先
-├── config/                 ← 設定ファイル
-└── docs/                   ← ドキュメント
+│   ├── scenes/             ← 画面判定用テンプレート（GameState / Pipeline 別）
+│   └── captures/           ← キャプチャ保存先・プローブ PNG
+├── config/                 ← 設定ファイル・宣言的パイプライン TOML
+└── docs/                   ← ドキュメント・Wiki・ダイアグラム
+```
+
+### ランタイムアーキテクチャ（4 信頼境界 & 10 コアコンポーネント）
+
+> 💡 **インタラクティブ HTML ダイアグラム**: [`docs/diagrams/runtime-architecture.html`](file:///C:/Users/black/git-repo/anaden-helper/docs/diagrams/runtime-architecture.html)
+> （Archify により生成されたダーク／ライトテーマ対応、章別フォーカスビュー、ズーム対応のスタンドアロン SVG/HTML）
+
+```
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ [User Interface Layer]                                                      │
+│   ├── anaden CLI (anaden-cli: Run / Ensure-Open / Tool)                     │
+│   └── anaden-studio (anaden-studio: egui Desktop GUI & Live Logs)           │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │ (Primary Path: 実行開始)
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ [Automation Engine & Vision Core]                                           │
+│   ├── Pipeline Driver (anaden-engine: Sense→Think→Act 駆動ループ)           │
+│   │     ├─▶ Core & Goals (anaden-core: 純粋ドメイン型・Goal 評価・I/O ゼロ)  │
+│   │     └─▶ Vision Engine (anaden-vision: SSE / Ccoeff / Lanczos3)          │
+│   │           └─▶ Templates & Tasks (720p 基準正規化 TOML/PNG 資産)         │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │ (Primary Path: アクション送信)
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ [Device Adaptation Layer]                                                   │
+│   ├── Android Adapter (anaden-device: ADB screencap & scrcpy タッチ注入)     │
+│   └── Windows Adapter (anaden-device: Win32 PrintWindow & SendInput)        │
+└──────────────────────────────────────┬──────────────────────────────────────┘
+                                       │ (Primary Path: デバイス制御)
+                                       ▼
+┌─────────────────────────────────────────────────────────────────────────────┐
+│ [Target Game Environments]                                                  │
+│   ├── Android (Pixel 7a: 2400×1080 横画面)                                  │
+│   └── Windows PC (AnotherEden.exe: RAW 1258×708 クライアント領域)            │
+└─────────────────────────────────────────────────────────────────────────────┘
 ```
 
 ### Sense → Think → Act ループ
 
+> 💡 **インタラクティブ実行シーケンス図**: [`docs/diagrams/sense-think-act.html`](file:///C:/Users/black/git-repo/anaden-helper/docs/diagrams/sense-think-act.html)
+> （Archify により生成された Sense / Think / Act / Verify の一連のメッセージパッシング・ライフサイクル詳細図）
+
 ```
-┌──────────────────────────────────────────────────┐
-│                   Orchestrator                     │
-│                                                    │
-│  ┌─────────┐   ┌──────────┐   ┌──────────────┐  │
-│  │  SENSE   │──▶│  THINK   │──▶│     ACT      │  │
-│  │ キャプチャ│   │ 状態判定  │   │ タップ/スワイプ│  │
-│  │ テンプレ  │   │ 戦略選択  │   │ 待機          │  │
-│  │ ート照合  │   │ 行動決定  │   │              │  │
-│  └─────────┘   └──────────┘   └──────────────┘  │
-│       ▲                               │          │
-│       └──────── フィードバック ────────┘          │
-└──────────────────────────────────────────────────┘
+┌────────────────────────────────────────────────────────┐
+│                   Orchestrator / Driver                │
+│                                                        │
+│  ┌──────────┐   ┌────────────┐   ┌──────────────────┐  │
+│  │  SENSE   │──▶│   THINK    │──▶│       ACT        │  │
+│  │ キャプチャ │   │ 状態判定   │   │ タップ/スワイプ/   │  │
+│  │ テンプレ  │   │ 戦略/遷移  │   │ キー/マウス送信   │  │
+│  │ 照合      │   │ 行動決定   │   │ 待機             │  │
+│  └──────────┘   └────────────┘   └──────────────────┘  │
+│       ▲                                   │            │
+│       └────────── 誠実検証 / 反復 ─────────┘            │
+└────────────────────────────────────────────────────────┘
 ```
 
 ### 依存関係の方向（絶対ルール）
 
 ```
-anaden-cli
-  └── anaden-engine
-        ├── anaden-core      （型定義のみ、I/O なし）
-        ├── anaden-device    （ADB 通信）
-        ├── anaden-vision    （画像認識）
-        └── anaden-strategies（ミニゲーム戦略）
-              └── anaden-core
+anaden-cli ─────────┐
+                    ▼
+anaden-studio ──▶ anaden-engine
+                    ├── anaden-core      （型定義・Goal のみ、I/O なし）
+                    ├── anaden-device    （ADB / scrcpy / Win32 API）
+                    ├── anaden-vision    （画像認識・スケーリング）
+                    └── anaden-strategies（ミニゲーム戦略）
+                          └── anaden-core
 ```
 
 **内側のクレートは外側を知らない。** `anaden-core` は一切の I/O を持たない。
@@ -85,12 +127,13 @@ anaden-cli
 
 | crate | 何をするか | 何をしないか |
 |---|---|---|
-| `anaden-core` | GameState, InputAction, Strategy trait の定義 | ファイル I/O、ADB 通信、ネットワーク |
-| `anaden-device` | ADB 経由のスクリーンショット取得・入力送信 | ゲームロジック、画像認識 |
-| `anaden-vision` | テンプレートマッチング → GameState 変換 | 入力実行、ADB 通信 |
-| `anaden-engine` | メインループの駆動・状態遷移・エラー回復 | 直接デバイス操作・画像処理 |
+| `anaden-core` | `GameState`, `InputAction`, `Strategy`, `Goal` trait・型の定義 | ファイル I/O、ADB 通信、ネットワーク、Windows API |
+| `anaden-device` | Android (ADB / scrcpy) & Windows (PrintWindow / SendInput) 通信・キャプチャ | ゲームロジック、画像認識 |
+| `anaden-vision` | テンプレートマッチング（SSE / TM_CCOEFF_NORMD）、720p スケーリング、ROI 抽出 | 入力実行、デバイス通信 |
+| `anaden-engine` | メインループ駆動、`PipelineDriver`、状態遷移、エラー回復（再起動/前景化）、誠実検証 | 直接デバイス操作・画像処理アルゴリズム実装 |
 | `anaden-strategies` | ミニゲーム固有の操作ロジック | デバイス通信・画像認識の直接呼び出し |
-| `anaden-cli` | 設定読み込み・依存関係の組み立て | ビジネスロジック |
+| `anaden-cli` | CLI 引数パース、サブコマンド（`run`, `ensure-open`, `launch`, `legacy`）、ツール提供 | ビジネスロジック |
+| `anaden-studio` | GUI（eframe / egui）、ROI 選択・ライブスコア、バッチ評価、パイプライン実行・ログ・履歴 | デバイス低レベルプロトコル実装 |
 
 ---
 
@@ -99,10 +142,10 @@ anaden-cli
 ### 前提条件
 
 ```bash
-# 1. Rust ツールチェーン
+# 1. Rust ツールチェーン（edition 2024 対応）
 rustup update stable
 
-# 2. ADB（Android SDK Platform Tools）
+# 2. ADB（Android SDK Platform Tools）※ Android 実機利用時
 adb version
 
 # 3. cargo-nextest
@@ -112,17 +155,19 @@ cargo install cargo-nextest --locked
 ### ビルドとテスト
 
 ```bash
-# ビルド
+# 全ワークスペースのビルド
 cargo build --workspace
 
-# テスト（32 テスト）
+# 全テストの実行
 cargo nextest run --workspace
 
-# ツールのみビルド
-cargo build --bin anaden-tool
+# 各バイナリの個別ビルド
+cargo build --bin anaden        # メイン CLI
+cargo build --bin anaden-tool   # 開発・検証ツール
+cargo build --bin anaden-studio # GUI ツール
 ```
 
-### デバイス接続
+### デバイス接続（Android の場合）
 
 ```bash
 # USB 接続後、認識確認
@@ -135,152 +180,133 @@ adb -s <serial> reconnect
 ### 基本操作
 
 ```bash
-# スクリーンショット取得
-cargo run --bin anaden-tool -- capture <DEVICE_SERIAL> templates/captures/test.png
+# 1. 宣言的パイプライン実行（Android 実機）
+cargo run --bin anaden -- run config/pipelines/nav_to_field title <serial>
 
-# アナザーエデン起動
-cargo run --bin anaden-tool -- launch <DEVICE_SERIAL>
+# 2. 宣言的パイプライン実行（Windows PC 版）
+cargo run --bin anaden -- run config/pipelines/nav_to_field_pc title_pc --target windows
 
-# 連続キャプチャ（2秒×10枚）
-cargo run --bin anaden-tool -- record <DEVICE_SERIAL> templates/captures --interval 2 --count 10
+# 3. Studio GUI 起動
+cargo run --bin anaden-studio
 
-# テンプレート抽出（座標指定）
-cargo run --bin anaden-tool -- extract <画像> <x> <y> <w> <h> <出力>
+# 4. スクリーンショット取得
+cargo run --bin anaden-tool -- capture <serial> templates/captures/test.png
 
-# マッチングテスト（1/4ダウンスケール）
+# 5. テンプレートマッチングテスト（1/4 ダウンスケール）
 cargo run --bin anaden-tool -- match <画像> <テンプレート> 0.85 --scale 4
 ```
-
----
 
 ## 4. ツールリファレンス
 
 ### `anaden`（メイン CLI）
 
-```bash
-# 設定ファイル指定で起動
-cargo run --bin anaden -- --device <DEVICE_SERIAL> --templates ./templates/scenes
+| サブコマンド | 用途 |
+|---|---|
+| `run` | 宣言的パイプラインを実機 / PC でライブ実行（`PipelineDriver`） |
+| `ensure-open` | ゲームの起動状態を確認し、未起動なら起動して前景化を待機（CI gate） |
+| `launch` | 無条件起動コマンドを発行（リカバリ用途） |
+| `legacy` | 旧来の命令型 `Orchestrator` ループ（後方互換） |
 
-# オプション
---device <serial>       # ADB デバイスシリアル
---templates <dir>       # テンプレートディレクトリ
---interval <ms>         # ループ間隔（デフォルト: 500ms）
---threshold <float>     # 信頼度閾値（デフォルト: 0.85）
---timeout <secs>        # 最大実行時間（0=無制限）
---config <file>         # TOML 設定ファイル
+#### `anaden run` の主要オプション
+
+```bash
+cargo run --bin anaden -- run <pipeline_dir> <start_task> [serial] [オプション...]
 ```
 
-### `anaden-tool`（開発・デバッグ用）
+- `--target <android|windows>`: 実行ターゲット（デフォルト: `android`）
+- `--algorithm <sse|ccoeff>`: 認識アルゴリズム上書き
+- `--interval <秒>`: ループ間隔（デフォルト: 1秒）
+- `--max-iters <回数>`: 最大サイクル数（デフォルト: 100）
+- `--ensure-open <bool>`: 未起動時の自動前景化（デフォルト: `true`）
+- `--recover-launch <bool>`: NoMatch 連続時の自動再起動（デフォルト: `true`）
+- `--verify-after-fire <bool>`: 発火後検証・誠実検証（デフォルト: `true`）
+- `--goal <toml_str>` / `--goal-file <path>`: 停止ゴール条件
+
+### `anaden-studio`（デスクトップ GUI）
+
+```bash
+cargo run --bin anaden-studio
+```
+
+- **✏️ 作成モード（Authoring）**: スクリーンショットやライブ ADB からマウスドラッグで ROI を選択。正例／負例フォルダに対する識別マージンとヒートマップをリアルタイム算出して保存。
+- **📊 バッチ評価モード（Batch）**: テスト画像群に対して保存済みテンプレートを一括照合し、混同行列・正答率・感度・特異性を算出。
+- **🚀 パイプラインランナー（Runner）**: 戦略・引数を選択してパイプラインを実行。stdout/stderr 分離ログビュー、リアルタイム色分け、協調的停止。
+- **📜 実行履歴（History）**: 過去の実行ログ・終了コード・実行時間を永続化し一覧確認。
+
+### `anaden-tool`（開発・デバッグ用 CLI）
 
 | コマンド | 説明 |
 |---|---|
-| `capture <serial> [output]` | スクリーンショットを取得して保存 |
+| `capture <serial> [out]` | スクリーンショットを取得して保存 |
 | `extract <img> <x> <y> <w> <h> <out>` | 画像の一部をテンプレートとして抽出 |
-| `match <img> <tpl> [threshold] [--scale N]` | テンプレートマッチングを実行 |
+| `match <img> <tpl> [threshold] [-s N]` | テンプレートマッチングを実行 |
+| `detect <img> [-t <dir>] [-c <threshold>]` | ディレクトリ内全テンプレートによるシーン投票判定 |
+| `explore <serial> [-o <dir>] [-i N] [-d N]` | 探索的テンプレート自動収集 |
 | `launch <serial>` | アナザーエデンを起動 |
-| `record <serial> [dir] [--interval N] [--count N]` | 連続キャプチャ |
+| `record <serial> [dir] [-i N] [-c N]` | 連続キャプチャ |
+| `run-pipeline <img> <dir> <task> [-a algo]` | パイプライン 1 ステップ Dry-run（発火なし） |
 
 ---
 
-## 5. テンプレート収集ガイド
-
-### 手順
-
-```
-1. アナザーエデンを起動
-   cargo run --bin anaden-tool -- launch <DEVICE_SERIAL>
-
-2. 画面をキャプチャ
-   cargo run --bin anaden-tool -- capture <DEVICE_SERIAL> templates/captures/screen.png
-
-3. 特徴的な領域を抽出（50x50程度の小さい領域が推奨）
-   cargo run --bin anaden-tool -- extract templates/captures/screen.png 30 15 120 35 templates/scenes/title/ver_label.png
-
-4. マッチング精度を確認
-   cargo run --bin anaden-tool -- match templates/captures/screen.png templates/scenes/title/ver_label.png 0.85 --scale 4
-
-5. 別キャプチャで交差検証
-   cargo run --bin anaden-tool -- capture <DEVICE_SERIAL> templates/captures/screen2.png
-   cargo run --bin anaden-tool -- match templates/captures/screen2.png templates/scenes/title/ver_label.png 0.85 --scale 4
-```
+## 5. テンプレート作成・評価ガイド
 
 ### テンプレートのベストプラクティス
 
-- **小さく**: 50x50〜150x50 程度。大きすぎるとマッチングが重い
-- **特徴的**: テキスト、アイコン、一意な UI 要素
-- **変化に強い**: アニメーションしない要素を選ぶ（ボタンテキスト > キャラ絵）
-- **GameState 別ディレクトリ**: `templates/scenes/title/`, `templates/scenes/battle/` 等
-
-### 現在収集済みのテンプレート
-
-| GameState | テンプレート | サイズ | 信頼度 |
-|---|---|---|---|
-| TitleScreen | `title/ver_label.png` | 120×35 | 99.3% |
-| TitleScreen | `title/support_text.png` | 150×40 | 99.9% |
-| TitleScreen | `title/wfs_mark.png` | 120×25 | 100% |
+- **720p 基準正規化**: すべての座標・ROI は幅 1280 基準で保存されます。
+- **小さく特徴的**: 50×50〜150×50 程度。大きすぎるとマッチング計算が重くなり、アニメーションや背景変化の影響を受けやすくなります。
+- **変化に強い要素**: ボタンテキストや固有アイコンを選択（キャラ立ち絵や背景アニメーション領域を避ける）。
+- **`anaden-studio` でのマージン評価**: 正例スコア最小値 - 負例スコア最大値（`margin > 0.1`）が緑色になる ROI を選定。
 
 ---
 
-## 6. 実機で判明した事柄
+## 6. プラットフォーム・実機の知見
 
-### デバイス情報
+### Android（Google Pixel 7a）
 
-| 項目 | 値 |
-|---|---|
-| デバイス | Google Pixel 7a |
-| シリアル | `<DEVICE_SERIAL>` |
-| ゲーム中の解像度 | **2400×1080（横画面）** |
-| ゲームのパッケージ名 | `net.wrightflyer.anothereden` |
-| メイン Activity | `net.wrightflyer.toybox.AppActivity` |
-| ゲームバージョン | `ver 3.15.50 (980)` |
+- **解像度**: 2400×1080（横画面）
+- **キャプチャ**: `adb exec-out screencap -p` を使用（Windows の CR/LF 改行破損を回避）。所要時間 ~797ms。
+- **入力安定化**: ゲームが `adb input tap` を無視・ドロップする場合、`--input scrcpy`（`TYPE_INJECT_TOUCH_EVENT`）を使用可能。
 
-### ADB の注意点
+### Windows PC 版（AnotherEden.exe）
 
-| 問題 | 対策 |
-|---|---|
-| `adb shell screencap -p` で PNG が壊れる（Windows の CR/LF 変換） | **`adb exec-out screencap -p`** を使う |
-| デバイスが `offline` になる | `adb -s <serial> reconnect` で復旧 |
-| ゲーム起動時の Activity 名が `MainActivity` ではない | `net.wrightflyer.toybox.AppActivity` |
+- **クライアント寸法**: **1258×708 RAW 空間**（DPI スケーリング非依存）。
+- **キャプチャ**: `windows-rs` による `PrintWindow`（GDI / D3D11）。
+- **入力送信**: `SendInput` によるマウス合成入力。
+- **アンチチート（wfsdrv）**: PC 版では `PrintWindow` / `SendInput` はブロックされず正常動作することを確認済み。
+- **起動**: `Launcher.exe` 経由でプロセス監視。
 
-### パフォーマンス
+### パフォーマンス実測（1ループ 1秒以内達成）
 
-| 測定項目 | 値 |
-|---|---|
-| スクリーンショット取得 | ~500ms |
-| テンプレートマッチング（1/4 DS） | ~1s / テンプレート（小テンプレート） |
-| フル解像度マッチング | **実用不可**（2400×1080 は遅すぎる） |
+| 工程 | 実測中央値 | 割合 |
+|---|---|---|
+| **キャプチャ（screencap）** | ~797ms | ~86%（支配的律速） |
+| **タップ送信（adb input）** | ~106ms | ~11% |
+| **720p スケーリング** | ~23ms | ~3% |
+| **テンプレートマッチング（ROI）** | ~4〜5ms | < 0.5% |
+| **合計** | **~930ms** | **1秒以内ループを達成** |
 
 ---
 
 ## 7. 技術的な意思決定
 
-### なぜ Rust か
+### なぜ Rust & 純 Rust `imageproc` か
+- リアルタイム自動操作に必要な速度と並行性（Rayon / Tokio）。
+- OpenCV の C++ ネイティブ依存を排除し、Windows / Linux で環境構築・CI ビルドを一発で安定化。
+- `VisionEngine` trait による将来的なアルゴリズム差し替えの容易性。
 
-- 画像処理のパフォーマンス要件（リアルタイム自動操作）
-- 型安全性による GameState の堅牢な管理
-- 将来的に WASM やネイティブ拡張への道がある
+### Lanczos3 スケーリング
+- テンプレート画像（needle）をターゲット解像度へスケーリングする際、バイリニア補間では微細な文字（version 帯等）のエッジがボケて信頼度が低下する。高品質な `Lanczos3` 補間を採用することで認識精度を大幅に向上。
 
-### なぜ `imageproc`（OpenCV ではない）か
-
-- Windows 環境で OpenCV のネイティブライブラリ依存を回避
-- アナザーエデンの固定解像度 UI はテンプレートマッチングで十分
-- 純 Rust で `cargo build` 一発で通る
-- 精度不足が出たら `anaden-vision` 内部だけ差し替え可能
-
-### ダウンスケール戦略
-
-- **問題**: 2400×1080 の全画素マッチングは O(W×H×w×h) で数十分かかる
-- **解決**: 1/4（600×270）に縮小してからマッチング
-- **精度**: 実測 99%+。ゲーム UI の変化は 4px 精度で十分に識別可能
-- **座標**: マッチ位置 × 4 で元解像度に復元。タップ精度は ±4px
+### 宣言的タスクと誠実検証
+- 自動操作シーケンスを TOML で宣言化し、コード変更なしでフロー追加・メンテナンスを可能に。
+- アクション発火後に再度キャプチャしてテンプレート消失を確認する「誠実検証」により、偽成功を排除。
 
 ---
 
-## 8. 将来の改善アイディア
+## 8. 将来の改善アイディア・検証基盤
 
-詳細は [docs/investigation.md](investigation.md) を参照。
+- **Review Gate 定量検証基盤**: `scripts/review_gate_eval` によるレビュー精度検証ハーネス（AND コンセンサス・majority / critical-veto）。
+- **常駐キャプチャの標準化**: `scrcpy` H.264 常駐受信によるキャプチャ時間の大幅短縮（~797ms → ~50ms）。
+- **マルチ解像度・アスペクト比対応**: 16:9, 20:9 以外の端末への自動適応。
+- **録画・リプレイ・LLM 連携**: 操作ログの学習や小型ビジョンモデルとのハイブリッド判定。
 
-- **Tiny LLM アプローチ**: テンプレートマッチングの代わりに超小型ビジョンモデルで画面分類
-- **YouTube 動画からの学習データ収集**: プレイング動画をフレーム抽出して教師データに
-- **マルチデバイス対応**: 解像度非依存のテンプレートスケーリング
-- **録画・リプレイ機能**: 操作シーケンスの記録と再実行

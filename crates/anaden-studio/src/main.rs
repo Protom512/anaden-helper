@@ -4,22 +4,14 @@
 //! リアルタイムに検証しながらテンプレートを作成するツール。
 //! 認識方式は VisionEngine trait（現状は正規化SSE）で差し替え可能。
 
-mod app;
-mod batch;
-mod canvas;
-mod childproc;
-mod library;
-mod log_view;
-mod proposals;
-mod runner;
-mod scoring;
-mod source;
-mod strategy_ui;
+// モジュール実体は lib.rs (anaden-studio lib) 側で公開している。
+// bin 側で二重に `mod` 宣言すると別実体としてコンパイルされ dead_code
+// 警告が発生するため、lib を参照する。
+use anaden_studio::app::StudioApp;
+use anaden_studio::runner::PipelineRunnerApp;
+use anaden_studio::source::Target;
 
 use eframe::egui;
-
-use crate::app::StudioApp;
-use crate::source::Target;
 
 /// コマンドライン引数。
 struct CliArgs {
@@ -124,7 +116,7 @@ fn main() -> eframe::Result {
                 setup_japanese_fonts(&cc.egui_ctx);
                 // anaden バイナリを ANADEN_BIN → target/{debug,release} → PATH
                 // の順で明示パス解決する（Issue #85）。
-                Ok(Box::new(runner::PipelineRunnerApp::with_resolved_anaden()))
+                Ok(Box::new(PipelineRunnerApp::with_resolved_anaden()))
             }),
         );
     }

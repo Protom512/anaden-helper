@@ -21,3 +21,7 @@
 
 ## 2026-08-24
 - Added concepts/AgentVerification.md (Issue #69 agent verification report, UC-1..UC-3 all PASS).
+
+## 2026-08-27
+- Synchronized and updated all wiki documents (`docs/anaden-helper.wiki/*` and `docs/wiki.md`) to reflect the latest 7-crate workspace architecture (`anaden-studio`), Windows PC platform support & cold-start (`nav_to_field_pc`), Lanczos3 scaling, and review-gate quantitative eval harness.
+

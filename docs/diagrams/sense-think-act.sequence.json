@@ -1,0 +1,54 @@
+{
+  "schema_version": 1,
+  "diagram_type": "sequence",
+  "meta": {
+    "title": "Sense → Think → Act 実行シーケンス",
+    "output": "docs/diagrams/sense-think-act.html",
+    "quality_profile": "showcase",
+    "column_fit": "spread",
+    "viewBox": [920, 520]
+  },
+  "participants": [
+    { "id": "cli", "type": "frontend", "label": "CLI / GUI", "sublabel": "UI エントリ" },
+    { "id": "driver", "type": "backend", "label": "Driver", "sublabel": "実行制御" },
+    { "id": "device", "type": "backend", "label": "DeviceAdapter", "sublabel": "ADB / Win32" },
+    { "id": "vision", "type": "backend", "label": "VisionEngine", "sublabel": "SSE / Ccoeff" },
+    { "id": "core", "type": "backend", "label": "GoalEvaluator", "sublabel": "状態・目標判定" },
+    { "id": "target", "type": "external", "label": "Another Eden", "sublabel": "実機 / PC" }
+  ],
+  "messages": [
+    { "id": "m1", "from": "cli", "to": "driver", "y": 160, "label": "run_pipeline(task)", "variant": "emphasis" },
+    { "id": "m2", "from": "driver", "to": "device", "y": 190, "label": "capture_screenshot()" },
+    { "id": "m3", "from": "device", "to": "target", "y": 220, "label": "screencap / PrintWindow" },
+    { "id": "m4", "from": "target", "to": "driver", "y": 250, "label": "DynamicImage (720p)", "variant": "return" },
+    { "id": "m5", "from": "driver", "to": "vision", "y": 280, "label": "match_scene(image, task)" },
+    { "id": "m6", "from": "vision", "to": "driver", "y": 310, "label": "MatchResult (conf >= 0.95)", "variant": "return" },
+    { "id": "m7", "from": "driver", "to": "core", "y": 340, "label": "eval_goal_and_action()" },
+    { "id": "m8", "from": "core", "to": "driver", "y": 370, "label": "ActionDecision (Tap)", "variant": "return" },
+    { "id": "m9", "from": "driver", "to": "target", "y": 400, "label": "scrcpy inject / SendInput", "variant": "emphasis" },
+    { "id": "m10", "from": "driver", "to": "target", "y": 430, "label": "verify_after_fire() (誠実検証)", "variant": "dashed" }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "SENSE（認識フェーズ）",
+      "items": [
+        "ScreenScaler で 720p 基準へ Lanczos3 正規化し、VisionEngine で照合スコアを算出"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "THINK（判定フェーズ）",
+      "items": [
+        "信頼度スコアと Goal 条件を評価し、目標達成確認または次アクション（Tap/Swipe）を決定"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "ACT & VERIFY（実行・検証フェーズ）",
+      "items": [
+        "コマンド発火後に再度キャプチャしてテンプレート消失を確認し、偽成功を排除"
+      ]
+    }
+  ]
+}
