@@ -1,0 +1,7 @@
+{
+  "runTimestamp": "2026-08-29T05:45:22Z",
+  "runId": "run-1787982322",
+  "issue": 97,
+  "title": "[Feature] pipeline 実行へ runTimestamp の記録・活用",
+  "phases": ["Coordinate", "Request", "Estimate", "Approve", "Implement", "Commit Gate", "Release", "Release Review", "Merge & Close", "Self-Improve"]
+}

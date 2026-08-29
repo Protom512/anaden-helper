@@ -48,11 +48,9 @@ pub enum ChildProcessError {
     Spawn(#[source] io::Error),
     /// プロセス停止に失敗（SharedChild 化に伴い現在未使用だが、stop の
     /// 失敗報告契約として将来の再利用に備えて保持する）。
-    #[expect(dead_code)]
     #[error("停止に失敗: {0}")]
     Kill(#[source] io::Error),
     /// 停止後の終了待機に失敗（同上）。
-    #[expect(dead_code)]
     #[error("終了待機に失敗: {0}")]
     Wait(#[source] io::Error),
 }

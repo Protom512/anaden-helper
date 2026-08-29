@@ -1,0 +1,244 @@
+{
+  "schema_version": 1,
+  "diagram_type": "architecture",
+  "meta": {
+    "title": "Another Eden 自動化ヘルパー — ランタイムアーキテクチャ",
+    "output": "docs/diagrams/runtime-architecture.html",
+    "quality_profile": "showcase",
+    "views": [
+      {
+        "id": "primary-pipeline",
+        "label": "主要パイプライン実行パス",
+        "focus": ["cli", "driver", "vision", "android_adapter", "android_target"],
+        "note": "CLI から実機ゲーム画面操作に至る Sense→Think→Act の一連の実行フロー。"
+      },
+      {
+        "id": "vision-and-state",
+        "label": "画像認識とゴール判定",
+        "focus": ["driver", "vision", "template_store", "core_models"],
+        "note": "テンプレート照合、Lanczos3 座標スケーリング、純粋ゴール評価の連携。"
+      },
+      {
+        "id": "pc-platform",
+        "label": "Windows PC ネイティブ実行",
+        "focus": ["cli", "studio", "driver", "win32_adapter", "pc_target"],
+        "note": "AnotherEden.exe に対する Win32 PrintWindow キャプチャと SendInput 操作。"
+      }
+    ]
+  },
+  "components": [
+    {
+      "id": "cli",
+      "type": "frontend",
+      "label": "anaden CLI",
+      "sublabel": "実行 / 起動確認 / ツール",
+      "tag": "anaden-cli",
+      "pos": [40, 110],
+      "size": [130, 56]
+    },
+    {
+      "id": "studio",
+      "type": "frontend",
+      "label": "anaden-studio",
+      "sublabel": "egui GUI & ログ表示",
+      "tag": "anaden-studio",
+      "pos": [40, 240],
+      "size": [130, 56]
+    },
+    {
+      "id": "driver",
+      "type": "backend",
+      "label": "パイプラインドライバ",
+      "sublabel": "Sense→Think→Act 駆動",
+      "tag": "anaden-engine",
+      "pos": [260, 110],
+      "size": [140, 60]
+    },
+    {
+      "id": "core_models",
+      "type": "backend",
+      "label": "コア型・ゴール評価",
+      "sublabel": "ドメイン型 / 副作用なし",
+      "tag": "anaden-core",
+      "pos": [260, 240],
+      "size": [140, 56]
+    },
+    {
+      "id": "vision",
+      "type": "backend",
+      "label": "画像認識エンジン",
+      "sublabel": "SSE / Ccoeff / Lanczos3",
+      "tag": "anaden-vision",
+      "pos": [470, 110],
+      "size": [140, 60]
+    },
+    {
+      "id": "template_store",
+      "type": "database",
+      "label": "テンプレート・タスク",
+      "sublabel": "TOML & PNG 資産",
+      "tag": "720p 基準正規化",
+      "pos": [470, 240],
+      "size": [140, 56]
+    },
+    {
+      "id": "android_adapter",
+      "type": "backend",
+      "label": "Android アダプタ",
+      "sublabel": "ADB / scrcpy タッチ注入",
+      "tag": "anaden-device",
+      "pos": [680, 110],
+      "size": [140, 60]
+    },
+    {
+      "id": "win32_adapter",
+      "type": "backend",
+      "label": "Windows アダプタ",
+      "sublabel": "PrintWindow / SendInput",
+      "tag": "windows-rs",
+      "pos": [680, 240],
+      "size": [140, 56]
+    },
+    {
+      "id": "android_target",
+      "type": "external",
+      "label": "Android (Pixel 7a)",
+      "sublabel": "アナザーエデン (2400x1080)",
+      "tag": "実機端末",
+      "pos": [900, 110],
+      "size": [140, 60]
+    },
+    {
+      "id": "pc_target",
+      "type": "external",
+      "label": "PC版 AnotherEden.exe",
+      "sublabel": "クライアント RAW (1258x708)",
+      "tag": "32bit cocos2d-x",
+      "pos": [900, 240],
+      "size": [140, 56]
+    }
+  ],
+  "boundaries": [
+    {
+      "kind": "region",
+      "label": "ユーザーインターフェース層",
+      "wraps": ["cli", "studio"]
+    },
+    {
+      "kind": "security-group",
+      "label": "自動化エンジン & 認識コア",
+      "wraps": ["driver", "core_models", "vision", "template_store"]
+    },
+    {
+      "kind": "security-group",
+      "label": "デバイス適合層",
+      "wraps": ["android_adapter", "win32_adapter"]
+    },
+    {
+      "kind": "region",
+      "label": "対象ゲーム実行環境",
+      "wraps": ["android_target", "pc_target"]
+    }
+  ],
+  "connections": [
+    {
+      "id": "cli-to-driver",
+      "from": "cli",
+      "to": "driver",
+      "label": "パイプライン実行",
+      "variant": "emphasis"
+    },
+    {
+      "id": "studio-to-driver",
+      "from": "studio",
+      "to": "driver",
+      "label": "子プロセス起動",
+      "variant": "default"
+    },
+    {
+      "id": "driver-to-vision",
+      "from": "driver",
+      "to": "vision",
+      "label": "画面状態照合",
+      "variant": "emphasis"
+    },
+    {
+      "id": "vision-to-templates",
+      "from": "vision",
+      "to": "template_store",
+      "label": "資産読込",
+      "variant": "dashed",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 20
+    },
+    {
+      "id": "driver-to-core",
+      "from": "driver",
+      "to": "core_models",
+      "label": "ゴール評価",
+      "variant": "default",
+      "fromSide": "bottom",
+      "toSide": "top",
+      "labelDy": 20
+    },
+    {
+      "id": "driver-to-android",
+      "from": "driver",
+      "to": "android_adapter",
+      "label": "操作コマンド送信",
+      "variant": "emphasis",
+      "fromSide": "top",
+      "toSide": "top",
+      "via": [[330, 48], [750, 48]]
+    },
+    {
+      "id": "android-to-target",
+      "from": "android_adapter",
+      "to": "android_target",
+      "label": "ADB / scrcpy",
+      "variant": "emphasis"
+    },
+    {
+      "id": "win32-to-target",
+      "from": "win32_adapter",
+      "to": "pc_target",
+      "label": "Win32 API",
+      "variant": "default"
+    }
+  ],
+  "cards": [
+    {
+      "dot": "cyan",
+      "title": "エントリポイント & UI 層",
+      "items": [
+        "anaden CLI はライブ実行・コールドスタート CI ゲート・検証ツールを提供",
+        "anaden-studio は egui による ROI 作成・バッチ混同行列評価・ログ監視を提供"
+      ]
+    },
+    {
+      "dot": "emerald",
+      "title": "Sense → Think → Act エンジン",
+      "items": [
+        "PipelineDriver がキャプチャ・照合・発火・誠実検証（発火後確認）ループを駆動",
+        "VisionEngine は SSE / TM_CCOEFF_NORMD と Lanczos3 720p 基準スケーリングを提供"
+      ]
+    },
+    {
+      "dot": "violet",
+      "title": "デバイス適合層",
+      "items": [
+        "Android アダプタは adb exec-out と scrcpy タッチ注入でアンチチートを回避",
+        "Windows アダプタは PrintWindow (GDI) と SendInput で AnotherEden.exe を直接制御"
+      ]
+    },
+    {
+      "dot": "amber",
+      "title": "信頼性と安全性",
+      "items": [
+        "発火後検証（誠実検証）によりタップ空振り時の誤ったタスク遷移を排除",
+        "連続 NoMatch 検出時の自動コールドスタート再起動でスタック状態から自律回復"
+      ]
+    }
+  ]
+}

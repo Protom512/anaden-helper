@@ -16,9 +16,12 @@ use std::sync::mpsc::{Receiver, SyncSender};
 use eframe::egui;
 
 use crate::childproc::{ChildProcess, SpawnSpec};
+use crate::history::{RunHistory, RunOutcome, RunRecord};
+use crate::history_ui::{HistoryAction, HistoryPanel};
 use crate::log_view::{
     DEFAULT_MAX_LINES, LogBuffer, LogEntry, LogEvent, LogLevel, SharedLogBuffer,
 };
+use crate::settings::StudioSettings;
 
 /// `anaden` バイナリを解決する純関数（Issue #85 タスク2）。
 ///
@@ -169,6 +172,24 @@ pub struct PipelineRunnerApp {
     strategy_panel: crate::strategy_ui::StrategyPanel,
     /// 選択サマリのキャッシュ（ui() の changed フラグで再計算・UC-4 前提の表示）。
     strategy_summary: String,
+    /// 直近の起動 SpawnSpec（再実行ボタンで同一 spec を再 start するため保持）。
+    last_spawn: Option<SpawnSpec>,
+    /// 実行履歴ストア（委譲: 追記ロジックは history.rs）。
+    history: RunHistory,
+    /// 現在実行の開始時刻 (UNIX epoch 秒)。履歴 Record 追記に使用。
+    run_started_at: Option<u64>,
+    /// 現在実行の戦略名（履歴 Record 追記に使用）。
+    run_strategy: Option<String>,
+    /// 子プロセス終了を検知済みか（Exit イベント処理で立てるフラグ）。
+    exit_observed: bool,
+    /// 検知した exit code（Exit イベント処理で保持）。
+    exit_code: Option<i32>,
+    /// 異常終了検知時に保持する失敗状態サマリ（run_status_summary + エラーログ末尾）。
+    failure_summary: Option<String>,
+    /// 履歴ビューペイン（タスク5・UC-1/UC-2: 一覧・選択・設定保存/読込・再実行/中止）。
+    history_panel: HistoryPanel,
+    /// 設定ファイルパス（settings.rs の解決。テストでは差し替え）。
+    settings_path: PathBuf,
 }
 
 impl PipelineRunnerApp {
@@ -210,6 +231,15 @@ impl PipelineRunnerApp {
             auto_scroll: true,
             strategy_panel: crate::strategy_ui::StrategyPanel::default(),
             strategy_summary: "戦略未選択".to_string(),
+            last_spawn: None,
+            history: RunHistory::open_default(),
+            run_started_at: None,
+            run_strategy: None,
+            exit_observed: false,
+            exit_code: None,
+            failure_summary: None,
+            history_panel: HistoryPanel::new(),
+            settings_path: crate::settings::settings_file_path(),
         }
     }
 
@@ -265,9 +295,51 @@ impl PipelineRunnerApp {
             return;
         }
         let spec = build_spawn_spec(&self.program, args);
+        self.start_spec(spec);
+    }
+
+    /// SpawnSpec を起動し、成功時に再実行用・履歴用の状態を記録する。
+    fn start_spec(&mut self, spec: SpawnSpec) {
+        self.reset_run_tracking();
         if let Err(e) = self.child.start(&spec, self.log_tx.clone()) {
             self.record_error_line(&e.to_string());
+            return;
         }
+        self.last_spawn = Some(spec);
+        self.run_started_at = Some(
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map(|d| d.as_secs())
+                .unwrap_or(0),
+        );
+        self.run_strategy = self.strategy_panel.selection().strategy.clone();
+    }
+
+    /// 実行追跡状態をリセット（次実行に備える）。
+    fn reset_run_tracking(&mut self) {
+        self.run_started_at = None;
+        self.run_strategy = None;
+        self.exit_observed = false;
+        self.exit_code = None;
+        self.failure_summary = None;
+    }
+
+    /// 再実行ボタンのハンドラ（UC-1: 停止待ち → 同一 SpawnSpec で再 start）。
+    ///
+    /// 実行中は何もせずエラーを記録。直前の起動 spec が無い場合もエラー。
+    pub fn rerun_pipeline(&mut self) {
+        self.last_error = None;
+        if self.child.is_running() {
+            self.record_error_line("再実行には停止待ちが必要です（実行中は再実行できません）");
+            return;
+        }
+        let Some(spec) = self.last_spawn.clone() else {
+            self.record_error_line("再実行可能な実行履歴がありません（先に開始してください）");
+            return;
+        };
+        // 終了済み子の後始末（Exit drain 前でも stop は Ok を返す契約）。
+        let _ = self.child.stop();
+        self.start_spec(spec);
     }
 
     /// 停止ボタンのハンドラ。エラーは UI 表示用に保持するとともにログへ記録。
@@ -275,6 +347,12 @@ impl PipelineRunnerApp {
         self.last_error = None;
         if let Err(e) = self.child.stop() {
             self.record_error_line(&e.to_string());
+            return;
+        }
+        // ユーザー操作による中止として履歴へ記録（exit code は採取不能扱い）。
+        // 自然終了を Exit イベントで既に観測済みなら二重記録しない。
+        if !self.exit_observed {
+            self.append_history_record(RunOutcome::Cancelled, None);
         }
     }
 
@@ -293,9 +371,110 @@ impl PipelineRunnerApp {
     }
 
     /// チャネルを drain してログスナップショットを更新する（UI 毎フレーム呼出）。
+    ///
+    /// `LogEvent::Exit` を観測した場合:
+    /// - exit code を保持し、異常終了（非零 / 不明）なら失敗状態サマリ
+    ///   （run_status_summary + エラーログ末尾）を保持する（UC-3）
+    /// - 履歴へ RunRecord を追記する（正常: Success / 非零・不明: Failed）
     pub fn drain_logs(&mut self) {
-        self.log.drain(&self.log_rx);
+        // Exit イベントを観測するため、イベント列を一度収集する。
+        let mut events = Vec::new();
+        while let Ok(ev) = self.log_rx.try_recv() {
+            events.push(ev);
+        }
+        let exit_seen = events.iter().any(|ev| matches!(ev, LogEvent::Exit(_)));
+        // Exit(Option<i32>) の中身は既に Option<i32> のため flatten で一意化する
+        // （Some(*c) で包むと二重ネストになる）。
+        let exit_code: Option<i32> = events
+            .iter()
+            .find_map(|ev| match ev {
+                LogEvent::Exit(c) => Some(*c),
+                LogEvent::Line(_) => None,
+            })
+            .flatten();
+        // バッファへ反映（SharedLogBuffer::drain 相当の直接 push）。
+        for ev in events {
+            match ev {
+                LogEvent::Line(l) => {
+                    let _ = self.log.with_buf(|b| b.push_line(&l));
+                }
+                LogEvent::Exit(code) => {
+                    let label = match code {
+                        Some(0) => "exit=0 (成功)",
+                        Some(_) => "exit=エラー",
+                        None => "exit=不明",
+                    };
+                    let line = format!("[studio] プロセス終了: {label} (code={code:?})");
+                    // 異常終了行は文字列推定にかからないため明示レベルで記録。
+                    let level = if matches!(code, Some(0)) {
+                        LogLevel::Info
+                    } else {
+                        LogLevel::Error
+                    };
+                    let _ = self.log.with_buf(|b| b.push_line_with_level(&line, level));
+                }
+            }
+        }
         self.refresh_snapshot();
+        if exit_seen && !self.exit_observed {
+            self.exit_observed = true;
+            self.exit_code = exit_code;
+            let failed = !matches!(exit_code, Some(0));
+            if failed {
+                self.failure_summary = Some(self.build_failure_summary());
+            }
+            // 履歴 Record 追記（正常終了 / 異常終了）。中止は stop_pipeline 側。
+            let outcome = if failed {
+                RunOutcome::Failed
+            } else {
+                RunOutcome::Success
+            };
+            self.append_history_record(outcome, exit_code);
+        }
+    }
+
+    /// 失敗状態サマリ（状態 + エラーログ末尾）を組み立てる純ロジック。
+    fn build_failure_summary(&self) -> String {
+        let status = self.run_status_summary();
+        let error_tail: Vec<String> = self
+            .log_snapshot
+            .iter()
+            .rev()
+            .filter(|e| e.level == LogLevel::Error)
+            .take(crate::history::LOG_TAIL_MAX_LINES)
+            .map(|e| e.line.clone())
+            .collect::<Vec<_>>()
+            .into_iter()
+            .rev()
+            .collect();
+        if error_tail.is_empty() {
+            format!("失敗: {status}")
+        } else {
+            format!(
+                "失敗: {status} | エラーログ末尾: {}",
+                error_tail.join(" / ")
+            )
+        }
+    }
+
+    /// 履歴へ RunRecord を追記する（委譲: history.rs）。
+    fn append_history_record(&mut self, outcome: RunOutcome, exit_code: Option<i32>) {
+        let log_tail = self.log_snapshot.iter().map(|e| e.line.clone()).collect();
+        let record = RunRecord::new(
+            self.run_started_at.unwrap_or(0),
+            self.run_strategy.clone().unwrap_or_else(|| "-".to_string()),
+            outcome,
+            exit_code,
+            log_tail,
+        );
+        if let Err(e) = self.history.append(record) {
+            self.record_error_line(&format!("履歴の保存に失敗しました: {e}"));
+        }
+    }
+
+    /// 異常終了検知時に保持した失敗状態サマリ（未検知/正常時は None）。
+    pub fn failure_summary(&self) -> Option<&str> {
+        self.failure_summary.as_deref()
     }
 
     fn refresh_snapshot(&mut self) {
@@ -330,6 +509,44 @@ impl PipelineRunnerApp {
     /// 直近のエラーメッセージ(無ければ None)。
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
+    }
+
+    /// 履歴ペインのアクション要求を消費して実行に反映する
+    /// （タスク5・UC-1/UC-2: 再実行/中止/設定保存/設定読込。毎フレーム ui() から呼ぶ）。
+    pub fn handle_history_actions(&mut self) {
+        while let Some(action) = self.history_panel.take_action() {
+            match action {
+                HistoryAction::Rerun => self.rerun_pipeline(),
+                HistoryAction::Stop => self.stop_pipeline(),
+                HistoryAction::SaveSettings => {
+                    let settings = StudioSettings {
+                        selection: self.strategy_panel.selection().clone(),
+                    };
+                    self.history_panel
+                        .save_settings(&settings, &self.settings_path);
+                }
+                HistoryAction::LoadSettings => {
+                    if let Some(loaded) = self.history_panel.load_settings(&self.settings_path)
+                        && self
+                            .strategy_panel
+                            .load_toml(&toml::to_string(&loaded).unwrap_or_default())
+                            .is_ok()
+                    {
+                        self.strategy_summary = self.strategy_panel.summary();
+                    }
+                }
+            }
+        }
+    }
+
+    /// 履歴パネルの参照（テスト用）。
+    pub fn history_panel(&self) -> &HistoryPanel {
+        &self.history_panel
+    }
+
+    /// 履歴パネルの可変参照（テスト用: アクション注入）。
+    pub fn history_panel_mut(&mut self) -> &mut HistoryPanel {
+        &mut self.history_panel
     }
 
     /// ログビューア本体（シャード3前半: LogLevel 色分け・自動スクロール・クリア）。
@@ -375,6 +592,11 @@ impl eframe::App for PipelineRunnerApp {
                     self.stop_pipeline();
                 }
             });
+            ui.add_enabled_ui(!running, |ui| {
+                if ui.button("再実行").clicked() {
+                    self.rerun_pipeline();
+                }
+            });
 
             ui.label(if running {
                 "状態: 実行中"
@@ -389,6 +611,11 @@ impl eframe::App for PipelineRunnerApp {
                 ui.colored_label(egui::Color32::RED, format!("エラー: {err}"));
             }
 
+            // 異常終了検知時の失敗状態サマリ（UC-3: 状態 + エラーログ末尾）。
+            if let Some(failure) = self.failure_summary() {
+                ui.colored_label(egui::Color32::RED, format!("直前の実行: {failure}"));
+            }
+
             ui.separator();
             // 戦略選択パネル（シャード3）。changed フラグでサマリ/引数プレビューを更新。
             let changed = self.strategy_panel.ui(ui);
@@ -399,6 +626,14 @@ impl eframe::App for PipelineRunnerApp {
             // ログビューア（シャード3前半・毎フレーム drain）。
             self.drain_logs();
             self.log_view_ui(ui);
+
+            ui.separator();
+            // 履歴ビューペイン（タスク5・UC-1/UC-2）。毎フレーム実行状態と
+            // 履歴ストアを同期し、ボタン操作は handle_history_actions で処理。
+            self.history_panel.set_running(running);
+            self.history_panel.refresh_from(self.history.records());
+            self.history_panel.ui(ui);
+            self.handle_history_actions();
         });
     }
 }

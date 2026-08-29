@@ -14,7 +14,9 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Stdio};
-use std::sync::mpsc::{Receiver, SyncSender, TrySendError};
+#[cfg(test)]
+use std::sync::mpsc::Receiver;
+use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
 use std::thread::JoinHandle;
 
@@ -164,15 +166,26 @@ impl LogBuffer {
 
     /// ログ 1 行を push（レベル自動推定・状態更新・上限超過時は最古行を破棄）。
     pub fn push_line(&mut self, line: &str) {
+        let level = LogLevel::from_line(line);
+        self.push_entry(line, level);
+    }
+
+    /// ログ 1 行を明示レベルで push（終了通知等、文字列から推定できない行用）。
+    fn push_entry(&mut self, line: &str, level: LogLevel) {
         let entry = LogEntry {
             line: line.to_string(),
-            level: LogLevel::from_line(line),
+            level,
         };
         self.entries.push_back(entry);
         while self.entries.len() > self.max_lines {
             self.entries.pop_front();
         }
         self.status.observe(line);
+    }
+
+    /// 明示レベル指定の push（終了/システム通知行。公開ヘッドレステスト用）。
+    pub fn push_line_with_level(&mut self, line: &str, level: LogLevel) {
+        self.push_entry(line, level);
     }
 
     /// 現在保持している行数。
@@ -233,6 +246,8 @@ impl SharedLogBuffer {
     ///
     /// 戻り値は UI 描画用。ロック中毒時は空スナップショットを返す
     /// （ログ表示は best-effort で、UI を落とさない）。
+    /// テストからのみ使用（runner は Exit イベント観測のため drain をインライン化）。
+    #[cfg(test)]
     pub fn drain(&self, rx: &Receiver<LogEvent>) -> Vec<LogEntry> {
         let Ok(mut buf) = self.inner.lock() else {
             return Vec::new();
@@ -241,12 +256,15 @@ impl SharedLogBuffer {
             match ev {
                 LogEvent::Line(l) => buf.push_line(&l),
                 LogEvent::Exit(code) => {
-                    let label = match code {
-                        Some(0) => "exit=0 (成功)",
-                        Some(_) => "exit=エラー",
-                        None => "exit=不明",
+                    let (label, level) = match code {
+                        Some(0) => ("exit=0 (成功)", LogLevel::Info),
+                        Some(_) => ("exit=エラー", LogLevel::Error),
+                        None => ("exit=不明", LogLevel::Error),
                     };
-                    buf.push_line(&format!("[studio] プロセス終了: {label} (code={code:?})"));
+                    buf.push_line_with_level(
+                        &format!("[studio] プロセス終了: {label} (code={code:?})"),
+                        level,
+                    );
                 }
             }
         }
