@@ -82,7 +82,7 @@ function toNormalizedSet(files) {
  * @returns {{ verdict: 'PASS'|'FAIL', declared: string[], changed: string[],
  *   undeclared: string[], missing: string[], reason: string }}
  */
-export function evaluateTicketPrecheck(declaredFiles, changedFiles) {
+export function evaluateTicketPrecheck(declaredFiles, changedFiles, mode = 'strict') {
   const declared = toNormalizedSet(declaredFiles);
   const changed = toNormalizedSet(changedFiles);
   /** @type {string[]} */
@@ -99,7 +99,11 @@ export function evaluateTicketPrecheck(declaredFiles, changedFiles) {
       missing.push(p);
     }
   }
-  const hasMismatch = undeclared.length > 0 || missing.length > 0;
+  // mode='pre-implementation' (Request->Estimate): declared-but-unchanged (missing)
+  // is NORMAL (implementation follows declaration). Only undeclared / malformed /
+  // empty-declaration FAIL. mode='strict' (default, gate-time): full mismatch FAIL.
+  const preImpl = mode === 'pre-implementation';
+  const hasMismatch = preImpl ? undeclared.length > 0 : (undeclared.length > 0 || missing.length > 0);
   // Fail-closed: changed-files side malformed is always FAIL; declared side
   // malformed is FAIL only when there is actual diff content to check
   // against (both-empty is the only clean vacuous case).
@@ -107,6 +111,7 @@ export function evaluateTicketPrecheck(declaredFiles, changedFiles) {
     changed.malformed ||
     (declared.malformed && changed.ordered.length > 0) ||
     (declared.ordered.length === 0 && changed.ordered.length > 0) ||
+    (preImpl && declared.ordered.length === 0) ||
     hasMismatch;
   /** @type {string[]} */
   const parts = [];
@@ -131,7 +136,7 @@ export function evaluateTicketPrecheck(declaredFiles, changedFiles) {
     changed: changed.ordered,
     undeclared,
     missing,
-    reason: fail ? `ticket-precheck FAIL — ${parts.join('; ')}` : 'ticket-precheck PASS — declared files match changed files',
+    reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : (preImpl && missing.length > 0 ? `ticket-precheck PASS (pre-implementation) — ${missing.length} declared file(s) pending implementation; no undeclared changed files` : 'ticket-precheck PASS — declared files match changed files'),
   };
 }
 
