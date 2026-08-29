@@ -15,7 +15,10 @@
     {"pr": 62, "id": "62-G3", "description": "version 表示の回帰テスト (crate_version 一致含む) 欠落 [G4]"},
     {"pr": 72, "id": "72-G1", "description": "top.png NoMatch の per-template conf 内訳調査手段不存在 [G3: issue71]"},
     {"pr": 72, "id": "72-G2", "description": "診断レポート IO のエンジン本体混入禁止 (pure 計算層と env-gated IO 分離) [G1]"},
-    {"pr": 72, "id": "72-G3", "description": "フック未設定時に no-op であること (本番影響ゼロ) [G1]"}
+    {"pr": 72, "id": "72-G3", "description": "フック未設定時に no-op であること (本番影響ゼロ) [G1]"},
+    {"pr": 82, "id": "82-G1", "description": "AND コンセンサスが偽ブロックに構造的にバイアス (reviewer 非決定性で偽NO-GO率が 1-(1-p)^3 に増幅) → majority + critical-veto 導入 [G2: issue80 問題1]"},
+    {"pr": 82, "id": "82-G2", "description": "NO-GO 判定が妥当だったかの事後検証手段と reviewer 間の割れ記録スキーマが不存在 → split_info (judgments/confidence/決着方式) 追加 [G2: issue80 問題2/3]"},
+    {"pr": 82, "id": "82-G3", "description": "LLM 判定と決定論的コマンド成否が未分離 (欠損が暗黙に成功扱いになる恐れ) → confidence/command_results スキーマと CommandFail 強制 NO-GO 追加 [G2: issue80 改善案1]"}
   ],
   "findings": [
     {"pr": 58, "reviewer": "structure-reproduction-check", "matched_golden": "58-G1"},
@@ -50,7 +53,10 @@
     {"pr": 62, "reviewer": "llm-reviewer-sample/architecture", "matched_golden": "62-G2"},
     {"pr": 62, "reviewer": "llm-reviewer-sample/architecture", "matched_golden": null},
     {"pr": 62, "reviewer": "llm-reviewer-sample/functional", "matched_golden": null},
-    {"pr": 62, "reviewer": "llm-reviewer-sample/maintainability", "matched_golden": "62-G1"}
+    {"pr": 62, "reviewer": "llm-reviewer-sample/maintainability", "matched_golden": "62-G1"},
+    {"pr": 82, "reviewer": "structure-reproduction-check", "matched_golden": "82-G1", "confidence": 0.9, "command_results": {"clippy": "PASS", "nextest": "PASS"}},
+    {"pr": 82, "reviewer": "structure-reproduction-check", "matched_golden": "82-G2", "confidence": 0.9, "command_results": {"clippy": "PASS", "nextest": "PASS"}},
+    {"pr": 82, "reviewer": "structure-reproduction-check", "matched_golden": "82-G3", "confidence": 0.85, "command_results": {"clippy": "PASS", "nextest": "PASS"}}
   ],
   "consensus": [
     {"pr": 58, "verdict": "GO", "merged": true, "post_merge_issue_ids": []},
@@ -61,6 +67,7 @@
     {"pr": 56, "verdict": "GO", "merged": true, "post_merge_issue_ids": []},
     {"pr": 64, "verdict": "NO_GO", "merged": false, "post_merge_issue_ids": ["gate-evidence:empty-diff-blocked"]},
     {"pr": 65, "verdict": "NO_GO", "merged": false, "post_merge_issue_ids": ["gate-evidence:empty-diff-blocked"]},
-    {"pr": 75, "verdict": "NO_GO", "merged": true, "post_merge_issue_ids": ["gate-evidence:wrong-ticket-closable"]}
+    {"pr": 75, "verdict": "NO_GO", "merged": true, "post_merge_issue_ids": ["gate-evidence:wrong-ticket-closable"]},
+    {"pr": 82, "verdict": "GO", "merged": true, "post_merge_issue_ids": [], "split_info": {"judgments": [{"reviewer": "architecture", "verdict": "GO", "confidence": 0.9, "has_critical": false}, {"reviewer": "functional", "verdict": "GO", "confidence": 0.9, "has_critical": false}, {"reviewer": "maintainability", "verdict": "GO", "confidence": 0.85, "has_critical": false}], "veto_activated": false, "command_fail_forced_nogo": false}}
   ]
 }

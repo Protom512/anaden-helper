@@ -39,7 +39,9 @@ mod tests {
     #[test]
     fn golden_prs_are_within_known_merged_prs() {
         let input = load();
-        let known: HashSet<u64> = [54, 55, 56, 58, 62, 72, 64, 65, 75].into_iter().collect();
+        let known: HashSet<u64> = [54, 55, 56, 58, 62, 72, 64, 65, 75, 82]
+            .into_iter()
+            .collect();
         for g in &input.golden_issues {
             assert!(
                 known.contains(&g.pr),
