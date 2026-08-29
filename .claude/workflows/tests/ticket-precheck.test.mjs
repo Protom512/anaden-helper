@@ -158,3 +158,36 @@ test('deriveSliceMetadata: path separators normalized (windows-style crates\\foo
   const m = deriveSliceMetadata(['crates\\foo\\src\\lib.rs']);
   assert.deepEqual(m.changedCrates, ['foo']);
 });
+
+// ── Issue #102 修正: mode='pre-implementation' (Request→Estimate 間) の挙動 ──
+// 実装前のため declared-but-unchanged (missing) は正常。undeclared のみ FAIL。
+test('pre-implementation mode: declared-but-unchanged files do not FAIL (Issue #102 regression)', () => {
+  const r = evaluateTicketPrecheck(['a.js', 'b.js'], [], 'pre-implementation');
+  assert.equal(r.verdict, 'PASS');
+  assert.deepEqual(r.missing, ['a.js', 'b.js']);
+  assert.equal(r.undeclared.length, 0);
+  assert.match(r.reason, /pre-implementation/);
+});
+
+test('pre-implementation mode: undeclared changed file still FAILs', () => {
+  const r = evaluateTicketPrecheck(['a.js'], ['x.js'], 'pre-implementation');
+  assert.equal(r.verdict, 'FAIL');
+  assert.deepEqual(r.undeclared, ['x.js']);
+});
+
+test('pre-implementation mode: empty declaration with actual diff still FAILs (fail-closed)', () => {
+  const r = evaluateTicketPrecheck([], ['x.js'], 'pre-implementation');
+  assert.equal(r.verdict, 'FAIL');
+});
+
+test('pre-implementation mode: empty declaration and empty diff FAILs (declaration required)', () => {
+  const r = evaluateTicketPrecheck([], [], 'pre-implementation');
+  assert.equal(r.verdict, 'FAIL');
+});
+
+test('strict mode (default): declared-but-unchanged still FAILs (gate-time semantics preserved)', () => {
+  const r1 = evaluateTicketPrecheck(['a.js'], []);
+  assert.equal(r1.verdict, 'FAIL');
+  const r2 = evaluateTicketPrecheck(['a.js'], [], 'strict');
+  assert.equal(r2.verdict, 'FAIL');
+});
