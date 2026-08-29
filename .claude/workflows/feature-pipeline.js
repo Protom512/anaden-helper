@@ -375,6 +375,12 @@ StructuredOutput の files フィールドに文字列配列で返すこと。
 この宣言は precheck で実際の diff と機械検証される (宣言漏れファイルは fail 対象)。
 例: files: ["crates/anaden-cli/src/main.rs", ".claude/workflows/feature-pipeline.js"]
 
+## ticketKind (必須 — Issue #104)
+
+StructuredOutput の ticketKind フィールドに以下のいずれかを返すこと:
+- "continuation": 未マージブランチ/open PR の残作業検証・続き (commit-range fallback が適用される)
+- "new-implementation": ゼロから新規実装するチケット (実装前に diff は空が正常)
+
 Before creating a new issue, check whether one already exists: run
 gh issue list --repo protom512/anaden-helper --state open --search "<keywords>"
 and review the results. If an existing open issue already covers this work
@@ -393,8 +399,9 @@ GitHub Issue using: gh issue create`,
       acceptanceCriteria: { type: 'number' },
       issueNumber: { type: 'string' },
       files: { type: 'array', items: { type: 'string' } },
+      ticketKind: { type: 'string', enum: ['new-implementation', 'continuation'] },
     },
-    required: ['title', 'priority', 'summary'],
+    required: ['title', 'priority', 'summary', 'files', 'ticketKind'],
   }}
 );
 log(`Ticket created: ${ticket.title} (Priority: ${ticket.priority})`);
@@ -560,9 +567,13 @@ const precheckWorkingTree = (precheckScope && Array.isArray(precheckScope.workin
 const precheckUntracked = (precheckScope && Array.isArray(precheckScope.untrackedFiles)) ? precheckScope.untrackedFiles : [];
 const precheckRangeFiles = (precheckScope && Array.isArray(precheckScope.commitRangeFiles)) ? precheckScope.commitRangeFiles : [];
 // working-tree + untracked を優先し、両方空の場合のみ commit-range fallback (UC-3)。
+// Issue #104 修正: commit-range fallback は continuation (未マージ成果物の残作業検証)
+// のみに適用。new-implementation (ゼロから実装) では直前の無関係コミット (直前PR等) を
+// 自チケットの diff と誤検出するため fallback しない (空 = 実装前の正常状態)。
+const precheckTicketKind = (ticket.ticketKind === 'continuation') ? 'continuation' : 'new-implementation';
 const precheckChangedFiles = (precheckWorkingTree.length > 0 || precheckUntracked.length > 0)
   ? [...new Set([...precheckWorkingTree, ...precheckUntracked])]
-  : [...new Set(precheckRangeFiles)];
+  : (precheckTicketKind === 'continuation' ? [...new Set(precheckRangeFiles)] : []);
 // Issue #102 修正: この位置は実装前 (Request->Estimate 間) のため mode='pre-implementation' —
 // declared-but-unchanged は FAIL にしない (実装が宣言に先行するのは通常)。
 // undeclared (宣言外の実 diff) と malformed/空宣言のみ FAIL。gate 時は strict。
