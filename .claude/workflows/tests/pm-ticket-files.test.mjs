@@ -63,3 +63,31 @@ test('continuation branch is distinct from new-feature template (no mechanical t
     || /残作業サマリ/.test(ternary),
     'branch is a genuine alternative format');
 });
+
+// ── Issue #104: ticketKind (commit-range fallback の誤検出防止) ──
+test('pm:create-ticket schema requires ticketKind enum (Issue #104)', () => {
+  const begin = src.indexOf('// [pm-ticket-files-begin]');
+  const end = src.indexOf('// [pm-ticket-files-end]');
+  assert.ok(begin >= 0 && end > begin);
+  const block = src.slice(begin, end);
+  assert.match(block, /ticketKind:\s*\{\s*type:\s*'string',\s*enum:\s*\['new-implementation',\s*'continuation'\]/,
+    'schema has ticketKind enum');
+  assert.match(block, /required:\s*\['title',\s*'priority',\s*'summary',\s*'files',\s*'ticketKind'\]/,
+    'ticketKind is required');
+});
+
+test('commit-range fallback gated to continuation tickets only (Issue #104)', () => {
+  const fiAt = src.indexOf('const precheckChangedFiles');
+  assert.ok(fiAt > 0);
+  const block = src.slice(fiAt - 600, fiAt + 500);
+  assert.match(block, /precheckTicketKind === 'continuation' \? \[\.\.\.new Set\(precheckRangeFiles\)\] : \[\]/,
+    'fallback applies only when ticketKind === continuation');
+});
+
+test('PM prompt explains ticketKind semantics (Issue #104)', () => {
+  const begin = src.indexOf('// [pm-ticket-files-begin]');
+  const end = src.indexOf('// [pm-ticket-files-end]');
+  const block = src.slice(begin, end);
+  assert.match(block, /"continuation":\s*未マージブランチ\/open PR の残作業/, 'continuation explained');
+  assert.match(block, /"new-implementation":\s*ゼロから新規実装/, 'new-implementation explained');
+});
