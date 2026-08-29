@@ -1,0 +1,4 @@
+# Workflow scripts must stay LF: source-scan drift-guard tests match '\n' patterns.
+# core.autocrlf=true converts these to CRLF on checkout, silently breaking tests.
+*.mjs text eol=lf
+.claude/workflows/*.js text eol=lf

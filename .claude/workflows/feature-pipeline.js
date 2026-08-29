@@ -322,13 +322,16 @@ function GATE_DIFF_KIND_LANES() {
   return lanes.length > 0 ? lanes : GATE_DIMENSIONS;
 }
 // integration gate Step1 は「スライスが crate を触ったか」で分岐(触ってない=docs/data/assets/test のみなら per-slice コード層は N/A)。
-const integrationSliceCheck = hasChangedCrate
-  ? `各 changed crate (${changedCratesList}) について実行し、緑であることを確認:
+// NOTE: hasChangedCrate/changedCratesList は precheck (Issue #99) の後方で宣言されるため、
+// 即時評価すると TDZ 違反。関数化して消費時 (integration lane プロンプト構築時) に評価する。
+function integrationSliceCheckText() {
+  return hasChangedCrate
+    ? `各 changed crate (${changedCratesList}) について実行し、緑であることを確認:
        - cargo clippy -p <crate> --all-targets -- -D warnings
        - cargo nextest run -p <crate>
      スライスが導入した失敗は slice-owned → NO-GO(このスライスの責務)。`
-  : `スライスは crate を触っていない(docs/data/assets のみ、または test-only)。per-slice コード層は N/A → GO(public API 影響は Step3 で確認)。`;
-log(`Per-slice crates (R5): ${changedCratesList || '(no crate touched — docs/data/assets/test only)'}`);
+    : `スライスは crate を触っていない(docs/data/assets のみ、または test-only)。per-slice コード層は N/A → GO(public API 影響は Step3 で確認)。`;
+}
 
 // ── Phase 1: Request ──
 phase('Request');
@@ -1460,7 +1463,7 @@ feature が無関係な負債でブロックされる(org-feedback 36/40/47/66/1
 生の workspace-wide 赤を信じて NO-GO に**しないこと**。失敗を「このスライスが導入したか」「baseline 負債か」で属性判定せよ。
 
 Step 1 — per-slice 層(このスライスの責務):
-  ${integrationSliceCheck}
+  ${integrationSliceCheckText()}
 
 Step 2 — baseline-attribution 層(baseline 負債はブロックしない):
   workspace-wide 実行(cargo clippy/nextest --workspace)で、スライスが触って**いない** crate に失敗があれば、
