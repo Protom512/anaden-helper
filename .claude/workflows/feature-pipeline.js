@@ -472,7 +472,7 @@ function toNormalizedSet(files) {
   return { set, ordered, malformed };
 }
 // canonical: ticket-precheck.js evaluateTicketPrecheck (verbatim inline copy)
-const evaluateTicketPrecheck = (declaredFiles, changedFiles) => {
+const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') => {
   const declared = toNormalizedSet(declaredFiles);
   const changed = toNormalizedSet(changedFiles);
   const undeclared = [];
@@ -487,11 +487,13 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles) => {
       missing.push(p);
     }
   }
-  const hasMismatch = undeclared.length > 0 || missing.length > 0;
+  const preImpl = mode === 'pre-implementation';
+  const hasMismatch = preImpl ? undeclared.length > 0 : (undeclared.length > 0 || missing.length > 0);
   const fail =
     changed.malformed ||
     (declared.malformed && changed.ordered.length > 0) ||
     (declared.ordered.length === 0 && changed.ordered.length > 0) ||
+    (preImpl && declared.ordered.length === 0) ||
     hasMismatch;
   const parts = [];
   if (undeclared.length > 0) {
@@ -515,7 +517,7 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles) => {
     changed: changed.ordered,
     undeclared,
     missing,
-    reason: fail ? `ticket-precheck FAIL — ${parts.join('; ')}` : 'ticket-precheck PASS — declared files match changed files',
+    reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : (preImpl && missing.length > 0 ? `ticket-precheck PASS (pre-implementation) — ${missing.length} declared file(s) pending implementation; no undeclared changed files` : 'ticket-precheck PASS — declared files match changed files'),
   };
 };
 // canonical: ticket-precheck.js deriveSliceMetadata (verbatim inline copy)。
@@ -561,7 +563,10 @@ const precheckRangeFiles = (precheckScope && Array.isArray(precheckScope.commitR
 const precheckChangedFiles = (precheckWorkingTree.length > 0 || precheckUntracked.length > 0)
   ? [...new Set([...precheckWorkingTree, ...precheckUntracked])]
   : [...new Set(precheckRangeFiles)];
-const ticketPrecheck = evaluateTicketPrecheck(ticket.files, precheckChangedFiles);
+// Issue #102 修正: この位置は実装前 (Request->Estimate 間) のため mode='pre-implementation' —
+// declared-but-unchanged は FAIL にしない (実装が宣言に先行するのは通常)。
+// undeclared (宣言外の実 diff) と malformed/空宣言のみ FAIL。gate 時は strict。
+const ticketPrecheck = evaluateTicketPrecheck(ticket.files, precheckChangedFiles, 'pre-implementation');
 const precheckSliceMetadata = deriveSliceMetadata(precheckChangedFiles);
 // Issue #99: slice メタデータ (changedCrates / diffKind) は precheck 生成の
 // 実測値で上書き — Coordinate 時点の resolve-scope 手動導出 (旧 L209-336) を
