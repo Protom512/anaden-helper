@@ -137,3 +137,24 @@ test('wiring: implement phase が resolveImplementLane を dispatch 前に呼ぶ
 test('wiring: lane-missing はタスク結果として fail-closed 報告される', () => {
   assert.match(src, /status: 'lane-missing'/);
 });
+
+// ── Issue #106: estimate schema が metadata.lane を要求 (循環 lane-missing 解消) ──
+test('tech-lead:estimate schema requires tasks[].metadata.lane (Issue #106)', () => {
+  const at = src.indexOf("label: 'tech-lead:estimate'");
+  assert.ok(at > 0, 'estimate agent call exists');
+  const block = src.slice(at, at + 1500);
+  assert.match(block, /lane:\s*\{\s*type:\s*'string',\s*enum:\s*\['tdd',\s*'release',\s*'merge'\]/,
+    'lane enum in tasks schema');
+  assert.match(block, /required:\s*\['id',\s*'description',\s*'files',\s*'metadata'\]/,
+    'metadata required per task');
+  assert.match(block, /required:\s*\['lane'\]/, 'lane required in metadata');
+});
+
+test('tech-lead prompt explains lane choices (Issue #106)', () => {
+  const at = src.indexOf('metadata.lane (必須');
+  assert.ok(at > 0, 'lane guidance section exists');
+  const block = src.slice(at, at + 700);
+  assert.match(block, /"tdd":\s*コード・テスト・ドキュメントを新規実装/, 'tdd explained');
+  assert.match(block, /"release":\s*未 push コミット/, 'release explained');
+  assert.match(block, /"merge":\s*未マージブランチ\/Open PR/, 'merge explained');
+});

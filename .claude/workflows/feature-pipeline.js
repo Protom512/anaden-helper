@@ -663,6 +663,13 @@ Analyze the codebase to understand the impact:
 Read the relevant source files to verify your assumptions.
 Provide a detailed estimate with task breakdown.
 
+## metadata.lane (必須 — Issue #99 Task 4 / Issue #106)
+
+各 task に metadata.lane を必ず宣言すること (未宣言は lane-missing で fail-closed):
+- "tdd": コード・テスト・ドキュメントを新規実装・改修するタスク (既定の実装テンプレート)
+- "release": 未 push コミットの PR 化・push・PR 作成などリリース工程のタスク
+- "merge": 未マージブランチ/Open PR の検証・merge・close 判定のタスク (実態調査型)
+
 If you noticed issues with the workflow, role clarity, or tooling during this task,
 append a single line to .claude/org-feedback.md:
 [YYYY-MM-DD] [tech-lead] [category: workflow|tooling|role-ambiguity|bottleneck|suggestion] specific constructive feedback
@@ -677,7 +684,10 @@ Only append if you have genuine feedback. Be specific.`,
         description: { type: 'string' },
         files: { type: 'array', items: { type: 'string' } },
         dependencies: { type: 'array', items: { type: 'string' } },
-      }}},
+        metadata: { type: 'object', properties: {
+          lane: { type: 'string', enum: ['tdd', 'release', 'merge'] },
+        }, required: ['lane'] },
+      }, required: ['id', 'description', 'files', 'metadata']}},
       risks: { type: 'array', items: { type: 'string' } },
     },
     required: ['complexity', 'affectedCrates', 'tasks'],
