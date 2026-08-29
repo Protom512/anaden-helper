@@ -1,0 +1,7 @@
+{
+  "runTimestamp": "2026-08-29T12:37:14Z",
+  "runId": "run-1788007034",
+  "issue": 99,
+  "title": "[Feature] pipeline precheck 拡張: ticket-declared files・slice メタデータ・継続系指示の diff 実測検証",
+  "phases": ["Coordinate","Request","Estimate","Approve","Implement","Commit Gate","Release","Release Review","Merge & Close","Self-Improve"]
+}
