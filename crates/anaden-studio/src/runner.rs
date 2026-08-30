@@ -136,6 +136,18 @@ fn level_color(level: LogLevel) -> egui::Color32 {
     }
 }
 
+/// 実行系ペインの種別（統合GUIシェルからの描画委譲用・Issue #120 欠陥2修正）。
+///
+/// 「▶️ 実行」タブと「🕘 履歴」タブが同一画面になる欠陥を解消するため、
+/// [`PipelineRunnerApp::render_body`] はこのペイン種別で描画内容を区別する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunnerPane {
+    /// 実行ビュー（開始/停止/再実行・戦略選択・ログ・履歴の全量）。
+    Run,
+    /// 履歴ビュー（履歴テーブル + 設定保存/読込のみ）。
+    History,
+}
+
 /// pipeline 実行GUI の状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerStatus {
@@ -579,7 +591,7 @@ impl PipelineRunnerApp {
 impl eframe::App for PipelineRunnerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
-            self.render_body(ui);
+            self.render_body(ui, RunnerPane::Run);
         });
     }
 }
@@ -590,7 +602,19 @@ impl PipelineRunnerApp {
     /// `eframe::App::ui` から CentralPanel の内側を切り出したもの。
     /// 単一ウィンドウ統合 GUI (`shell::UnifiedShell`) の Run/History タブから
     /// 委譲される。
-    pub fn render_body(&mut self, ui: &mut egui::Ui) {
+    /// モード本体を親レイアウト内に描画する埋め込み用 API（統合GUIシェル経由）。
+    ///
+    /// Issue #120 欠陥2修正: かつて Run/History 両タブが同一内容を描画していた
+    /// （履歴タブがダミー）。`RunnerPane` で実行ビューと履歴ビューを区別する。
+    pub fn render_body(&mut self, ui: &mut egui::Ui, pane: RunnerPane) {
+        match pane {
+            RunnerPane::Run => self.render_run_body(ui),
+            RunnerPane::History => self.render_history_body(ui),
+        }
+    }
+
+    /// 実行ビュー（開始/停止/再実行・戦略選択・ログ・履歴の全量）。
+    fn render_run_body(&mut self, ui: &mut egui::Ui) {
         {
             ui.heading("anaden pipeline runner");
 
@@ -643,11 +667,36 @@ impl PipelineRunnerApp {
             ui.separator();
             // 履歴ビューペイン（タスク5・UC-1/UC-2）。毎フレーム実行状態と
             // 履歴ストアを同期し、ボタン操作は handle_history_actions で処理。
-            self.history_panel.set_running(running);
-            self.history_panel.refresh_from(self.history.records());
-            self.history_panel.ui(ui);
-            self.handle_history_actions();
+            self.render_history_section(ui, running);
         }
+    }
+
+    /// 履歴ビュー（履歴テーブル + 設定保存/読込のみ。実行制御は含まない）。
+    ///
+    /// Issue #120 欠陥2: 統合GUIの「🕘 履歴」タブ専用ビュー。実行ビューと
+    /// 区別され、履歴参照・再実行・設定操作に集中したレイアウト。
+    fn render_history_body(&mut self, ui: &mut egui::Ui) {
+        ui.heading("実行履歴");
+        let running = self.status() == RunnerStatus::Running;
+        ui.label(if running {
+            "状態: 実行中"
+        } else {
+            "状態: 停止"
+        });
+        if let Some(failure) = self.failure_summary() {
+            ui.colored_label(egui::Color32::RED, format!("直前の実行: {failure}"));
+        }
+        ui.separator();
+        self.render_history_section(ui, running);
+    }
+
+    /// 履歴セクション（両ビュー共通）。毎フレーム実行状態と履歴ストアを同期し、
+    /// ボタン操作は handle_history_actions で処理。
+    fn render_history_section(&mut self, ui: &mut egui::Ui, running: bool) {
+        self.history_panel.set_running(running);
+        self.history_panel.refresh_from(self.history.records());
+        self.history_panel.ui(ui);
+        self.handle_history_actions();
     }
 }
 
