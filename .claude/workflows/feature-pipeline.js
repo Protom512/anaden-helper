@@ -527,6 +527,51 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') =>
     reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : (preImpl && missing.length > 0 ? `ticket-precheck PASS (pre-implementation) — ${missing.length} declared file(s) pending implementation; no undeclared changed files` : 'ticket-precheck PASS — declared files match changed files'),
   };
 };
+// canonical: ticket-precheck.js evaluateIssuePremise (verbatim inline copy)。
+// Issue #109 Task 1: stale (closed+merged) / duplicate (open PR) dispatch 検出。
+// fail-closed: malformed/null 入力も FAIL (検証実施不能は dispatch 拒否)。
+const evaluateIssuePremise = (input) => {
+  const invalid = { verdict: 'FAIL', stale: false, duplicate: false };
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed input (fail-closed: precheck unverifiable, dispatch rejected)' };
+  }
+  const { issueState, linkedBranchesContainIssue, openPRs } = input;
+  if (typeof issueState !== 'string' || (issueState !== 'open' && issueState !== 'closed')) {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed issueState (fail-closed: expected "open"|"closed")' };
+  }
+  if (typeof linkedBranchesContainIssue !== 'boolean') {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed linkedBranchesContainIssue (fail-closed: expected boolean)' };
+  }
+  if (!Array.isArray(openPRs)) {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed openPRs (fail-closed: expected array)' };
+  }
+  const stale = issueState === 'closed' && linkedBranchesContainIssue;
+  const duplicate = openPRs.length > 0;
+  if (stale) {
+    return {
+      verdict: 'FAIL',
+      stale: true,
+      duplicate,
+      reason: duplicate
+        ? 'issue-premise FAIL — stale: issue is closed and already merged into trunk; duplicate: open PR(s) also exist'
+        : 'issue-premise FAIL — stale: issue is closed and already merged into trunk',
+    };
+  }
+  if (duplicate) {
+    return {
+      verdict: 'FAIL',
+      stale: false,
+      duplicate: true,
+      reason: `issue-premise FAIL — duplicate: ${openPRs.length} open PR(s) already reference this issue`,
+    };
+  }
+  return {
+    verdict: 'PASS',
+    stale: false,
+    duplicate: false,
+    reason: `issue-premise PASS — issue is ${issueState}, not merged into trunk, no open duplicate PRs`,
+  };
+};
 // canonical: ticket-precheck.js deriveSliceMetadata (verbatim inline copy)。
 // crates/* 導出は旧 changedCrates 手動導出 (R5, L209-336 相当) を置換。
 const deriveSliceMetadata = (changedFiles) => {
@@ -637,6 +682,123 @@ if (ticketPrecheck.verdict !== 'PASS') {
   };
 }
 log(`Ticket precheck PASS (Issue #99): declared ${ticketPrecheck.declared.length} file(s) match changed files; slice metadata crates=[${changedCratesList || 'none'}] diffKind=${diffKind} (precheck-derived)`);
+
+// [issue-premise-wiring-begin]
+// Issue #109 Task 2: issue premise precheck (Request→Estimate 間)。stale
+// (closed かつ trunk merged issue) / duplicate (open PR 既存) を機械検出して
+// Estimate 以降の dispatch を拒否する。evidence 収集は gh / git コマンドで、
+// 判定は canonical ticket-precheck.js evaluateIssuePremise の inline copy
+// (drift は tests/ticket-precheck-wiring.test.mjs / drift test が guard)。
+// fail-closed: gh 認証失敗・rate limit で evidence が欠損した場合は
+// malformed input として FAIL verdict (fail-open は stale 検出を素通りさせる)。
+const evaluateIssuePremise = (input) => {
+  const invalid = { verdict: 'FAIL', stale: false, duplicate: false };
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed input (fail-closed: precheck unverifiable, dispatch rejected)' };
+  }
+  const { issueState, linkedBranchesContainIssue, openPRs } = input;
+  if (typeof issueState !== 'string' || (issueState !== 'open' && issueState !== 'closed')) {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed issueState (fail-closed: expected "open"|"closed")' };
+  }
+  if (typeof linkedBranchesContainIssue !== 'boolean') {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed linkedBranchesContainIssue (fail-closed: expected boolean)' };
+  }
+  if (!Array.isArray(openPRs)) {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed openPRs (fail-closed: expected array)' };
+  }
+  const stale = issueState === 'closed' && linkedBranchesContainIssue;
+  const duplicate = openPRs.length > 0;
+  if (stale) {
+    return {
+      verdict: 'FAIL',
+      stale: true,
+      duplicate,
+      reason: duplicate
+        ? 'issue-premise FAIL — stale: issue is closed and already merged into trunk; duplicate: open PR(s) also exist'
+        : 'issue-premise FAIL — stale: issue is closed and already merged into trunk',
+    };
+  }
+  if (duplicate) {
+    return {
+      verdict: 'FAIL',
+      stale: false,
+      duplicate: true,
+      reason: `issue-premise FAIL — duplicate: ${openPRs.length} open PR(s) already reference this issue`,
+    };
+  }
+  return {
+    verdict: 'PASS',
+    stale: false,
+    duplicate: false,
+    reason: `issue-premise PASS — issue is ${issueState}, not merged into trunk, no open duplicate PRs`,
+  };
+};
+// evidence collector: gh issue view + git branch --contains (trunk membership)
+// + gh pr list --search。各コマンド失敗時は null を返す (fail-closed)。
+const issueNumberForPremise = ticket.issueNumber;
+const premiseEvidence = issueNumberForPremise ? await agent(
+  `ISSUE-PREMISE PROBE (Issue #109)。issue #${issueNumberForPremise} の前提検証 evidence を以下のコマンドで収集せよ:
+1. \`gh issue view ${issueNumberForPremise} --json state,closedAt\` — issueState には state ("open"|"closed") を、closedAt も記録せよ。コマンド失敗 (認証/rate limit/存在しない) 場合は state を null とせよ (fail-closed)。
+2. issue 番号を含むブランチの trunk membership:
+   a. \`git branch -a | grep -E '(${issueNumberForPremise})'\` で該当ブランチ名を列挙
+   b. 各ブランチ b について \`git branch -a --contains b\` を実行し、origin/master (又は remotes/origin/master) が含まれるか判定
+   c. 一つでも origin/master に到達するブランチがあれば linkedBranchesContainIssue=true、無い・ブランチ自体無ければ false。列挙失敗時は null とせよ (fail-closed)。
+3. \`gh pr list --search '${issueNumberForPremise} in:body' --state open --json number,title\` — 結果配列を openPRs へ。失敗時は null とせよ (fail-closed)。
+**最後に StructuredOutput({issueState: "open"|"closed"|null, closedAt: "...", linkedBranchesContainIssue: true|false|null, openPRs: [{number, title}]|null}) を呼ぶこと。**`,
+  { schema: { type: 'object', required: ['issueState'], properties: {
+    issueState: { type: ['string', 'null'] },
+    closedAt: { type: ['string', 'null'] },
+    linkedBranchesContainIssue: { type: ['boolean', 'null'] },
+    openPRs: { type: ['array', 'null'], items: { type: 'object', properties: { number: { type: 'number' }, title: { type: 'string' } } } },
+  } }, label: 'request:issue-premise-evidence', phase: 'Request', model: 'sonnet' }
+) : null;
+// fail-closed: evidence 欠損 (issueNumber 無し / collector 失敗 / null フィールド)
+// はそのまま pure fn へ流し malformed として FAIL 判定させる。
+const issuePremise = evaluateIssuePremise({
+  issueState: premiseEvidence && premiseEvidence.issueState,
+  linkedBranchesContainIssue: premiseEvidence && premiseEvidence.linkedBranchesContainIssue,
+  openPRs: premiseEvidence && premiseEvidence.openPRs,
+});
+// evidence persistence: verdict を .omc/logs/${runId} の
+// .omc/logs/{runId}/issue-premise-precheck.json へ永続化
+// (pipeline-evidence-verification.md — evidence は自己申告不可)。
+await agent(
+  `EVIDENCE PERSISTER (Issue #109)。以下の JSON をファイル .omc/logs/${runId}/issue-premise-precheck.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
+${JSON.stringify({
+    runTimestamp,
+    runId,
+    issue: 109,
+    issueNumber: issueNumberForPremise || null,
+    verdict: issuePremise.verdict,
+    reason: issuePremise.reason,
+    stale: issuePremise.stale,
+    duplicate: issuePremise.duplicate,
+    evidence: premiseEvidence || 'unavailable (fail-closed)',
+  }, null, 2)}
+書き出し後、書き込んだファイルのパスのみを返せ。`,
+  { label: 'request:persist-issue-premise-precheck', phase: 'Request', model: 'haiku' }
+);
+if (issuePremise.verdict !== 'PASS') {
+  // fail-closed short-circuit (precheck-failed と同型の resumable status)。
+  // Estimate 以降 (Implement / Gate / Release) を dispatch しない。
+  log(`Issue premise precheck FAIL (Issue #109): ${issuePremise.reason}`);
+  return {
+    status: 'precheck-failed',
+    reason: issuePremise.reason,
+    ticket,
+    issuePremise: {
+      verdict: issuePremise.verdict,
+      stale: issuePremise.stale,
+      duplicate: issuePremise.duplicate,
+      reason: issuePremise.reason,
+    },
+    requiredFixes: [
+      `issue 前提検証 FAIL (Issue #109): ${issuePremise.reason}。stale なら issue を再オープンするか新規 ticket で再実行し、duplicate なら既存 open PR の継続として ticket を作り直すこと。`,
+    ],
+  };
+}
+log(`Issue premise precheck PASS (Issue #109): issue #${issueNumberForPremise} is not stale/duplicate — ${issuePremise.reason}`);
+// [issue-premise-wiring-end]
 // [ticket-precheck-wiring-end]
 
 // ── Phase 2: Estimate ──
@@ -1875,19 +2037,41 @@ const trackedPathFromPorcelain = (line) => {
 //  - abort=false: Release エージェントを起動してよい
 //  - abort=true + reason='no-tracked-changes': tracked 変更ゼロ & snapshot なし
 //  - abort=true + reason='exclusion-only-changes': 変更はあるが全て除外パターン
+//  - abort=true + reason='gitignored-only-artifacts' (P-003/step-3, Issue #109):
+//    hasSnapshotCommit=false かつ staged=0 かつ untracked 全部が gitignore 対象の
+//    成果物パスの場合。成果物が gitignored で git diff --cached が空のまま
+//    空 PR が出るのを hard-fail する。
+const GITIGNORED_ARTIFACT_PATTERNS = [
+  /^\.omc\//, /^target\//, /^dist\//, /^build\//, /^node_modules\//,
+  /^coverage\//, /\.log$/i, /\.tmp$/i,
+];
+const isGitignoredArtifact = (f) =>
+  typeof f === 'string' && f.length > 0 && GITIGNORED_ARTIFACT_PATTERNS.some((re) => re.test(f));
+const untrackedPathFromPorcelain = (line) => {
+  if (typeof line !== 'string' || line.length < 4) return null;
+  if (!line.startsWith('??')) return null;
+  const p = line.slice(3).trim();
+  return p.length > 0 ? p : null;
+};
 const evaluateReleasePrecheck = (input) => {
   const { diffNames, porcelainLines, hasSnapshotCommit } = (input && typeof input === 'object')
     ? input
     : {};
   const names = new Set();
   let untrackedCount = 0;
+  const untrackedPaths = [];
   if (Array.isArray(diffNames)) {
     for (const f of diffNames) if (typeof f === 'string' && f.length > 0) names.add(f);
   }
   if (Array.isArray(porcelainLines)) {
     for (const line of porcelainLines) {
       if (typeof line !== 'string' || line.length === 0) continue;
-      if (line.startsWith('??')) { untrackedCount += 1; continue; }
+      if (line.startsWith('??')) {
+        untrackedCount += 1;
+        const u = untrackedPathFromPorcelain(line);
+        if (u) untrackedPaths.push(u);
+        continue;
+      }
       const p = trackedPathFromPorcelain(line);
       if (p) names.add(p);
     }
@@ -1896,7 +2080,14 @@ const evaluateReleasePrecheck = (input) => {
   const staged = all.filter((f) => !isReleaseExcluded(f));
   const excluded = all.filter((f) => isReleaseExcluded(f));
   if (hasSnapshotCommit === true) {
+    // R7 guard が最優先: snapshot commit があれば work は commit 済みのため
+    // gitignored-only 判定を適用しない (空 diff 正常パスを壊さない — Issue #109 task 4)。
     return { abort: false, reason: null, staged, excluded, untrackedCount };
+  }
+  if (staged.length === 0
+    && untrackedPaths.length > 0
+    && untrackedPaths.every((f) => isGitignoredArtifact(f))) {
+    return { abort: true, reason: 'gitignored-only-artifacts', staged, excluded, untrackedCount };
   }
   if (all.length === 0) {
     return { abort: true, reason: 'no-tracked-changes', staged, excluded, untrackedCount };
@@ -1979,7 +2170,10 @@ const buildReleasePrompt = (consensus, ticket, snapshotBranch) => `RELEASE MANAG
   git rev-parse --abbrev-ref HEAD と git log --oneline -1 で、現在 ${snapshotBranch} 上に
   snapshot commit があるか判定せよ。
 - 既に commit 済みなら: 新規 commit せず、その branch を push + PR 作成のみ（手順 4-5 へ）。
-  snapshot の WIP commit message を正規のものへ amend してもよい（git commit --amend、又は --amend --no-edit で message を正規化）。
+  snapshot の WIP commit message を amend する場合は、**元 conventional-commit メッセージを保持したまま
+  scope のみ修正**せよ（git commit --amend で scope 部分だけ編集）。
+  type の書き換え (feat → feat(snapshot) 等)、body の削除、Co-Authored-By trailer の落としは全て禁止。
+  --amend --no-edit（message 変更なし）も許容される。
 - 未 commit（snapshot 失敗/未実行）なら: 手順 1-5 を従来通り実行。
 
 【空リリース防止アサーション (Issue #66) — commit 実行直前に必ず実施】
@@ -1994,14 +2188,25 @@ staged な tracked 変更を確認せよ:
   この情報で再開可能。
 - 除外パターン (.claude/, .omc/, .claude.old/, .understand-anything/, *.local, *.lnk 等)
   以外に staged される実ファイルがゼロの場合もアボート扱い。
+- **gitignored 成果物のみ (P-003/step-3, Issue #109)**: staged がゼロで、変更成果物が
+  .omc/, target/, dist/, build/, node_modules/, coverage/, *.log, *.tmp 等
+  gitignore 対象パスにしか存在しない場合もアボート扱い ('ABORTED' を明記)。
+  成果物を gitignore 対象でなく (又は .gitignore 更新 + git add -f で) tracked して
+  再実行すること。
 - **例外 (R7 整合)**: snapshot commit が既に存在し（上記 R7 確認で判定済み）、
   追加の staged 差分がゼロなら正常パス。アボートせず手順 4-5 へ進め。
 
-Commit Message:
+Commit Message (gate 合意 — verbatim 使用、scope 編集のみ可):
 ${consensus.commit_message}
 
-Body:
+Body (verbatim — 削除禁止):
 ${consensus.commit_body || ''}
+
+**メッセージ verbatim 保持 (Issue #109)**: 上記の gate 合意 conventional-commit メッセージを
+そのまま verbatim で使用せよ。許される編集は scope 部分のみ。
+- type の書き換え禁止 (例: feat → feat(snapshot) への変更は不可)
+- body の落とし・省略禁止
+- Co-Authored-By: glm 4.7 <noreply@zhipuai.cn> trailer の削除禁止（必ず保持）
 
 Ticket: ${ticket.title} (issue #${ticket.issueNumber || 'none'})
 受け入れ基準: ${JSON.stringify(ticket.acceptanceCriteria || [])}
@@ -2010,8 +2215,8 @@ Execute:
 1. ブランチ作成: git checkout -b ${snapshotBranch}  (既存の場合は git checkout ${snapshotBranch})
 2. Stage only relevant files (.claude/, .understand-anything/, *.local, *.lnk 等は除外)
 3. **commit 直前に git diff --cached --name-only で空リリース防止アサーション（上記）。
-   問題なければ** Commit: 上記 message + Co-Authored-By: glm 4.7 <noreply@zhipuai.cn>
-   (snapshot commit が既にあれば amend で正規化・省略可)
+   問題なければ** Commit: 上記 message を verbatim で（scope 編集のみ可）+ Co-Authored-By: glm 4.7 <noreply@zhipuai.cn>
+   (snapshot commit が既にあれば、元 conventional-commit メッセージを保持したまま scope のみ修正する amend、又は --amend --no-edit)
 4. Push: git push -u origin HEAD
 5. PR作成: gh pr create --title "<commit subject>" --base master --body 以下本文:
    <body>

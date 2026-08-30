@@ -85,6 +85,27 @@ if (begin >= 0 && end > begin) {
   r = T([], ['?? newfile.rs'], false);
   assert(r.abort === true, 'untracked-only porcelain entry does not prevent abort');
 
+  // ── P-003/step-3: gitignored-only artifacts → hard-fail with dedicated reason ──
+  // hasSnapshotCommit=false かつ staged=0 かつ untracked 全部が gitignore 対象の
+  // 成果物パス (.omc/, target/, dist/, node_modules/, *.log 等) の場合。
+  r = T([], ['?? .omc/logs/run-1/gate.json'], false);
+  assert(r.abort === true, 'gitignored artifact only (.omc/logs) → abort');
+  assert(r.reason === 'gitignored-only-artifacts', 'reason is gitignored-only-artifacts (.omc artifact)');
+  r = T([], ['?? target/debug/anaden.exe', '?? dist/bundle.js'], false);
+  assert(r.abort === true && r.reason === 'gitignored-only-artifacts',
+    'target/ + dist/ artifacts only → gitignored-only-artifacts');
+  // exclusion-pattern tracked change + gitignored untracked artifacts → same reason
+  r = T(['.claude/workflows/feature-pipeline.js'], [' M .claude/workflows/feature-pipeline.js', '?? .omc/state/s.json'], false);
+  assert(r.abort === true && r.reason === 'gitignored-only-artifacts',
+    'staged=0 + untracked all gitignored artifacts → gitignored-only-artifacts (not exclusion-only)');
+  // untracked mixture with a NON-artifact file → NOT gitignored-only-artifacts
+  r = T([], ['?? .omc/state/s.json', '?? src/real_change.rs'], false);
+  assert(r.reason !== 'gitignored-only-artifacts' && r.abort === true,
+    'untracked non-artifact file present → generic abort reason, not gitignored-only-artifacts');
+  // hasSnapshotCommit=true + staged=0 + gitignored untracked → proceed (guard wins)
+  r = T([], ['?? .omc/logs/run/gate.json'], true);
+  assert(r.abort === false, 'gitignored-only artifacts BUT snapshot commit → proceed (R7 guard precedence)');
+
   // ── robustness: malformed inputs ──
   r = api.evaluateReleasePrecheck({});
   assert(r.abort === true, 'missing inputs default to abort (fail-closed, no empty release)');

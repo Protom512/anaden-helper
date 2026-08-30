@@ -141,6 +141,74 @@ export function evaluateTicketPrecheck(declaredFiles, changedFiles, mode = 'stri
 }
 
 /**
+ * Issue premise verification (Issue #109 Task 1): detect stale / duplicate
+ * dispatch targets BEFORE Request/Estimate proceeds.
+ *
+ * Input fields (all supplied by the wiring layer — pure fn does no I/O):
+ *   - issueState: 'open' | 'closed' (from `gh issue view --json state`)
+ *   - linkedBranchesContainIssue: boolean — any trunk-reachable branch
+ *     contains the issue's implementation commit(s) (from
+ *     `git branch -a --contains <sha>`; wiring resolves commit SHAs)
+ *   - openPRs: array of open PR objects for the same issueNumber
+ *     (from `gh pr list --search "<n> in:body" --json number,title`)
+ *
+ * Verdicts:
+ *   - stale:     issue closed AND merged into trunk -> FAIL
+ *   - duplicate: any open PR referencing the same issue -> FAIL
+ *   - closed-but-unmerged is PASS (closed != merged; e.g. wontfix-reopened)
+ *
+ * Fail-closed: null / non-object input, missing fields, or invalid field
+ * types (gh auth failure / rate limit surface as malformed input) -> FAIL.
+ * Never fail-open — a fail-open would let stale detection slip through.
+ *
+ * @param {unknown} input
+ * @returns {{ verdict: 'PASS'|'FAIL', reason: string, stale: boolean,
+ *   duplicate: boolean }}
+ */
+export function evaluateIssuePremise(input) {
+  const invalid = { verdict: 'FAIL', stale: false, duplicate: false };
+  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed input (fail-closed: precheck unverifiable, dispatch rejected)' };
+  }
+  const { issueState, linkedBranchesContainIssue, openPRs } = /** @type {Record<string, unknown>} */ (input);
+  if (typeof issueState !== 'string' || (issueState !== 'open' && issueState !== 'closed')) {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed issueState (fail-closed: expected "open"|"closed")' };
+  }
+  if (typeof linkedBranchesContainIssue !== 'boolean') {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed linkedBranchesContainIssue (fail-closed: expected boolean)' };
+  }
+  if (!Array.isArray(openPRs)) {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed openPRs (fail-closed: expected array)' };
+  }
+  const stale = issueState === 'closed' && linkedBranchesContainIssue;
+  const duplicate = openPRs.length > 0;
+  if (stale) {
+    return {
+      verdict: 'FAIL',
+      stale: true,
+      duplicate,
+      reason: duplicate
+        ? 'issue-premise FAIL — stale: issue is closed and already merged into trunk; duplicate: open PR(s) also exist'
+        : 'issue-premise FAIL — stale: issue is closed and already merged into trunk',
+    };
+  }
+  if (duplicate) {
+    return {
+      verdict: 'FAIL',
+      stale: false,
+      duplicate: true,
+      reason: `issue-premise FAIL — duplicate: ${openPRs.length} open PR(s) already reference this issue`,
+    };
+  }
+  return {
+    verdict: 'PASS',
+    stale: false,
+    duplicate: false,
+    reason: `issue-premise PASS — issue is ${issueState}, not merged into trunk, no open duplicate PRs`,
+  };
+}
+
+/**
  * Derive slice metadata (changed crates + diff-kind) from the actual changed
  * files — replaces self-declared slice metadata. Crates derivation mirrors
  * the existing feature-pipeline.js changedCrates logic (crates/<name>/** ->
