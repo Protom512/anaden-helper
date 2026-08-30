@@ -425,7 +425,7 @@ if (runMeta.value) {
     `EVIDENCE PERSISTER (Issue #97 UC-1)。以下の JSON をファイル .omc/logs/${runId}/run-metadata.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
 ${JSON.stringify(runMeta.value, null, 2)}
 書き出し後、書き込んだファイルのパスのみを返せ。`,
-    { label: 'run:persist-run-metadata', phase: 'Request', model: 'haiku' }
+    { label: 'run:persist-run-metadata', phase: 'Request', model: 'sonnet' // P-005: haiku は GLM backend で Unknown Model 400 (sonnet へ) }
   );
   log(`Run metadata (Issue #97 UC-1): persisted to .omc/logs/${runId}/run-metadata.json (issue=${runMeta.value.issue}, phases=${runMeta.value.phases.length})`);
 } else {
@@ -656,7 +656,7 @@ ${JSON.stringify({
       : 'unknown',
   }, null, 2)}
 書き出し後、書き込んだファイルのパスのみを返せ。`,
-  { label: 'request:persist-ticket-precheck', phase: 'Request', model: 'haiku' }
+  { label: 'request:persist-ticket-precheck', phase: 'Request', model: 'sonnet' // P-005: haiku は GLM backend で Unknown Model 400 (sonnet へ) }
 );
 if (ticketPrecheck.verdict !== 'PASS') {
   // fail-closed short-circuit (resolveReleaseAbort / evidence-failed と同型)。
@@ -736,7 +736,7 @@ ${JSON.stringify({
     evidence: premiseEvidence || 'unavailable (fail-closed)',
   }, null, 2)}
 書き出し後、書き込んだファイルのパスのみを返せ。`,
-  { label: 'request:persist-issue-premise-precheck', phase: 'Request', model: 'haiku' }
+  { label: 'request:persist-issue-premise-precheck', phase: 'Request', model: 'sonnet' // P-005: haiku は GLM backend で Unknown Model 400 (sonnet へ) }
 );
 if (issuePremise.verdict !== 'PASS') {
   // fail-closed short-circuit (precheck-failed と同型の resumable status)。
@@ -1643,7 +1643,7 @@ await agent(
   `EVIDENCE PERSISTER (Issue #95 P-008 T3c)。以下の JSON をファイル .omc/logs/${runId}/diff-kind-short-circuit.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
 ${JSON.stringify(diffKindRationale, null, 2)}
 書き出し後、書き込んだファイルのパスのみを返せ。`,
-  { label: 'gate:persist-diff-kind-rationale', phase: 'Commit Gate', model: 'haiku' }
+  { label: 'gate:persist-diff-kind-rationale', phase: 'Commit Gate', model: 'sonnet' // P-005: haiku は GLM backend で Unknown Model 400 (sonnet へ) }
 );
 log(`Diff-kind (P-008): short-circuit rationale persisted to .omc/logs/${runId}/diff-kind-short-circuit.json (classification=${diffKind}, lanes=${activeLaneCount}, treeHash=${gateDiffInput.treeHash || 'n/a'})`);
 // [gate-diff-kind-persist-apply-end]
@@ -2075,7 +2075,7 @@ const releaseScope = await agent(
     porcelainLines: { type: 'array', items: { type: 'string' } },
     hasSnapshotCommit: { type: 'boolean' },
   } }, label: 'release:precheck-scope', phase: 'Release', model: 'sonnet' }
-// P-005 (2026-08-21): model: 'haiku' は GLM バックエンドで "Unknown Model" 400 になり
+// P-005 (2026-08-21): model: 'sonnet' // P-005: haiku は GLM backend で Unknown Model 400 (sonnet へ) は GLM バックエンドで "Unknown Model" 400 になり
 // agent が StructuredOutput を呼べず workflow 全体が throw した (cycle-18)。
 // haiku 指定はこのハーネスで使用不可 — sonnet へ修正。
 );
