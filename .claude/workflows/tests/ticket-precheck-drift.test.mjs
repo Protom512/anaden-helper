@@ -11,6 +11,7 @@ import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
   evaluateTicketPrecheck,
+  evaluateIssuePremise,
   deriveSliceMetadata,
 } from '../ticket-precheck.js';
 import { classifyDiffKind } from '../gate-diff-kind.js';
@@ -34,7 +35,7 @@ function extractInlinePureFns() {
   // pipeline from the gate-diff-kind inline copy) — inject the canonical one.
   const factory = new Function(
     'classifyDiffKind',
-    `${blk}\nreturn { evaluateTicketPrecheck, deriveSliceMetadata };`
+    `${blk}\nreturn { evaluateTicketPrecheck, evaluateIssuePremise, deriveSliceMetadata };`
   );
   return factory(classifyDiffKind);
 }
@@ -86,5 +87,30 @@ test('drift guard: inline deriveSliceMetadata matches canonical (incl. classifyD
     const m2 = deriveSliceMetadata(c);
     assert.deepEqual(m1, m2, `deriveSliceMetadata(${JSON.stringify(c)}) diverged from canonical`);
     assert.equal(m1.diffKind, classifyDiffKind(c), 'diffKind must equal canonical classifyDiffKind');
+  }
+});
+
+test('drift guard: inline evaluateIssuePremise matches canonical across input matrix', () => {
+  const inline = extractInlinePureFns();
+  const cases = [
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [] },
+    { issueState: 'closed', linkedBranchesContainIssue: true, openPRs: [] },
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 1 }] },
+    { issueState: 'closed', linkedBranchesContainIssue: true, openPRs: [{ number: 1 }] },
+    { issueState: 'closed', linkedBranchesContainIssue: false, openPRs: [] },
+    null,
+    undefined,
+    'open',
+    {},
+    { issueState: 'bogus', linkedBranchesContainIssue: false, openPRs: [] },
+    { issueState: 'open', linkedBranchesContainIssue: 'no', openPRs: [] },
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: null },
+  ];
+  for (const c of cases) {
+    assert.deepEqual(
+      inline.evaluateIssuePremise(c),
+      evaluateIssuePremise(c),
+      `evaluateIssuePremise(${JSON.stringify(c)}) diverged from canonical`
+    );
   }
 });

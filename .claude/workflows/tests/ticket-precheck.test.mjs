@@ -191,3 +191,81 @@ test('strict mode (default): declared-but-unchanged still FAILs (gate-time seman
   const r2 = evaluateTicketPrecheck(['a.js'], [], 'strict');
   assert.equal(r2.verdict, 'FAIL');
 });
+
+// ── Issue #109 Task 1: evaluateIssuePremise (stale/duplicate detection) ──
+
+import { evaluateIssuePremise } from '../ticket-precheck.js';
+
+// UC-1 (normal): open issue, no merged work, no open PR -> PASS
+test('issuePremise UC-1: open issue with no linked merged branches and no open PRs -> PASS', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [],
+  });
+  assert.equal(r.verdict, 'PASS');
+  assert.ok(r.reason.includes('PASS'));
+});
+
+// UC-2 (normal, stale): issue closed and merged into trunk -> FAIL
+test('issuePremise UC-2: closed issue already merged into trunk -> FAIL (stale)', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'closed',
+    linkedBranchesContainIssue: true,
+    openPRs: [],
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.match(r.reason, /stale/i);
+});
+
+// UC-3 (normal, duplicate): open PR already exists for the same issue -> FAIL
+test('issuePremise UC-3: existing open PR for same issue -> FAIL (duplicate)', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [{ number: 123, title: 'feat: same issue work' }],
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.match(r.reason, /duplicate/i);
+});
+
+// Edge 1: closed issue but NOT merged anywhere (e.g. closed as wontfix) — not
+// merged, so not stale-by-merge; dispatch proceeds (verification is the
+// wiring layer's concern; pure fn only rejects closed+merged)
+test('issuePremise edge: closed issue without merged branches -> PASS (closed != merged)', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'closed',
+    linkedBranchesContainIssue: false,
+    openPRs: [],
+  });
+  assert.equal(r.verdict, 'PASS');
+});
+
+// Edge 2 (fail-closed): null / malformed input -> FAIL
+test('issuePremise edge: null or malformed input -> FAIL (fail-closed)', () => {
+  assert.equal(evaluateIssuePremise(null).verdict, 'FAIL');
+  assert.equal(evaluateIssuePremise(undefined).verdict, 'FAIL');
+  assert.equal(evaluateIssuePremise('open').verdict, 'FAIL');
+  assert.equal(evaluateIssuePremise({}).verdict, 'FAIL');
+  assert.equal(
+    evaluateIssuePremise({ issueState: 'bogus', linkedBranchesContainIssue: false, openPRs: [] }).verdict,
+    'FAIL'
+  );
+});
+
+// Edge 3 (fail-closed): invalid field types -> FAIL (gh failure/rate-limit
+// surfaces as malformed input; never fail-open into stale dispatch)
+test('issuePremise edge: invalid field types -> FAIL (fail-closed on gh failure shapes)', () => {
+  assert.equal(
+    evaluateIssuePremise({ issueState: 'open', linkedBranchesContainIssue: 'no', openPRs: [] }).verdict,
+    'FAIL'
+  );
+  assert.equal(
+    evaluateIssuePremise({ issueState: 'open', linkedBranchesContainIssue: false, openPRs: null }).verdict,
+    'FAIL'
+  );
+  assert.equal(
+    evaluateIssuePremise({ issueState: null, linkedBranchesContainIssue: false, openPRs: [] }).verdict,
+    'FAIL'
+  );
+});

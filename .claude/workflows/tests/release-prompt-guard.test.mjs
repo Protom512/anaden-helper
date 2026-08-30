@@ -68,3 +68,41 @@ test('prompt handles exclusion-pattern-only staging as zero (excluded files are 
 test('prompt requires reporting the current branch and diff summary on abort (resumable)', () => {
   assert.match(prompt, /branch|ブランチ/u);
 });
+
+// --- Issue #109 Task 3: conventional-commit verbatim preservation ---
+// The release commit step must use the gate-agreed commit message verbatim
+// (only scope edits allowed). Dropping the body/Co-Authored-By or rewriting
+// the type (e.g. feat → feat(snapshot)) is forbidden.
+
+test('prompt requires the gate-agreed commit message to be used verbatim (scope edits only)', () => {
+  assert.match(prompt, /verbatim/i);
+  assert.match(prompt, /scope のみ|scope only/iu);
+});
+
+test('prompt forbids dropping the commit body and Co-Authored-By trailer', () => {
+  assert.match(prompt, /Co-Authored-By.*落と|body.*落と|削除禁止|保持/u);
+  assert.match(prompt, /Co-Authored-By/u);
+});
+
+test('prompt forbids rewriting the commit type (e.g. feat → feat(snapshot))', () => {
+  assert.match(prompt, /型.*書き換え.*禁止|type.*rewrite.*forbid|書き換え禁止/u);
+});
+
+test('R7 snapshot amend instruction preserves the original conventional-commit message (scope fix only)', () => {
+  assert.match(prompt, /amend/u);
+  assert.match(prompt, /amend.*[^\n]*scope|scope.*[^\n]*amend/us);
+  assert.match(prompt, /元.*conventional-commit.*メッセージ.*保持|既存のコミットメッセージ.*保持/us);
+});
+
+// release-pipeline.js Phase 4 Commit prompt must also instruct verbatim use.
+const rpPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'release-pipeline.js');
+const rpSrc = readFileSync(rpPath, 'utf8');
+const phase4 = rpSrc.slice(rpSrc.indexOf('// Phase 4: Commit'), rpSrc.indexOf('// Phase 5'));
+
+test('release-pipeline.js Phase 4 commit prompt instructs original message verbatim (scope edit only)', () => {
+  assert.ok(phase4.length > 0, 'Phase 4 block exists in release-pipeline.js');
+  assert.match(phase4, /verbatim/i);
+  assert.match(phase4, /scope のみ|scope only/iu);
+  assert.match(phase4, /Co-Authored-By/u);
+  assert.match(phase4, /保持/u);
+});

@@ -41,6 +41,11 @@ if (begin >= 0 && end > begin) {
   r = api.resolveReleaseAbort({ precheck: { abort: true, reason: 'exclusion-only-changes' }, releaseResult: '' });
   assert(r.aborted === true && r.reason === 'exclusion-only-changes', 'exclusion-only abort propagated');
 
+  // P-003/step-3: gitignored-only-artifacts reason propagates through the abort path
+  r = api.resolveReleaseAbort({ precheck: { abort: true, reason: 'gitignored-only-artifacts' }, releaseResult: '' });
+  assert(r.aborted === true && r.reason === 'gitignored-only-artifacts',
+    'gitignored-only-artifacts abort propagated');
+
   // ── precheck says proceed → not aborted regardless of prose ──
   r = api.resolveReleaseAbort({ precheck: { abort: false, reason: null }, releaseResult: 'PR_NUMBER=12' });
   assert(r.aborted === false, 'precheck ok → not aborted');
