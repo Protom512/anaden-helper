@@ -29,20 +29,13 @@ fn main() -> eframe::Result {
             print!("{HELP_TEXT}");
             Ok(())
         }
-        // フラグなしも `--pipeline` も同一の統合GUI を起動する。
-        // `--pipeline` 経由時のみ deprecated 警告バナーを表示する (UC-3)。
-        LaunchKind::Unified {
-            deprecated_pipeline,
-        } => eframe::run_native(
+        // Issue #123 (shard 2): `--pipeline` は完全削除済み。常に統合GUI を起動。
+        LaunchKind::Unified => eframe::run_native(
             UNIFIED_WINDOW_TITLE,
             options,
             Box::new(move |cc| {
                 setup_japanese_fonts(&cc.egui_ctx);
-                Ok(Box::new(UnifiedShell::new_with_flags(
-                    cli.target,
-                    cli.exe,
-                    deprecated_pipeline,
-                )))
+                Ok(Box::new(UnifiedShell::new(cli.target, cli.exe)))
             }),
         ),
     }
