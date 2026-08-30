@@ -579,6 +579,19 @@ impl PipelineRunnerApp {
 impl eframe::App for PipelineRunnerApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
+            self.render_body(ui);
+        });
+    }
+}
+
+impl PipelineRunnerApp {
+    /// 実行GUI 本体ペイン（Issue #119: 統合シェルへの埋め込み用公開 API）。
+    ///
+    /// `eframe::App::ui` から CentralPanel の内側を切り出したもの。
+    /// 単一ウィンドウ統合 GUI (`shell::UnifiedShell`) の Run/History タブから
+    /// 委譲される。
+    pub fn render_body(&mut self, ui: &mut egui::Ui) {
+        {
             ui.heading("anaden pipeline runner");
 
             let running = self.status() == RunnerStatus::Running;
@@ -634,7 +647,7 @@ impl eframe::App for PipelineRunnerApp {
             self.history_panel.refresh_from(self.history.records());
             self.history_panel.ui(ui);
             self.handle_history_actions();
-        });
+        }
     }
 }
 

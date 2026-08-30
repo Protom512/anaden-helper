@@ -1,104 +1,20 @@
-//! anaden-studio: テンプレート作成GUI。
+//! anaden-studio: 単一ウィンドウ統合 GUI (Issue #119)。
 //!
-//! スクリーンショット上でROIを選び、正例/負例画面に対する識別力を
-//! リアルタイムに検証しながらテンプレートを作成するツール。
-//! 認識方式は VisionEngine trait（現状は正規化SSE）で差し替え可能。
+//! フラグなし起動で作成 / バッチ評価 / pipeline 実行 / 履歴 の全タブを
+//! 利用できる統合アプリ (`shell::UnifiedShell`) を起動する。
+//! `--pipeline` は後方互換のため同一の統合アプリを起動する deprecated
+//! フラグとして残る（ヘルプ文言に deprecated 表記・GUI 上に警告バナー）。
+//!
+//! 引数解析の実体は lib 側 `cli` モジュール（テスト可能な純関数）。
 
-// モジュール実体は lib.rs (anaden-studio lib) 側で公開している。
-// bin 側で二重に `mod` 宣言すると別実体としてコンパイルされ dead_code
-// 警告が発生するため、lib を参照する。
-use anaden_studio::app::StudioApp;
-use anaden_studio::runner::PipelineRunnerApp;
-use anaden_studio::source::Target;
+use anaden_studio::cli::{CliArgs, HELP_TEXT, LaunchKind, launch_kind, parse_args_from};
+use anaden_studio::shell::{UNIFIED_WINDOW_TITLE, UnifiedShell};
 
 use eframe::egui;
 
-/// コマンドライン引数。
-struct CliArgs {
-    /// キャプチャバックエンド(android|windows)。既定 android。
-    target: Target,
-    /// PC版(Windows)対象プロセスの exe 名。未指定時は GUI 既定値(AnotherEden.exe)。
-    exe: Option<String>,
-    /// pipeline 実行ランナーGUI モード(Issue #83 シャード1 スケルトン)。
-    pipeline: bool,
-}
-
-/// 手動でコマンドライン引数をパースする(clap 依存を避けるため)。
-///
-/// 対応フラグ:
-/// - `--target <android|windows>`: キャプチャバックエンド(既定 android)。
-/// - `--exe <name>`: Windows バックエンドの対象 exe 名。
-/// - `-h` / `--help`: ヘルプを表示して終了。
-///
-/// 後方互換: 引数未指定時は target=android で従来通り。
+/// コマンドライン引数を解析する（実体は lib 側 `cli::parse_args_from`）。
 fn parse_args() -> CliArgs {
-    let mut args = CliArgs {
-        target: Target::default(),
-        exe: None,
-        pipeline: false,
-    };
-    let mut iter = std::env::args().skip(1);
-    while let Some(arg) = iter.next() {
-        match arg.as_str() {
-            "--target" => {
-                if let Some(v) = iter.next() {
-                    match v.as_str() {
-                        "android" => args.target = Target::Android,
-                        "windows" => {
-                            // Target::Windows は Windows ビルドでのみ存在。
-                            #[cfg(windows)]
-                            {
-                                args.target = Target::Windows;
-                            }
-                            // Windows 以外のビルドで --target windows が渡された場合は
-                            // android へフォールバック(Target::Windows バリアントが無い)。
-                            #[cfg(not(windows))]
-                            {
-                                eprintln!(
-                                    "anaden-studio: このビルドでは windows バックエンドを利用できません。android を使用します。"
-                                );
-                            }
-                        }
-                        other => {
-                            eprintln!(
-                                "anaden-studio: 未知の --target 値 \"{other}\" です。android を使用します。"
-                            );
-                        }
-                    }
-                }
-            }
-            "--exe" => {
-                if let Some(v) = iter.next() {
-                    args.exe = Some(v);
-                }
-            }
-            "--pipeline" => {
-                args.pipeline = true;
-            }
-            "-h" | "--help" => {
-                println!("anaden-studio — テンプレート作成GUI");
-                println!();
-                println!(
-                    "USAGE: anaden-studio [--target android|windows] [--exe <name>] [--pipeline]"
-                );
-                println!();
-                println!("OPTIONS:");
-                println!("  --target <android|windows>  キャプチャバックエンド(既定: android)");
-                println!("      windows は Windows ビルドでのみ有効。Linux では無視されます。");
-                println!("  --exe <name>                Windows バックエンドの対象 exe 名");
-                println!("                              (既定: AnotherEden.exe)");
-                println!(
-                    "  --pipeline                  pipeline 実行ランナーGUI を起動 (Issue #83)"
-                );
-                println!("  -h, --help                  このヘルプを表示");
-                std::process::exit(0);
-            }
-            other => {
-                eprintln!("anaden-studio: 未知の引数 \"{other}\" を無視します。");
-            }
-        }
-    }
-    args
+    parse_args_from(std::env::args().skip(1))
 }
 
 fn main() -> eframe::Result {
@@ -108,32 +24,28 @@ fn main() -> eframe::Result {
         viewport: egui::ViewportBuilder::default().with_inner_size([1200.0, 800.0]),
         ..Default::default()
     };
-    if cli.pipeline {
-        return eframe::run_native(
-            "anaden-studio — pipeline 実行",
+    match launch_kind(&cli) {
+        LaunchKind::Help => {
+            print!("{HELP_TEXT}");
+            Ok(())
+        }
+        // フラグなしも `--pipeline` も同一の統合GUI を起動する。
+        // `--pipeline` 経由時のみ deprecated 警告バナーを表示する (UC-3)。
+        LaunchKind::Unified {
+            deprecated_pipeline,
+        } => eframe::run_native(
+            UNIFIED_WINDOW_TITLE,
             options,
-            Box::new(|cc| {
+            Box::new(move |cc| {
                 setup_japanese_fonts(&cc.egui_ctx);
-                // anaden バイナリを ANADEN_BIN → target/{debug,release} → PATH
-                // の順で明示パス解決する（Issue #85）。
-                Ok(Box::new(PipelineRunnerApp::with_resolved_anaden()))
+                Ok(Box::new(UnifiedShell::new_with_flags(
+                    cli.target,
+                    cli.exe,
+                    deprecated_pipeline,
+                )))
             }),
-        );
+        ),
     }
-    eframe::run_native(
-        "anaden-studio — テンプレート作成",
-        options,
-        Box::new(move |cc| {
-            // egui のデフォルトフォントは日本語グリフを含まないため文字化け（□豆腐）する。
-            // かつて .ttc（フォントコレクション）の面選択で実機文字化けが残った実績があるため、
-            // 日本語グリフを含むシングルフェースの .ttf をバンドルして include_bytes! で読む。
-            setup_japanese_fonts(&cc.egui_ctx);
-            // CLI で指定された target/exe を初期値として StudioApp へ渡す。
-            Ok(Box::new(StudioApp::with_initial_target(
-                cli.target, cli.exe,
-            )))
-        }),
-    )
 }
 
 /// フォントの登録名。include_bytes! は文字列リテラルしか受け付けないため、

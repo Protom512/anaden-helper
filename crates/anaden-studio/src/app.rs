@@ -34,7 +34,7 @@ const STATE_OPTIONS: &[&str] = &[
 
 /// GUI のモード。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum AppMode {
+pub enum AppMode {
     /// テンプレート作成（ROI選択＋識別力評価）。
     Authoring,
     /// バッチ評価（混同行列）。
@@ -203,6 +203,16 @@ impl StudioApp {
         }
     }
 
+    /// 現在のモードを返す（公開 API 経由の振る舞い検証用）。
+    pub fn mode(&self) -> AppMode {
+        self.mode
+    }
+
+    /// モードを設定する（埋め込み親シェルからのタブ切替用）。
+    pub fn set_mode(&mut self, mode: AppMode) {
+        self.mode = mode;
+    }
+
     /// エンジン種別を切替え、self.engine を再構築し、再評価を強制する。
     /// downscale=2・閾値0 で現行 scoring engine と同じ条件（公平比較）。
     /// scored_roi / discrimination を None に戻すことで、次フレームの
@@ -357,6 +367,18 @@ impl StudioApp {
 
 impl eframe::App for StudioApp {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
+        self.render_modebar(ui);
+        self.render_body(ui);
+    }
+}
+
+impl StudioApp {
+    /// ウィンドウ上限のモード切替バー（modebar）を描画する。
+    ///
+    /// 親レイアウト内への埋め込み（単一ウィンドウ統合 GUI, Issue #119）を想定した
+    /// 公開パネル描画 API。単体テストからは [`Self::mode`] / [`Self::set_mode`]
+    /// 経由で振る舞いを検証する。
+    pub fn render_modebar(&mut self, ui: &mut egui::Ui) {
         // スクリーンショットのテクスチャ生成（未生成時）
         if self.screenshot_tex.is_none()
             && let Some(img) = &self.screenshot
@@ -380,7 +402,13 @@ impl eframe::App for StudioApp {
                     ui.selectable_value(&mut self.mode, AppMode::Batch, "📊 バッチ評価");
                 });
             });
+    }
 
+    /// モード本体（Authoring / Batch）を親レイアウト内に描画する埋め込み用 API。
+    ///
+    /// modebar は含まない。呼び出し前に [`Self::render_modebar`] を実行するか、
+    /// 親シェル側でタブ切替してもよい（mode は [`Self::set_mode`] で制御）。
+    pub fn render_body(&mut self, ui: &mut egui::Ui) {
         if matches!(self.mode, AppMode::Authoring) {
             // 別スレッドでの propose 計算結果を非ブロッキング受信。
             // 完了時: proposing を下ろし、結果を self.proposals へ反映・status 更新。
@@ -762,63 +790,7 @@ impl StudioApp {
 
         egui::CentralPanel::default().show_inside(ui, |ui| {
             if let Some(cm) = &self.batch_result {
-                ui.heading(format!("混同行列（正答率 {:.1}%）", cm.accuracy() * 100.0));
-                ui.label(format!(
-                    "テスト画像 {} 枚 / 状態 {} 種",
-                    cm.total,
-                    cm.labels.len()
-                ));
-                ui.separator();
-
-                egui::Grid::new("confusion")
-                    .num_columns(cm.labels.len() + 1)
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.strong("真\\予測");
-                        for lbl in &cm.labels {
-                            ui.strong(lbl);
-                        }
-                        ui.end_row();
-                        for (i, true_lbl) in cm.labels.iter().enumerate() {
-                            ui.strong(true_lbl);
-                            for (j, _pred) in cm.labels.iter().enumerate() {
-                                let count = cm.matrix[i][j];
-                                let color = if i == j && count > 0 {
-                                    egui::Color32::from_rgb(60, 180, 75)
-                                } else if count > 0 {
-                                    egui::Color32::from_rgb(220, 60, 60)
-                                } else {
-                                    egui::Color32::from_gray(160)
-                                };
-                                let txt = if count > 0 {
-                                    format!("{count}")
-                                } else {
-                                    "·".to_string()
-                                };
-                                ui.colored_label(color, txt);
-                            }
-                            ui.end_row();
-                        }
-                    });
-
-                ui.separator();
-                ui.heading("テンプレート別");
-                egui::Grid::new("per_template")
-                    .striped(true)
-                    .show(ui, |ui| {
-                        ui.strong("名前");
-                        ui.strong("状態");
-                        ui.strong("感度");
-                        ui.strong("特異性");
-                        ui.end_row();
-                        for r in &cm.per_template {
-                            ui.label(&r.name);
-                            ui.label(&r.state);
-                            ui.monospace(format!("{:.2}", r.sensitivity));
-                            ui.monospace(format!("{:.2}", r.specificity));
-                            ui.end_row();
-                        }
-                    });
+                batch::render_confusion_matrix(ui, cm);
             } else {
                 ui.heading("「▶ 実行」でバッチ評価を行います");
                 ui.label("テンプレート元フォルダ（PNG+TOML）と、");
@@ -887,6 +859,9 @@ fn is_image(path: &Path) -> bool {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
 mod tests {
     use super::*;
     use image::{DynamicImage, GrayImage, Luma};
@@ -938,6 +913,55 @@ mod tests {
         // デフォルトエンジンは CCOEFF。構築できること（panic しない）が最小保証。
         let _engine = StudioApp::build_engine(EngineKind::default());
         let _sse = StudioApp::build_engine(EngineKind::Sse);
+    }
+
+    /// ヘッドレス egui コンテキストを用意し、その中に子 Ui を作る。
+    /// GUI バックエンド不要でパネル描画を単体テストできる。
+    fn child_ui(ctx: &egui::Context) -> egui::Ui {
+        egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("test-area"),
+            egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(800.0, 600.0),
+            )),
+        )
+    }
+
+    /// 埋め込み描画 API（render_modebar + render_body）が Authoring モードで
+    /// パニックせず完了することを検証する（Issue #119 shard 1 task 2）。
+    #[test]
+    fn embed_render_authoring_mode_completes_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = StudioApp::default();
+        assert_eq!(app.mode(), AppMode::Authoring);
+        ctx.begin_pass(egui::RawInput::default());
+        app.render_modebar(&mut child_ui(&ctx));
+        app.render_body(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
+    }
+
+    /// 埋め込み描画 API が Batch モード（混同行列 UI 含む）でも壊れないことを検証する。
+    #[test]
+    fn embed_render_batch_mode_completes_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = StudioApp::default();
+        app.set_mode(AppMode::Batch);
+        assert_eq!(app.mode(), AppMode::Batch);
+        ctx.begin_pass(egui::RawInput::default());
+        app.render_modebar(&mut child_ui(&ctx));
+        app.render_body(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
+    }
+
+    /// set_mode でモードが切り替わり、mode() で観測できること（公開 API 振る舞い）。
+    #[test]
+    fn set_mode_switches_between_authoring_and_batch() {
+        let mut app = StudioApp::default();
+        app.set_mode(AppMode::Batch);
+        assert_eq!(app.mode(), AppMode::Batch);
+        app.set_mode(AppMode::Authoring);
+        assert_eq!(app.mode(), AppMode::Authoring);
     }
 
     /// build_engine が downscale=2・閾値0 で健全に構築されていることを、
