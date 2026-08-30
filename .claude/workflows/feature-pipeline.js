@@ -691,48 +691,8 @@ log(`Ticket precheck PASS (Issue #99): declared ${ticketPrecheck.declared.length
 // (drift は tests/ticket-precheck-wiring.test.mjs / drift test が guard)。
 // fail-closed: gh 認証失敗・rate limit で evidence が欠損した場合は
 // malformed input として FAIL verdict (fail-open は stale 検出を素通りさせる)。
-const evaluateIssuePremise = (input) => {
-  const invalid = { verdict: 'FAIL', stale: false, duplicate: false };
-  if (input === null || typeof input !== 'object' || Array.isArray(input)) {
-    return { ...invalid, reason: 'issue-premise FAIL — malformed input (fail-closed: precheck unverifiable, dispatch rejected)' };
-  }
-  const { issueState, linkedBranchesContainIssue, openPRs } = input;
-  if (typeof issueState !== 'string' || (issueState !== 'open' && issueState !== 'closed')) {
-    return { ...invalid, reason: 'issue-premise FAIL — malformed issueState (fail-closed: expected "open"|"closed")' };
-  }
-  if (typeof linkedBranchesContainIssue !== 'boolean') {
-    return { ...invalid, reason: 'issue-premise FAIL — malformed linkedBranchesContainIssue (fail-closed: expected boolean)' };
-  }
-  if (!Array.isArray(openPRs)) {
-    return { ...invalid, reason: 'issue-premise FAIL — malformed openPRs (fail-closed: expected array)' };
-  }
-  const stale = issueState === 'closed' && linkedBranchesContainIssue;
-  const duplicate = openPRs.length > 0;
-  if (stale) {
-    return {
-      verdict: 'FAIL',
-      stale: true,
-      duplicate,
-      reason: duplicate
-        ? 'issue-premise FAIL — stale: issue is closed and already merged into trunk; duplicate: open PR(s) also exist'
-        : 'issue-premise FAIL — stale: issue is closed and already merged into trunk',
-    };
-  }
-  if (duplicate) {
-    return {
-      verdict: 'FAIL',
-      stale: false,
-      duplicate: true,
-      reason: `issue-premise FAIL — duplicate: ${openPRs.length} open PR(s) already reference this issue`,
-    };
-  }
-  return {
-    verdict: 'PASS',
-    stale: false,
-    duplicate: false,
-    reason: `issue-premise PASS — issue is ${issueState}, not merged into trunk, no open duplicate PRs`,
-  };
-};
+// (evaluateIssuePremise inline copy は前方 [ticket-premise] ブロック内に一元化済み —
+//  Task 1/Task 2 並列実装による二重宣言を解消)
 // evidence collector: gh issue view + git branch --contains (trunk membership)
 // + gh pr list --search。各コマンド失敗時は null を返す (fail-closed)。
 const issueNumberForPremise = ticket.issueNumber;
