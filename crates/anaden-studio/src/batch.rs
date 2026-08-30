@@ -8,6 +8,7 @@ use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
 
+use eframe::egui;
 use image::DynamicImage;
 
 use anaden_vision::VisionEngine;
@@ -174,6 +175,71 @@ pub fn evaluate(
         per_template,
         total: tests.len(),
     }
+}
+
+/// 混同行列（グリッド + テンプレート別レポート）を描画する。
+///
+/// Issue #119 の単一ウィンドウ統合 GUI 向けに、StudioApp から独立して
+/// 埋め込み可能な公開描画 API として切り出した。任意の親 `egui::Ui` 内に
+/// 描画できる（パネル占有はしない）。
+pub fn render_confusion_matrix(ui: &mut egui::Ui, cm: &ConfusionMatrix) {
+    ui.heading(format!("混同行列（正答率 {:.1}%）", cm.accuracy() * 100.0));
+    ui.label(format!(
+        "テスト画像 {} 枚 / 状態 {} 種",
+        cm.total,
+        cm.labels.len()
+    ));
+    ui.separator();
+
+    egui::Grid::new("confusion")
+        .num_columns(cm.labels.len() + 1)
+        .striped(true)
+        .show(ui, |ui| {
+            ui.strong("真\\予測");
+            for lbl in &cm.labels {
+                ui.strong(lbl);
+            }
+            ui.end_row();
+            for (i, true_lbl) in cm.labels.iter().enumerate() {
+                ui.strong(true_lbl);
+                for (j, _pred) in cm.labels.iter().enumerate() {
+                    let count = cm.matrix[i][j];
+                    let color = if i == j && count > 0 {
+                        egui::Color32::from_rgb(60, 180, 75)
+                    } else if count > 0 {
+                        egui::Color32::from_rgb(220, 60, 60)
+                    } else {
+                        egui::Color32::from_gray(160)
+                    };
+                    let txt = if count > 0 {
+                        format!("{count}")
+                    } else {
+                        "·".to_string()
+                    };
+                    ui.colored_label(color, txt);
+                }
+                ui.end_row();
+            }
+        });
+
+    ui.separator();
+    ui.heading("テンプレート別");
+    egui::Grid::new("per_template")
+        .striped(true)
+        .show(ui, |ui| {
+            ui.strong("名前");
+            ui.strong("状態");
+            ui.strong("感度");
+            ui.strong("特異性");
+            ui.end_row();
+            for r in &cm.per_template {
+                ui.label(&r.name);
+                ui.label(&r.state);
+                ui.monospace(format!("{:.2}", r.sensitivity));
+                ui.monospace(format!("{:.2}", r.specificity));
+                ui.end_row();
+            }
+        });
 }
 
 /// ライブラリディレクトリから評価用テンプレート（TOML + PNG）を読み込む。
