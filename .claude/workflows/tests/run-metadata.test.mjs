@@ -155,14 +155,15 @@ test('UC-1 wiring: run-metadata helper marker block present', () => {
   assert.ok(fpSrc.includes('[run-metadata-end]'), 'end marker present');
 });
 
-test('UC-1 wiring: haiku persister writes .omc/logs/{runId}/run-metadata.json', () => {
+test('UC-1 wiring: persister writes .omc/logs/{runId}/run-metadata.json', () => {
   assert.ok(
     fpSrc.includes('.omc/logs/${runId}/run-metadata.json'),
     'persister target path uses .omc/logs/{runId}/run-metadata.json'
   );
+  // P-005 (2026-08-21 + 2026-08-30 再発): haiku は GLM backend で Unknown Model 400 → sonnet。
   assert.ok(
-    fpSrc.includes("label: 'run:persist-run-metadata', phase: 'Request', model: 'haiku'"),
-    'persister is haiku model in Request phase (after ticket issue/title are known)'
+    fpSrc.includes("label: 'run:persist-run-metadata', phase: 'Request', model: 'sonnet'"),
+    'persister uses sonnet in Request phase (P-005: haiku is Unknown-Model-400 on GLM backend)'
   );
 });
 
