@@ -224,7 +224,8 @@ test('issuePremise wiring: inline pure fn evaluates gh/git/PR evidence', () => {
   const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
   const end = fpSrc.indexOf('[issue-premise-wiring-end]');
   const block = fpSrc.slice(begin, end);
-  assert.match(block, /const evaluateIssuePremise/, 'evaluateIssuePremise defined inline');
+  // 定義は前方 [ticket-premise] 一元化ブロック内 (二重宣言解消後)。両方を検証:
+  assert.match(fpSrc, /const evaluateIssuePremise/, 'evaluateIssuePremise defined inline (unified block)');
   assert.match(block, /evaluateIssuePremise\(\{/, 'evaluateIssuePremise invoked with object evidence');
   assert.match(block, /gh issue view/, 'gh issue view (state/closedAt) collected');
   assert.match(block, /state/, 'issue state passed to pure fn');
