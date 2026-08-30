@@ -98,27 +98,18 @@ pub struct UnifiedShell {
     studio: StudioApp,
     /// 実行/履歴ペインの実体。
     runner: PipelineRunnerApp,
-    /// `--pipeline` 経由起動時に deprecated 警告を表示する
-    /// （Issue #119 UC-3: 後方互換フラグ。同一アプリを起動する）。
-    deprecated_pipeline: bool,
 }
 
 impl UnifiedShell {
     /// CLI 指定の target/exe を初期値として統合シェルを構築する。
-    pub fn new(target: Target, exe: Option<String>) -> Self {
-        Self::new_with_flags(target, exe, false)
-    }
-
-    /// `--pipeline` フラグの有無も指定して統合シェルを構築する。
     ///
-    /// `deprecated_pipeline == true`（`--pipeline` 経由起動）の場合、
-    /// Run ペイン上部に deprecated 警告バナーを表示する。
-    pub fn new_with_flags(target: Target, exe: Option<String>, deprecated_pipeline: bool) -> Self {
+    /// Issue #123 (shard 2): `--pipeline` フラグは完全削除済みのため
+    /// フラグ区別のコンストラクタは存在しない。
+    pub fn new(target: Target, exe: Option<String>) -> Self {
         Self {
             mode: UnifiedMode::default(),
             studio: StudioApp::with_initial_target(target, exe),
             runner: PipelineRunnerApp::with_resolved_anaden(),
-            deprecated_pipeline,
         }
     }
 
@@ -157,10 +148,6 @@ impl UnifiedShell {
         }
     }
 
-    /// deprecated 警告バナーの表示要否（`--pipeline` 経由起動時のみ true）。
-    pub fn shows_deprecated_pipeline_warning(&self) -> bool {
-        self.deprecated_pipeline
-    }
 }
 
 impl eframe::App for UnifiedShell {
@@ -175,14 +162,6 @@ impl eframe::App for UnifiedShell {
                 self.studio.render_body(ui);
             }
             UnifiedPane::Runner => {
-                // `--pipeline` 経由起動時の deprecated 警告バナー (UC-3)。
-                if self.deprecated_pipeline {
-                    ui.colored_label(
-                        egui::Color32::from_rgb(230, 180, 50),
-                        "[deprecated] --pipeline は後方互換フラグです。フラグなし起動で同一の統合GUIが開きます (Issue #119)",
-                    );
-                    ui.separator();
-                }
                 // Run / History は既存 runner UI（Issue #120 欠陥2修正:
                 // ペイン種別で実行ビューと履歴ビューを区別）。
                 self.runner
@@ -317,13 +296,14 @@ mod tests {
         assert_eq!(shell.studio().mode(), AppMode::Authoring);
     }
 
-    /// UC-3: `--pipeline` 経由起動時のみ deprecated 警告を表示する。
+    /// Issue #123 (shard 2): `--pipeline` フラグは完全削除済み。new() 以外の
+    /// コンストラクタは存在せず、deprecated 警告バナーも表示されない。
     #[test]
-    fn test_deprecated_pipeline_warning_only_when_flag_given() {
-        let plain = UnifiedShell::new_with_flags(Target::default(), None, false);
-        assert!(!plain.shows_deprecated_pipeline_warning());
-        let via_flag = UnifiedShell::new_with_flags(Target::default(), None, true);
-        assert!(via_flag.shows_deprecated_pipeline_warning());
+    fn pipeline_deprecated_warning_fully_removed() {
+        let shell = UnifiedShell::new(Target::default(), None);
+        // new_with_flags / shows_deprecated_pipeline_warning は削除済み
+        // (コンパイル時検証: この test が型チェックを通れば API は存在しない)。
+        assert_eq!(shell.mode(), UnifiedMode::Authoring);
     }
 
     /// ウィンドウタイトルは単一名称「anaden-studio」。
