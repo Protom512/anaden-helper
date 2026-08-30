@@ -203,3 +203,68 @@ test('evidence: treeHash recorded in persisted ticket-precheck.json (vacuous-PAS
   const guard = block.match(/treeHash[\s\S]{0,200}unknown/s);
   assert.ok(guard, 'missing treeHash falls back to explicit unknown (fail-closed)');
 });
+
+// ── Issue #109 Task 2: issue-premise precheck wiring (Request→Estimate) ──
+// stale (closed+merged issue) / duplicate (open PR) dispatch を機械検出して
+// Estimate 以降の dispatch を拒否する。fail-closed: gh 失敗は FAIL verdict。
+
+test('issuePremise wiring: marker block sits inside ticket-precheck wiring, before Estimate', () => {
+  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
+  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const precheckBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
+  const precheckEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
+  const estimatePhase = fpSrc.indexOf("phase('Estimate')");
+  assert.ok(begin > 0 && end > begin, 'issue-premise wiring markers present');
+  assert.ok(precheckBegin < begin && end < precheckEnd,
+    'issue-premise block nested inside ticket-precheck wiring block');
+  assert.ok(end < estimatePhase, 'issue-premise block precedes Estimate');
+});
+
+test('issuePremise wiring: inline pure fn evaluates gh/git/PR evidence', () => {
+  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
+  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const block = fpSrc.slice(begin, end);
+  assert.match(block, /const evaluateIssuePremise/, 'evaluateIssuePremise defined inline');
+  assert.match(block, /evaluateIssuePremise\(\{/, 'evaluateIssuePremise invoked with object evidence');
+  assert.match(block, /gh issue view/, 'gh issue view (state/closedAt) collected');
+  assert.match(block, /state/, 'issue state passed to pure fn');
+  assert.match(block, /git branch -a --contains|--contains/, 'trunk membership via git branch --contains');
+  assert.match(block, /gh pr list --search/, 'open-PR duplicate search collected');
+});
+
+test('issuePremise wiring: FAIL short-circuits to precheck-failed before Estimate', () => {
+  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
+  const estimatePhase = fpSrc.indexOf("phase('Estimate')");
+  const block = fpSrc.slice(begin, estimatePhase);
+  assert.match(block, /issuePremise\.verdict !== 'PASS'/, 'FAIL branch checks verdict');
+  const failIdx = block.indexOf("'precheck-failed'");
+  assert.ok(failIdx > 0, "status 'precheck-failed' literal present");
+  const failBlock = block.slice(Math.max(0, failIdx - 300), failIdx + 400);
+  assert.ok(failBlock.includes('return {'), 'FAIL branch returns resumable status object');
+  assert.match(block, /issuePremise\.reason/, 'FAIL return carries reason');
+});
+
+test('issuePremise evidence: verdict persisted to .omc/logs/{runId}/issue-premise-precheck.json', () => {
+  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
+  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const block = fpSrc.slice(begin, end);
+  const persistIdx = block.indexOf('issue-premise-precheck.json');
+  assert.ok(persistIdx > 0, 'dedicated persistence file name present in issue-premise block');
+  const around = block.slice(Math.max(0, persistIdx - 2000), persistIdx + 500);
+  assert.ok(around.includes('.omc/logs/'), 'log dir .omc/logs/ referenced');
+  assert.match(around, /\$\{runId\}/, 'path uses shared ${runId}');
+  assert.match(around, /verdict/, 'verdict recorded in persisted JSON');
+});
+
+test('issuePremise wiring: fail-closed — gh failure surfaces as FAIL via malformed evidence', () => {
+  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
+  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const block = fpSrc.slice(begin, end);
+  // wiring must guard missing/unfetchable evidence and pass it through the
+  // pure fn (which fails-closed on malformed input), never bypass it.
+  assert.match(block, /issueState/, 'issueState field mapped from gh evidence');
+  assert.match(block, /linkedBranchesContainIssue/, 'linkedBranchesContainIssue field mapped');
+  assert.match(block, /openPRs/, 'openPRs field mapped');
+  const bypass = block.match(/verdict\s*=\s*'PASS'/);
+  assert.equal(bypass, null, 'no hardcoded PASS bypass of evaluateIssuePremise');
+});

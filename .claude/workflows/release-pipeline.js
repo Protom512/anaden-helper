@@ -131,11 +131,13 @@ const commitResult = await agent(
 
 Steps:
 1. git add -A
-2. Create commit with proper message:
-   - Type: feat/fix/refactor based on branch name
-   - Scope: affected crate(s)
-   - Description: concise summary
-   - Include: Co-Authored-By: glm 4.7 <noreply@zhipuai.cn>
+2. Commit message must be the ORIGINAL conventional-commit message used VERBATIM
+   (scope edit only). First check git log -1 --format=%B for the existing message
+   and preserve it (保持). If amending a snapshot/WIP commit, keep the original
+   conventional-commit message and fix the scope only.
+   - FORBIDDEN: rewriting the type (e.g. feat → feat(snapshot)), dropping the
+     body, or dropping the Co-Authored-By trailer.
+   - Always keep: Co-Authored-By: glm 4.7 <noreply@zhipuai.cn>
 
 3. If this is a feature branch:
    - Push the branch: git push origin HEAD
