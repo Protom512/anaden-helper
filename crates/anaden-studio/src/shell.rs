@@ -147,6 +147,16 @@ impl UnifiedShell {
         &self.runner
     }
 
+    /// 現在モードに対応する runner ペイン種別（Issue #120 欠陥2）。
+    ///
+    /// History モードは履歴ビュー、Run モード（既定）は実行ビュー。
+    fn runner_pane_for_current_mode(&self) -> crate::runner::RunnerPane {
+        match self.mode {
+            UnifiedMode::History => crate::runner::RunnerPane::History,
+            _ => crate::runner::RunnerPane::Run,
+        }
+    }
+
     /// deprecated 警告バナーの表示要否（`--pipeline` 経由起動時のみ true）。
     pub fn shows_deprecated_pipeline_warning(&self) -> bool {
         self.deprecated_pipeline
@@ -173,8 +183,10 @@ impl eframe::App for UnifiedShell {
                     );
                     ui.separator();
                 }
-                // Run / History は既存 runner UI（実行制御 + 履歴パネル）。
-                self.runner.render_body(ui);
+                // Run / History は既存 runner UI（Issue #120 欠陥2修正:
+                // ペイン種別で実行ビューと履歴ビューを区別）。
+                self.runner
+                    .render_body(ui, self.runner_pane_for_current_mode());
             }
         });
     }
@@ -211,6 +223,23 @@ mod tests {
     fn test_active_pane_authoring_and_batch_delegate_to_studio() {
         assert_eq!(active_pane(UnifiedMode::Authoring), UnifiedPane::Studio);
         assert_eq!(active_pane(UnifiedMode::Batch), UnifiedPane::Studio);
+    }
+
+    #[test]
+    fn test_history_mode_uses_history_pane_run_uses_run_pane() {
+        // Issue #120 欠陥2: Run と History が同一画面になる欠陥の回帰防止。
+        // shell は History モードで RunnerPane::History を渡し、それ以外は Run。
+        let mut shell = UnifiedShell::new(Target::default(), None);
+        shell.set_mode(UnifiedMode::Run);
+        assert_eq!(
+            shell.runner_pane_for_current_mode(),
+            crate::runner::RunnerPane::Run
+        );
+        shell.set_mode(UnifiedMode::History);
+        assert_eq!(
+            shell.runner_pane_for_current_mode(),
+            crate::runner::RunnerPane::History
+        );
     }
 
     #[test]

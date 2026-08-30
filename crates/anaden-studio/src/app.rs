@@ -379,20 +379,6 @@ impl StudioApp {
     /// 公開パネル描画 API。単体テストからは [`Self::mode`] / [`Self::set_mode`]
     /// 経由で振る舞いを検証する。
     pub fn render_modebar(&mut self, ui: &mut egui::Ui) {
-        // スクリーンショットのテクスチャ生成（未生成時）
-        if self.screenshot_tex.is_none()
-            && let Some(img) = &self.screenshot
-        {
-            let rgba = img.to_rgba8();
-            let size = [rgba.width() as usize, rgba.height() as usize];
-            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-            self.screenshot_tex = Some(ui.ctx().load_texture(
-                "studio-screenshot",
-                color_image,
-                egui::TextureOptions::default(),
-            ));
-        }
-
         // モード切替バー
         egui::Panel::top("modebar")
             .exact_size(30.0)
@@ -408,7 +394,29 @@ impl StudioApp {
     ///
     /// modebar は含まない。呼び出し前に [`Self::render_modebar`] を実行するか、
     /// 親シェル側でタブ切替してもよい（mode は [`Self::set_mode`] で制御）。
+    ///
+    /// スクリーンショットのテクスチャ生成はここ（描画パスの入口）で行う。
+    /// かつて [`Self::render_modebar`] 内にあったが、統合GUI シェル
+    /// （Issue #119 `UnifiedShell`）は [`Self::render_body`] のみを呼ぶため、
+    /// テクスチャが生成されずキャンバスが永久に空になる欠陥があった
+    /// （作成タブで画像を開いても何も表示されない）。
     pub fn render_body(&mut self, ui: &mut egui::Ui) {
+        // スクリーンショットのテクスチャ生成（未生成時）— 描画パスの入口で必ず走る。
+        // 統合GUIシェル (UnifiedShell) 経由でも render_body は呼ばれるため、
+        // どの起動経路でもキャンバスに画像が表示される (Issue #120 欠陥1修正)。
+        if self.screenshot_tex.is_none()
+            && let Some(img) = &self.screenshot
+        {
+            let rgba = img.to_rgba8();
+            let size = [rgba.width() as usize, rgba.height() as usize];
+            let color_image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+            self.screenshot_tex = Some(ui.ctx().load_texture(
+                "studio-screenshot",
+                color_image,
+                egui::TextureOptions::default(),
+            ));
+        }
+
         if matches!(self.mode, AppMode::Authoring) {
             // 別スレッドでの propose 計算結果を非ブロッキング受信。
             // 完了時: proposing を下ろし、結果を self.proposals へ反映・status 更新。
