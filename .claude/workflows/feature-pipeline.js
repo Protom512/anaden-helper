@@ -974,11 +974,223 @@ Only append if you have genuine feedback. Be specific.`;
 };
 // [implement-lane-end]
 
+// [file-ownership-begin]
+// Issue #106 (cycle-40 retrospective proposal 3/5): タスク files 重複検出と
+// 直列化ディスパッチ。computeFileOwnership は task.files[] から file→taskId[]
+// の所有権マップを導出し、findFileConflicts は同一ファイルに触るタスク群を
+// 検出、resolveDispatchGroups は重複ペアを含むタスクを直列チェーンへ、
+// 分離タスクを同一グループで並列維持する (UC-1)。
+// UC-3 fail-closed: files 未宣言 ([]・フィールド欠損・非配列) のタスクは
+// 全 in-flight タスクと重複する可能性があるものとして直列化末尾に配置する
+// (黙って並列に混ぜない)。
+// Pure block — unit-tested by .claude/workflows/tests/ownership-serialization.test.mjs
+// (same marker-extraction pattern as implement-lane #99 / done-evidence #68).
+const normalizeOwnedPath = (p) =>
+  (typeof p === 'string') ? p.replace(/\\/g, '/') : null;
+const taskDeclaredFiles = (task) => {
+  const t = (task && typeof task === 'object') ? task : null;
+  if (!t || !Array.isArray(t.files)) return null;
+  const normalized = t.files
+    .map(normalizeOwnedPath)
+    .filter((p) => typeof p === 'string' && p.length > 0);
+  return normalized;
+};
+const computeFileOwnership = (tasks) => {
+  const ownership = {};
+  const undeclaredIds = [];
+  if (!Array.isArray(tasks)) {
+    return { ownership, undeclaredIds };
+  }
+  for (const task of tasks) {
+    const t = (task && typeof task === 'object') ? task : null;
+    const id = t && (typeof t.id === 'string' || typeof t.id === 'number') ? String(t.id) : null;
+    if (id === null) continue;
+    const files = taskDeclaredFiles(t);
+    if (files === null || files.length === 0) {
+      // files 未宣言: all-unknown — ownership map に入れず fail-closed 扱い
+      undeclaredIds.push(id);
+      continue;
+    }
+    for (const f of files) {
+      if (!Object.hasOwn(ownership, f)) ownership[f] = [];
+      ownership[f].push(id);
+    }
+  }
+  return { ownership, undeclaredIds };
+};
+const findFileConflicts = (tasks) => {
+  const { ownership, undeclaredIds } = computeFileOwnership(tasks);
+  const conflicts = [];
+  for (const file of Object.keys(ownership).sort()) {
+    if (ownership[file].length > 1) {
+      conflicts.push({ file, taskIds: ownership[file] });
+    }
+  }
+  if (undeclaredIds.length > 0 && (Object.keys(ownership).length > 0 || undeclaredIds.length > 1)) {
+    // UC-3: 未宣言タスクは全 in-flight タスク (宣言済み他タスク or 他の未宣言タスク)
+    // と重複しうる — file: null の potential conflict として報告
+    const allIds = Object.values(ownership).flat();
+    for (const id of undeclaredIds) allIds.push(id);
+    conflicts.push({ file: null, taskIds: [...new Set(allIds)] });
+  }
+  return conflicts;
+};
+const resolveDispatchGroups = (tasks) => {
+  const { ownership, undeclaredIds } = computeFileOwnership(tasks);
+  const duplicateFiles = Object.keys(ownership)
+    .filter((f) => ownership[f].length > 1)
+    .sort();
+  const groups = [];
+  if (!Array.isArray(tasks)) {
+    return { groups, undeclaredIds, duplicateFiles, serializedPairs: [], status: 'ownership-undeclared' };
+  }
+  // 宣言済みタスクの union-find: 重複ファイル経由で連結なタスクは同一直列チェーン
+  const parent = new Map();
+  const find = (x) => {
+    let root = x;
+    while (parent.get(root) !== root) root = parent.get(root);
+    return root;
+  };
+  const union = (a, b) => {
+    const ra = find(a);
+    const rb = find(b);
+    if (ra !== rb) parent.set(ra, rb);
+  };
+  const declaredTasks = [];
+  for (const task of tasks) {
+    const t = (task && typeof task === 'object') ? task : null;
+    const id = t && (typeof t.id === 'string' || typeof t.id === 'number') ? String(t.id) : null;
+    if (id === null) continue;
+    const files = taskDeclaredFiles(t);
+    if (files === null || files.length === 0) continue;
+    declaredTasks.push({ id, files });
+    parent.set(id, id);
+  }
+  const fileOwners = new Map();
+  for (const { id, files } of declaredTasks) {
+    for (const f of files) {
+      if (fileOwners.has(f)) union(fileOwners.get(f), id);
+      else fileOwners.set(f, id);
+    }
+  }
+  // 連結成分ごとに、サイズ 1 なら並列グループへ集約、サイズ >1 ならタスク順の直列チェーン
+  const components = new Map();
+  for (const { id } of declaredTasks) {
+    const root = find(id);
+    if (!components.has(root)) components.set(root, []);
+    components.get(root).push(id);
+  }
+  // 直列化されたタスク対 (入力順、rationale 永続用 — 同一連結成分内の隣接対)
+  const serializedPairs = [];
+  for (const ids of components.values()) {
+    if (ids.length > 1) {
+      const order = new Set(ids);
+      const chain = declaredTasks.filter(({ id }) => order.has(id)).map(({ id }) => id);
+      for (let i = 1; i < chain.length; i++) serializedPairs.push([chain[i - 1], chain[i]]);
+    }
+  }
+  // 並列維持タスクは順序安定で 1 グループへ
+  const serialIds = [];
+  for (const ids of components.values()) {
+    if (ids.length > 1) serialIds.push(...ids);
+  }
+  const serialSet = new Set(serialIds);
+  const orderedParallel = declaredTasks.filter(({ id }) => !serialSet.has(id)).map(({ id }) => id);
+  const orderedSerial = declaredTasks.filter(({ id }) => serialSet.has(id)).map(({ id }) => id);
+  const finalGroups = [];
+  if (orderedParallel.length > 0) finalGroups.push({ tasks: orderedParallel, parallel: true });
+  for (const id of orderedSerial) finalGroups.push({ tasks: [id], parallel: false });
+  // UC-3: 未宣言タスクは fail-closed — 直列化末尾に 1 タスクずつ配置
+  for (const id of undeclaredIds) finalGroups.push({ tasks: [id], parallel: false });
+  return {
+    groups: finalGroups,
+    undeclaredIds,
+    duplicateFiles,
+    serializedPairs,
+    // status: 全タスクが files を宣言していれば 'ok'。未宣言タスクが 1 つでも
+    // あれば 'ownership-undeclared' (fail-closed — 並列グループは構成しない)。
+    status: undeclaredIds.length > 0 ? 'ownership-undeclared' : 'ok',
+  };
+};
+// Issue #106 Task 2: 直列化判定根拠の rationale builder。Evidence は自己申告不可
+// (.claude/rules/pipeline-evidence-verification.md §2) — 重複ファイル・タスク対・
+// グループ構成・treeHash を .omc/logs/{run-id}/ownership-serialization.json へ
+// 永続化する payload を構築する (Date API 禁制のため recordedAt は runTimestamp
+// を流用 — Issue #95 の diff-kind short-circuit rationale と同じ規約)。
+const buildOwnershipSerializationRationale = (tasks, treeHash, rid, rts) => {
+  const { ownership, undeclaredIds } = computeFileOwnership(tasks);
+  const { groups, duplicateFiles, serializedPairs, status } = resolveDispatchGroups(tasks);
+  const taskFiles = (Array.isArray(tasks) ? tasks : [])
+    .filter((t) => t && typeof t === 'object' && t.id != null)
+    .map((t) => {
+      const files = taskDeclaredFiles(t);
+      return { task: String(t.id), files: (files === null ? null : files) };
+    });
+  return {
+    recordedAt: rts,
+    runTimestamp: rts,
+    runId: rid,
+    issue: 106,
+    status,
+    taskFiles,
+    ownership,
+    duplicateFiles,
+    serializedPairs,
+    groups,
+    undeclaredTasks: undeclaredIds,
+    treeHash: (typeof treeHash === 'string' && treeHash.length > 0) ? treeHash : 'unknown',
+    classifier: 'feature-pipeline.js resolveDispatchGroups (marker block, drift-guarded by tests/ownership-serialization.test.mjs)',
+  };
+};
+// [file-ownership-end]
+
 // ── Phase 3: Implement ──
+// [ownership-serialization-wiring-begin]
+// Issue #106 Task 2: ファイル所有権に基づく直列化ディスパッチ。
+// 旧来の `pipeline(estimate.tasks, ...)` 平坦並列は files 重複タスク同士で
+// mid-edit 競合を起こしうるため、resolveDispatchGroups のグループ構成に
+// 書き換える — 直列グループ (parallel:false) は上から順に 1 タスクずつ
+// await し、並列グループ (parallel:true) のみ pipeline() で同時実行する。
+// UC-3 fail-closed: 未宣言タスクがある場合 status 'ownership-undeclared' を
+// 返し、タスクを 1 つも dispatch しない (黙って並列化しない)。
 phase('Implement');
-const implResults = await pipeline(
-  estimate.tasks,
-  async (task) => {
+const ownershipPlan = resolveDispatchGroups(estimate.tasks);
+if (ownershipPlan.status !== 'ok') {
+  // Evidence 永続 (§2): 直列化不能の根拠を機械検証可能な形で残す
+  const ownershipRationale = buildOwnershipSerializationRationale(
+    estimate.tasks, (precheckScope && precheckScope.treeHash) || '', runId, runTimestamp,
+  );
+  await agent(
+    `EVIDENCE PERSISTER (Issue #106 Task 2)。以下の JSON をファイル .omc/logs/${runId}/ownership-serialization.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
+${JSON.stringify(ownershipRationale, null, 2)}
+書き出し後、書き込んだファイルのパスのみを返せ。`,
+    { label: 'implement:persist-ownership-serialization', phase: 'Implement', model: 'haiku' }
+  );
+  log(`Ownership serialization (Issue #106): status=ownership-undeclared — tasks ${ownershipPlan.undeclaredIds.join(', ')} lack declared files; NO dispatch (fail-closed)`);
+  return {
+    status: 'ownership-undeclared',
+    reason: `estimate tasks (${ownershipPlan.undeclaredIds.join(', ')}) do not declare files[] — cannot prove file disjointness, refusing to dispatch (Issue #106 UC-3 fail-closed)`,
+    ticket,
+    requiredFixes: [
+      '各 estimate task に files[] (タスクが触るファイルパス) を宣言して pipeline を再実行すること (Issue #106)',
+    ],
+  };
+}
+// 判定根拠の永続化 (重複ファイル・直列ペア・グループ構成・treeHash — §2)
+{
+  const ownershipRationale = buildOwnershipSerializationRationale(
+    estimate.tasks, (precheckScope && precheckScope.treeHash) || '', runId, runTimestamp,
+  );
+  await agent(
+    `EVIDENCE PERSISTER (Issue #106 Task 2)。以下の JSON をファイル .omc/logs/${runId}/ownership-serialization.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
+${JSON.stringify(ownershipRationale, null, 2)}
+書き出し後、書き込んだファイルのパスのみを返せ。`,
+    { label: 'implement:persist-ownership-serialization', phase: 'Implement', model: 'haiku' }
+  );
+  log(`Ownership serialization (Issue #106): ${ownershipPlan.groups.length} dispatch group(s), duplicates=[${ownershipPlan.duplicateFiles.join(', ') || 'none'}], serializedPairs=${ownershipPlan.serializedPairs.length}, treeHash=${ownershipRationale.treeHash}`);
+}
+const implResults = [];
+const runImplementTask = async (task) => {
     // C: operator-gated task（capture/probe/live frame/ゲーム操作 等）は
     //    executor agent では実行不可（人間によるゲーム操作・キャプチャ取得が必要）。
     //    human-in-loop としてスキップし、ステータスを human-gated で報告。
@@ -1014,9 +1226,29 @@ const implResults = await pipeline(
       buildEngineerPrompt(laneResult, task, ticket, approval),
       { label: `engineer:${task.id}`, phase: 'Implement', model: 'sonnet' }
     );
+};
+// グループ構成に従うディスパッチ: 並列グループのみ pipeline() 同時実行、
+// 直列グループは 1 タスクずつ await (ファイル所有権の重複するタスクは
+// 一度に 1 つだけ in-flight — mid-edit 競合の構造的防止)。
+for (const group of ownershipPlan.groups) {
+  if (group.parallel && group.tasks.length > 1) {
+    const groupTasks = estimate.tasks.filter((t) => group.tasks.includes(String(t.id)));
+    const groupResults = await pipeline(
+      groupTasks,
+      async (task) => runImplementTask(task),
+    );
+    implResults.push(...groupResults.filter(Boolean));
+  } else {
+    for (const taskId of group.tasks) {
+      const task = estimate.tasks.find((t) => String(t.id) === taskId);
+      if (!task) continue;
+      const r = await runImplementTask(task);
+      implResults.push(r);
+    }
   }
-);
+}
 log(`Implementation: ${implResults.filter(Boolean).length}/${estimate.tasks.length} tasks completed`);
+// [ownership-serialization-wiring-end]
 
 // ── R7: atomic snapshot commit (preserve implementation BEFORE the gate) ──
 // Implement は「Do NOT commit」でコードを書くだけ。commit は Phase 5 Release が gate 後に
