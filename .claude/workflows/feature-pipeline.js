@@ -624,8 +624,13 @@ const precheckTicketKind = (ticket.ticketKind === 'continuation') ? 'continuatio
 // 「undeclared changed files」として FAIL させる構造バグ。直前コミットが PR merge なら
 // それは pipeline 自身の成果物であり自チケットの残作業ではないため fallback から除外する
 // (空 = 検証タスクとして正常)。判定は scope agent の commitRangeLastSubject を用いる。
-const precheckRangeFromPrMerge = typeof precheckScope?.commitRangeLastSubject === 'string'
-  && /\(#\d+\)\s*$/.test(precheckScope.commitRangeLastSubject.trim());
+const precheckRangeLastSubject = (typeof precheckScope?.commitRangeLastSubject === 'string')
+  ? precheckScope.commitRangeLastSubject.trim() : '';
+// 除外条件 (Issue #127/#129): 直前コミットが (a) PR squash merge (subject が
+// "(#N)" 終端) または (b) local merge commit ("Merge ..." 始点 = git pull 取り込みで
+// HEAD~1..HEAD が直前PRのdiffを拾う) のいずれかなら fallback から除外する。
+const precheckRangeFromPrMerge = /\(#\d+\)\s*$/.test(precheckRangeLastSubject)
+  || /^Merge /.test(precheckRangeLastSubject);
 const precheckChangedFiles = (precheckWorkingTree.length > 0 || precheckUntracked.length > 0)
   ? [...new Set([...precheckWorkingTree, ...precheckUntracked])]
   : (precheckTicketKind === 'continuation' && !precheckRangeFromPrMerge
