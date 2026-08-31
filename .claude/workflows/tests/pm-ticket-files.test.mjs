@@ -80,8 +80,9 @@ test('commit-range fallback gated to continuation tickets only (Issue #104)', ()
   const fiAt = src.indexOf('const precheckChangedFiles');
   assert.ok(fiAt > 0);
   const block = src.slice(fiAt - 600, fiAt + 500);
-  assert.match(block, /precheckTicketKind === 'continuation' \? \[\.\.\.new Set\(precheckRangeFiles\)\] : \[\]/,
-    'fallback applies only when ticketKind === continuation');
+  assert.match(block, /precheckTicketKind === 'continuation' && !precheckRangeFromPrMerge/,
+    'fallback applies only when ticketKind === continuation AND last commit is not a PR merge');
+  assert.match(block, /\(#\d\+\)\s\*\$/.test('/') || /commitRangeLastSubject/, 'PR-merge detection via commitRangeLastSubject (Issue #127)');
 });
 
 test('PM prompt explains ticketKind semantics (Issue #104)', () => {
