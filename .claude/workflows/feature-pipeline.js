@@ -1112,6 +1112,20 @@ const resolveDispatchGroups = (tasks) => {
     status: undeclaredIds.length > 0 ? 'ownership-undeclared' : 'ok',
   };
 };
+// Issue #134 修正: ownership チェックの対象は実装系 (tdd lane) タスクのみ。
+// 検証系タスク (lane: merge|release — PR 状態確認・trunk-membership 検証等) は
+// コード変更しないため files 宣言が意味を持たず、未宣言を理由に dispatch 拒否
+// すると検証チケット全体が進行不能になる (過剰ブロック)。
+function ownershipRelevantTasks(tasks) {
+  if (!Array.isArray(tasks)) return [];
+  return tasks.filter((t) => {
+    const meta = (t && t.metadata && typeof t.metadata === 'object') ? t.metadata : null;
+    const lane = meta && typeof meta.lane === 'string' ? meta.lane : 'tdd';
+    // lane 未宣言は resolveImplementLane が fail-closed で別途拒否するため
+    // ここでは tdd 扱い (実装系として ownership チェック対象) に含める。
+    return lane === 'tdd';
+  });
+}
 // Issue #106 Task 2: 直列化判定根拠の rationale builder。Evidence は自己申告不可
 // (.claude/rules/pipeline-evidence-verification.md §2) — 重複ファイル・タスク対・
 // グループ構成・treeHash を .omc/logs/{run-id}/ownership-serialization.json へ
@@ -1154,7 +1168,8 @@ const buildOwnershipSerializationRationale = (tasks, treeHash, rid, rts) => {
 // UC-3 fail-closed: 未宣言タスクがある場合 status 'ownership-undeclared' を
 // 返し、タスクを 1 つも dispatch しない (黙って並列化しない)。
 phase('Implement');
-const ownershipPlan = resolveDispatchGroups(estimate.tasks);
+// Issue #134: ownership 判定は実装系タスクのみで行う (検証系は除外)。
+const ownershipPlan = resolveDispatchGroups(ownershipRelevantTasks(estimate.tasks));
 if (ownershipPlan.status !== 'ok') {
   // Evidence 永続 (§2): 直列化不能の根拠を機械検証可能な形で残す
   const ownershipRationale = buildOwnershipSerializationRationale(
