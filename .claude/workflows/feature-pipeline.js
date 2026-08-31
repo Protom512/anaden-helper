@@ -500,7 +500,8 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') =>
     changed.malformed ||
     (declared.malformed && changed.ordered.length > 0) ||
     (declared.ordered.length === 0 && changed.ordered.length > 0) ||
-    (preImpl && declared.ordered.length === 0) ||
+    // Issue #131: pre-implementation で changed も空なら検証のみチケットとして PASS。
+    (preImpl && declared.ordered.length === 0 && changed.ordered.length > 0) ||
     hasMismatch;
   const parts = [];
   if (undeclared.length > 0) {
