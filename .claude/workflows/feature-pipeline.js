@@ -598,13 +598,16 @@ const precheckScope = await agent(
    \`git diff HEAD~1..HEAD --name-only\` (HEAD~1 が解決不能な merge context は
    \`git diff \$(git merge-base origin/master HEAD)..HEAD --name-only\`)
    — 結果を commitRangeFiles へ。
+   併せて \`git log -1 --format=%s\` の出力 (HEAD コミットの subject) を
+   commitRangeLastSubject へ (実行不能な場合は空文字列)。
 4. treeHash (「green だが実体は空」検出用 — pipeline-evidence-verification.md §2):
    \`git write-tree\` の出力 (SHA-1) を treeHash へ (実行不能な場合は空文字列)。
-**最後に StructuredOutput({workingTreeFiles: [...], untrackedFiles: [...], commitRangeFiles: [...], treeHash: "..."}) を呼ぶこと。**`,
+**最後に StructuredOutput({workingTreeFiles: [...], untrackedFiles: [...], commitRangeFiles: [...], commitRangeLastSubject: "...", treeHash: "..."}) を呼ぶこと。**`,
   { schema: { type: 'object', required: ['workingTreeFiles'], properties: {
     workingTreeFiles: { type: 'array', items: { type: 'string' } },
     untrackedFiles: { type: 'array', items: { type: 'string' } },
     commitRangeFiles: { type: 'array', items: { type: 'string' } },
+    commitRangeLastSubject: { type: 'string' },
     treeHash: { type: 'string' },
   } }, label: 'request:precheck-scope', phase: 'Request', model: 'sonnet' }
 );
@@ -616,9 +619,18 @@ const precheckRangeFiles = (precheckScope && Array.isArray(precheckScope.commitR
 // のみに適用。new-implementation (ゼロから実装) では直前の無関係コミット (直前PR等) を
 // 自チケットの diff と誤検出するため fallback しない (空 = 実装前の正常状態)。
 const precheckTicketKind = (ticket.ticketKind === 'continuation') ? 'continuation' : 'new-implementation';
+// Issue #127 修正 (3度目の同型誤検出): continuation の commit-range fallback が直前の
+// squash merge (= 直前PR。subject が "(#N)" で終わる) を拾い、自runと無関係の diff を
+// 「undeclared changed files」として FAIL させる構造バグ。直前コミットが PR merge なら
+// それは pipeline 自身の成果物であり自チケットの残作業ではないため fallback から除外する
+// (空 = 検証タスクとして正常)。判定は scope agent の commitRangeLastSubject を用いる。
+const precheckRangeFromPrMerge = typeof precheckScope?.commitRangeLastSubject === 'string'
+  && /\(#\d+\)\s*$/.test(precheckScope.commitRangeLastSubject.trim());
 const precheckChangedFiles = (precheckWorkingTree.length > 0 || precheckUntracked.length > 0)
   ? [...new Set([...precheckWorkingTree, ...precheckUntracked])]
-  : (precheckTicketKind === 'continuation' ? [...new Set(precheckRangeFiles)] : []);
+  : (precheckTicketKind === 'continuation' && !precheckRangeFromPrMerge
+      ? [...new Set(precheckRangeFiles)]
+      : []);
 // Issue #102 修正: この位置は実装前 (Request->Estimate 間) のため mode='pre-implementation' —
 // declared-but-unchanged は FAIL にしない (実装が宣言に先行するのは通常)。
 // undeclared (宣言外の実 diff) と malformed/空宣言のみ FAIL。gate 時は strict。
