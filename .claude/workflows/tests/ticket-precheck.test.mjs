@@ -180,9 +180,18 @@ test('pre-implementation mode: empty declaration with actual diff still FAILs (f
   assert.equal(r.verdict, 'FAIL');
 });
 
-test('pre-implementation mode: empty declaration and empty diff FAILs (declaration required)', () => {
+test('pre-implementation mode: empty declaration and empty diff PASSes (verification-only ticket, Issue #131)', () => {
+  // 検証・棚卸し系 continuation チケット (files:[]) の正当ケース。
+  // 空宣言×非空diff のみ FAIL (fail-closed は別テストで維持)。
   const r = evaluateTicketPrecheck([], [], 'pre-implementation');
-  assert.equal(r.verdict, 'FAIL');
+  assert.equal(r.verdict, 'PASS');
+});
+
+test('strict mode: empty declaration and empty diff PASSes (vacuous-clean, both-empty semantics preserved)', () => {
+  // JSDoc 仕様: both empty -> PASS (vacuous-clean; nothing to verify)。
+  // gate 時の空 diff は GATE_DIFF_EMPTY fail-closed が別経路で担保する。
+  const r = evaluateTicketPrecheck([], [], 'strict');
+  assert.equal(r.verdict, 'PASS');
 });
 
 test('strict mode (default): declared-but-unchanged still FAILs (gate-time semantics preserved)', () => {

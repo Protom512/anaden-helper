@@ -111,7 +111,9 @@ export function evaluateTicketPrecheck(declaredFiles, changedFiles, mode = 'stri
     changed.malformed ||
     (declared.malformed && changed.ordered.length > 0) ||
     (declared.ordered.length === 0 && changed.ordered.length > 0) ||
-    (preImpl && declared.ordered.length === 0) ||
+    // Issue #131 修正: pre-implementation で changed も空なら「検証のみチケット」として
+    // PASS (空宣言×非空diff のみ FAIL — fail-closed は維持)。
+    (preImpl && declared.ordered.length === 0 && changed.ordered.length > 0) ||
     hasMismatch;
   /** @type {string[]} */
   const parts = [];
