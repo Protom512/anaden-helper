@@ -155,13 +155,15 @@ impl UnifiedShell {
     ///
     /// History モードは履歴ビュー、Run モード（既定）は実行ビュー。
     fn runner_pane_for_current_mode(&self) -> crate::runner::RunnerPane {
+        // 全バリアント明示列挙 (wildcard 禁止・gate 指摘修正: Strategy/Settings が
+        // Run へフォールスルーしてタブ分離が無効化される欠陥を解消)。
         match self.mode {
             UnifiedMode::History => crate::runner::RunnerPane::History,
-            UnifiedMode::Strategy
-            | UnifiedMode::Settings
-            | UnifiedMode::Authoring
-            | UnifiedMode::Batch
-            | UnifiedMode::Run => crate::runner::RunnerPane::Run,
+            UnifiedMode::Strategy => crate::runner::RunnerPane::Strategy,
+            UnifiedMode::Settings => crate::runner::RunnerPane::Settings,
+            UnifiedMode::Authoring | UnifiedMode::Batch | UnifiedMode::Run => {
+                crate::runner::RunnerPane::Run
+            }
         }
     }
 }
@@ -218,6 +220,26 @@ mod tests {
     fn test_active_pane_authoring_and_batch_delegate_to_studio() {
         assert_eq!(active_pane(UnifiedMode::Authoring), UnifiedPane::Studio);
         assert_eq!(active_pane(UnifiedMode::Batch), UnifiedPane::Studio);
+    }
+
+    #[test]
+    fn test_strategy_and_settings_modes_reach_dedicated_panes() {
+        // gate 指摘 (Issue #125): Strategy/Settings タブが Run へフォールスルーして
+        // 専用ビュー (render_strategy_body / render_settings_body) に到達しない
+        // 欠陥の回帰防止。runner_pane_for_current_mode を直接検証する。
+        let mut shell = UnifiedShell::new(Target::default(), None);
+        shell.set_mode(UnifiedMode::Strategy);
+        assert_eq!(
+            shell.runner_pane_for_current_mode(),
+            crate::runner::RunnerPane::Strategy,
+            "戦略タブは RunnerPane::Strategy に到達しなければならない"
+        );
+        shell.set_mode(UnifiedMode::Settings);
+        assert_eq!(
+            shell.runner_pane_for_current_mode(),
+            crate::runner::RunnerPane::Settings,
+            "設定タブは RunnerPane::Settings に到達しなければならない"
+        );
     }
 
     #[test]
