@@ -211,6 +211,44 @@ impl StrategyPanel {
 
         changed
     }
+
+    /// 戦略タブ本体（Issue #125 shard 3: runner 実行ビュー埋め込みから独立タブ化）。
+    ///
+    /// 見出し・状態行・選択 UI 全量・選択サマリを並べた独立タブ向け構成。
+    /// runner は単一の `StrategyPanel` インスタンスを保持し実行ビューと共有する
+    /// （状態二重管理の回避・estimate 承認条件）。
+    /// 戻り値は選択状態が変化したフラグ（`ui()` と同一契約）。
+    pub fn render_tab_body(&mut self, ui: &mut Ui, running: bool) -> bool {
+        ui.heading(tab_heading());
+        ui.label(tab_status_line(running));
+        ui.separator();
+        let changed = self.ui(ui);
+        ui.separator();
+        ui.weak(tab_summary_line(&self.summary()));
+        changed
+    }
+}
+
+/// 戦略タブの見出し（Issue #125 shard 3: 独立タブ向け・純関数）。
+#[must_use]
+pub fn tab_heading() -> &'static str {
+    "🎯 戦略選択"
+}
+
+/// 戦略タブの状態行（実行中は選択変更の反映タイミングを注記・純関数）。
+#[must_use]
+pub fn tab_status_line(running: bool) -> &'static str {
+    if running {
+        "状態: 実行中"
+    } else {
+        "状態: 停止"
+    }
+}
+
+/// 選択サマリ行の UI 表示文字列（純関数）。
+#[must_use]
+pub fn tab_summary_line(summary: &str) -> String {
+    format!("選択: {summary}")
 }
 
 #[cfg(test)]
@@ -338,5 +376,27 @@ mod tests {
     fn load_toml_invalid_string_is_err() {
         let mut panel = StrategyPanel::default();
         assert!(panel.load_toml("not = valid = toml").is_err());
+    }
+
+    // ---- Issue #125 shard 3 タスク3: 独立タブ向け純関数 ----
+
+    #[test]
+    fn tab_heading_is_strategy_selection() {
+        assert_eq!(tab_heading(), "🎯 戦略選択");
+    }
+
+    #[test]
+    fn tab_status_line_reflects_running_state() {
+        assert_eq!(tab_status_line(true), "状態: 実行中");
+        assert_eq!(tab_status_line(false), "状態: 停止");
+    }
+
+    #[test]
+    fn tab_summary_line_prefixes_selection() {
+        assert_eq!(tab_summary_line("戦略未選択"), "選択: 戦略未選択");
+        assert_eq!(
+            tab_summary_line("strategy=fishing on=[fishing.auto_release]"),
+            "選択: strategy=fishing on=[fishing.auto_release]"
+        );
     }
 }

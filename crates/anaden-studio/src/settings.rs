@@ -118,6 +118,68 @@ pub fn settings_file_path() -> PathBuf {
     resolve_config_dir().join(SETTINGS_FILE)
 }
 
+/// 設定タブの状態（Issue #125 shard 3: runner 履歴ペイン埋め込みから独立タブ化）。
+///
+/// 保存/読込の実行結果表示（SettingsStatus は history_ui の型を再利用せず
+/// settings.rs を egui 非依存のまま保つため、等価な独自 enum を持つ）。
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub enum SettingsTabStatus {
+    /// 成功 (対象ファイルパス)。
+    Ok(PathBuf),
+    /// 失敗 (ユーザー表示用メッセージ)。UC-2: 失敗しても GUI は継続。
+    Err(String),
+    /// 未実施。
+    #[default]
+    None,
+}
+
+/// 設定タブの保存/読込ロジック（egui 非依存・ヘッドレステスト可能）。
+///
+/// runner はこの型を保持し、設定タブ・履歴ペイン双方の設定操作を
+/// 単一ロジックへ集約する（二重実装の回避）。
+#[derive(Debug, Default, PartialEq)]
+pub struct SettingsTab {
+    /// 直近の設定 I/O 結果。
+    status: SettingsTabStatus,
+}
+
+impl SettingsTab {
+    /// 現在の選択を指定パスへ保存する。結果は `status` へ記録される。
+    pub fn save(&mut self, selection: &StrategySelection, path: &Path) {
+        let settings = StudioSettings {
+            selection: selection.clone(),
+        };
+        self.status = match settings.save(path) {
+            Ok(()) => SettingsTabStatus::Ok(path.to_path_buf()),
+            Err(e) => SettingsTabStatus::Err(format!("設定保存失敗: {e}")),
+        };
+    }
+
+    /// 指定パスから読み込み、戦略選択へ復元する。
+    ///
+    /// ファイル不在・破損 (UC-2) はエラー扱いにせず Ok(None)。
+    /// 復元した選択を返す（呼び出し側が StrategyPanel へ反映）。
+    pub fn load(&mut self, path: &Path) -> Option<StrategySelection> {
+        match StudioSettings::load(path) {
+            LoadOutcome::Loaded(s) => {
+                self.status = SettingsTabStatus::Ok(path.to_path_buf());
+                Some(s.selection)
+            }
+            LoadOutcome::Fallback => {
+                // ファイル不在・破損は初回起動相当 (UC-2): 既定値フォールバック。
+                self.status = SettingsTabStatus::Ok(path.to_path_buf());
+                None
+            }
+        }
+    }
+
+    /// 直近の I/O 結果。
+    #[must_use]
+    pub fn status(&self) -> &SettingsTabStatus {
+        &self.status
+    }
+}
+
 /// プラットフォーム標準のユーザ設定ディレクトリ (存在しない環境では None)。
 fn platform_config_dir() -> Option<PathBuf> {
     if let Some(appdata) = std::env::var_os("APPDATA")
@@ -156,12 +218,55 @@ impl<'de> serde::Deserialize<'de> for StudioSettings {
     }
 }
 
+/// 設定パスの UI 表示文字列（設定タブのパス表示・純関数）。
+#[must_use]
+pub fn settings_path_display(path: &Path) -> String {
+    format!("設定ファイル: {}", path.display())
+}
+
+/// 読込結果の通知文字列（UC-2 フォールバック通知・純関数）。
+///
+/// - 読込成功: 通常の完了通知
+/// - フォールバック: ファイル不在・破損時に既定値へフォールバックした旨
+#[must_use]
+pub fn load_outcome_notice(outcome: &LoadOutcome) -> String {
+    match outcome {
+        LoadOutcome::Loaded(_) => "設定を読み込みました".to_string(),
+        LoadOutcome::Fallback => {
+            "設定ファイルが見つからないか破損のため既定値を使用します (UC-2)".to_string()
+        }
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn settings_path_display_formats_path() {
+        let path = std::path::Path::new("/tmp/x/settings.toml");
+        assert_eq!(
+            settings_path_display(path),
+            "設定ファイル: /tmp/x/settings.toml"
+        );
+    }
+
+    #[test]
+    fn load_outcome_notice_loaded_is_plain_message() {
+        let outcome = LoadOutcome::Loaded(StudioSettings::default());
+        assert_eq!(load_outcome_notice(&outcome), "設定を読み込みました");
+    }
+
+    #[test]
+    fn load_outcome_notice_fallback_mentions_uc2_and_default() {
+        assert_eq!(
+            load_outcome_notice(&LoadOutcome::Fallback),
+            "設定ファイルが見つからないか破損のため既定値を使用します (UC-2)"
+        );
+    }
 
     fn sample_settings() -> StudioSettings {
         let mut options = std::collections::BTreeMap::new();

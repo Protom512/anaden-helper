@@ -21,8 +21,6 @@ use crate::history_ui::{HistoryAction, HistoryPanel};
 use crate::log_view::{
     DEFAULT_MAX_LINES, LogBuffer, LogEntry, LogEvent, LogLevel, SharedLogBuffer,
 };
-use crate::settings::StudioSettings;
-
 /// `anaden` バイナリを解決する純関数（Issue #85 タスク2）。
 ///
 /// 候補順:
@@ -146,6 +144,12 @@ pub enum RunnerPane {
     Run,
     /// 履歴ビュー（履歴テーブル + 設定保存/読込のみ）。
     History,
+    /// 戦略選択ビュー（Issue #125 shard 3: 戦略パネルの独立タブ。
+    /// 実行ビューの埋め込みから切り出し、runner 保持の単一
+    /// `StrategyPanel` インスタンスを共有する）。
+    Strategy,
+    /// 設定ビュー（Issue #125 shard 3: 設定保存/読込の独立タブ）。
+    Settings,
 }
 
 /// pipeline 実行GUI の状態。
@@ -198,8 +202,10 @@ pub struct PipelineRunnerApp {
     exit_code: Option<i32>,
     /// 異常終了検知時に保持する失敗状態サマリ（run_status_summary + エラーログ末尾）。
     failure_summary: Option<String>,
-    /// 履歴ビューペイン（タスク5・UC-1/UC-2: 一覧・選択・設定保存/読込・再実行/中止）。
+    /// 履歴ビューペイン（タスク5・UC-1/UC-2: 一覧・選択・再実行/中止）。
     history_panel: HistoryPanel,
+    /// 設定タブロジック（Issue #125 shard 3: 保存/読込の単一実装）。
+    settings_tab: crate::settings::SettingsTab,
     /// 設定ファイルパス（settings.rs の解決。テストでは差し替え）。
     settings_path: PathBuf,
 }
@@ -251,6 +257,7 @@ impl PipelineRunnerApp {
             exit_code: None,
             failure_summary: None,
             history_panel: HistoryPanel::new(),
+            settings_tab: crate::settings::SettingsTab::default(),
             settings_path: crate::settings::settings_file_path(),
         }
     }
@@ -530,23 +537,8 @@ impl PipelineRunnerApp {
             match action {
                 HistoryAction::Rerun => self.rerun_pipeline(),
                 HistoryAction::Stop => self.stop_pipeline(),
-                HistoryAction::SaveSettings => {
-                    let settings = StudioSettings {
-                        selection: self.strategy_panel.selection().clone(),
-                    };
-                    self.history_panel
-                        .save_settings(&settings, &self.settings_path);
-                }
-                HistoryAction::LoadSettings => {
-                    if let Some(loaded) = self.history_panel.load_settings(&self.settings_path)
-                        && self
-                            .strategy_panel
-                            .load_toml(&toml::to_string(&loaded).unwrap_or_default())
-                            .is_ok()
-                    {
-                        self.strategy_summary = self.strategy_panel.summary();
-                    }
-                }
+                HistoryAction::SaveSettings => self.save_settings_to_path(),
+                HistoryAction::LoadSettings => self.load_settings_from_path(),
             }
         }
     }
@@ -610,6 +602,8 @@ impl PipelineRunnerApp {
         match pane {
             RunnerPane::Run => self.render_run_body(ui),
             RunnerPane::History => self.render_history_body(ui),
+            RunnerPane::Strategy => self.render_strategy_body(ui),
+            RunnerPane::Settings => self.render_settings_body(ui),
         }
     }
 
@@ -654,9 +648,8 @@ impl PipelineRunnerApp {
             }
 
             ui.separator();
-            // 戦略選択パネル（シャード3）。changed フラグでサマリ/引数プレビューを更新。
-            let changed = self.strategy_panel.ui(ui);
-            self.on_strategy_changed(changed);
+            // 戦略選択サマリ一行（Issue #125 shard 3: 選択 UI は Strategy タブへ
+            // 切り出したため、実行ビューにはサマリのみ残す）。
             ui.weak(format!("選択: {}", self.strategy_summary));
 
             ui.separator();
@@ -698,6 +691,80 @@ impl PipelineRunnerApp {
         self.history_panel.ui(ui);
         self.handle_history_actions();
     }
+
+    /// 戦略選択ビュー（Issue #125 shard 3: 実行ビューからの切り出し）。
+    ///
+    /// 描画本体は strategy_ui.rs の `render_tab_body` へ委譲（runner.rs は
+    /// 500 行ルール超過のためロジックを持たない・estimate 承認条件）。
+    /// パネルは runner が保持する単一インスタンスを実行ビューと共有する。
+    fn render_strategy_body(&mut self, ui: &mut egui::Ui) {
+        let running = self.status() == RunnerStatus::Running;
+        let changed = self.strategy_panel.render_tab_body(ui, running);
+        self.on_strategy_changed(changed);
+    }
+
+    /// 設定ビュー（Issue #125 shard 3: 設定保存/読込の独立タブ化）。
+    ///
+    /// 保存/読込ロジックは settings.rs の `SettingsTab` へ集約し、ここでは
+    /// ボタン描画とステータス表示のみ（runner.rs 肥大化の回避）。
+    fn render_settings_body(&mut self, ui: &mut egui::Ui) {
+        ui.heading("設定");
+        ui.label(crate::settings::settings_path_display(&self.settings_path));
+        ui.separator();
+        if ui.button("💾 設定を保存").clicked() {
+            self.save_settings_to_path();
+        }
+        if ui.button("📂 設定を読込").clicked() {
+            self.load_settings_from_path();
+        }
+        match self.settings_tab.status() {
+            crate::settings::SettingsTabStatus::Ok(p) => {
+                ui.label(format!("設定: {}", p.display()));
+            }
+            crate::settings::SettingsTabStatus::Err(e) => {
+                ui.colored_label(egui::Color32::RED, e.clone());
+            }
+            crate::settings::SettingsTabStatus::None => {}
+        }
+        ui.separator();
+        ui.weak(format!("現在の選択: {}", self.strategy_summary));
+    }
+
+    /// 設定を settings_path へ保存する（設定ビュー・履歴ペイン共用の単一実装）。
+    ///
+    /// 選択中戦略を `StudioSettings` として保存し、結果は `SettingsTab` の
+    /// ステータスに記録される（UC-2: 失敗しても GUI 継続）。
+    fn save_settings_to_path(&mut self) {
+        self.settings_tab
+            .save(self.strategy_panel.selection(), &self.settings_path);
+    }
+
+    /// settings_path から設定を読み込み戦略パネルへ反映する
+    /// （設定ビュー・履歴ペイン共用の単一実装）。
+    ///
+    /// 読込成功時はサマリも再計算する。ファイル不在・破損 (初回起動) は
+    /// UC-2 フォールバックとして既定値を維持しエラー表示しない。
+    fn load_settings_from_path(&mut self) {
+        if let Some(selection) = self.settings_tab.load(&self.settings_path)
+            && self
+                .strategy_panel
+                .load_toml(&selection_to_toml(&selection))
+                .is_ok()
+        {
+            self.strategy_summary = self.strategy_panel.summary();
+        }
+    }
+
+    /// 設定 I/O の直近結果（テスト用）。
+    pub fn settings_status(&self) -> &crate::settings::SettingsTabStatus {
+        self.settings_tab.status()
+    }
+}
+
+/// 読み込んだ選択を StrategyPanel へ渡すための TOML 文字列化
+/// （serde 失敗時は空文字列 → load_toml が Err となるため無視される）。
+fn selection_to_toml(selection: &anaden_strategies::StrategySelection) -> String {
+    toml::to_string(selection).unwrap_or_default()
 }
 
 impl Drop for PipelineRunnerApp {
@@ -1109,6 +1176,81 @@ mod tests {
             app.strategy_summary(),
             "strategy=fishing on=[fishing.auto_release]"
         );
+    }
+
+    // ---- Issue #125 shard 3 タスク2: Strategy / Settings ペイン ----
+
+    /// RunnerPane に Strategy / Settings バリアントが存在し全ペイン種別が区別される。
+    #[test]
+    fn test_runner_pane_has_six_distinct_variants() {
+        use RunnerPane::{History, Run, Settings, Strategy};
+        assert_ne!(Strategy, Run);
+        assert_ne!(Strategy, History);
+        assert_ne!(Settings, Run);
+        assert_ne!(Settings, History);
+        assert_ne!(Strategy, Settings);
+    }
+
+    /// 設定ビューの保存: 選択中戦略が settings.toml へ保存され status が Ok になる。
+    #[test]
+    fn test_save_settings_from_runner_writes_file_and_records_ok() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        app.settings_path = path.clone();
+        app.strategy_panel.select_strategy("fishing");
+        app.save_settings_to_path();
+        assert!(path.is_file());
+        assert!(matches!(
+            app.settings_status(),
+            crate::settings::SettingsTabStatus::Ok(_)
+        ));
+    }
+
+    /// 設定ビューの読込: 保存済み設定が戦略パネルへ復元されサマリも更新される。
+    #[test]
+    fn test_load_settings_restores_strategy_selection_and_summary() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        app.settings_path = path.clone();
+        app.strategy_panel.select_strategy("fishing");
+        app.save_settings_to_path();
+
+        let mut app2 = PipelineRunnerApp::new(dummy_program());
+        app2.settings_path = path;
+        assert_eq!(app2.strategy_summary(), "戦略未選択");
+        app2.load_settings_from_path();
+        assert!(app2.strategy_panel.selection().strategy.is_some());
+        assert!(app2.strategy_summary().contains("fishing"));
+    }
+
+    /// 読込: ファイル不在 (初回起動) はエラー扱いにしない (UC-2)。
+    #[test]
+    fn test_load_settings_missing_file_is_ok_status() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let dir = tempfile::tempdir().unwrap();
+        app.settings_path = dir.path().join("nope.toml");
+        app.load_settings_from_path();
+        assert!(matches!(
+            app.settings_status(),
+            crate::settings::SettingsTabStatus::Ok(_)
+        ));
+    }
+
+    /// 履歴ペインの SaveSettings アクションは設定ビューと同一ロジックへ委譲される
+    /// （二重実装ではなく単一の save_settings_to_path を通る）。
+    #[test]
+    fn test_history_save_settings_action_delegates_to_shared_logic() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        app.settings_path = path.clone();
+        app.strategy_panel.select_strategy("fishing");
+        app.history_panel_mut()
+            .request(crate::history_ui::HistoryAction::SaveSettings);
+        app.handle_history_actions();
+        assert!(path.is_file());
     }
 
     #[test]
