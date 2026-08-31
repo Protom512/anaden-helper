@@ -34,6 +34,11 @@ pub enum UnifiedMode {
     Run,
     /// 実行履歴（既存 runner UI）。
     History,
+    /// 戦略選択（Issue #125 shard 3: runner の戦略パネルを独立タブ化。
+    /// 既定は Runner 委譲拡張）。
+    Strategy,
+    /// 設定（Issue #125 shard 3: 設定保存/読込を独立タブ化。既定は Runner 委譲拡張）。
+    Settings,
 }
 
 impl Default for UnifiedMode {
@@ -52,15 +57,19 @@ impl UnifiedMode {
             Self::Batch => "📊 バッチ評価",
             Self::Run => "▶️ 実行",
             Self::History => "🕘 履歴",
+            Self::Strategy => "🎯 戦略",
+            Self::Settings => "⚙️ 設定",
         }
     }
 
-    /// 全モードを modebar 表示順に返す。
-    pub const ALL: [UnifiedMode; 4] = [
+    /// 全モードを modebar 表示順に返す（Issue #125: 6 タブ構成）。
+    pub const ALL: [UnifiedMode; 6] = [
         UnifiedMode::Authoring,
         UnifiedMode::Batch,
+        UnifiedMode::Strategy,
         UnifiedMode::Run,
         UnifiedMode::History,
+        UnifiedMode::Settings,
     ];
 
     /// 対応する StudioApp 側モード（Authoring/Batch 以外は None）。
@@ -68,7 +77,7 @@ impl UnifiedMode {
         match self {
             Self::Authoring => Some(AppMode::Authoring),
             Self::Batch => Some(AppMode::Batch),
-            Self::Run | Self::History => None,
+            Self::Run | Self::History | Self::Strategy | Self::Settings => None,
         }
     }
 }
@@ -87,6 +96,10 @@ pub fn active_pane(mode: UnifiedMode) -> UnifiedPane {
     match mode {
         UnifiedMode::Authoring | UnifiedMode::Batch => UnifiedPane::Studio,
         UnifiedMode::Run | UnifiedMode::History => UnifiedPane::Runner,
+        // Issue #125 shard 3: 戦略・設定タブは既定で Runner 委譲拡張。
+        // 戦略パネルは runner が保持する単一 StrategyPanel インスタンスを
+        // 実行ビューと共有する（状態二重管理の回避）。
+        UnifiedMode::Strategy | UnifiedMode::Settings => UnifiedPane::Runner,
     }
 }
 
@@ -142,12 +155,17 @@ impl UnifiedShell {
     ///
     /// History モードは履歴ビュー、Run モード（既定）は実行ビュー。
     fn runner_pane_for_current_mode(&self) -> crate::runner::RunnerPane {
+        // 全バリアント明示列挙 (wildcard 禁止・gate 指摘修正: Strategy/Settings が
+        // Run へフォールスルーしてタブ分離が無効化される欠陥を解消)。
         match self.mode {
             UnifiedMode::History => crate::runner::RunnerPane::History,
-            _ => crate::runner::RunnerPane::Run,
+            UnifiedMode::Strategy => crate::runner::RunnerPane::Strategy,
+            UnifiedMode::Settings => crate::runner::RunnerPane::Settings,
+            UnifiedMode::Authoring | UnifiedMode::Batch | UnifiedMode::Run => {
+                crate::runner::RunnerPane::Run
+            }
         }
     }
-
 }
 
 impl eframe::App for UnifiedShell {
@@ -202,6 +220,26 @@ mod tests {
     fn test_active_pane_authoring_and_batch_delegate_to_studio() {
         assert_eq!(active_pane(UnifiedMode::Authoring), UnifiedPane::Studio);
         assert_eq!(active_pane(UnifiedMode::Batch), UnifiedPane::Studio);
+    }
+
+    #[test]
+    fn test_strategy_and_settings_modes_reach_dedicated_panes() {
+        // gate 指摘 (Issue #125): Strategy/Settings タブが Run へフォールスルーして
+        // 専用ビュー (render_strategy_body / render_settings_body) に到達しない
+        // 欠陥の回帰防止。runner_pane_for_current_mode を直接検証する。
+        let mut shell = UnifiedShell::new(Target::default(), None);
+        shell.set_mode(UnifiedMode::Strategy);
+        assert_eq!(
+            shell.runner_pane_for_current_mode(),
+            crate::runner::RunnerPane::Strategy,
+            "戦略タブは RunnerPane::Strategy に到達しなければならない"
+        );
+        shell.set_mode(UnifiedMode::Settings);
+        assert_eq!(
+            shell.runner_pane_for_current_mode(),
+            crate::runner::RunnerPane::Settings,
+            "設定タブは RunnerPane::Settings に到達しなければならない"
+        );
     }
 
     #[test]
@@ -260,18 +298,35 @@ mod tests {
     }
 
     #[test]
-    fn test_all_modes_cover_exactly_four_tabs() {
-        assert_eq!(UnifiedMode::ALL.len(), 4);
-        // modebar 表示順: 作成 → バッチ評価 → 実行 → 履歴。
+    fn test_all_modes_cover_exactly_six_tabs() {
+        assert_eq!(UnifiedMode::ALL.len(), 6);
+        // modebar 表示順: 作成 → バッチ評価 → 戦略 → 実行 → 履歴 → 設定
+        // (Issue #125 shard 3, 親 #119 UC-1 の 6 タブ構成)。
         assert_eq!(
             UnifiedMode::ALL,
             [
                 UnifiedMode::Authoring,
                 UnifiedMode::Batch,
+                UnifiedMode::Strategy,
                 UnifiedMode::Run,
                 UnifiedMode::History,
+                UnifiedMode::Settings,
             ]
         );
+    }
+
+    /// Issue #125 shard 3 回帰: 戦略・設定タブの描画ペインは Runner 委譲。
+    #[test]
+    fn test_active_pane_strategy_and_settings_delegate_to_runner() {
+        assert_eq!(active_pane(UnifiedMode::Strategy), UnifiedPane::Runner);
+        assert_eq!(active_pane(UnifiedMode::Settings), UnifiedPane::Runner);
+    }
+
+    /// Issue #125 shard 3 回帰: 戦略・設定は StudioApp モードを持たない。
+    #[test]
+    fn test_strategy_and_settings_have_no_studio_mode() {
+        assert_eq!(UnifiedMode::Strategy.studio_mode(), None);
+        assert_eq!(UnifiedMode::Settings.studio_mode(), None);
     }
 
     #[test]
