@@ -11,7 +11,7 @@
 #[allow(clippy::panic)]
 #[allow(clippy::expect_used)]
 mod tests {
-    use review_gate_eval::{aggregate, DecisionMethod, EvalInput, Verdict};
+    use review_gate_eval::{DecisionMethod, EvalInput, Verdict, aggregate};
 
     const RAW: &str = include_str!("../data/input.json");
 
@@ -83,8 +83,7 @@ mod tests {
         );
         assert_eq!(split.effective_verdict(), Verdict::Go);
         assert!(
-            !split.judgments.is_empty()
-                && split.judgments.iter().all(|j| j.confidence.is_some()),
+            !split.judgments.is_empty() && split.judgments.iter().all(|j| j.confidence.is_some()),
             "PR82 schema requires confidence on judgments"
         );
     }
