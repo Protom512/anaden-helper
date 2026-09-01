@@ -86,14 +86,16 @@ const DIFF_TRUNCATE_THRESHOLD = 28000;
 const DIFF_BODY_CAP = 24000;
 const TOTAL_DIFF_CAP = 30000;
 
-const DIFF_FETCH_PROMPT = `Diff fetcher for the Review Gate (Issue #91 P-007 T3). In the repo CWD run these and return ONE plain-text string (no JSON, no commentary wrapper):
+const DIFF_FETCH_PROMPT = `Diff fetcher for the Review Gate (Issue #102 T4 — feature-pipeline gate:fetch-diff と同一の収集内容). In the repo CWD run these and return ONE plain-text string (no JSON, no commentary wrapper):
 1. \`git --no-pager diff HEAD --stat\`
 2. \`git --no-pager diff HEAD\`
 3. \`git --no-pager status --porcelain\`
-4. \`git --no-pager diff HEAD~1..HEAD --stat\` (commit-range; HEAD~1 が解決不能な merge context の場合は代わりに \`git --no-pager diff $(git merge-base origin/master HEAD)..HEAD --stat\` を使う)
-5. \`git --no-pager diff HEAD~1..HEAD\` (上と同じ merge-base fallback)
-6. \`git write-tree\` (tree hash — 「green だが実体は空」検出用)
-Concatenate with headers "=== STAT ===", "=== DIFF ===", "=== UNTRACKED ===", "=== COMMIT-RANGE STAT ===", "=== COMMIT-RANGE DIFF ===", "=== TREE HASH ===". If the DIFF or COMMIT-RANGE DIFF section exceeds ${DIFF_TRUNCATE_THRESHOLD} chars, emit full STAT + UNTRACKED + the other sections but only the FIRST ${DIFF_BODY_CAP} chars of the oversized DIFF section, then a line "[DIFF TRUNCATED]". Return ONLY the concatenated text.`;
+4. \`git --no-pager diff HEAD~1..HEAD --stat\` (commit-range)
+5. \`git --no-pager diff HEAD~1..HEAD\`
+6. \`git --no-pager diff origin/master...HEAD --stat\` (merge-base commit-range — HEAD~1 が解決不能な merge context や複数 commit の slice 用)
+7. \`git --no-pager diff origin/master...HEAD\` (merge-base full diff)
+8. \`git write-tree\` (tree hash — 「green だが実体は空」検出用)
+Concatenate with headers "=== STAT ===", "=== DIFF ===", "=== UNTRACKED ===", "=== COMMIT-RANGE STAT ===", "=== COMMIT-RANGE DIFF ===", "=== MERGE-BASE STAT ===", "=== MERGE-BASE DIFF ===", "=== TREE HASH ===". If the DIFF, COMMIT-RANGE DIFF or MERGE-BASE DIFF section exceeds ${DIFF_TRUNCATE_THRESHOLD} chars, emit full STAT + UNTRACKED + the other sections but only the FIRST ${DIFF_BODY_CAP} chars of the oversized DIFF section, then a line "[DIFF TRUNCATED]". Return ONLY the concatenated text.`;
 
 // ── inlined from review-gate-diff.js (Issue #91 T1 canonical copy, T3 inline) ──
 // buildCommitRangeDiffInput: working-tree diff が空 (commit 済み slice) の場合は
@@ -138,6 +140,133 @@ function buildCommitRangeDiffInput(input, options = {}) {
       + 're-run with `git add -N` (intent-to-add) diff or enumerate files for individual Read';
   }
   return out;
+}
+
+// ── inlined from review-gate-diff.js (Issue #102 T1 canonical copy, T4 inline) ──
+// buildUnifiedGateDiff: 決定論的 fallback チェーン (単一情報源)。
+//   (a) working-tree STAT/DIFF 非空 → 'working-tree'
+//   (b) 空 → HEAD~1..HEAD commit-range
+//   (c) まだ空 → merge-base (origin/master...HEAD)
+//   (d) untracked のみ → 'intent-to-add' (file list + 個別 Read)
+//   (e) 全空 / 429 placeholder → 'fail-closed'
+// 429 placeholder 検出は exact match (trimmed section === sentinel) に限定 —
+// 正当な diff 内の部分一致で fail-closed にしない (estimate approval condition #1)。
+// Drift guarded by tests/review-gate-unified-diff.test.mjs (input/output pair comparison).
+
+/** Exact-match 429/placeholder sentinels. */
+const PLACEHOLDER_SENTINELS = ['429', 'rate limit', 'placeholder'];
+
+function isPlaceholderSection(text) {
+  const t = (text ?? '').trim();
+  return PLACEHOLDER_SENTINELS.includes(t);
+}
+
+function assembleSnapshot(stat, diff, header) {
+  const parts = [];
+  if (stat.trim() !== '') parts.push(`=== STAT ===\n${stat.trim()}`);
+  if (diff.trim() !== '') parts.push(`=== DIFF ===\n${diff.trim()}`);
+  if (parts.length === 0) return '';
+  return (header ? `${header}\n` : '') + parts.join('\n');
+}
+
+/** Parse `git status --porcelain` untracked lines into file paths. */
+function parseUntrackedFiles(untracked) {
+  return untracked
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('??'))
+    .map((l) => l.replace(/^\?\?\s+/, '').replace(/"(.*)"$/, '$1'))
+    .filter((l) => l !== '');
+}
+
+function buildUnifiedGateDiff(input) {
+  const str = (v) => (typeof v === 'string' ? v : '');
+  const fail = (basis, reason) => ({
+    mode: 'fail-closed', basis, reason, snapshot: '',
+  });
+
+  if (input == null || typeof input !== 'object') {
+    return fail('all-empty', 'no gate diff input provided (null/undefined)');
+  }
+
+  const stat = str(input.stat);
+  const diff = str(input.diff);
+
+  // (e) 429-placeholder detection — EXACT match only (see PLACEHOLDER_SENTINELS).
+  if (isPlaceholderSection(stat) || isPlaceholderSection(diff)) {
+    return fail('429-placeholder',
+      'gate diff input is a 429/rate-limit placeholder string; must fail-closed instead of vacuous GO');
+  }
+
+  // (a) working-tree mode — reuses buildCommitRangeDiffInput as the lower
+  // routine for the working-tree vs HEAD~1..HEAD decision.
+  const headPrev = buildCommitRangeDiffInput({
+    stat, diff, untracked: str(input.untracked),
+    rangeStat: str(input.headPrevStat),
+    rangeDiff: str(input.headPrevDiff),
+    treeHash: input.treeHash ?? undefined,
+  });
+
+  if (headPrev.mode === 'working-tree') {
+    return {
+      ...headPrev,
+      basis: 'working-tree',
+      snapshot: assembleSnapshot(stat, diff, null),
+    };
+  }
+
+  if (headPrev.mode === 'commit-range') {
+    return {
+      ...headPrev,
+      mode: 'commit-range',
+      basis: 'commit-range:HEAD~1..HEAD',
+      snapshot: assembleSnapshot(headPrev.stat, headPrev.diff,
+        '=== COMMIT-RANGE DIFF (HEAD~1..HEAD) ==='),
+    };
+  }
+
+  // (c) merge-base fallback (origin/master...HEAD).
+  const mergeStat = str(input.mergeBaseStat);
+  const mergeDiff = str(input.mergeBaseDiff);
+  if (isPlaceholderSection(mergeStat) || isPlaceholderSection(mergeDiff)) {
+    return fail('429-placeholder',
+      'gate diff input is a 429/rate-limit placeholder string; must fail-closed instead of vacuous GO');
+  }
+  if (mergeDiff.trim() !== '' || mergeStat.trim() !== '') {
+    const out = {
+      mode: 'commit-range',
+      basis: 'commit-range:origin/master...HEAD',
+      stat: mergeStat,
+      diff: mergeDiff,
+      rangeVariant: 'merge-base',
+      snapshot: assembleSnapshot(mergeStat, mergeDiff,
+        '=== COMMIT-RANGE DIFF (origin/master...HEAD) ==='),
+    };
+    if (input.treeHash != null) out.treeHash = input.treeHash;
+    return out;
+  }
+
+  // (d) untracked-only → intent-to-add mode (file list + individual Read).
+  const untracked = str(input.untracked);
+  if (untracked.trim() !== '') {
+    const files = parseUntrackedFiles(untracked);
+    return {
+      mode: 'intent-to-add',
+      basis: 'untracked-only',
+      untracked,
+      untrackedFiles: files,
+      reason: 'no tracked diff; untracked files present',
+      note: 'gate must run `git add -N` (intent-to-add) or have reviewers Read each file individually; never emit a vacuous GO',
+      snapshot: files.length > 0
+        ? `=== UNTRACKED FILES (intent-to-add; Read each file individually) ===\n${files.join('\n')}`
+        : untracked,
+      ...(input.treeHash != null ? { treeHash: input.treeHash } : {}),
+    };
+  }
+
+  // (e) everything empty → fail-closed.
+  return fail('all-empty',
+    'working-tree, HEAD~1..HEAD and merge-base diffs are all empty and no untracked files exist');
 }
 
 function extractDiffSection(raw, name) {
@@ -232,46 +361,57 @@ const GATE_DIFF_RAW = (typeof diffFetch === 'string'
   ? diffFetch
   : (diffFetch == null ? '' : JSON.stringify(diffFetch))
 ).slice(0, TOTAL_DIFF_CAP);
-// Issue #91 T3: working-tree → commit-range (HEAD~1..HEAD / merge-base) →
-// fail-closed fallback. 空 diff を reviewer に注入して vacuous GO させない
-// (feature-pipeline.js gate:fetch-diff と同じ S2-FP-1 構造のミラー)。
-const gateDiffInput = buildCommitRangeDiffInput({
+// Issue #102 T4: working-tree → commit-range (HEAD~1..HEAD) → merge-base
+// (origin/master...HEAD) → untracked-only (intent-to-add) → fail-closed の
+// 決定論的 fallback チェーン (T1 buildUnifiedGateDiff inline copy)。
+// 空 diff・429 placeholder は reviewer に注入せず fail-closed — vacuous GO
+// させない (feature-pipeline.js gate と同一挙動のミラー適用,
+// pipeline-evidence-verification.md §2)。
+const gateDiff = buildUnifiedGateDiff({
   stat: extractDiffSection(GATE_DIFF_RAW, 'STAT'),
   diff: extractDiffSection(GATE_DIFF_RAW, 'DIFF'),
   untracked: extractDiffSection(GATE_DIFF_RAW, 'UNTRACKED'),
-  rangeStat: extractDiffSection(GATE_DIFF_RAW, 'COMMIT-RANGE STAT'),
-  rangeDiff: extractDiffSection(GATE_DIFF_RAW, 'COMMIT-RANGE DIFF'),
+  headPrevStat: extractDiffSection(GATE_DIFF_RAW, 'COMMIT-RANGE STAT'),
+  headPrevDiff: extractDiffSection(GATE_DIFF_RAW, 'COMMIT-RANGE DIFF'),
+  mergeBaseStat: extractDiffSection(GATE_DIFF_RAW, 'MERGE-BASE STAT'),
+  mergeBaseDiff: extractDiffSection(GATE_DIFF_RAW, 'MERGE-BASE DIFF'),
   treeHash: extractDiffSection(GATE_DIFF_RAW, 'TREE HASH') || null,
 });
-if (gateDiffInput.mode === 'fail-closed') {
-  // fail-closed: 空 diff では reviewer に注入しない。NO-GO として即時終了。
-  log(`Review Gate DIFF-EMPTY-FAILED: ${gateDiffInput.reason}${gateDiffInput.note ? ` note=${gateDiffInput.note}` : ''} — gate を短絡する (Issue #91 P-007 T3, fail-closed)`);
+if (gateDiff.mode === 'fail-closed') {
+  // fail-closed: 空 diff / 429 placeholder では reviewer に注入しない。
+  // NO-GO として即時終了。
+  log(`Review Gate DIFF-EMPTY-FAILED: ${gateDiff.reason}${gateDiff.note ? ` note=${gateDiff.note}` : ''} — gate を短絡する (Issue #102 T4, fail-closed, basis=${gateDiff.basis})`);
   return {
     status: 'DIFF_EMPTY_FAILED',
-    diffInput: gateDiffInput,
+    diffInput: gateDiff,
     judgment: {
       decision: 'NO-GO',
-      summary: `diff が空 (${gateDiffInput.reason})。commit 済み slice の場合は commit-range diff (HEAD~1..HEAD) が自動使用されるが、それも空だった。対象コミットが存在するかスライス範囲を確認して再実行のこと。`,
+      summary: `diff が空または 429 placeholder (${gateDiff.reason})。commit 済み slice の場合は commit-range diff (HEAD~1..HEAD → merge-base) が自動使用されるが、それも空だった。対象コミットが存在するかスライス範囲を確認して再実行のこと。`,
       requiredFixes: [{
         priority: 'critical',
         reviewer: 'review-gate',
-        description: `diff empty: ${gateDiffInput.reason}`,
-        fix: 'コミット済み slice の commit-range diff が空。スライス範囲を確認し pipeline 再実行のこと。',
+        description: `diff empty: ${gateDiff.reason}`,
+        fix: 'コミット済み slice の commit-range diff (HEAD~1..HEAD / merge-base) が空。スライス範囲を確認し pipeline 再実行のこと。',
       }],
     },
   };
 }
-const REVIEW_DIFF_RAW = [
-  '=== STAT ===',
-  gateDiffInput.stat,
-  '=== DIFF ===',
-  gateDiffInput.diff,
-  '=== UNTRACKED ===',
-  gateDiffInput.untracked,
-  ...(gateDiffInput.treeHash ? ['=== TREE HASH ===', gateDiffInput.treeHash] : []),
-].join('\n').slice(0, TOTAL_DIFF_CAP);
+// intent-to-add mode: tracked diff は無いが untracked ファイルがある。
+// snapshot (untracked file list) を注入し、reviewer に個別 Read を促す
+// (vacuous GO 防止 — S2 修正案 UC-1 (d))。
+const REVIEW_DIFF_RAW = gateDiff.mode === 'intent-to-add'
+  ? `=== UNTRACKED FILES (intent-to-add; Read each file individually) ===\n${gateDiff.untrackedFiles.join('\n')}`.slice(0, TOTAL_DIFF_CAP)
+  : [
+    '=== STAT ===',
+    gateDiff.stat,
+    '=== DIFF ===',
+    gateDiff.diff,
+    '=== UNTRACKED ===',
+    gateDiff.untracked,
+    ...(gateDiff.treeHash ? ['=== TREE HASH ===', gateDiff.treeHash] : []),
+  ].join('\n').slice(0, TOTAL_DIFF_CAP);
 const REVIEW_DIFF_SECTION = buildDiffSection(REVIEW_DIFF_RAW);
-log(`Review Gate: injected diff context (${REVIEW_DIFF_SECTION.length} chars, mode=${gateDiffInput.mode}${gateDiffInput.rangeVariant ? ` variant=${gateDiffInput.rangeVariant}` : ''}) into all reviewers (Issue #78 R8 / Issue #91 T3)`);
+log(`Review Gate: injected diff context (${REVIEW_DIFF_SECTION.length} chars, mode=${gateDiff.mode}, basis=${gateDiff.basis}${gateDiff.rangeVariant ? ` variant=${gateDiff.rangeVariant}` : ''}${gateDiff.mode === 'intent-to-add' ? ` files=${gateDiff.untrackedFiles.length}` : ''}) into all reviewers (Issue #78 R8 / Issue #102 T4)`);
 
 // Phase 2: Parallel reviews
 phase('Review');

@@ -29,6 +29,21 @@ false-negative が繰り返した。上位 3 構造課題と修正案:
 > (governance + integration 常時維持)。判定根拠は `.omc/logs/{run-id}/diff-kind-short-circuit.json`
 > に永続化。テスト: `tests/gate-diff-kind.test.mjs` / `tests/gate-lane-ownership.test.mjs` /
 > `tests/gate-diff-kind-wiring.test.mjs`。
+>
+> **Issue #102 適用済み (2026-09-01)**: 本書 FP-1/FP-2 の残余修正案
+> (diff 収集の単一情報源化) は Issue #102「Gate diff 収集の単一情報源化:
+> 決定論的 commit-range fallback + 全 lane 共有スナップショット注入」として
+> 実装・適用済み。`buildUnifiedGateDiff` (review-gate-diff.js, 純関数) が
+> 決定論的 fallback チェーン (working-tree → HEAD~1..HEAD commit-range →
+> merge-base (origin/master...HEAD) → untracked intent-to-add / `git add -N`)
+> を単一情報源として解決し、basis・treeHash・snapshot を
+> `.omc/logs/{run-id}/gate-diff.json` に永続化、同一 snapshot を全 lane へ注入。
+> 空 diff・429 placeholder (明示的文字列完全一致検出) は fail-closed で
+> fan-out を拒否。テスト: `tests/review-gate-diff.test.mjs` /
+> `tests/gate-diff-unified-docs.test.mjs`。
+> **承認経緯**: estimate approval (CTO APPROVE, 2026-09-01 run) を経て適用。
+> 本書「適用は CEO 承認経由」注記との権者相違は `.claude/org-feedback.md` に
+> 記載済み (承認権者の一元化は retro 課題)。
 
 **修正案** (feature-pipeline.js Commit Gate / S2 セクション):
 1. diff 収集ステップで `git status --porcelain` + `git diff HEAD~1..HEAD` を併取し、

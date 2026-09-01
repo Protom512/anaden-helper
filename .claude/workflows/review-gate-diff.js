@@ -119,6 +119,156 @@ export function extractDiffSection(raw, name) {
   return body.trim();
 }
 
+// ---------------------------------------------------------------------------
+// Issue #102 T1 — unified gate-diff single source of truth (S2 codify).
+// Pure function expressing the full deterministic fallback chain of UC-1:
+//   (a) working-tree STAT/DIFF non-empty → 'working-tree'
+//   (b) empty → HEAD~1..HEAD commit-range
+//   (c) still empty → merge-base (origin/master...HEAD)
+//   (d) untracked files only → 'intent-to-add' (file list + individual Read)
+//   (e) all empty / 429-placeholder input → 'fail-closed'
+// Returns basis (mode-decision evidence), treeHash and a pre-assembled
+// snapshot string for injection into every gate lane.
+// buildCommitRangeDiffInput is reused as the lower-level routine for the
+// working-tree vs single-commit-range decision (no breaking change).
+// ---------------------------------------------------------------------------
+
+/**
+ * Exact-match 429/placeholder sentinels. Detection is exact (whole trimmed
+ * section equals one of these) so legitimate diffs containing these words as
+ * substrings are NOT fail-closed (estimate approval condition #1).
+ */
+export const PLACEHOLDER_SENTINELS = ['429', 'rate limit', 'placeholder'];
+
+function isPlaceholderSection(text) {
+  const t = (text ?? '').trim();
+  return PLACEHOLDER_SENTINELS.includes(t);
+}
+
+function assembleSnapshot(stat, diff, header) {
+  const parts = [];
+  if (stat.trim() !== '') parts.push(`=== STAT ===\n${stat.trim()}`);
+  if (diff.trim() !== '') parts.push(`=== DIFF ===\n${diff.trim()}`);
+  if (parts.length === 0) return '';
+  return (header ? `${header}\n` : '') + parts.join('\n');
+}
+
+/**
+ * Parse `git status --porcelain` untracked lines into file paths.
+ */
+function parseUntrackedFiles(untracked) {
+  return untracked
+    .split('\n')
+    .map((l) => l.trim())
+    .filter((l) => l.startsWith('??'))
+    .map((l) => l.replace(/^\?\?\s+/, '').replace(/"(.*)"$/, '$1'))
+    .filter((l) => l !== '');
+}
+
+/**
+ * Unified deterministic gate-diff resolver (Issue #102 UC-1). Pure function:
+ * callers pass pre-collected git outputs; no git invocation here.
+ *
+ * @param {{stat?:string, diff?:string, untracked?:string,
+ *          headPrevStat?:string, headPrevDiff?:string,
+ *          mergeBaseStat?:string, mergeBaseDiff?:string,
+ *          treeHash?:string|null}} input
+ * @returns {{mode:'working-tree'|'commit-range'|'intent-to-add'|'fail-closed',
+ *            basis:string, snapshot:string,
+ *            stat?:string, diff?:string, untracked?:string,
+ *            treeHash?:string, rangeVariant?:string,
+ *            untrackedFiles?:string[], reason?:string, note?:string}}
+ */
+export function buildUnifiedGateDiff(input) {
+  const str = (v) => (typeof v === 'string' ? v : '');
+  const fail = (basis, reason) => ({
+    mode: 'fail-closed', basis, reason, snapshot: '',
+  });
+
+  if (input == null || typeof input !== 'object') {
+    return fail('all-empty', 'no gate diff input provided (null/undefined)');
+  }
+
+  const stat = str(input.stat);
+  const diff = str(input.diff);
+
+  // (e) 429-placeholder detection — EXACT match only (see PLACEHOLDER_SENTINELS).
+  if (isPlaceholderSection(stat) || isPlaceholderSection(diff)) {
+    return fail('429-placeholder',
+      'gate diff input is a 429/rate-limit placeholder string; must fail-closed instead of vacuous GO');
+  }
+
+  // (a) working-tree mode — reuses buildCommitRangeDiffInput as the lower
+  // routine for the working-tree vs HEAD~1..HEAD decision.
+  const headPrev = buildCommitRangeDiffInput({
+    stat, diff, untracked: str(input.untracked),
+    rangeStat: str(input.headPrevStat),
+    rangeDiff: str(input.headPrevDiff),
+    treeHash: input.treeHash ?? undefined,
+  });
+
+  if (headPrev.mode === 'working-tree') {
+    return {
+      ...headPrev,
+      basis: 'working-tree',
+      snapshot: assembleSnapshot(stat, diff, null),
+    };
+  }
+
+  if (headPrev.mode === 'commit-range') {
+    return {
+      ...headPrev,
+      mode: 'commit-range',
+      basis: 'commit-range:HEAD~1..HEAD',
+      snapshot: assembleSnapshot(headPrev.stat, headPrev.diff,
+        '=== COMMIT-RANGE DIFF (HEAD~1..HEAD) ==='),
+    };
+  }
+
+  // (c) merge-base fallback (origin/master...HEAD).
+  const mergeStat = str(input.mergeBaseStat);
+  const mergeDiff = str(input.mergeBaseDiff);
+  if (isPlaceholderSection(mergeStat) || isPlaceholderSection(mergeDiff)) {
+    return fail('429-placeholder',
+      'gate diff input is a 429/rate-limit placeholder string; must fail-closed instead of vacuous GO');
+  }
+  if (mergeDiff.trim() !== '' || mergeStat.trim() !== '') {
+    const out = {
+      mode: 'commit-range',
+      basis: 'commit-range:origin/master...HEAD',
+      stat: mergeStat,
+      diff: mergeDiff,
+      rangeVariant: 'merge-base',
+      snapshot: assembleSnapshot(mergeStat, mergeDiff,
+        '=== COMMIT-RANGE DIFF (origin/master...HEAD) ==='),
+    };
+    if (input.treeHash != null) out.treeHash = input.treeHash;
+    return out;
+  }
+
+  // (d) untracked-only → intent-to-add mode (file list + individual Read).
+  const untracked = str(input.untracked);
+  if (untracked.trim() !== '') {
+    const files = parseUntrackedFiles(untracked);
+    return {
+      mode: 'intent-to-add',
+      basis: 'untracked-only',
+      untracked,
+      untrackedFiles: files,
+      reason: 'no tracked diff; untracked files present',
+      note: 'gate must run `git add -N` (intent-to-add) or have reviewers Read each file individually; never emit a vacuous GO',
+      snapshot: files.length > 0
+        ? `=== UNTRACKED FILES (intent-to-add; Read each file individually) ===\n${files.join('\n')}`
+        : untracked,
+      ...(input.treeHash != null ? { treeHash: input.treeHash } : {}),
+    };
+  }
+
+  // (e) everything empty → fail-closed.
+  return fail('all-empty',
+    'working-tree, HEAD~1..HEAD and merge-base diffs are all empty and no untracked files exist');
+}
+
 export function withDiffContext(prompt, diffSection) {
   if (!diffSection) return prompt;
   return `${prompt}

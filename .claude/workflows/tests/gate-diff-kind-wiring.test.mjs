@@ -247,10 +247,16 @@ test('T3(#97): diffKindRationale records the shared run-level runId + runTimesta
   assert.ok(/runId/.test(block), 'runId field present in diffKindRationale');
   // runId must reference the shared run-level const, not a locally re-generated id
   assert.ok(!/diffKindRunId/.test(fpSrc), 'per-file diffKindRunId (separate run dir) must be removed — persist under the shared run dir');
-  // persistence path must use the shared runId dir so all JSONs co-locate
-  const persistIdx = fpSrc.indexOf('diff-kind-short-circuit.json');
-  const persistCtx = fpSrc.slice(persistIdx - 1500, persistIdx);
-  assert.ok(persistCtx.includes('${runId}'), 'diff-kind persistence writes into .omc/logs/${runId}/ (shared run dir)');
+  // persistence path must use the shared runId dir so all JSONs co-locate.
+  // Search ALL occurrences (Issue #102 added the gate-diff builder above, which
+  // can shift the window of the first hit — the actual persister prompt is the
+  // occurrence prefixed with the .omc/logs/ path in an EVIDENCE PERSISTER agent).
+  const occurrences = [...fpSrc.matchAll(/diff-kind-short-circuit\.json/g)].map((m) => m.index);
+  assert.ok(occurrences.length > 0, 'diff-kind persistence log file name present');
+  const usesSharedRunId = occurrences.some(
+    (i) => fpSrc.slice(Math.max(0, i - 1500), i).includes('${runId}')
+  );
+  assert.ok(usesSharedRunId, 'diff-kind persistence writes into .omc/logs/${runId}/ (shared run dir)');
 });
 
 test('T3(#97): GATE_DIFF reviewer blob carries the run timestamp', () => {
