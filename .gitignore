@@ -27,3 +27,5 @@ probe_live*.png
 capture_probe_live.png
 version_label_orig.png
 snapshots/
+.agents/
+skills-lock.json
