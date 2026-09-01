@@ -232,11 +232,13 @@ test('review-gate.js: fetch-diff prompt collects commit-range diff + tree hash (
   assert.ok(body.includes('=== TREE HASH ==='), 'tree hash header');
 });
 
-test('review-gate.js: wiring uses extractDiffSection + buildCommitRangeDiffInput after fetch', () => {
+test('review-gate.js: wiring uses extractDiffSection + unified T1 helper after fetch', () => {
   const fetchAt = src.indexOf("label: 'review:fetch-diff'");
   const after = src.slice(fetchAt, fetchAt + 4000);
   assert.ok(after.includes('extractDiffSection'), 'sections extracted from raw fetch result');
-  assert.ok(after.includes('buildCommitRangeDiffInput'), 'T1 helper drives the fallback decision');
+  // Issue #102 T4: the wiring now drives the fallback via buildUnifiedGateDiff
+  // (which reuses buildCommitRangeDiffInput internally as the lower routine).
+  assert.ok(after.includes('buildUnifiedGateDiff('), 'T1 unified helper drives the fallback decision');
   for (const s of ['STAT', 'DIFF', 'UNTRACKED', 'COMMIT-RANGE STAT', 'COMMIT-RANGE DIFF', 'TREE HASH']) {
     assert.ok(after.includes(`'${s}'`), `section '${s}' extracted`);
   }

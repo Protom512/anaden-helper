@@ -6,7 +6,10 @@
 // Run: node --test .claude/workflows/tests/review-gate-diff-range.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { buildCommitRangeDiffInput } from '../review-gate-diff.js';
+import {
+  buildCommitRangeDiffInput,
+  buildUnifiedGateDiff,
+} from '../review-gate-diff.js';
 
 const TREE_HASH = 'a1b2c3d4e5f6a1b2c3d4e5f6a1b2c3d4e5f6a1b2';
 const BASE = { treeHash: TREE_HASH };
@@ -104,6 +107,101 @@ test('whitespace-only diff is treated as empty (fail-closed)', () => {
     rangeStat: '',
     rangeDiff: '',
     ...BASE,
+  });
+  assert.equal(out.mode, 'fail-closed');
+});
+
+// ── Issue #102 T5: buildUnifiedGateDiff merge-base / intent-to-add / 429
+//    placeholder cases (deterministic fallback chain, UC-1) ──
+
+test('unified: merge-base fallback when working-tree and HEAD~1..HEAD are both empty', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '', diff: '', untracked: '',
+    headPrevStat: '', headPrevDiff: '',
+    mergeBaseStat: ' x.js | 4 +++\n',
+    mergeBaseDiff: 'diff --git a/x.js b/x.js\n+q',
+    treeHash: TREE_HASH,
+  });
+  assert.equal(out.mode, 'commit-range');
+  assert.equal(out.basis, 'commit-range:origin/master...HEAD');
+  assert.equal(out.rangeVariant, 'merge-base');
+  assert.equal(out.treeHash, TREE_HASH);
+  assert.ok(out.snapshot.includes('diff --git a/x.js'));
+});
+
+test('unified: merge-base preferred over intent-to-add when both available', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '', diff: '', untracked: '?? n.js',
+    headPrevStat: '', headPrevDiff: '',
+    mergeBaseStat: ' y.js | 1 +',
+    mergeBaseDiff: 'diff --git a/y.js b/y.js',
+  });
+  assert.equal(out.mode, 'commit-range');
+  assert.equal(out.basis, 'commit-range:origin/master...HEAD');
+});
+
+test('unified: HEAD~1..HEAD preferred over merge-base (chain order)', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '', diff: '', untracked: '',
+    headPrevStat: ' a.js | 1 +', headPrevDiff: 'diff --git a/a.js b/a.js',
+    mergeBaseStat: ' b.js | 9 +', mergeBaseDiff: 'diff --git a/b.js b/b.js',
+  });
+  assert.equal(out.basis, 'commit-range:HEAD~1..HEAD');
+  assert.ok(!out.snapshot.includes('b.js | 9'), 'merge-base content must not leak');
+});
+
+test('unified: intent-to-add mode for untracked-only input', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '', diff: '', untracked: '?? foo.js\n?? bar/baz.js',
+    headPrevStat: '', headPrevDiff: '', mergeBaseStat: '', mergeBaseDiff: '',
+    treeHash: TREE_HASH,
+  });
+  assert.equal(out.mode, 'intent-to-add');
+  assert.equal(out.basis, 'untracked-only');
+  assert.deepEqual(out.untrackedFiles, ['foo.js', 'bar/baz.js']);
+  assert.ok(out.snapshot.includes('foo.js') && out.snapshot.includes('bar/baz.js'));
+  assert.ok(/Read each file individually|intent-to-add/.test(out.snapshot));
+  assert.equal(out.treeHash, TREE_HASH);
+});
+
+test('unified: 429 placeholder exact-match (diff) -> fail-closed, empty snapshot', () => {
+  for (const ph of ['429', 'rate limit', 'placeholder']) {
+    const out = buildUnifiedGateDiff({
+      stat: '', diff: ph, untracked: '',
+      headPrevStat: '', headPrevDiff: '', mergeBaseStat: '', mergeBaseDiff: '',
+    });
+    assert.equal(out.mode, 'fail-closed', `placeholder "${ph}"`);
+    assert.equal(out.basis, '429-placeholder');
+    assert.equal(out.snapshot, '');
+    assert.match(out.reason, /429|rate-limit|placeholder/);
+  }
+});
+
+test('unified: 429 placeholder exact-match (merge-base sections) -> fail-closed', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '', diff: '', untracked: '',
+    headPrevStat: '', headPrevDiff: '',
+    mergeBaseStat: 'rate limit', mergeBaseDiff: '',
+  });
+  assert.equal(out.mode, 'fail-closed');
+  assert.equal(out.basis, '429-placeholder');
+});
+
+test('unified: placeholder as SUBSTRING of a legitimate diff is NOT fail-closed', () => {
+  const out = buildUnifiedGateDiff({
+    stat: ' p.js | 2 ++',
+    diff: 'diff --git a/p.js b/p.js\n-const placeholder = 1;\n+const placeholder = 2;\n// rate limit note',
+    untracked: '',
+    headPrevStat: '', headPrevDiff: '', mergeBaseStat: '', mergeBaseDiff: '',
+  });
+  assert.equal(out.mode, 'working-tree');
+  assert.notEqual(out.mode, 'fail-closed');
+});
+
+test('unified: whitespace-padded placeholder still exact-match fail-closed (trim)', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '  429  ', diff: '', untracked: '',
+    headPrevStat: '', headPrevDiff: '', mergeBaseStat: '', mergeBaseDiff: '',
   });
   assert.equal(out.mode, 'fail-closed');
 });
