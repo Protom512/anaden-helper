@@ -42,13 +42,76 @@ impl LogLevel {
     /// 等）もあるため、**行内のどこかに大文字トークンがあれば**そのレベルとみなす。
     /// 複数ヒット時は ERROR > WARN > INFO の優先度。
     pub fn from_line(line: &str) -> Self {
-        if line.contains("ERROR") {
+        if line.contains("ERROR") || line.contains("panicked") || line.contains("PANIC") {
             Self::Error
-        } else if line.contains("WARN") {
+        } else if line.contains("WARN") || line.starts_with("[stderr]") {
             Self::Warn
         } else {
             Self::Info
         }
+    }
+}
+
+/// 自動スクロール追従の純ロジック (Issue #139 T4)。
+///
+/// 有効時 (既定) はログ末尾へ張り付き (`should_stick_to_bottom` = true)。
+/// UI が新着行数を `observe_new_lines` で通知し、実際に末尾へスクロール
+/// されたら `on_scrolled_to_bottom` でペンディングを清算する。MAA/MDA の
+/// 「ユーザーが上へスクロールしたら追従を一時停止」相当は enabled トグルで
+/// 表現し、無効中は新着行のカウント自体を行わない。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AutoScrollFollow {
+    enabled: bool,
+    pending: usize,
+}
+
+impl Default for AutoScrollFollow {
+    fn default() -> Self {
+        Self {
+            enabled: true,
+            pending: 0,
+        }
+    }
+}
+
+impl AutoScrollFollow {
+    /// 追従を有効/無効化する。有効化時にペンディングはクリアされる
+    /// （再有効化した瞬間に末尾へ張り付くため）。
+    pub fn set_enabled(&mut self, enabled: bool) {
+        self.enabled = enabled;
+        if !enabled {
+            self.pending = 0;
+        }
+    }
+
+    /// 有効か。
+    #[must_use]
+    pub fn is_enabled(&self) -> bool {
+        self.enabled
+    }
+
+    /// UI のスクロール領域を末尾へ張り付けるべきか。
+    #[must_use]
+    pub fn should_stick_to_bottom(&self) -> bool {
+        self.enabled
+    }
+
+    /// 新着行数を観測する（有効時のみ蓄積）。
+    pub fn observe_new_lines(&mut self, n: usize) {
+        if self.enabled {
+            self.pending = self.pending.saturating_add(n);
+        }
+    }
+
+    /// 末尾へスクロール完了を通知し、ペンディングを清算する。
+    pub fn on_scrolled_to_bottom(&mut self) {
+        self.pending = 0;
+    }
+
+    /// 未スクロールの新着行数（UI の「新着 N 行」バッジ表示用）。
+    #[must_use]
+    pub fn pending_lines(&self) -> usize {
+        self.pending
     }
 }
 
@@ -603,6 +666,85 @@ mod tests {
             matches!(events.last(), Some(LogEvent::Exit(Some(0)))),
             "events={events:?}"
         );
+    }
+
+    // ---- LogLevel 強化 (T4: [stderr] 接頭辞・panic 系行の検出) ----
+
+    #[test]
+    fn level_stderr_prefix_lines_are_warn() {
+        assert_eq!(
+            LogLevel::from_line("[stderr] some diagnostics"),
+            LogLevel::Warn
+        );
+    }
+
+    #[test]
+    fn level_panic_lines_are_error() {
+        assert_eq!(
+            LogLevel::from_line("thread 'main' panicked at src/main.rs:2:3:"),
+            LogLevel::Error
+        );
+        assert_eq!(LogLevel::from_line("PANIC in pipeline"), LogLevel::Error);
+    }
+
+    #[test]
+    fn level_error_still_wins_over_stderr_warn() {
+        assert_eq!(
+            LogLevel::from_line("[stderr] ERROR something failed"),
+            LogLevel::Error
+        );
+    }
+
+    #[test]
+    fn level_plain_lines_remain_info() {
+        assert_eq!(LogLevel::from_line("=== 実行結果 ==="), LogLevel::Info);
+        assert_eq!(LogLevel::from_line("サイクル数: 3"), LogLevel::Info);
+    }
+
+    // ---- AutoScrollFollow (T4: 自動スクロール追従の純ロジック) ----
+
+    #[test]
+    fn follow_defaults_enabled_with_no_pending() {
+        let f = AutoScrollFollow::default();
+        assert!(f.should_stick_to_bottom());
+        assert_eq!(f.pending_lines(), 0);
+    }
+
+    #[test]
+    fn follow_accumulates_pending_new_lines_while_enabled() {
+        let mut f = AutoScrollFollow::default();
+        f.observe_new_lines(3);
+        assert_eq!(f.pending_lines(), 3);
+        f.observe_new_lines(2);
+        assert_eq!(f.pending_lines(), 5);
+    }
+
+    #[test]
+    fn follow_scrolled_to_bottom_clears_pending() {
+        let mut f = AutoScrollFollow::default();
+        f.observe_new_lines(4);
+        f.on_scrolled_to_bottom();
+        assert_eq!(f.pending_lines(), 0);
+        assert!(f.should_stick_to_bottom());
+    }
+
+    #[test]
+    fn follow_disabled_stops_sticking_and_ignores_new_lines() {
+        let mut f = AutoScrollFollow::default();
+        f.set_enabled(false);
+        assert!(!f.should_stick_to_bottom());
+        f.observe_new_lines(10);
+        assert_eq!(f.pending_lines(), 0);
+    }
+
+    #[test]
+    fn follow_reenable_resumes_stick_without_pending() {
+        let mut f = AutoScrollFollow::default();
+        f.set_enabled(false);
+        f.observe_new_lines(10);
+        f.set_enabled(true);
+        assert!(f.should_stick_to_bottom());
+        assert_eq!(f.pending_lines(), 0);
     }
 
     // ---- spawn_stdout_reader (echo プロセスで統合確認) ----

@@ -6,8 +6,14 @@
 //! - `ensure-open`: 起動状態を確認し未起動なら起動する独立 CI gate(Issue #21)。
 //! - `launch`: 無条件起動(AlreadyOpen チェックなし、リカバリ用途)。
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
+
+// UC-2 実機 E2E 証跡ヘルパー (Issue #139 T6)。
+// evidence 採取 (生ログ・スクショ・tree hash の .omc/logs/{run-id}/ 永続化) の
+// 単一情報源。pipeline-evidence-verification.md 準拠。
+mod e2e;
+use e2e::tree_hash_of_pipeline;
 
 use anaden_cli_contract::{ensure_outcome_label, standalone_exit_code};
 use anyhow::Result;
@@ -26,6 +32,7 @@ struct Cli {
 }
 
 #[derive(Subcommand, Debug)]
+#[allow(clippy::large_enum_variant)] // clap derive: Run variant は CLI 定義上 Box 化不可
 enum Commands {
     /// 宣言的パイプラインを ADB 実機でライブ実行する
     Run {
@@ -105,6 +112,13 @@ enum Commands {
         /// `--goal` と同じく未指定時はゴール無し(後方互換)。
         #[arg(long)]
         goal_file: Option<PathBuf>,
+        /// UC-2 実機 E2E 証跡採取 (Issue #139 T6)。run-id を指定すると
+        /// `.omc/logs/{run-id}/` へ生ログ (`uc2-e2e-evidence.log`)・
+        /// 認識サイクル毎のスクショ (`uc2-shot-NNN.png`)・メタデータ JSON
+        /// (tree hash・コマンド全文・runTimestamp) を永続化する。
+        /// 未指定時は証跡採取なし (通常実行)。
+        #[arg(long)]
+        evidence_run_id: Option<String>,
     },
     /// 旧来の Orchestrator(命令型 Strategy ループ) を実行する
     Legacy {
@@ -248,6 +262,60 @@ async fn ensure_open_outcome(
     }
 }
 
+/// コンパイル時に確定する workspace ルート（anaden-cli manifest から
+/// 2 階層上昇 = リポジトリルート）。実行時 cwd に依存しない pipeline
+/// ディレクトリ解決の基準点（Issue #139 T2）。
+fn cli_workspace_root() -> PathBuf {
+    PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .join("..")
+        .join("..")
+}
+
+/// pipeline_dir 位置引数を決定的に解決する（Issue #139 T2）。
+///
+/// 従来 `run` は pipeline_dir を cwd 相対で `load_pipeline` に渡していたため、
+/// 起動 workdir 次第で「パイプライン読込失敗」になっていた（GUI 子プロセス
+/// 起動で顕在化）。本関数は manifest 基準の workspace ルートを用いて
+/// workdir 非依存の解決を行う:
+///
+/// 候補順（最初に実在するディレクトリを採用）:
+/// 1. 与えられたパス自体（相対・絶対を問わず cwd 解決）
+/// 2. `<workspace_root>/<与えられた相対パス>`（例: `templates/pipelines/field_loop`）
+/// 3. `<workspace_root>/templates/pipelines/<basename>`
+///
+/// いずれも実在しない場合は元のパスをそのまま返し、下流 `load_pipeline` の
+/// fail-closed エラーに委譲する（偽のパスを捏造しない）。
+fn resolve_pipeline_dir(input: &Path, root: &Path) -> PathBuf {
+    if input.is_dir() {
+        return input.to_path_buf();
+    }
+    let rel = if input.is_absolute() {
+        // 絶対パスで非実在の場合は候補 3 の basename のみ試す。
+        PathBuf::from(
+            input
+                .file_name()
+                .map(|n| n.to_string_lossy().into_owned())
+                .unwrap_or_default(),
+        )
+    } else {
+        input.to_path_buf()
+    };
+    if !rel.as_os_str().is_empty() {
+        let joined = root.join(&rel);
+        if joined.is_dir() {
+            return joined;
+        }
+        // bare name（`field_loop` 等）は templates/pipelines 基準で解決。
+        if !rel.components().any(|c| c.as_os_str() == "templates") {
+            let pipelined = root.join("templates").join("pipelines").join(&rel);
+            if pipelined.is_dir() {
+                return pipelined;
+            }
+        }
+    }
+    input.to_path_buf()
+}
+
 /// `--algorithm` 文字列を Algorithm へ解決する。
 /// `sse` / `ccoeff` 以外は即座に anyhow エラーを返す(panic しない)。
 fn resolve_algorithm(value: &str) -> Result<anaden_vision::Algorithm> {
@@ -347,6 +415,7 @@ async fn run_pipeline_live(
     verify_after_fire: bool,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
+    evidence_dir: Option<&Path>,
 ) -> Result<()> {
     // ---- Ctrl+C / SIGINT リスナ起動 ----
     // tokio::signal::ctrl_c() が返ったら token.cancel() する。driver(各 run_with_* 経由で
@@ -383,6 +452,7 @@ async fn run_pipeline_live(
                 verify_after_fire,
                 goal,
                 cancel_token,
+                evidence_dir,
             )
             .await;
         }
@@ -590,6 +660,7 @@ async fn run_with_windows(
     verify_after_fire: bool,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
+    evidence_dir: Option<&Path>,
 ) -> Result<()> {
     // ---- (1) パイプライン読込 + algorithm 上書き ----
     let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
@@ -633,8 +704,21 @@ async fn run_with_windows(
     }
 
     // ---- (3) capture/input 構築(Win32) ----
+    // UC-2 E2E 証跡 (Issue #139 T6): evidence_run_id 指定時は capture を
+    // EvidenceCapture デコレータで包み、認識サイクル毎のスクショ + ログ行を
+    // .omc/logs/{run-id}/ へ永続化する。
     let capture = anaden_device::Win32Capture::default_process();
     let input = anaden_device::Win32InputExecutor::new(anaden_device::DEFAULT_PROCESS_NAME);
+    if let Some(dir) = evidence_dir {
+        let _ = e2e::append_evidence_line(
+            dir,
+            &format!(
+                "ANADEN_E2E backend=win32 process={} pipeline={:?} start={start_task}",
+                anaden_device::DEFAULT_PROCESS_NAME,
+                pipeline_dir.display().to_string()
+            ),
+        );
+    }
 
     // ---- (4) device_width: --width > 初回 capture の width 実測 ----
     // PC版クライアント生サイズ(1258x708 想定)をそのまま device_width へ採用する。
@@ -670,24 +754,48 @@ async fn run_with_windows(
 
     let interval_dur = Duration::from_secs(interval);
 
-    run_driver(
-        anaden_engine::PipelineDriver::new(
-            capture,
-            input,
-            anaden_engine::PipelineState::new(start_task),
-            tasks,
-            device_width,
-            300,
+    // UC-2 E2E 証跡: デコレータは driver 構築時にのみ capture を消費するため、
+    // ここで evidence 有無を分岐する (if-let 2 分岐で driver 構築が重複するのを
+    // 避けるため、enum 風に Option<PathBuf> を move で判定)。
+    if let Some(dir) = evidence_dir {
+        run_driver(
+            anaden_engine::PipelineDriver::new(
+                e2e::EvidenceCapture::new(capture, dir.to_path_buf()),
+                input,
+                anaden_engine::PipelineState::new(start_task),
+                tasks,
+                device_width,
+                300,
+            )
+            .with_verify(verify_after_fire)
+            .with_cancel(cancel_token),
+            interval_dur,
+            max_iters,
+            recover_nomatch_threshold,
+            recovery,
+            goal,
         )
-        .with_verify(verify_after_fire)
-        .with_cancel(cancel_token),
-        interval_dur,
-        max_iters,
-        recover_nomatch_threshold,
-        recovery,
-        goal,
-    )
-    .await
+        .await
+    } else {
+        run_driver(
+            anaden_engine::PipelineDriver::new(
+                capture,
+                input,
+                anaden_engine::PipelineState::new(start_task),
+                tasks,
+                device_width,
+                300,
+            )
+            .with_verify(verify_after_fire)
+            .with_cancel(cancel_token),
+            interval_dur,
+            max_iters,
+            recover_nomatch_threshold,
+            recovery,
+            goal,
+        )
+        .await
+    }
 }
 
 /// `--target windows` 指定だが非 Windows ビルド時のフォールバック(コンパイルエラー回避)。
@@ -1159,9 +1267,39 @@ async fn main() -> Result<()> {
             verify_after_fire,
             goal,
             goal_file,
+            evidence_run_id,
         } => {
             let parsed_goal = parse_goal_flag(goal.as_deref(), goal_file.as_deref())
                 .map_err(|e| anyhow::anyhow!("ゴール指定の解決失敗: {e}"))?;
+            // UC-2 E2E 証跡 (T6): run-id 指定時のみ採取。無効 run-id は
+            // fail-closed (パス逸脱を黙って無視しない)。
+            let evidence_ctx = evidence_run_id.as_deref().and_then(|rid| {
+                match e2e::e2e_run_dir(&cli_workspace_root().join(".omc").join("logs"), rid) {
+                    Some(dir) => {
+                        info!("UC-2 E2E 証跡採取有効: {}", dir.display());
+                        Some((rid.to_string(), dir))
+                    }
+                    None => {
+                        warn!(
+                            "evidence-run-id が無効(空/パス区切り/.. 含む)のため証跡を採取しない: {rid:?}"
+                        );
+                        None
+                    }
+                }
+            });
+            if let Some((rid, dir)) = &evidence_ctx {
+                let command_line = format!(
+                    "anaden run --target {target} {pipeline_dir:?} {start_task} (max_iters={max_iters})"
+                );
+                // 生コマンド出力の先頭行 (コマンド全文) を即時永続化。
+                let _ = e2e::append_evidence_line(
+                    dir,
+                    &format!("ANADEN_E2E runId={rid} command={command_line}"),
+                );
+            }
+            // Issue #139 T2: pipeline_dir を workspace ルート基準で決定的解決
+            // （cwd 依存の読込失敗を除去。相対指定は manifest 基準でも探索）。
+            let pipeline_dir = resolve_pipeline_dir(&pipeline_dir, &cli_workspace_root());
             // Ctrl+C / SIGINT を拾う協調的キャンセルトークン。run_pipeline_live 内で
             // spawn_ctrl_c_listener を起動し、driver へ .with_cancel(token) 配線する。
             // トークン発火で driver は LoopStopReason::Interrupted(exit 2) で安全停止する。
@@ -1185,8 +1323,30 @@ async fn main() -> Result<()> {
                 verify_after_fire,
                 parsed_goal,
                 cancel_token,
+                evidence_ctx.as_ref().map(|(_, d)| d.as_path()),
             )
-            .await
+            .await?;
+            // run 終了後: メタデータ (tree hash・スクショ件数・runTimestamp) を永続化。
+            if let Some((rid, dir)) = &evidence_ctx {
+                let shots = e2e::count_screenshots(dir);
+                let tree = tree_hash_of_pipeline(&pipeline_dir);
+                let meta = e2e::write_metadata(
+                    dir,
+                    rid,
+                    &e2e::iso8601_utc(e2e::unix_now()),
+                    &format!("anaden run --target {target} {:?}", pipeline_dir.display()),
+                    &tree,
+                    shots,
+                );
+                match meta {
+                    Ok(p) => info!(
+                        "UC-2 E2E メタデータ永続化: {} (screenshots={shots})",
+                        p.display()
+                    ),
+                    Err(e) => warn!("UC-2 E2E メタデータ書込失敗: {e}"),
+                }
+            }
+            Ok(())
         }
         Commands::Legacy {
             device,
@@ -1235,6 +1395,78 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
     use anaden_cli_contract::{EXIT_TIMEOUT, ensure_open_exit_code};
+
+    // ---- resolve_pipeline_dir (Issue #139 T2, cwd 非依存の決定的解決) ----
+
+    #[test]
+    fn resolve_pipeline_dir_prefers_existing_cwd_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let input = dir.path().join("templates").join("pipelines").join("x");
+        std::fs::create_dir_all(&input).unwrap();
+        assert_eq!(resolve_pipeline_dir(&input, dir.path()), input);
+    }
+
+    #[test]
+    fn resolve_pipeline_dir_falls_back_to_workspace_root_relative() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root
+            .path()
+            .join("templates")
+            .join("pipelines")
+            .join("field_loop");
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = PathBuf::from("templates/pipelines/field_loop");
+        assert_eq!(resolve_pipeline_dir(&input, root.path()), dir);
+    }
+
+    #[test]
+    fn resolve_pipeline_dir_resolves_bare_pipeline_name() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = root
+            .path()
+            .join("templates")
+            .join("pipelines")
+            .join("worldmap_loop");
+        std::fs::create_dir_all(&dir).unwrap();
+        let input = PathBuf::from("worldmap_loop");
+        assert_eq!(resolve_pipeline_dir(&input, root.path()), dir);
+    }
+
+    #[test]
+    fn resolve_pipeline_dir_nonexistent_returns_input_as_is() {
+        let root = tempfile::tempdir().unwrap();
+        let input = PathBuf::from("templates/pipelines/ghost");
+        assert_eq!(resolve_pipeline_dir(&input, root.path()), input);
+    }
+
+    /// 実機 workspace ルートでカタログ 6 パイプラインの相対指定がすべて解決される。
+    #[test]
+    fn resolve_pipeline_dir_supports_all_six_real_pipelines_on_real_root() {
+        let root = cli_workspace_root();
+        for id in [
+            "field_loop",
+            "field_loop_pc",
+            "nav_to_field",
+            "nav_to_field_pc",
+            "worldmap_loop",
+            "_title_load",
+        ] {
+            let rel = PathBuf::from(format!("templates/pipelines/{id}"));
+            let got = resolve_pipeline_dir(&rel, &root);
+            assert!(
+                got.is_dir(),
+                "{id}: not resolved to existing dir: {}",
+                got.display()
+            );
+            // bare name 指定も同一ディレクトリへ解決される。
+            let bare = resolve_pipeline_dir(&PathBuf::from(id), &root);
+            assert!(
+                bare.is_dir(),
+                "{id}: bare name not resolved: {}",
+                bare.display()
+            );
+        }
+    }
 
     // ---- ensure_outcome_label (pure contract, device-free) ----
     // この純粋関数が `run` パス(android/windows)と standalone サブコマンドの

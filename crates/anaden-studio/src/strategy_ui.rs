@@ -232,7 +232,7 @@ impl StrategyPanel {
 /// 戦略タブの見出し（Issue #125 shard 3: 独立タブ向け・純関数）。
 #[must_use]
 pub fn tab_heading() -> &'static str {
-    "🎯 戦略選択"
+    "戦略選択"
 }
 
 /// 戦略タブの状態行（実行中は選択変更の反映タイミングを注記・純関数）。
@@ -262,19 +262,17 @@ mod tests {
     fn new_panel_has_defaults_and_no_strategy() {
         let panel = StrategyPanel::default();
         assert_eq!(panel.selection().strategy, None);
-        assert_eq!(
-            panel.selection().option("fishing", "auto_release"),
-            Some(true)
-        );
+        // 実在 6 パイプラインは ON/OFF オプションを持たないため空。
+        assert!(panel.selection().options.is_empty());
     }
 
     #[test]
     fn select_strategy_updates_selection_and_selected_def() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("fishing");
-        assert_eq!(panel.selection().strategy.as_deref(), Some("fishing"));
+        panel.select_strategy("field_loop");
+        assert_eq!(panel.selection().strategy.as_deref(), Some("field_loop"));
         let def = panel.selected_def().expect("def");
-        assert_eq!(def.id, "fishing");
+        assert_eq!(def.id, "field_loop");
     }
 
     #[test]
@@ -285,54 +283,46 @@ mod tests {
     }
 
     #[test]
-    fn toggle_option_of_selected_strategy_applies() {
-        let mut panel = StrategyPanel::default();
-        panel.select_strategy("fishing");
-        panel.toggle_option("skip_animation", true);
-        assert_eq!(
-            panel.selection().option("fishing", "skip_animation"),
-            Some(true)
-        );
-    }
-
-    #[test]
     fn toggle_option_without_strategy_is_ignored() {
         let mut panel = StrategyPanel::default();
         panel.toggle_option("skip_animation", true);
-        // 戦略未選択では何も変わらない（既定値のまま）。
-        assert_eq!(
-            panel.selection().option("fishing", "skip_animation"),
-            Some(false)
-        );
+        // 戦略未選択では何も変わらない。
+        assert!(!panel.selection().options.contains_key("skip_animation"));
     }
 
     #[test]
     fn toggle_unknown_option_is_ignored() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("fishing");
+        panel.select_strategy("field_loop");
         panel.toggle_option("nonexistent", true);
         assert!(
             !panel
                 .selection()
                 .options
-                .contains_key("fishing.nonexistent")
+                .contains_key("field_loop.nonexistent")
         );
+    }
+
+    /// Issue #139 T1: 実在しない fishing はカタログ外のため選択できない。
+    #[test]
+    fn select_nonexistent_fishing_is_ignored() {
+        let mut panel = StrategyPanel::default();
+        panel.select_strategy("fishing");
+        assert_eq!(panel.selection().strategy, None);
     }
 
     #[test]
     fn validate_ok_after_select_and_clear() {
         let mut panel = StrategyPanel::default();
         assert!(panel.validate().is_ok());
-        panel.select_strategy("fishing");
+        panel.select_strategy("field_loop");
         assert!(panel.validate().is_ok());
     }
 
     #[test]
     fn toml_roundtrip_preserves_selection() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("fishing");
-        panel.toggle_option("auto_release", false);
-        panel.toggle_option("skip_animation", true);
+        panel.select_strategy("worldmap_loop");
 
         let toml_str = panel.to_toml().expect("serialize");
         let mut restored = StrategyPanel::default();
@@ -351,25 +341,16 @@ mod tests {
     #[test]
     fn summary_selected_lists_enabled_options() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("fishing");
-        // 既定: auto_release=true, skip_animation=false。
-        assert_eq!(
-            panel.summary(),
-            "strategy=fishing on=[fishing.auto_release]"
-        );
-        panel.toggle_option("skip_animation", true);
-        assert_eq!(
-            panel.summary(),
-            "strategy=fishing on=[fishing.auto_release,fishing.skip_animation]"
-        );
+        panel.select_strategy("worldmap_loop");
+        // 実在 6 パイプラインは ON/OFF オプションを持たない。
+        assert_eq!(panel.summary(), "strategy=worldmap_loop (オプションなし)");
     }
 
     #[test]
     fn summary_selected_all_off_shows_no_options() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("fishing");
-        panel.toggle_option("auto_release", false);
-        assert_eq!(panel.summary(), "strategy=fishing (オプションなし)");
+        panel.select_strategy("field_loop");
+        assert_eq!(panel.summary(), "strategy=field_loop (オプションなし)");
     }
 
     #[test]
@@ -382,7 +363,7 @@ mod tests {
 
     #[test]
     fn tab_heading_is_strategy_selection() {
-        assert_eq!(tab_heading(), "🎯 戦略選択");
+        assert_eq!(tab_heading(), "戦略選択");
     }
 
     #[test]
@@ -395,8 +376,8 @@ mod tests {
     fn tab_summary_line_prefixes_selection() {
         assert_eq!(tab_summary_line("戦略未選択"), "選択: 戦略未選択");
         assert_eq!(
-            tab_summary_line("strategy=fishing on=[fishing.auto_release]"),
-            "選択: strategy=fishing on=[fishing.auto_release]"
+            tab_summary_line("strategy=field_loop (オプションなし)"),
+            "選択: strategy=field_loop (オプションなし)"
         );
     }
 }

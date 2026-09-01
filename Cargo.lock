@@ -193,6 +193,7 @@ dependencies = [
  "anaden-strategies",
  "anaden-vision",
  "anyhow",
+ "async-trait",
  "clap",
  "image",
  "imageproc",

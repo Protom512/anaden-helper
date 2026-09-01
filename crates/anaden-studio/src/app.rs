@@ -12,7 +12,8 @@ use image::DynamicImage;
 
 use anaden_core::{MatchConfidence, ScreenRegion};
 use anaden_vision::{
-    CcoeffVisionEngine, ScreenScaler, SseVisionEngine, TemplateMatcher, VisionEngine,
+    Action, Algorithm, CcoeffVisionEngine, ScreenScaler, SseVisionEngine, TemplateMatcher,
+    VisionEngine,
 };
 
 use crate::batch::{self, ConfusionMatrix};
@@ -31,6 +32,246 @@ const HEATMAP_DOWNSCALE: u32 = 4;
 const STATE_OPTIONS: &[&str] = &[
     "title", "field", "loading", "battle", "fishing", "menu", "dialog", "unknown",
 ];
+
+/// 接続状態 (MAA/MDA 参考の状態サマリバッジ・Issue #139 T3)。
+///
+///豆腐 (グリフ欠落) 排除のため、バッジ表示は Unicode 絵文字ではなく
+/// ASCII 括弧ラベル (`[OK]` 等) + 日本語テキストで構成する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConnectionState {
+    /// 未チェック (起動直後)。
+    Unknown,
+    /// 確認中 (プローブ実行中)。
+    Checking,
+    /// 接続済み (実機検出 / プロセス検出成功)。
+    Connected,
+    /// 未接続 (検出失敗・理由あり)。
+    Disconnected,
+}
+
+impl ConnectionState {
+    /// 状態サマリバッジの表示文字列 (グリフ確認済み・豆腐なし)。
+    #[must_use]
+    pub fn badge(self) -> &'static str {
+        match self {
+            Self::Unknown => "[?] 接続未確認",
+            Self::Checking => "[..] 接続確認中",
+            Self::Connected => "[OK] 接続済み",
+            Self::Disconnected => "[NG] 未接続",
+        }
+    }
+
+    /// 接続済みかどうか。
+    #[must_use]
+    pub fn is_connected(self) -> bool {
+        matches!(self, Self::Connected)
+    }
+
+    /// バッジの表示色 (egui 色)。
+    fn badge_color(self) -> egui::Color32 {
+        match self {
+            Self::Unknown => egui::Color32::from_rgb(150, 150, 150),
+            Self::Checking => egui::Color32::from_rgb(230, 160, 30),
+            Self::Connected => egui::Color32::from_rgb(60, 180, 75),
+            Self::Disconnected => egui::Color32::from_rgb(220, 60, 60),
+        }
+    }
+}
+
+/// 接続チェックの結果 (状態 + エラー理由)。
+#[derive(Debug, Clone)]
+pub struct ConnectionStatus {
+    /// 接続状態。
+    pub state: ConnectionState,
+    /// チェックの詳細・エラー理由 (エラー理由パネルに表示)。
+    pub detail: String,
+}
+
+impl Default for ConnectionStatus {
+    fn default() -> Self {
+        Self {
+            state: ConnectionState::Unknown,
+            detail: "接続チェック未実行".to_string(),
+        }
+    }
+}
+
+impl ConnectionStatus {
+    /// エラー理由パネルの表示行。未接続時は理由を添える。
+    #[must_use]
+    pub fn reason_line(&self) -> String {
+        match self.state {
+            ConnectionState::Disconnected => format!("理由: {}", self.detail),
+            _ => self.detail.clone(),
+        }
+    }
+}
+
+/// Android 実機 (adb) の接続チェック。
+/// `adb -s <serial> get-state` の終了コードと stdout で判定する。
+pub fn check_android_device(serial: &str) -> ConnectionStatus {
+    if serial.trim().is_empty() {
+        return ConnectionStatus {
+            state: ConnectionState::Disconnected,
+            detail: "adb serial が未入力".to_string(),
+        };
+    }
+    match std::process::Command::new("adb")
+        .args(["-s", serial.trim(), "get-state"])
+        .output()
+    {
+        Ok(out) if out.status.success() => {
+            let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
+            if state == "device" {
+                ConnectionStatus {
+                    state: ConnectionState::Connected,
+                    detail: format!("adb {serial}: device"),
+                }
+            } else {
+                ConnectionStatus {
+                    state: ConnectionState::Disconnected,
+                    detail: format!("adb {serial}: 状態が device でない ({state})"),
+                }
+            }
+        }
+        Ok(out) => ConnectionStatus {
+            state: ConnectionState::Disconnected,
+            detail: format!(
+                "adb {serial}: get-state 失敗 ({})",
+                String::from_utf8_lossy(&out.stderr).trim()
+            ),
+        },
+        Err(e) => ConnectionStatus {
+            state: ConnectionState::Disconnected,
+            detail: format!("adb 起動失敗 (adb への PATH を確認): {e}"),
+        },
+    }
+}
+
+/// PC版 (Windows) プロセス検出チェック。
+/// `Win32Capture` の 1 枚キャプチャ成功をプロセス検出成功とみなす。
+#[cfg(windows)]
+pub fn check_windows_process(exe: &str) -> ConnectionStatus {
+    if exe.trim().is_empty() {
+        return ConnectionStatus {
+            state: ConnectionState::Disconnected,
+            detail: "exe 名が未入力".to_string(),
+        };
+    }
+    let probe = anaden_device::Win32Capture::new(exe.trim());
+    match probe.capture_blocking() {
+        Ok(img) => ConnectionStatus {
+            state: ConnectionState::Connected,
+            detail: format!("{exe}: プロセス検出済み ({}x{})", img.width(), img.height()),
+        },
+        Err(e) => ConnectionStatus {
+            state: ConnectionState::Disconnected,
+            detail: format!("{exe}: プロセス未検出 or キャプチャ失敗 ({e})"),
+        },
+    }
+}
+
+/// PC版チェックの非 Windows フォールバック (GUI 表示整合用)。
+#[cfg(not(windows))]
+pub fn check_windows_process(_exe: &str) -> ConnectionStatus {
+    ConnectionStatus {
+        state: ConnectionState::Disconnected,
+        detail: "Windows バックエンドはこの OS では利用不可".to_string(),
+    }
+}
+
+/// pipeline task の認識成功時アクション種別 (UI コンボ選択用)。
+/// anaden_vision::Action の作成タブで扱う部分集合。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PipelineActionKind {
+    /// マッチ位置をクリック (`click_self`)。
+    ClickSelf,
+    /// 何もしない (`do_nothing`)。
+    DoNothing,
+    /// 停止 (`stop`)。
+    Stop,
+}
+
+impl PipelineActionKind {
+    /// UI コンボ表示ラベル (グリフ確認済み・豆腐なし)。
+    #[must_use]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::ClickSelf => "click_self (マッチ位置をタップ)",
+            Self::DoNothing => "do_nothing (何もしない)",
+            Self::Stop => "stop (停止)",
+        }
+    }
+
+    /// ラベル → 種別。UI の選択状態復元用。未知ラベルは None (fail-closed)。
+    #[must_use]
+    pub fn from_label(label: &str) -> Option<Self> {
+        match label {
+            l if l == Self::ClickSelf.label() => Some(Self::ClickSelf),
+            l if l == Self::DoNothing.label() => Some(Self::DoNothing),
+            l if l == Self::Stop.label() => Some(Self::Stop),
+            _ => None,
+        }
+    }
+
+    /// anaden_vision::Action へ変換。
+    fn to_action(self) -> Action {
+        match self {
+            Self::ClickSelf => Action::ClickSelf,
+            Self::DoNothing => Action::DoNothing,
+            Self::Stop => Action::Stop,
+        }
+    }
+}
+
+/// 作成タブの入力 (ROI/スコア) から pipeline task (anaden_vision::TaskDef) を構築する。
+///
+/// `method` は engine_kind.method_str ("sse"/"ccoeff") を想定。未知文字列は
+/// None (fail-closed。黙って既定方式へフォールバックしない)。
+#[must_use]
+pub fn pipeline_task_spec(
+    name: &str,
+    state: &str,
+    method: &str,
+    roi: ScreenRegion,
+    threshold: f32,
+    action: PipelineActionKind,
+) -> Option<anaden_vision::TaskDef> {
+    let algorithm = match method {
+        "sse" => Algorithm::Sse,
+        "ccoeff" => Algorithm::Ccoeff,
+        _ => return None,
+    };
+    Some(anaden_vision::TaskDef {
+        name: name.to_string(),
+        state: state.to_string(),
+        algorithm,
+        template: PathBuf::from(format!("{name}.png")),
+        roi: Some([roi.x, roi.y, roi.width, roi.height]),
+        threshold,
+        base: None,
+        action: Some(action.to_action()),
+        next: Some(vec![]),
+    })
+}
+
+/// pipeline task を TOML + テンプレート PNG としてディレクトリへ保存する。
+///
+/// 出力: `<dir>/<name>.toml` + `<dir>/<name>.png`。既存 `load_pipeline`
+/// (anaden-vision) でそのまま読み込れる形式 (templates/pipelines/<pipeline>/ 互換)。
+pub fn save_pipeline_task(
+    dir: &Path,
+    spec: &anaden_vision::TaskDef,
+    template: &DynamicImage,
+) -> std::io::Result<PathBuf> {
+    std::fs::create_dir_all(dir)?;
+    let png_path = dir.join(format!("{}.png", spec.name));
+    template.save(&png_path).map_err(std::io::Error::other)?;
+    let toml_path = dir.join(format!("{}.toml", spec.name));
+    let toml_str = toml::to_string(spec).map_err(std::io::Error::other)?;
+    std::fs::write(&toml_path, toml_str)?;
+    Ok(toml_path)
+}
 
 /// GUI のモード。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -114,7 +355,7 @@ pub struct StudioApp {
     live: Option<LiveCapture>,
     /// 720p 基準への解像度正規化スケーラ（TASK-009）。
     scaler: ScreenScaler,
-    /// ROI自動提案の候補リスト（💡ボタン押下で生成）。
+    /// ROI自動提案の候補リスト（ROI候補ボタン押下で生成）。
     proposals: Vec<Proposal>,
     /// ROI候補提案の計算中フラグ（別スレッドで propose 実行中）。
     proposing: bool,
@@ -123,6 +364,12 @@ pub struct StudioApp {
     proposal_rx: Option<Receiver<Vec<Proposal>>>,
     /// ステータスメッセージ。
     status: String,
+    /// 接続状態 (実機/プロセス検出チェック結果)。Issue #139 T3。
+    connection: ConnectionStatus,
+    /// pipeline task 保存先ディレクトリ (UC-3: 作成タブ → pipeline TOML 保存)。
+    task_dir: PathBuf,
+    /// pipeline task の認識成功時アクション選択 (UC-3)。
+    task_action: PipelineActionKind,
 }
 
 impl Default for StudioApp {
@@ -186,6 +433,9 @@ impl StudioApp {
             proposing: false,
             proposal_rx: None,
             status: String::from("スクリーンショットと正例/負例フォルダを読み込んでください"),
+            connection: ConnectionStatus::default(),
+            task_dir: PathBuf::from("./templates/pipelines/created"),
+            task_action: PipelineActionKind::ClickSelf,
         }
     }
 }
@@ -211,6 +461,25 @@ impl StudioApp {
     /// モードを設定する（埋め込み親シェルからのタブ切替用）。
     pub fn set_mode(&mut self, mode: AppMode) {
         self.mode = mode;
+    }
+
+    /// 現在の接続状態への参照 (Issue #139 T3)。
+    pub fn connection(&self) -> &ConnectionStatus {
+        &self.connection
+    }
+
+    /// 接続チェックを実行して状態を更新する (Issue #139 T3)。
+    ///
+    /// target に応じて Android (adb get-state) / Windows (プロセス検出) を使い分ける。
+    pub fn run_connection_check(&mut self) {
+        self.connection.state = ConnectionState::Checking;
+        self.connection = match self.target {
+            crate::source::Target::Android => check_android_device(&self.adb_serial),
+            #[cfg(windows)]
+            crate::source::Target::Windows => check_windows_process(&self.win_exe),
+            #[cfg(not(windows))]
+            crate::source::Target::Windows => check_windows_process(&self.win_exe),
+        };
     }
 
     /// エンジン種別を切替え、self.engine を再構築し、再評価を強制する。
@@ -350,8 +619,7 @@ impl StudioApp {
         });
     }
 
-    /// 候補ROIをドラッグROI編集状態に読み込む。
-    ///
+    /// 候補ROIをドラッグROI編集状態に読み込む。    ///
     /// RoiEdit::rect() は width = x1 - x0 で矩形を復元するため、
     /// 候補 roi (x,y,w,h) を正確に再現するには current を (x+w, y+h) = (right(), bottom())
     /// に設定する（right-1 だと width が1つ減る）。dragging=false で確定状態にする。
@@ -362,6 +630,51 @@ impl StudioApp {
         self.roi.dragging = false;
         // 既存の再評価トリガを発火させるため、scored_roi を古い値に戻す。
         self.scored_roi = None;
+    }
+
+    /// 現在のROI切り出しを pipeline task (TOML+PNG) として保存する (UC-3)。
+    ///
+    /// 既存部品のみで構成: ROI画像は screenshot から crop、閾値は
+    /// discrimination (scoring.rs) があれば正例/負例の中間、なければ 0.9、
+    /// 方式は engine_kind.method_str、TOML は anaden_vision::TaskDef として
+    /// serialize し save_pipeline_task で書き出す。書いた TOML は既存
+    /// load_pipeline で読める (roundtrip 検証済み)。
+    fn save_current_pipeline_task(&mut self) {
+        let (Some(img), Some(roi)) = (self.screenshot.clone(), self.roi.rect()) else {
+            self.status = "pipeline task 保存にはスクリーンショットとROI確定が必要です".to_string();
+            return;
+        };
+        let name = if self.tpl_name.trim().is_empty() {
+            "template_01".to_string()
+        } else {
+            self.tpl_name.trim().to_string()
+        };
+        let crop = img.crop_imm(roi.x, roi.y, roi.width, roi.height);
+        let threshold = self
+            .discrimination
+            .as_ref()
+            .map(|d| ((d.own_min + d.other_max) / 2.0).clamp(0.5, 0.99))
+            .unwrap_or(0.9);
+        let Some(spec) = pipeline_task_spec(
+            &name,
+            STATE_OPTIONS[self.tpl_state_idx],
+            self.engine_kind.method_str(),
+            roi,
+            threshold,
+            self.task_action,
+        ) else {
+            self.status = format!(
+                "pipeline task 保存失敗: 未知の方式 ({})",
+                self.engine_kind.method_str()
+            );
+            return;
+        };
+        match save_pipeline_task(&self.task_dir, &spec, &crop) {
+            Ok(p) => {
+                self.status = format!("pipeline task 保存: {}", p.display());
+            }
+            Err(e) => self.status = format!("pipeline task 保存失敗: {e}"),
+        }
     }
 }
 
@@ -384,8 +697,8 @@ impl StudioApp {
             .exact_size(30.0)
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
-                    ui.selectable_value(&mut self.mode, AppMode::Authoring, "✏️ 作成");
-                    ui.selectable_value(&mut self.mode, AppMode::Batch, "📊 バッチ評価");
+                    ui.selectable_value(&mut self.mode, AppMode::Authoring, "作成");
+                    ui.selectable_value(&mut self.mode, AppMode::Batch, "バッチ評価");
                 });
             });
     }
@@ -449,17 +762,17 @@ impl StudioApp {
                     ui.separator();
 
                     ui.label("データ");
-                    if ui.button("📸 スクリーンショットを開く").clicked() {
+                    if ui.button("スクリーンショットを開く").clicked() {
                         self.open_screenshot();
                     }
                     ui.horizontal(|ui| {
-                        if ui.button("✅ 正例フォルダ").clicked() {
+                        if ui.button("正例フォルダ").clicked() {
                             self.load_positives();
                         }
                         ui.label(format!("{}枚", self.positives.len()));
                     });
                     ui.horizontal(|ui| {
-                        if ui.button("❌ 負例フォルダ").clicked() {
+                        if ui.button("負例フォルダ").clicked() {
                             self.load_negatives();
                         }
                         ui.label(format!("{}枚", self.negatives.len()));
@@ -498,19 +811,28 @@ impl StudioApp {
 
                     // ライブキャプチャ(android 実機 / PC版 Windows)
                     ui.heading("ライブキャプチャ");
+                    // 接続状態サマリバッジ + チェックボタン + エラー理由パネル (Issue #139 T3)。
+                    ui.colored_label(
+                        self.connection.state.badge_color(),
+                        self.connection.state.badge(),
+                    );
+                    if ui.button("接続チェック").clicked() {
+                        self.run_connection_check();
+                    }
+                    ui.label(self.connection.reason_line());
                     // バックエンド選択。Windows バックエンドは Windows ビルドでのみ選択可能。
                     ui.horizontal(|ui| {
                         ui.label("取得元:");
                         ui.selectable_value(
                             &mut self.target,
                             crate::source::Target::Android,
-                            "📱 Android(adb)",
+                            "Android(adb)",
                         );
                         #[cfg(windows)]
                         ui.selectable_value(
                             &mut self.target,
                             crate::source::Target::Windows,
-                            "🖥 Windows(PC版)",
+                            "Windows(PC版)",
                         );
                     });
                     // android は serial、windows は exe 名を入力。
@@ -536,7 +858,7 @@ impl StudioApp {
                         }
                     }
                     if self.live.is_some() {
-                        if ui.button("⏹ 停止（この画面で固定）").clicked() {
+                        if ui.button("停止（この画面で固定）").clicked() {
                             self.live = None;
                             self.status = "ライブ停止: 現在の画面で固定しました".to_string();
                         }
@@ -548,7 +870,7 @@ impl StudioApp {
                             crate::source::Target::Windows => !self.win_exe.trim().is_empty(),
                         };
                         ui.add_enabled_ui(can_start, |ui| {
-                            if ui.button("▶ ライブ開始").clicked() {
+                            if ui.button("ライブ開始").clicked() {
                                 // android は serial、windows は exe 名を渡してバックエンドを分岐。
                                 let serial = self.adb_serial.trim().to_string();
                                 self.live = Some(LiveCapture::start(
@@ -577,9 +899,9 @@ impl StudioApp {
                     let can_propose = self.screenshot.is_some() && !self.proposing;
                     ui.add_enabled_ui(can_propose, |ui| {
                         let label = if self.proposing {
-                            "💡 ROI候補を計算中…"
+                            "ROI候補を計算中…"
                         } else {
-                            "💡 ROI候補を提案"
+                            "ROI候補を提案"
                         };
                         if ui.button(label).clicked() {
                             self.run_proposals();
@@ -662,7 +984,7 @@ impl StudioApp {
                             });
                     });
                     ui.label(format!("保存先: {}", self.save_dir.display()));
-                    if ui.button("📁 保存先変更").clicked()
+                    if ui.button("保存先変更").clicked()
                         && let Some(dir) = rfd::FileDialog::new().pick_folder()
                     {
                         self.save_dir = dir;
@@ -670,12 +992,49 @@ impl StudioApp {
                     let can_save = self.roi.rect().is_some() && self.screenshot.is_some();
                     let mut save_clicked = false;
                     ui.add_enabled_ui(can_save, |ui| {
-                        if ui.button("💾 テンプレート保存").clicked() {
+                        if ui.button("テンプレート保存").clicked() {
                             save_clicked = true;
                         }
                     });
                     if save_clicked {
                         self.save_current_template();
+                    }
+                    ui.separator();
+
+                    // pipeline task 保存 (UC-3: スクショ取り込み → ROI選択 →
+                    // スコア計算 (scoring.rs) → pipeline task TOML 保存)。
+                    // 同一の ROI/スコア/名前/状態入力を再利用し、保存形式のみ
+                    // pipeline TOML (anaden-vision load_pipeline 互換) に切替。
+                    ui.heading("pipeline task 保存");
+                    ui.label(format!("保存先: {}", self.task_dir.display()));
+                    if ui.button("task保存先変更").clicked()
+                        && let Some(dir) = rfd::FileDialog::new().pick_folder()
+                    {
+                        self.task_dir = dir;
+                    }
+                    ui.horizontal(|ui| {
+                        ui.label("action:");
+                        egui::ComboBox::from_id_salt("task_action_combo")
+                            .selected_text(self.task_action.label())
+                            .show_ui(ui, |ui| {
+                                for kind in [
+                                    PipelineActionKind::ClickSelf,
+                                    PipelineActionKind::DoNothing,
+                                    PipelineActionKind::Stop,
+                                ] {
+                                    ui.selectable_value(&mut self.task_action, kind, kind.label());
+                                }
+                            });
+                    });
+                    let can_save_task = self.roi.rect().is_some() && self.screenshot.is_some();
+                    let mut task_save_clicked = false;
+                    ui.add_enabled_ui(can_save_task, |ui| {
+                        if ui.button("pipeline task として保存").clicked() {
+                            task_save_clicked = true;
+                        }
+                    });
+                    if task_save_clicked {
+                        self.save_current_pipeline_task();
                     }
                     ui.separator();
                     ui.label(&self.status);
@@ -776,7 +1135,7 @@ impl StudioApp {
                 ui.separator();
                 ui.label(format!("テンプレート元: {}", self.save_dir.display()));
                 ui.label(format!("テスト元: {}", self.test_dir.display()));
-                if ui.button("📁 テスト元変更").clicked()
+                if ui.button("テスト元変更").clicked()
                     && let Some(dir) = rfd::FileDialog::new().pick_folder()
                 {
                     self.test_dir = dir;
@@ -786,7 +1145,7 @@ impl StudioApp {
                     ui.add(egui::Slider::new(&mut self.batch_threshold, 0.0..=1.0));
                 });
                 let mut run_clicked = false;
-                if ui.button("▶ 実行").clicked() {
+                if ui.button("実行").clicked() {
                     run_clicked = true;
                 }
                 if run_clicked {
@@ -800,7 +1159,7 @@ impl StudioApp {
             if let Some(cm) = &self.batch_result {
                 batch::render_confusion_matrix(ui, cm);
             } else {
-                ui.heading("「▶ 実行」でバッチ評価を行います");
+                ui.heading("「実行」でバッチ評価を行います");
                 ui.label("テンプレート元フォルダ（PNG+TOML）と、");
                 ui.label("テストフォルダ（<ラベル名>/画像）を選んでください");
             }
@@ -1004,6 +1363,286 @@ mod tests {
             assert!(
                 (40..=42).contains(&got),
                 "{axis} should be ~40 (downscale=2), got {got}"
+            );
+        }
+    }
+
+    // ---- Issue #139 T3: 接続状態可視化 ----
+
+    #[test]
+    fn connection_state_badges_are_ascii_no_tofu() {
+        // バッジ文字列は Unicode 絵文字を含まない (豆腐排除)。
+        for (state, expected) in [
+            (ConnectionState::Unknown, "[?] 接続未確認"),
+            (ConnectionState::Checking, "[..] 接続確認中"),
+            (ConnectionState::Connected, "[OK] 接続済み"),
+            (ConnectionState::Disconnected, "[NG] 未接続"),
+        ] {
+            assert_eq!(state.badge(), expected);
+            // 絵文字ブロック (U+1F300 以上) を含まないことを機械検証。
+            assert!(
+                state.badge().chars().all(|c| c < '\u{1F300}'),
+                "badge must not contain emoji: {}",
+                state.badge()
+            );
+        }
+    }
+
+    #[test]
+    fn connection_state_is_connected_only_for_connected() {
+        assert!(ConnectionState::Connected.is_connected());
+        assert!(!ConnectionState::Unknown.is_connected());
+        assert!(!ConnectionState::Checking.is_connected());
+        assert!(!ConnectionState::Disconnected.is_connected());
+    }
+
+    #[test]
+    fn connection_status_default_is_unknown_with_reason() {
+        let s = ConnectionStatus::default();
+        assert_eq!(s.state, ConnectionState::Unknown);
+        assert_eq!(s.reason_line(), "接続チェック未実行");
+    }
+
+    #[test]
+    fn connection_status_reason_line_prefixes_detail_when_disconnected() {
+        let s = ConnectionStatus {
+            state: ConnectionState::Disconnected,
+            detail: "adb が見つからない".to_string(),
+        };
+        assert_eq!(s.reason_line(), "理由: adb が見つからない");
+        let ok = ConnectionStatus {
+            state: ConnectionState::Connected,
+            detail: "adb emulator-5554: device".to_string(),
+        };
+        assert_eq!(ok.reason_line(), "adb emulator-5554: device");
+    }
+
+    #[test]
+    fn check_android_empty_serial_is_disconnected() {
+        let s = check_android_device("");
+        assert_eq!(s.state, ConnectionState::Disconnected);
+        assert!(s.detail.contains("serial"));
+    }
+
+    #[test]
+    fn check_windows_empty_exe_is_disconnected() {
+        let s = check_windows_process("  ");
+        assert_eq!(s.state, ConnectionState::Disconnected);
+        assert!(s.detail.contains("exe"));
+    }
+
+    #[test]
+    fn app_default_connection_is_unknown() {
+        let app = StudioApp::default();
+        assert_eq!(app.connection().state, ConnectionState::Unknown);
+    }
+
+    #[test]
+    fn run_connection_check_updates_state() {
+        let mut app = StudioApp::default();
+        // Android 既定 + serial 未入力 → チェック後に Disconnected (未入力理由)。
+        app.run_connection_check();
+        assert_eq!(app.connection().state, ConnectionState::Disconnected);
+        assert!(app.connection().reason_line().contains("理由"));
+    }
+
+    /// 接続バッジ・チェックボタン・エラー理由パネルを含む Authoring 描画が
+    /// パニックせず完了すること (Issue #139 T3)。
+    #[test]
+    fn embed_render_connection_panel_completes_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = StudioApp::default();
+        app.run_connection_check();
+        ctx.begin_pass(egui::RawInput::default());
+        app.render_modebar(&mut child_ui(&ctx));
+        app.render_body(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
+    }
+
+    // ---- Issue #139 T5: UC-3 作成タブ → pipeline task TOML 保存 ----
+
+    /// pipeline_task_spec は有効な方式文字列から TaskDef を構築する。
+    /// engine_kind.method_str ("sse"/"ccoeff") がそのまま使える。
+    #[test]
+    fn pipeline_task_spec_builds_from_method_str() {
+        let roi = ScreenRegion::new(10, 20, 30, 40);
+        let spec = pipeline_task_spec(
+            "my_task",
+            "field",
+            "ccoeff",
+            roi,
+            0.85,
+            PipelineActionKind::ClickSelf,
+        )
+        .unwrap();
+        assert_eq!(spec.name, "my_task");
+        assert_eq!(spec.state, "field");
+        assert_eq!(spec.algorithm, anaden_vision::Algorithm::Ccoeff);
+        assert_eq!(spec.roi, Some([10, 20, 30, 40]));
+        assert_eq!(spec.threshold, 0.85);
+        assert_eq!(spec.action, Some(anaden_vision::Action::ClickSelf));
+        assert_eq!(spec.next, Some(vec![]));
+
+        let sse = pipeline_task_spec(
+            "t2",
+            "title",
+            "sse",
+            roi,
+            0.9,
+            PipelineActionKind::DoNothing,
+        )
+        .unwrap();
+        assert_eq!(sse.algorithm, anaden_vision::Algorithm::Sse);
+        assert_eq!(sse.action, Some(anaden_vision::Action::DoNothing));
+    }
+
+    /// 未知の方式文字列は None (fail-closed。黙って sse にフォールバックしない)。
+    #[test]
+    fn pipeline_task_spec_rejects_unknown_method() {
+        assert!(
+            pipeline_task_spec(
+                "x",
+                "field",
+                "orb",
+                ScreenRegion::new(0, 0, 1, 1),
+                0.9,
+                PipelineActionKind::ClickSelf
+            )
+            .is_none()
+        );
+    }
+
+    /// save_pipeline_task が書いた TOML は既存 load_pipeline で読み込める (roundtrip)。
+    /// 作成タブで保存した task が実行パイプライン (anaden-cli) からそのまま
+    /// 使えることの結合保証。
+    #[test]
+    fn save_pipeline_task_roundtrips_through_load_pipeline() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = pipeline_task_spec(
+            "tap_logo",
+            "title",
+            "ccoeff",
+            ScreenRegion::new(10, 20, 100, 50),
+            0.82,
+            PipelineActionKind::ClickSelf,
+        )
+        .unwrap();
+        let img = DynamicImage::ImageLuma8(image::GrayImage::from_pixel(100, 50, Luma([128])));
+        let toml_path = save_pipeline_task(dir.path(), &spec, &img).unwrap();
+        assert!(toml_path.exists());
+        assert!(dir.path().join("tap_logo.png").exists());
+
+        let tasks = anaden_vision::load_pipeline(dir.path()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "tap_logo");
+        assert_eq!(tasks[0].state, "title");
+        assert_eq!(tasks[0].algorithm, anaden_vision::Algorithm::Ccoeff);
+        assert_eq!(tasks[0].roi, Some([10, 20, 100, 50]));
+        assert_eq!(tasks[0].action, Some(anaden_vision::Action::ClickSelf));
+    }
+
+    /// StudioApp の pipeline task 保存: ROI/スクショ未確定時はステータスに理由を
+    /// 残して何も書かない (fail-closed)。
+    #[test]
+    fn save_current_pipeline_task_without_roi_reports_status() {
+        let dir = tempfile::tempdir().unwrap();
+        let app = StudioApp {
+            task_dir: dir.path().to_path_buf(),
+            ..StudioApp::default()
+        };
+        let mut app = app;
+        app.save_current_pipeline_task();
+        assert!(app.status.contains("ROI"));
+        assert!(dir.path().read_dir().unwrap().next().is_none());
+    }
+
+    /// StudioApp の pipeline task 保存: ROI + スクショ + 識別力が揃った状態で
+    /// 保存すると task_dir に TOML+PNG が書かれ、load_pipeline で読める。
+    /// 閾値は discrimination から導出される (正例/負例の中間)。
+    #[test]
+    fn save_current_pipeline_task_writes_loadable_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = StudioApp {
+            task_dir: dir.path().to_path_buf(),
+            ..StudioApp::default()
+        };
+        app.tpl_name = "created_task".to_string();
+        app.screenshot = Some(Arc::new(DynamicImage::ImageLuma8(
+            image::GrayImage::from_pixel(200, 100, Luma([255])),
+        )));
+        app.roi.anchor = Some((10, 10));
+        app.roi.current = Some((110, 60)); // 100x50
+        app.discrimination = Some(Discrimination {
+            own_min: 0.9,
+            other_max: 0.8,
+            own_scores: vec![0.9],
+            other_scores: vec![0.8],
+        });
+
+        app.save_current_pipeline_task();
+        assert!(app.status.contains("保存"), "status: {}", app.status);
+
+        let tasks = anaden_vision::load_pipeline(dir.path()).unwrap();
+        assert_eq!(tasks.len(), 1);
+        assert_eq!(tasks[0].name, "created_task");
+        assert_eq!(tasks[0].roi, Some([10, 10, 100, 50]));
+        // threshold = (0.9 + 0.8) / 2 = 0.85
+        assert!((tasks[0].threshold - 0.85).abs() < 1e-4);
+        assert_eq!(tasks[0].action, Some(anaden_vision::Action::ClickSelf));
+    }
+
+    /// 識別力なしで保存した場合の閾値は既定 0.9。
+    #[test]
+    fn save_current_pipeline_task_threshold_defaults_without_discrimination() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = StudioApp {
+            task_dir: dir.path().to_path_buf(),
+            ..StudioApp::default()
+        };
+        app.screenshot = Some(Arc::new(DynamicImage::ImageLuma8(
+            image::GrayImage::from_pixel(200, 100, Luma([255])),
+        )));
+        app.roi.anchor = Some((0, 0));
+        app.roi.current = Some((50, 50));
+        app.save_current_pipeline_task();
+        let tasks = anaden_vision::load_pipeline(dir.path()).unwrap();
+        assert!((tasks[0].threshold - 0.9).abs() < 1e-4);
+    }
+
+    /// action 種別の label ラウンドトリップ (UI コンボ用)。
+    #[test]
+    fn pipeline_action_kind_labels_roundtrip() {
+        for k in [
+            PipelineActionKind::ClickSelf,
+            PipelineActionKind::DoNothing,
+            PipelineActionKind::Stop,
+        ] {
+            assert_eq!(PipelineActionKind::from_label(k.label()), Some(k));
+        }
+        assert_eq!(PipelineActionKind::from_label("bogus"), None);
+    }
+
+    /// app.rs のボタンラベルに Unicode 絵文字が残っていないこと (豆腐排除・機械検証)。
+    #[test]
+    fn app_button_labels_contain_no_emoji() {
+        let labels = [
+            "作成",
+            "バッチ評価",
+            "スクリーンショットを開く",
+            "正例フォルダ",
+            "負例フォルダ",
+            "Android(adb)",
+            "停止（この画面で固定）",
+            "ライブ開始",
+            "ROI候補を提案",
+            "テンプレート保存",
+            "保存先変更",
+            "実行",
+        ];
+        for l in labels {
+            assert!(
+                l.chars().all(|c| c < '\u{1F300}'),
+                "label must not contain emoji: {l}"
             );
         }
     }

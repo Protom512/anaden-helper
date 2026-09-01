@@ -3,6 +3,11 @@
 //! 戦略の実体 (`MiniGameStrategy` trait 実装) とは分離されたメタ情報層。
 //! anaden-studio 等 GUI はこのカタログからドロップダウン/チェックボックスを生成し、
 //! 選択結果を [`StrategySelection`] (serde/TOML互換) に射影する。
+//!
+//! Issue #139: カタログは `templates/pipelines/` に実在する 6 パイプラインのみを
+//! 登録する（fishing は pipelines/fishing が存在しないため除去）。
+//! `pipeline_dir` / `start_task` / `algorithm` / `target` を [`StrategyDef`] が持つ
+//! ことで、`anaden run` 引数列の組み立てはカタログ定義単一情報源から行われる。
 
 use serde::{Deserialize, Serialize};
 
@@ -17,47 +22,142 @@ pub struct StrategyOptionDef {
     pub default: bool,
 }
 
-/// 選択可能な戦略の定義。
+/// 選択可能な戦略（実在パイプライン）の定義。
+///
+/// `pipeline_dir` / `start_task` / `algorithm` は各パイプラインの
+/// TaskDef TOML (`templates/pipelines/<id>/*.toml`) の `name` / `algorithm` と
+/// 一致させること（カタログ単一情報源化・Issue #139 T1）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrategyDef {
-    /// 戦略の識別子（TOML キー・レジストリ名と一致）。
+    /// 戦略の識別子（= `templates/pipelines/` のディレクトリ名）。
     pub id: String,
     /// UI 表示名。
     pub label: String,
     /// ON/OFF 可能なオプション群。
     pub options: Vec<StrategyOptionDef>,
+    /// `anaden run` へ渡す pipeline ディレクトリ（リポジトリルート相対）。
+    pub pipeline_dir: String,
+    /// 開始タスク名（TaskDef TOML の `name`・pipeline.toml の `start_task`）。
+    pub start_task: String,
+    /// テンプレートマッチアルゴリズム（`sse`|`ccoeff`・TaskDef の algorithm 準拠）。
+    pub algorithm: String,
+    /// `--target` 上書き（PC 版パイプラインは `Some("windows")`・Android 版は None）。
+    #[serde(default)]
+    pub target: Option<String>,
 }
 
-/// 戦略カタログ。組み込み戦略のメタ情報一覧。
+impl StrategyDef {
+    /// この定義から `anaden run` の引数列（サブコマンド以降）を組み立てる。
+    ///
+    /// 単一情報源化（Issue #139 T1）: 引数列はハードコード match ではなく
+    /// このメソッド（カタログ定義）からのみ構成される。
+    #[must_use]
+    pub fn to_run_args(&self) -> Vec<String> {
+        let mut args = vec![
+            "run".to_string(),
+            "--algorithm".to_string(),
+            self.algorithm.clone(),
+        ];
+        if let Some(target) = &self.target {
+            args.push("--target".to_string());
+            args.push(target.clone());
+        }
+        args.push(self.pipeline_dir.clone());
+        args.push(self.start_task.clone());
+        args
+    }
+}
+
+/// 実在パイプラインのカタログ定義を構築するヘルパ（builtin の宣言性確保用）。
+fn pipeline_def(
+    id: &str,
+    label: &str,
+    pipeline_dir: &str,
+    start_task: &str,
+    algorithm: &str,
+    target: Option<&str>,
+) -> StrategyDef {
+    StrategyDef {
+        id: id.to_string(),
+        label: label.to_string(),
+        options: Vec::new(),
+        pipeline_dir: pipeline_dir.to_string(),
+        start_task: start_task.to_string(),
+        algorithm: algorithm.to_string(),
+        target: target.map(std::string::ToString::to_string),
+    }
+}
+
+/// 戦略カタログ。実在パイプラインのメタ情報一覧。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrategyCatalog {
     strategies: Vec<StrategyDef>,
 }
 
 impl StrategyCatalog {
-    /// 組み込み戦略を列挙したカタログを構築する。
+    /// `templates/pipelines/` に実在するパイプラインのカタログを構築する
+    /// （Issue #139: fishing は pipeline が実在しないため登録しない）。
     ///
-    /// 段階拡張（Issue #83 シャード3）: 当面は主要戦略 Fishing のみ。
-    /// 全戦略網羅は非スコープ。
+    /// 各定義の `start_task` / `algorithm` は TaskDef TOML の実測値:
+    /// - `field_loop`      : tap_bottom.toml  name="TapBottomStable" / ccoeff
+    /// - `field_loop_pc`   : pipeline.toml    start_task="TapBottomStablePc" / ccoeff
+    /// - `nav_to_field`    : dismiss_daily_popup.toml name="DismissDailyPopup" / ccoeff
+    /// - `nav_to_field_pc` : tap_to_start.toml name="TapToStartPc" / ccoeff (--target windows)
+    /// - `worldmap_loop`   : tap_ancient_tab.toml name="TapAncientTab" / ccoeff
+    /// - `_title_load`     : load_game.toml   name="LoadGame" / ccoeff
     #[must_use]
     pub fn builtin() -> Self {
         Self {
-            strategies: vec![StrategyDef {
-                id: "fishing".to_string(),
-                label: "釣りミニゲーム".to_string(),
-                options: vec![
-                    StrategyOptionDef {
-                        id: "auto_release".to_string(),
-                        label: "釣り上げ後に自動リリース".to_string(),
-                        default: true,
-                    },
-                    StrategyOptionDef {
-                        id: "skip_animation".to_string(),
-                        label: "リールアニメーション省略".to_string(),
-                        default: false,
-                    },
-                ],
-            }],
+            strategies: vec![
+                pipeline_def(
+                    "field_loop",
+                    "フィールド周回（Android 20:9）",
+                    "templates/pipelines/field_loop",
+                    "TapBottomStable",
+                    "ccoeff",
+                    None,
+                ),
+                pipeline_def(
+                    "field_loop_pc",
+                    "フィールド周回（PC 16:9）",
+                    "templates/pipelines/field_loop_pc",
+                    "TapBottomStablePc",
+                    "ccoeff",
+                    Some("windows"),
+                ),
+                pipeline_def(
+                    "nav_to_field",
+                    "フィールドへ遷移（Android 20:9）",
+                    "templates/pipelines/nav_to_field",
+                    "DismissDailyPopup",
+                    "ccoeff",
+                    None,
+                ),
+                pipeline_def(
+                    "nav_to_field_pc",
+                    "フィールドへ遷移（PC 16:9 コールドスタート）",
+                    "templates/pipelines/nav_to_field_pc",
+                    "TapToStartPc",
+                    "ccoeff",
+                    Some("windows"),
+                ),
+                pipeline_def(
+                    "worldmap_loop",
+                    "ワールドマップ周回（古代タブ）",
+                    "templates/pipelines/worldmap_loop",
+                    "TapAncientTab",
+                    "ccoeff",
+                    None,
+                ),
+                pipeline_def(
+                    "_title_load",
+                    "タイトル→ロード（実験用）",
+                    "templates/pipelines/_title_load",
+                    "LoadGame",
+                    "ccoeff",
+                    None,
+                ),
+            ],
         }
     }
 
@@ -154,14 +254,118 @@ pub enum SelectionError {
 mod tests {
     use super::*;
 
+    /// 実在が期待される 6 パイプラインの id 一覧（Issue #139 受け入れ基準）。
+    const EXPECTED_IDS: [&str; 6] = [
+        "field_loop",
+        "field_loop_pc",
+        "nav_to_field",
+        "nav_to_field_pc",
+        "worldmap_loop",
+        "_title_load",
+    ];
+
     #[test]
-    fn builtin_catalog_contains_fishing_with_two_options() {
+    fn builtin_catalog_contains_exactly_six_real_pipelines() {
         let catalog = StrategyCatalog::builtin();
-        let fishing = catalog.find("fishing").expect("fishing must exist");
-        assert_eq!(fishing.label, "釣りミニゲーム");
-        assert_eq!(fishing.options.len(), 2);
-        assert!(fishing.options.iter().any(|o| o.id == "auto_release"));
-        assert!(fishing.options.iter().any(|o| o.id == "skip_animation"));
+        let ids: Vec<&str> = catalog.strategies().iter().map(|s| s.id.as_str()).collect();
+        assert_eq!(ids, EXPECTED_IDS, "catalog ids: {ids:?}");
+    }
+
+    #[test]
+    fn builtin_catalog_does_not_contain_nonexistent_fishing() {
+        let catalog = StrategyCatalog::builtin();
+        assert!(
+            catalog.find("fishing").is_none(),
+            "fishing は実在しない pipeline のためカタログ外であること"
+        );
+    }
+
+    #[test]
+    fn every_strategy_has_pipeline_dir_start_task_and_valid_algorithm() {
+        let catalog = StrategyCatalog::builtin();
+        for s in catalog.strategies() {
+            assert!(!s.pipeline_dir.is_empty(), "{}: pipeline_dir 未設定", s.id);
+            assert!(
+                s.pipeline_dir.contains(&s.id),
+                "{}: pipeline_dir に id が含まれること ({}),",
+                s.id,
+                s.pipeline_dir
+            );
+            assert!(!s.start_task.is_empty(), "{}: start_task 未設定", s.id);
+            assert!(
+                s.algorithm == "sse" || s.algorithm == "ccoeff",
+                "{}: algorithm は sse|ccoeff のみ (actual: {})",
+                s.id,
+                s.algorithm
+            );
+        }
+    }
+
+    #[test]
+    fn catalog_pipeline_dirs_actually_exist_in_repo() {
+        // カタログ定義がリポジトリ実体と乖離していないことの機械検証
+        //（テスト実行は crate ルートから相対でない場合があるため env!("CARGO_MANIFEST_DIR")
+        // からリポジトリルートを辿る）。
+        let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest_dir.ancestors().nth(2).unwrap();
+        let catalog = StrategyCatalog::builtin();
+        for s in catalog.strategies() {
+            let dir = repo_root.join(&s.pipeline_dir);
+            assert!(
+                dir.is_dir(),
+                "{}: pipeline_dir が実在しない: {}",
+                s.id,
+                s.pipeline_dir
+            );
+        }
+    }
+
+    #[test]
+    fn pc_strategies_carry_windows_target_and_android_do_not() {
+        let catalog = StrategyCatalog::builtin();
+        for s in catalog.strategies() {
+            let expect_windows = s.id.ends_with("_pc");
+            assert_eq!(
+                s.target.as_deref(),
+                if expect_windows {
+                    Some("windows")
+                } else {
+                    None
+                },
+                "{}: target 設定が想定と異なる (actual: {:?})",
+                s.id,
+                s.target
+            );
+        }
+    }
+
+    #[test]
+    fn to_run_args_builds_catalog_driven_argument_sequence() {
+        let catalog = StrategyCatalog::builtin();
+        let nav_pc = catalog.find("nav_to_field_pc").unwrap();
+        assert_eq!(
+            nav_pc.to_run_args(),
+            vec![
+                "run",
+                "--algorithm",
+                "ccoeff",
+                "--target",
+                "windows",
+                "templates/pipelines/nav_to_field_pc",
+                "TapToStartPc",
+            ]
+        );
+        let field = catalog.find("field_loop").unwrap();
+        assert_eq!(
+            field.to_run_args(),
+            vec![
+                "run",
+                "--algorithm",
+                "ccoeff",
+                "templates/pipelines/field_loop",
+                "TapBottomStable",
+            ]
+        );
     }
 
     #[test]
@@ -171,34 +375,33 @@ mod tests {
     }
 
     #[test]
-    fn default_selection_has_defaults_and_no_strategy() {
+    fn default_selection_has_no_strategy_and_empty_options() {
         let catalog = StrategyCatalog::builtin();
         let sel = catalog.default_selection();
         assert_eq!(sel.strategy, None);
-        assert_eq!(sel.option("fishing", "auto_release"), Some(true));
-        assert_eq!(sel.option("fishing", "skip_animation"), Some(false));
+        assert!(
+            sel.options.is_empty(),
+            "実在 6 パイプラインには ON/OFF オプションが無い"
+        );
     }
 
     #[test]
     fn set_and_get_option_roundtrip() {
         let mut sel = StrategySelection::default();
-        sel.set_option("fishing", "skip_animation", true);
-        assert_eq!(sel.option("fishing", "skip_animation"), Some(true));
-        assert_eq!(sel.option("fishing", "auto_release"), None);
+        sel.set_option("field_loop", "some_option", true);
+        assert_eq!(sel.option("field_loop", "some_option"), Some(true));
+        assert_eq!(sel.option("field_loop", "other"), None);
     }
 
     #[test]
     fn selection_toml_roundtrip_keeps_compatibility() {
         // 既存 TOML 設定形式との互換: toml 往復で値が保存される。
         let mut sel = StrategySelection::from_defaults(&StrategyCatalog::builtin());
-        sel.strategy = Some("fishing".to_string());
-        sel.set_option("fishing", "auto_release", false);
+        sel.strategy = Some("worldmap_loop".to_string());
+        sel.set_option("worldmap_loop", "demo", false);
 
         let toml_str = toml::to_string(&sel).expect("serialize");
-        assert!(toml_str.contains(r#"strategy = "fishing""#));
-        // toml クレートはドット含有キーを引用符付き (`"fishing.auto_release" = false`) で
-        // 出力するため、キー名のみを部分一致で検証する。
-        assert!(toml_str.contains("fishing.auto_release"));
+        assert!(toml_str.contains(r#"strategy = "worldmap_loop""#));
 
         let parsed: StrategySelection = toml::from_str(&toml_str).expect("deserialize");
         assert_eq!(parsed, sel);
@@ -206,10 +409,11 @@ mod tests {
 
     #[test]
     fn selection_parses_unknown_strategy_without_error() {
-        // フォワード互換: 未知の戦略でもデシリアライズ自体は成功する。
-        let toml_str = r#"strategy = "future-strategy""#;
+        // フォワード互換: 未知の戦略（旧 fishing 設定ファイル等）でも
+        // デシリアライズ自体は成功する。
+        let toml_str = r#"strategy = "fishing""#;
         let parsed: StrategySelection = toml::from_str(toml_str).expect("deserialize");
-        assert_eq!(parsed.strategy.as_deref(), Some("future-strategy"));
+        assert_eq!(parsed.strategy.as_deref(), Some("fishing"));
     }
 
     #[test]
@@ -224,8 +428,18 @@ mod tests {
             Err(SelectionError::UnknownStrategy { .. })
         ));
 
+        // fishing はカタログ外（pipeline が実在しない）のため検証も拒否する。
         sel = StrategySelection {
             strategy: Some("fishing".to_string()),
+            ..Default::default()
+        };
+        assert!(matches!(
+            sel.validate(&catalog),
+            Err(SelectionError::UnknownStrategy { .. })
+        ));
+
+        sel = StrategySelection {
+            strategy: Some("field_loop".to_string()),
             ..Default::default()
         };
         assert!(sel.validate(&catalog).is_ok());
