@@ -6,7 +6,12 @@ import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 
-import { normalizeGateDiff, buildDiffSection, withDiffContext } from './review-gate-diff.js';
+import {
+  normalizeGateDiff,
+  buildDiffSection,
+  withDiffContext,
+  buildUnifiedGateDiff,
+} from './review-gate-diff.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -75,4 +80,109 @@ test('review-gate.js: all 3 reviewer prompts wrapped with withDiffContext (defin
 
 test('review-gate.js: changed files list retained in reviewer prompts', () => {
   assert.ok(src.includes('Changed files: ${changes.changedFiles.join'));
+});
+
+// ── buildUnifiedGateDiff: deterministic fallback chain (Issue #102 UC-1 / T1) ──
+// Chain: (a) working-tree non-empty → working-tree mode,
+//        (b) else HEAD~1..HEAD commit-range,
+//        (c) else merge-base (origin/master...HEAD),
+//        (d) else untracked-only → intent-to-add mode,
+//        (e) all empty or 429 placeholder → fail-closed.
+
+test('buildUnifiedGateDiff: (a) non-empty working-tree STAT/DIFF → working-tree mode', () => {
+  const out = buildUnifiedGateDiff({
+    stat: ' foo.js | 2 ++',
+    diff: 'diff --git a/foo.js b/foo.js',
+    headPrevStat: ' bar.js | 1 +',
+    headPrevDiff: 'diff --git a/bar.js b/bar.js',
+    treeHash: 'abc123',
+  });
+  assert.equal(out.mode, 'working-tree');
+  assert.equal(out.basis, 'working-tree');
+  assert.equal(out.treeHash, 'abc123');
+  assert.ok(out.snapshot.includes('=== STAT ==='));
+  assert.ok(out.snapshot.includes('diff --git a/foo.js'));
+  assert.ok(!out.snapshot.includes('bar.js')); // must not fall through
+});
+
+test('buildUnifiedGateDiff: (b) empty working-tree → falls back to HEAD~1..HEAD', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '', diff: '',
+    headPrevStat: ' bar.js | 1 +',
+    headPrevDiff: 'diff --git a/bar.js b/bar.js',
+    treeHash: 'def456',
+  });
+  assert.equal(out.mode, 'commit-range');
+  assert.equal(out.basis, 'commit-range:HEAD~1..HEAD');
+  assert.ok(out.snapshot.includes('diff --git a/bar.js'));
+});
+
+test('buildUnifiedGateDiff: (c) HEAD~1..HEAD empty too → merge-base fallback', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '', diff: '', headPrevStat: '', headPrevDiff: '',
+    mergeBaseStat: ' baz.js | 3 +++',
+    mergeBaseDiff: 'diff --git a/baz.js b/baz.js',
+    treeHash: null,
+  });
+  assert.equal(out.mode, 'commit-range');
+  assert.equal(out.basis, 'commit-range:origin/master...HEAD');
+  assert.ok(out.snapshot.includes('diff --git a/baz.js'));
+  assert.equal('treeHash' in out, false); // null treeHash omitted
+});
+
+test('buildUnifiedGateDiff: (d) untracked only → intent-to-add mode with file list', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '', diff: '', headPrevStat: '', headPrevDiff: '',
+    mergeBaseStat: '', mergeBaseDiff: '',
+    untracked: '?? new-file.js\n?? other.js',
+    treeHash: 'aaa111',
+  });
+  assert.equal(out.mode, 'intent-to-add');
+  assert.equal(out.basis, 'untracked-only');
+  assert.deepEqual(out.untrackedFiles, ['new-file.js', 'other.js']);
+  assert.ok(out.snapshot.includes('new-file.js'));
+  assert.ok(/individual Read|intent-to-add/i.test(out.snapshot));
+});
+
+test('buildUnifiedGateDiff: (e) everything empty → fail-closed', () => {
+  const out = buildUnifiedGateDiff({
+    stat: '', diff: '', headPrevStat: '', headPrevDiff: '',
+    mergeBaseStat: '', mergeBaseDiff: '', untracked: '',
+  });
+  assert.equal(out.mode, 'fail-closed');
+  assert.equal(out.basis, 'all-empty');
+  assert.ok(typeof out.reason === 'string' && out.reason.length > 0);
+  assert.equal(out.snapshot, '');
+});
+
+test('buildUnifiedGateDiff: 429 placeholder exact match in diff → fail-closed', () => {
+  for (const ph of ['429', 'rate limit', 'placeholder']) {
+    const out = buildUnifiedGateDiff({
+      stat: '', diff: ph, headPrevStat: '', headPrevDiff: '',
+      mergeBaseStat: '', mergeBaseDiff: '', untracked: '',
+    });
+    assert.equal(out.mode, 'fail-closed', `placeholder "${ph}" must be fail-closed`);
+    assert.ok(/429|rate limit|placeholder/.test(out.reason));
+    assert.equal(out.snapshot, '');
+  }
+});
+
+test('buildUnifiedGateDiff: legitimate diff containing "placeholder" as substring is NOT fail-closed', () => {
+  // Exact-match-only detection: a real diff touching a placeholder variable
+  // must not trigger fail-closed (estimate approval condition #1).
+  const out = buildUnifiedGateDiff({
+    stat: ' ph.js | 2 ++',
+    diff: 'diff --git a/ph.js b/ph.js\n-const placeholder = 1;\n+const placeholder = 2;',
+  });
+  assert.equal(out.mode, 'working-tree');
+});
+
+test('buildUnifiedGateDiff: missing input object → fail-closed (no throw)', () => {
+  const out = buildUnifiedGateDiff(null);
+  assert.equal(out.mode, 'fail-closed');
+});
+
+test('buildUnifiedGateDiff: reuses buildCommitRangeDiffInput semantics — working-tree still wins with stat only', () => {
+  const out = buildUnifiedGateDiff({ stat: ' x | 1 +' });
+  assert.equal(out.mode, 'working-tree');
 });
