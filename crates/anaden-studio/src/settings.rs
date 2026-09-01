@@ -376,4 +376,75 @@ mod tests {
         assert!(path.is_absolute());
         assert_eq!(path, dir.path().join("anaden-studio").join(SETTINGS_FILE));
     }
+
+    // ---- T4: 実在 6 パイプラインの選択戦略 TOML roundtrip ----
+
+    /// 実在 6 パイプラインのそれぞれで save → load が戦略 id を保存すること。
+    #[test]
+    fn roundtrip_preserves_each_of_six_real_pipeline_strategies() {
+        for id in [
+            "field_loop",
+            "field_loop_pc",
+            "nav_to_field",
+            "nav_to_field_pc",
+            "worldmap_loop",
+            "_title_load",
+        ] {
+            let dir = tempfile::tempdir().unwrap();
+            let path = dir.path().join("settings.toml");
+            let settings = StudioSettings {
+                selection: StrategySelection {
+                    strategy: Some(id.to_string()),
+                    options: std::collections::BTreeMap::new(),
+                },
+            };
+            settings.save(&path).unwrap();
+            let loaded = StudioSettings::load(&path).into_settings_or_default();
+            assert_eq!(
+                loaded.selection.strategy.as_deref(),
+                Some(id),
+                "roundtrip lost strategy {id}"
+            );
+        }
+    }
+
+    /// TOML 本文に選択戦略 id が現れる（人間可読・デバッグ容易性）。
+    #[test]
+    fn saved_toml_contains_selected_pipeline_id() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        let settings = StudioSettings {
+            selection: StrategySelection {
+                strategy: Some("nav_to_field_pc".to_string()),
+                options: std::collections::BTreeMap::new(),
+            },
+        };
+        settings.save(&path).unwrap();
+        let text = std::fs::read_to_string(&path).unwrap();
+        assert!(text.contains(r#"strategy = "nav_to_field_pc""#), "{text}");
+    }
+
+    /// 選択戦略がカタログの実在 6 パイプラインのいずれかと整合する。
+    #[test]
+    fn loaded_selection_validates_against_builtin_catalog() {
+        let catalog = anaden_strategies::StrategyCatalog::builtin();
+        for s in catalog.strategies() {
+            let sel = StrategySelection {
+                strategy: Some(s.id.clone()),
+                options: std::collections::BTreeMap::new(),
+            };
+            assert!(sel.validate(&catalog).is_ok(), "{}", s.id);
+        }
+    }
+
+    /// 旧形式（fishing 等・実在しない戦略）の設定もフォールバックせず
+    /// 読み込める（フォワード互換。検証は UI 側で行う）。
+    #[test]
+    fn roundtrip_of_legacy_unknown_strategy_still_loads() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("settings.toml");
+        std::fs::write(&path, "[selection]\nstrategy = \"fishing\"\n").unwrap();
+        let loaded = StudioSettings::load(&path).into_settings_or_default();
+        assert_eq!(loaded.selection.strategy.as_deref(), Some("fishing"));
+    }
 }

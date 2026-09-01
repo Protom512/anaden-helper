@@ -87,20 +87,15 @@ pub fn build_spawn_spec(program: &str, args: &[String]) -> SpawnSpec {
     SpawnSpec::new(program, args.to_vec())
 }
 
-/// 釣り戦略の既定 pipeline ディレクトリ（リポジトリ相対・暫定固定）。
-const FISHING_PIPELINE_DIR: &str = "pipelines/fishing";
-/// 釣り戦略の開始タスク名。
-const FISHING_START_TASK: &str = "fishing";
-/// 釣り戦略の既定マッチングアルゴリズム（--algorithm は sse|ccoeff のみ受理）。
-const FISHING_ALGORITHM: &str = "sse";
-
 /// [`StrategySelection`] から `anaden run` の CLI 引数列を組み立てる純関数
 /// （Issue #88 受け入れ基準: egui 非依存・ヘッドレスユニットテスト対象）。
 ///
-/// 戦略マッピング（Issue #88 UC-1/UC-2・暫定対応）:
-/// - `fishing` → `run --algorithm sse pipelines/fishing fishing`
-///   （オプション auto_release / skip_animation は現行 CLI に対応フラグが
-///   存在しないため引数へは反映しない。将来の CLI 拡張時に反映予定）
+/// Issue #139 T1 単一情報源化: 引数列はハードコード match ではなく
+/// `StrategyCatalog::builtin()` の [`anaden_strategies::StrategyDef::to_run_args`]
+/// （カタログ定義）から組み立てる。実在 6 パイプライン
+/// (field_loop / field_loop_pc / nav_to_field / nav_to_field_pc / worldmap_loop /
+/// _title_load) がカタログ経由で実行可能。
+///
 /// - `--goal` / `--goal-file` は排他（CLI の `parse_goal_flag` 制約）のため、
 ///   本関数はいずれも出力しない（ゴール無し = 従来の max_iters 挙動）。
 ///
@@ -113,16 +108,68 @@ pub fn build_run_args(
     let id = selection.strategy.as_deref().ok_or_else(|| {
         "戦略が選択されていません。「戦略設定」で戦略を選択してください".to_string()
     })?;
-    match id {
-        "fishing" => Ok(vec![
-            "run".to_string(),
-            "--algorithm".to_string(),
-            FISHING_ALGORITHM.to_string(),
-            FISHING_PIPELINE_DIR.to_string(),
-            FISHING_START_TASK.to_string(),
-        ]),
-        other => Err(format!("未知の戦略です(カタログ外): {other}")),
+    let catalog = anaden_strategies::StrategyCatalog::builtin();
+    catalog
+        .find(id)
+        .map(anaden_strategies::StrategyDef::to_run_args)
+        .ok_or_else(|| format!("未知の戦略です(カタログ外): {id}"))
+}
+
+/// コンパイル時に確定する workspace ルート（anaden-studio manifest から
+/// 2 階層上昇 = リポジトリルート）。実行時 workdir に依存しない
+/// pipeline ディレクトリ解決の基準点（Issue #139 T2）。
+fn workspace_root() -> PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+}
+
+/// `build_run_args` が生成した引数列中の pipeline ディレクトリ位置引数を
+/// workspace ルート基準の絶対パスへ決定的解決する純関数（Issue #139 T2）。
+///
+/// カタログの `pipeline_dir` は `templates/pipelines/<name>` 形式の相対パス。
+/// 従来は子プロセス (anaden CLI) 側の cwd 依存解決だったため、studio の
+/// 起動 workdir 次第で「パイプライン読込失敗」になっていた。本関数は
+/// spawn 前に UI 側で絶対パスへ確定させる:
+///
+/// - `templates/pipelines/<name>` (相対) → `<root>/templates/pipelines/<name>`
+///   （解決先が実在する場合のみ置換。非実在なら元の値を維持し CLI の
+///   fail-closed エラーに委譲する）
+/// - `<name>` (バリアンド: バ bare name) → `<root>/templates/pipelines/<name>`
+/// - 絶対パス・その他のトークンは変更しない
+///
+/// `run` サブコマンド・`--algorithm`/`--target` とその値は位置引数ではない
+/// ためスキップする。
+#[must_use]
+pub fn resolve_pipeline_arg(args: &[String], root: &Path) -> Vec<String> {
+    let mut out = args.to_vec();
+    let mut skip_value = false;
+    for tok in out.iter_mut() {
+        if skip_value {
+            skip_value = false;
+            continue;
+        }
+        if tok == "run" || !tok.starts_with('-') && args.iter().any(|a| a == "run") {
+            // 位置引数候補。テンプレ相対形式か bare name のみ解決する。
+            if tok.starts_with("templates/pipelines/") || tok.starts_with("templates\\pipelines\\")
+            {
+                let joined = root.join(tok.as_str());
+                if joined.is_dir() {
+                    *tok = joined.to_string_lossy().into_owned();
+                }
+            } else if !tok.starts_with('-')
+                && !tok.contains('/')
+                && !tok.contains('\\')
+                && tok != "run"
+            {
+                let joined = root.join("templates").join("pipelines").join(tok.as_str());
+                if joined.is_dir() {
+                    *tok = joined.to_string_lossy().into_owned();
+                }
+            }
+        } else if tok.starts_with("--") {
+            skip_value = true;
+        }
     }
+    out
 }
 
 /// LogLevel の表示色（スクロールログビューアの色分け・純関数）。
@@ -299,7 +346,12 @@ impl PipelineRunnerApp {
             return;
         }
         match build_run_args(self.strategy_panel.selection()) {
-            Ok(args) => self.start_pipeline(&args),
+            Ok(args) => {
+                // Issue #139 T2: pipeline ディレクトリを workspace ルート基準の
+                // 絶対パスへ決定論的に解決（cwd 依存を除去）。
+                let resolved = resolve_pipeline_arg(&args, &workspace_root());
+                self.start_pipeline(&resolved);
+            }
             Err(e) => self.record_error_line(&e),
         }
     }
@@ -1035,16 +1087,16 @@ mod tests {
 
     // ---- build_run_args（Issue #88 タスク1・UC-1/UC-4）----
 
-    fn fishing_selection() -> anaden_strategies::StrategySelection {
+    fn pipeline_selection(id: &str) -> anaden_strategies::StrategySelection {
         let mut panel = crate::strategy_ui::StrategyPanel::default();
-        panel.select_strategy("fishing");
+        panel.select_strategy(id);
         panel.selection().clone()
     }
 
-    /// UC-1 正常系: fishing 選択で run サブコマンド + --algorithm + 位置引数が組まれる。
+    /// UC-1 正常系: 実在パイプライン選択で run サブコマンド + --algorithm + 位置引数が組まれる。
     #[test]
-    fn test_build_run_args_fishing_builds_run_subcommand() {
-        let args = build_run_args(&fishing_selection()).unwrap();
+    fn test_build_run_args_field_loop_builds_run_subcommand() {
+        let args = build_run_args(&pipeline_selection("field_loop")).unwrap();
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--algorithm".to_string()));
         // --algorithm の値は sse|ccoeff のみ受理される値であること。
@@ -1061,8 +1113,8 @@ mod tests {
 
     /// UC-1 正常系: pipeline_dir / start_task 位置引数が含まれる。
     #[test]
-    fn test_build_run_args_fishing_includes_positional_args() {
-        let args = build_run_args(&fishing_selection()).unwrap();
+    fn test_build_run_args_field_loop_includes_positional_args() {
+        let args = build_run_args(&pipeline_selection("field_loop")).unwrap();
         // run の位置引数（フラグ以降の非フラグトークン）は pipeline_dir と start_task。
         let positional: Vec<&String> = args
             .iter()
@@ -1071,19 +1123,60 @@ mod tests {
             .map(|(_, a)| a)
             .collect();
         assert_eq!(positional.len(), 2, "args: {args:?}");
-        assert!(positional[0].contains("fishing"));
-        assert!(!positional[1].starts_with("--"));
+        assert!(positional[0].contains("field_loop"));
+        assert_eq!(positional[1], "TapBottomStable");
     }
 
-    /// UC-1 正常系: オプション変更（auto_release=false 等）でも引数生成は成功する。
+    /// Issue #139 T1: PC 版パイプラインは --target windows がカタログから注入される。
     #[test]
-    fn test_build_run_args_fishing_with_toggled_options() {
-        let mut panel = crate::strategy_ui::StrategyPanel::default();
-        panel.select_strategy("fishing");
-        panel.toggle_option("auto_release", false);
-        panel.toggle_option("skip_animation", true);
-        let args = build_run_args(panel.selection()).unwrap();
+    fn test_build_run_args_pc_pipeline_injects_windows_target() {
+        let args = build_run_args(&pipeline_selection("nav_to_field_pc")).unwrap();
         assert_eq!(args[0], "run");
+        let target_idx = args
+            .iter()
+            .position(|a| a == "--target")
+            .unwrap_or_else(|| panic!("--target not found in {args:?}"));
+        assert_eq!(args[target_idx + 1], "windows");
+        assert!(args.contains(&"templates/pipelines/nav_to_field_pc".to_string()));
+        assert!(args.contains(&"TapToStartPc".to_string()));
+    }
+
+    /// Issue #139 T1: 実在 6 パイプラインすべてがカタログ経由で引数組み立て可能。
+    #[test]
+    fn test_build_run_args_supports_all_six_real_pipelines() {
+        for id in [
+            "field_loop",
+            "field_loop_pc",
+            "nav_to_field",
+            "nav_to_field_pc",
+            "worldmap_loop",
+            "_title_load",
+        ] {
+            let args =
+                build_run_args(&pipeline_selection(id)).unwrap_or_else(|e| panic!("{id}: {e}"));
+            assert_eq!(args[0], "run", "{id}");
+            assert!(
+                args.iter().any(|a| a.contains(&format!("pipelines/{id}"))),
+                "{id}: pipeline_dir missing in {args:?}"
+            );
+        }
+    }
+
+    /// Issue #139 T1: fishing（実在しない pipeline）はカタログ外として拒否される
+    /// （select_strategy はカタログ外 id を無視するため strategy は None のまま）。
+    #[test]
+    fn test_build_run_args_fishing_is_rejected_as_nonexistent_pipeline() {
+        // パネル経由: カタログ外のため選択自体が無視される → 未選択エラー。
+        let sel = pipeline_selection("fishing");
+        assert_eq!(sel.strategy, None);
+
+        // 混入経路 (load_toml 等) を想定し strategy へ直接 fishing を入れた場合。
+        let injected = anaden_strategies::StrategySelection {
+            strategy: Some("fishing".to_string()),
+            ..Default::default()
+        };
+        let err = build_run_args(&injected).unwrap_err();
+        assert!(err.contains("fishing"), "unexpected: {err}");
     }
 
     /// UC-4 エッジケース: 戦略未選択は Err（子プロセス起動拒否の事前検証）。
@@ -1112,9 +1205,130 @@ mod tests {
     /// build_run_args はいずれも出力しない。
     #[test]
     fn test_build_run_args_never_outputs_goal_flags() {
-        let args = build_run_args(&fishing_selection()).unwrap();
+        let args = build_run_args(&pipeline_selection("field_loop")).unwrap();
         assert!(!args.contains(&"--goal".to_string()));
         assert!(!args.contains(&"--goal-file".to_string()));
+    }
+
+    // ---- Issue #139 T2: pipeline ディレクトリ決定的解決 ----
+
+    /// tempdir に `templates/pipelines/<name>` ディレクトリを作るヘルパ。
+    fn make_pipeline_dir(root: &Path, name: &str) -> PathBuf {
+        let dir = root.join("templates").join("pipelines").join(name);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    /// 相対 pipeline_dir が workspace ルート基準の絶対パスへ置換される。
+    #[test]
+    fn test_resolve_pipeline_arg_rewrites_relative_template_path() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = make_pipeline_dir(root.path(), "field_loop");
+        let args = vec![
+            "run".to_string(),
+            "--algorithm".to_string(),
+            "ccoeff".to_string(),
+            "templates/pipelines/field_loop".to_string(),
+            "TapBottomStable".to_string(),
+        ];
+        let got = resolve_pipeline_arg(&args, root.path());
+        assert_eq!(PathBuf::from(&got[3]), dir);
+        // その他のトークンは不変。
+        assert_eq!(got[0], "run");
+        assert_eq!(got[2], "ccoeff");
+        assert_eq!(got[4], "TapBottomStable");
+    }
+
+    /// 非実在 pipeline_dir は元の値を維持（CLI 側 fail-closed に委譲）。
+    #[test]
+    fn test_resolve_pipeline_arg_keeps_nonexistent_dir_as_is() {
+        let root = tempfile::tempdir().unwrap();
+        let args = vec![
+            "run".to_string(),
+            "templates/pipelines/ghost".to_string(),
+            "Task".to_string(),
+        ];
+        let got = resolve_pipeline_arg(&args, root.path());
+        assert_eq!(got[1], "templates/pipelines/ghost");
+    }
+
+    /// bare name（カタログ id）も templates/pipelines 基準で解決される。
+    #[test]
+    fn test_resolve_pipeline_arg_resolves_bare_pipeline_name() {
+        let root = tempfile::tempdir().unwrap();
+        let dir = make_pipeline_dir(root.path(), "worldmap_loop");
+        let args = vec![
+            "run".to_string(),
+            "worldmap_loop".to_string(),
+            "Task".to_string(),
+        ];
+        let got = resolve_pipeline_arg(&args, root.path());
+        assert_eq!(PathBuf::from(&got[1]), dir);
+    }
+
+    /// 絶対パス指定は変更されない（冪等・二重解決なし）。
+    #[test]
+    fn test_resolve_pipeline_arg_keeps_absolute_path_unchanged() {
+        let root = tempfile::tempdir().unwrap();
+        let abs = make_pipeline_dir(root.path(), "field_loop");
+        let args = vec![
+            "run".to_string(),
+            abs.to_string_lossy().into_owned(),
+            "Task".to_string(),
+        ];
+        let got = resolve_pipeline_arg(&args, root.path());
+        assert_eq!(PathBuf::from(&got[1]), abs);
+    }
+
+    /// --target の値（位置引数風の "windows"）は bare name 解決の対象外。
+    #[test]
+    fn test_resolve_pipeline_arg_does_not_touch_flag_values() {
+        let root = tempfile::tempdir().unwrap();
+        // windows という名の pipeline が存在しても --target の値は置換しない。
+        let _ = make_pipeline_dir(root.path(), "windows");
+        let args = vec![
+            "run".to_string(),
+            "--target".to_string(),
+            "windows".to_string(),
+            "templates/pipelines/none".to_string(),
+            "T".to_string(),
+        ];
+        let got = resolve_pipeline_arg(&args, root.path());
+        assert_eq!(got[2], "windows");
+    }
+
+    /// 実機workspace ルートでカタログ 6 パイプラインがすべて絶対解決される
+    /// （T1 カタログ定義からの引数経路が実ディレクトリに到達することの保証）。
+    #[test]
+    fn test_resolve_pipeline_arg_supports_all_six_real_pipelines_on_real_root() {
+        let root = workspace_root();
+        for id in [
+            "field_loop",
+            "field_loop_pc",
+            "nav_to_field",
+            "nav_to_field_pc",
+            "worldmap_loop",
+            "_title_load",
+        ] {
+            let sel = pipeline_selection(id);
+            let args = build_run_args(&sel).unwrap_or_else(|e| panic!("{id}: {e}"));
+            let got = resolve_pipeline_arg(&args, &root);
+            let dir = got
+                .iter()
+                .position(|a| a == "run")
+                .map(|i| {
+                    got[i + 1..]
+                        .iter()
+                        .find(|a| Path::new(a).is_absolute())
+                        .cloned()
+                        .unwrap_or_default()
+                })
+                .unwrap_or_default();
+            assert!(
+                Path::new(&dir).is_dir(),
+                "{id}: resolved dir not found: {dir}"
+            );
+        }
     }
 
     /// UC-4: 戦略未選択のまま開始すると拒否され、子プロセスは起動しない。
@@ -1153,12 +1367,12 @@ mod tests {
     #[test]
     fn test_start_with_selected_strategy_starts_child() {
         let mut app = PipelineRunnerApp::new(dummy_program());
-        app.strategy_panel.select_strategy("fishing");
+        app.strategy_panel.select_strategy("field_loop");
         app.start_pipeline_with_selection();
         if app.status() == RunnerStatus::Running {
             app.stop_pipeline();
         }
-        // 引数組み立て自体は fishing_selection のテストで検証済み。
+        // 引数組み立て自体は pipeline_selection のテストで検証済み。
     }
 
     /// on_strategy_changed: changed=true でのみサマリが再計算される。
@@ -1166,15 +1380,16 @@ mod tests {
     fn test_on_strategy_changed_refreshes_summary() {
         let mut app = PipelineRunnerApp::new(dummy_program());
         assert_eq!(app.strategy_summary(), "戦略未選択");
-        app.strategy_panel.select_strategy("fishing");
+        app.strategy_panel.select_strategy("field_loop");
         // changed=false（同一フレーム内の無操作）では更新されない。
         app.on_strategy_changed(false);
         assert_eq!(app.strategy_summary(), "戦略未選択");
         // changed=true で更新される。
         app.on_strategy_changed(true);
+        // 実在 6 パイプラインは ON/OFF オプションを持たないため「オプションなし」。
         assert_eq!(
             app.strategy_summary(),
-            "strategy=fishing on=[fishing.auto_release]"
+            "strategy=field_loop (オプションなし)"
         );
     }
 
@@ -1198,7 +1413,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         app.settings_path = path.clone();
-        app.strategy_panel.select_strategy("fishing");
+        app.strategy_panel.select_strategy("field_loop");
         app.save_settings_to_path();
         assert!(path.is_file());
         assert!(matches!(
@@ -1214,7 +1429,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         app.settings_path = path.clone();
-        app.strategy_panel.select_strategy("fishing");
+        app.strategy_panel.select_strategy("field_loop");
         app.save_settings_to_path();
 
         let mut app2 = PipelineRunnerApp::new(dummy_program());
@@ -1222,7 +1437,7 @@ mod tests {
         assert_eq!(app2.strategy_summary(), "戦略未選択");
         app2.load_settings_from_path();
         assert!(app2.strategy_panel.selection().strategy.is_some());
-        assert!(app2.strategy_summary().contains("fishing"));
+        assert!(app2.strategy_summary().contains("field_loop"));
     }
 
     /// 読込: ファイル不在 (初回起動) はエラー扱いにしない (UC-2)。
