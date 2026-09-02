@@ -1,0 +1,7 @@
+# ゲーム起動タスク (Issue #144)。
+# 実行経路: `anaden launch --target windows` standalone サブコマンド
+# (crates/anaden-cli/src/main.rs Commands::Launch と突合済み)。
+id = "launch"
+title = "ゲーム起動"
+kind = "launch_subcommand"
+implemented = true

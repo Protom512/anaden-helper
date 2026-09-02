@@ -1,0 +1,7 @@
+# ログインタスクのスケルトン (Issue #144)。
+# implemented = false: 未実装。グレー表示・チェック不可 (嘘の動作可能表示禁止)。
+id = "login"
+title = "ログイン"
+kind = "pipeline_run"
+implemented = false
+pipeline_dir = "templates/pipelines/login"

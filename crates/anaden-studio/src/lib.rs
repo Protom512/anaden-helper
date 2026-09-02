@@ -21,3 +21,4 @@ pub mod settings;
 pub mod shell;
 pub mod source;
 pub mod strategy_ui;
+pub mod tasks;

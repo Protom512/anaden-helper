@@ -22,6 +22,15 @@ use crate::library::{self, TemplateSpec};
 use crate::proposals::{self, Proposal};
 use crate::scoring::{self, Discrimination};
 use crate::source::LiveCapture;
+use crate::tasks;
+
+/// 開始ボタン押下時の実行委譲先 (Issue #144 Task 3)。
+///
+/// SpawnSpec は `tasks::spawn_args` が Kind 分岐済み
+/// (LaunchSubcommand = `launch ...` → childproc 経由、PipelineRun = `run ...`
+/// → runner.rs 経由)。app.rs は配線のみとし、実際の ChildProcess/Runner への
+/// 接続は親シェルが注入する。未注入時は pending へ退避 (fail-closed)。
+pub type TaskDispatch = Box<dyn FnMut(&crate::childproc::SpawnSpec)>;
 
 /// ヒートマップ計算用のダウンスケール倍率。
 /// imageproc の match_template は O(W·H·w·h) の総当たりのため、フル解像度では重い。
@@ -370,6 +379,15 @@ pub struct StudioApp {
     task_dir: PathBuf,
     /// pipeline task の認識成功時アクション選択 (UC-3)。
     task_action: PipelineActionKind,
+    /// MAA 型タスク一覧の定義リスト (Issue #144)。None = 未読込。
+    task_defs: Option<crate::tasks::TaskListState>,
+    /// MAA 型タスク一覧の選択キュー (Issue #144)。
+    /// 開始ボタンの実行委譲先 (未注入時は pending_spawn へ退避)。
+    task_dispatch: Option<TaskDispatch>,
+    /// 未注入時に直近の開始指定を退避するスロット (テスト・後段配線用)。
+    pending_spawn: Option<crate::childproc::SpawnSpec>,
+    /// anaden CLI 実行ファイル (spawn 時の program)。
+    anaden_program: String,
 }
 
 impl Default for StudioApp {
@@ -436,6 +454,10 @@ impl StudioApp {
             connection: ConnectionStatus::default(),
             task_dir: PathBuf::from("./templates/pipelines/created"),
             task_action: PipelineActionKind::ClickSelf,
+            task_defs: None,
+            task_dispatch: None,
+            pending_spawn: None,
+            anaden_program: "anaden".to_string(),
         }
     }
 }
@@ -466,6 +488,136 @@ impl StudioApp {
     /// 現在の接続状態への参照 (Issue #139 T3)。
     pub fn connection(&self) -> &ConnectionStatus {
         &self.connection
+    }
+
+    // ---- Issue #144 Task 3: MAA 型タスク一覧の配線 (ロジックは tasks.rs) ----
+
+    /// 開始ボタンの実行委譲先を注入する (親シェルが ChildProcess/Runner へ接続)。
+    pub fn set_task_dispatch(&mut self, dispatch: TaskDispatch) {
+        self.task_dispatch = Some(dispatch);
+    }
+
+    /// anaden CLI 実行ファイル (spawn 時の program) を設定する。
+    pub fn set_anaden_program(&mut self, program: impl Into<String>) {
+        self.anaden_program = program.into();
+    }
+
+    /// タスク定義が未読込なら既定パスから読み込む (ホーム画面表示時に呼ぶ)。
+    pub fn ensure_task_list_loaded(&mut self) {
+        if self.task_defs.is_none() {
+            let dir = Self::workspace_root().join("templates/tasks");
+            self.load_task_list(&dir);
+        }
+    }
+
+    /// `templates/tasks/` からタスク定義を読み込む。失敗時は status に理由。
+    pub fn load_task_list(&mut self, tasks_dir: &Path) {
+        match tasks::TaskListState::load(tasks_dir) {
+            Ok(list) => {
+                self.status = format!("タスク定義: {} 件読込", list.definitions().len());
+                self.task_defs = Some(list);
+            }
+            Err(e) => self.status = format!("タスク定義読込失敗: {e}"),
+        }
+    }
+
+    /// チェックボックストグル (implemented=false は tasks.rs 側で拒否される)。
+    pub fn toggle_task(&mut self, id: &str) {
+        let Some(list) = &mut self.task_defs else {
+            self.status = "タスク定義が未読込です".to_string();
+            return;
+        };
+        match list.toggle(id) {
+            Ok(()) => self.status = format!("選択: {} 件", list.selected_count()),
+            Err(e) => self.status = e.to_string(),
+        }
+    }
+
+    /// workspace ルート (runner.rs と同一の決定論的解決)。
+    fn workspace_root() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
+    }
+
+    /// CLI target 文字列 (source::Target → anaden CLI の `--target` 値)。
+    fn cli_target(&self) -> &'static str {
+        match self.target {
+            crate::source::Target::Android => "android",
+            crate::source::Target::Windows => "windows",
+        }
+    }
+
+    /// 開始ボタン: 選択キューを Kind 分岐済み SpawnSpec 列に組み立てて委譲する。
+    /// 実行本体は dispatch (親シェル経由で childproc/runner へ)。未注入時は
+    /// pending_spawn へ退避し、後段の注入で取り出せるようにする。
+    pub fn start_task_queue(&mut self) {
+        let Some(list) = &self.task_defs else {
+            self.status = "タスク定義が未読込です".to_string();
+            return;
+        };
+        let specs = match list.spawn_specs(
+            &self.anaden_program,
+            self.cli_target(),
+            Some(self.adb_serial.as_str()),
+            &Self::workspace_root(),
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                self.status = e.to_string();
+                return;
+            }
+        };
+        if specs.is_empty() {
+            self.status = "チェックされたタスクがありません".to_string();
+            return;
+        }
+        let count = specs.len();
+        for spec in specs {
+            match self.task_dispatch.as_mut() {
+                Some(dispatch) => dispatch(&spec),
+                None => self.pending_spawn = Some(spec),
+            }
+        }
+        self.status = format!("開始: {count} タスク");
+    }
+
+    /// 直近の開始指定 (dispatch 未注入時に退避されたもの)。テスト・後段配線用。
+    pub fn pending_spawn(&self) -> Option<&crate::childproc::SpawnSpec> {
+        self.pending_spawn.as_ref()
+    }
+
+    /// タスク一覧 UI (MAA 型チェックボックス) を描画する。
+    /// implemented=false はグレー表示・チェック不可 (嘘の動作可能表示禁止)。
+    pub fn render_task_list(&mut self, ui: &mut egui::Ui) {
+        ui.heading("タスク一覧");
+        if self.task_defs.is_none() {
+            if ui.button("タスク定義を読み込む").clicked() {
+                self.load_task_list(&Self::workspace_root().join("templates/tasks"));
+            }
+        } else if let Some(list) = self.task_defs.clone() {
+            let mut clicked: Option<String> = None;
+            for def in list.definitions() {
+                let mut checked = list.is_selected(&def.id);
+                let label = tasks::checkbox_label(def);
+                ui.add_enabled(
+                    def.is_selectable(),
+                    egui::Checkbox::new(&mut checked, label),
+                );
+                if checked != list.is_selected(&def.id) {
+                    clicked = Some(def.id.clone());
+                }
+            }
+            if let Some(id) = clicked {
+                self.toggle_task(&id);
+            }
+            let can_start = list.selected_count() > 0;
+            ui.add_enabled_ui(can_start, |ui| {
+                if ui.button("開始").clicked() {
+                    self.start_task_queue();
+                }
+            });
+        }
+        ui.separator();
+        ui.label(&self.status);
     }
 
     /// 接続チェックを実行して状態を更新する (Issue #139 T3)。
@@ -1645,5 +1797,81 @@ mod tests {
                 "label must not contain emoji: {l}"
             );
         }
+    }
+
+    // ---- Issue #144 Task 3: MAA 型タスク一覧配線 ----
+
+    fn tasks_dir() -> PathBuf {
+        Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("templates")
+            .join("tasks")
+    }
+
+    /// リポジトリ実タスク定義 6 件を読み込み、実装済み 4 タスクを選択・
+    /// 開始できること (dispatch 注入で SpawnSpec が委譲される)。
+    #[test]
+    fn task_list_loads_and_starts_selected_tasks() {
+        let mut app = StudioApp::default();
+        app.load_task_list(&tasks_dir());
+        assert!(app.status.contains("6"), "status: {}", app.status);
+
+        app.toggle_task("launch");
+        app.toggle_task("field_loop_pc");
+        // 未実装タスクは選択拒否 (グレー表示の機械的保証)。
+        app.toggle_task("login");
+        assert!(app.status.contains("未実装") || app.status.contains("implemented"));
+
+        let specs: std::sync::Arc<std::sync::Mutex<Vec<crate::childproc::SpawnSpec>>> =
+            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
+        let sink = specs.clone();
+        app.set_task_dispatch(Box::new(move |spec| {
+            sink.lock().unwrap().push(spec.clone());
+        }));
+        app.set_anaden_program("anaden-test-bin");
+        app.start_task_queue();
+
+        let got = specs.lock().unwrap();
+        assert_eq!(got.len(), 2, "specs: {got:?}");
+        assert_eq!(got[0].program, "anaden-test-bin");
+        // Kind 分岐: launch → launch サブコマンド、field_loop_pc → run。
+        assert_eq!(got[0].args[0], "launch");
+        assert_eq!(got[1].args[0], "run");
+        assert!(got[1].args.iter().any(|a| a.contains("field_loop_pc")));
+    }
+
+    /// dispatch 未注入時は pending_spawn へ退避 (fail-closed・後段配線用)。
+    #[test]
+    fn start_without_dispatch_stores_pending_spawn() {
+        let mut app = StudioApp::default();
+        app.load_task_list(&tasks_dir());
+        app.toggle_task("launch");
+        app.start_task_queue();
+        let spec = app.pending_spawn().unwrap();
+        assert_eq!(spec.args[0], "launch");
+    }
+
+    /// 未読込・未選択での開始は status に理由を残し何も起動しない。
+    #[test]
+    fn start_without_selection_reports_status() {
+        let mut app = StudioApp::default();
+        app.start_task_queue();
+        assert!(app.status.contains("未読込"), "status: {}", app.status);
+        app.load_task_list(&tasks_dir());
+        app.start_task_queue();
+        assert!(app.status.contains("チェック"), "status: {}", app.status);
+        assert!(app.pending_spawn().is_none());
+    }
+
+    /// タスク一覧 UI (チェックボックス・開始ボタン含む) がパニックせず描画できる。
+    #[test]
+    fn embed_render_task_list_completes_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = StudioApp::default();
+        app.load_task_list(&tasks_dir());
+        ctx.begin_pass(egui::RawInput::default());
+        app.render_task_list(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
     }
 }

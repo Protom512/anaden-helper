@@ -1,0 +1,9 @@
+# つりタスクのスケルトン (Issue #144)。
+# implemented = false: 未実装。グレー表示・チェック不可。
+# 注意: チケット側の files 表記 'templates/tasks/ fishing.toml' (スペース入り typo) は
+# 本ファイル templates/tasks/fishing.toml へ正規化済み。
+id = "fishing"
+title = "つり"
+kind = "pipeline_run"
+implemented = false
+pipeline_dir = "templates/pipelines/fishing"

@@ -1,0 +1,9 @@
+# フィールド周回 (PC版) タスク (Issue #144)。
+# 実行経路: `anaden run templates/pipelines/field_loop_pc`。
+# start_task は pipeline.toml の start_task = "TapBottomStablePc" と突合済み。
+id = "field_loop_pc"
+title = "フィールド周回"
+kind = "pipeline_run"
+implemented = true
+pipeline_dir = "templates/pipelines/field_loop_pc"
+start_task = "TapBottomStablePc"
