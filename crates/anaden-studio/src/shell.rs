@@ -26,6 +26,8 @@ pub const UNIFIED_WINDOW_TITLE: &str = "anaden-studio";
 /// 統合 modebar のモード（Issue #119 UC-1: フラグなし単一起動で全タブ利用可）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnifiedMode {
+    /// MAA 型タスク一覧 (Issue #144: ホーム画面。チェックボックス+開始)。
+    Tasks,
     /// テンプレート作成（StudioApp に委譲）。
     Authoring,
     /// バッチ評価（StudioApp に委譲）。
@@ -42,10 +44,9 @@ pub enum UnifiedMode {
 }
 
 impl Default for UnifiedMode {
-    /// 既定モードは作成 (Authoring)。UC-2 の「作成→実行→履歴」連続フローの
-    /// 入口であり、実行 (Run) であってはならない。
+    /// 既定モードはタスク一覧 (Tasks・Issue #144)。MAA/MDA 型のホーム画面。
     fn default() -> Self {
-        Self::Authoring
+        Self::Tasks
     }
 }
 
@@ -53,6 +54,7 @@ impl UnifiedMode {
     /// modebar 表示ラベル。
     pub fn label(self) -> &'static str {
         match self {
+            Self::Tasks => "[=] タスク一覧",
             Self::Authoring => "✏️ 作成",
             Self::Batch => "📊 バッチ評価",
             Self::Run => "▶️ 実行",
@@ -63,7 +65,8 @@ impl UnifiedMode {
     }
 
     /// 全モードを modebar 表示順に返す（Issue #125: 6 タブ構成）。
-    pub const ALL: [UnifiedMode; 6] = [
+    pub const ALL: [UnifiedMode; 7] = [
+        UnifiedMode::Tasks,
         UnifiedMode::Authoring,
         UnifiedMode::Batch,
         UnifiedMode::Strategy,
@@ -77,7 +80,7 @@ impl UnifiedMode {
         match self {
             Self::Authoring => Some(AppMode::Authoring),
             Self::Batch => Some(AppMode::Batch),
-            Self::Run | Self::History | Self::Strategy | Self::Settings => None,
+            Self::Tasks | Self::Run | Self::History | Self::Strategy | Self::Settings => None,
         }
     }
 }
@@ -85,6 +88,8 @@ impl UnifiedMode {
 /// モードに対応する描画ペイン（描画分岐の純関数表現）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnifiedPane {
+    /// MAA 型タスク一覧 (Issue #144: ホーム画面)。
+    Tasks,
     /// StudioApp のパネル（作成/バッチ評価）。
     Studio,
     /// PipelineRunnerApp のパネル（実行/履歴）。
@@ -94,6 +99,7 @@ pub enum UnifiedPane {
 /// モード → 描画ペインの純関数（単体テスト対象）。
 pub fn active_pane(mode: UnifiedMode) -> UnifiedPane {
     match mode {
+        UnifiedMode::Tasks => UnifiedPane::Tasks,
         UnifiedMode::Authoring | UnifiedMode::Batch => UnifiedPane::Studio,
         UnifiedMode::Run | UnifiedMode::History => UnifiedPane::Runner,
         // Issue #125 shard 3: 戦略・設定タブは既定で Runner 委譲拡張。
@@ -161,7 +167,7 @@ impl UnifiedShell {
             UnifiedMode::History => crate::runner::RunnerPane::History,
             UnifiedMode::Strategy => crate::runner::RunnerPane::Strategy,
             UnifiedMode::Settings => crate::runner::RunnerPane::Settings,
-            UnifiedMode::Authoring | UnifiedMode::Batch | UnifiedMode::Run => {
+            UnifiedMode::Tasks | UnifiedMode::Authoring | UnifiedMode::Batch | UnifiedMode::Run => {
                 crate::runner::RunnerPane::Run
             }
         }
@@ -172,6 +178,12 @@ impl eframe::App for UnifiedShell {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.render_modebar(ui);
         egui::CentralPanel::default().show_inside(ui, |ui| match self.pane() {
+            UnifiedPane::Tasks => {
+                // MAA 型ホーム画面 (Issue #144): タスク一覧 + 開始 + 状態。
+                // 起動時に定義を自動読込 (未読込なら UI 内ボタンで読込)。
+                self.studio.ensure_task_list_loaded();
+                self.studio.render_task_list(ui);
+            }
             UnifiedPane::Studio => {
                 // StudioApp 側の対応モードへ同期してからパネル描画に委譲。
                 if let Some(studio_mode) = self.mode.studio_mode() {
@@ -210,9 +222,9 @@ mod tests {
     use super::*;
 
     #[test]
-    fn test_default_mode_is_authoring_not_run() {
-        assert_eq!(UnifiedMode::default(), UnifiedMode::Authoring);
-        // 既定モードが Run でないことの検証（タスク要件）。
+    fn test_default_mode_is_tasks_not_run() {
+        // Issue #144: 既定モードは MAA 型ホーム (タスク一覧)。
+        assert_eq!(UnifiedMode::default(), UnifiedMode::Tasks);
         assert_ne!(UnifiedMode::default(), UnifiedMode::Run);
     }
 
@@ -268,8 +280,8 @@ mod tests {
     #[test]
     fn test_mode_transitions_switch_active_pane() {
         let mut shell = UnifiedShell::new(Target::default(), None);
-        // 既定は Studio ペイン。
-        assert_eq!(shell.pane(), UnifiedPane::Studio);
+        // 既定は Tasks ペイン (Issue #144 ホーム)。
+        assert_eq!(shell.pane(), UnifiedPane::Tasks);
 
         // Run へ切替 → Runner ペインへ分岐が切り替わる。
         shell.set_mode(UnifiedMode::Run);
@@ -298,13 +310,14 @@ mod tests {
     }
 
     #[test]
-    fn test_all_modes_cover_exactly_six_tabs() {
-        assert_eq!(UnifiedMode::ALL.len(), 6);
-        // modebar 表示順: 作成 → バッチ評価 → 戦略 → 実行 → 履歴 → 設定
-        // (Issue #125 shard 3, 親 #119 UC-1 の 6 タブ構成)。
+    fn test_all_modes_cover_exactly_seven_tabs() {
+        assert_eq!(UnifiedMode::ALL.len(), 7);
+        // modebar 表示順: タスク一覧 → 作成 → バッチ評価 → 戦略 → 実行 → 履歴 → 設定
+        // (Issue #144: Tasks をホーム先頭に追加した 7 タブ構成)。
         assert_eq!(
             UnifiedMode::ALL,
             [
+                UnifiedMode::Tasks,
                 UnifiedMode::Authoring,
                 UnifiedMode::Batch,
                 UnifiedMode::Strategy,
@@ -343,12 +356,11 @@ mod tests {
     }
 
     #[test]
-    fn test_shell_default_state_uses_authoring_pane() {
+    fn test_shell_default_state_uses_tasks_pane() {
         let shell = UnifiedShell::new(Target::default(), None);
-        assert_eq!(shell.mode(), UnifiedMode::Authoring);
-        assert_eq!(shell.pane(), UnifiedPane::Studio);
-        // 委譲先 StudioApp も Authoring で開始する。
-        assert_eq!(shell.studio().mode(), AppMode::Authoring);
+        // Issue #144: 既定は MAA 型ホーム (タスク一覧ペイン)。
+        assert_eq!(shell.mode(), UnifiedMode::Tasks);
+        assert_eq!(shell.pane(), UnifiedPane::Tasks);
     }
 
     /// Issue #123 (shard 2): `--pipeline` フラグは完全削除済み。new() 以外の
@@ -358,7 +370,7 @@ mod tests {
         let shell = UnifiedShell::new(Target::default(), None);
         // new_with_flags / shows_deprecated_pipeline_warning は削除済み
         // (コンパイル時検証: この test が型チェックを通れば API は存在しない)。
-        assert_eq!(shell.mode(), UnifiedMode::Authoring);
+        assert_eq!(shell.mode(), UnifiedMode::Tasks);
     }
 
     /// ウィンドウタイトルは単一名称「anaden-studio」。

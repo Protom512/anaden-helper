@@ -1,0 +1,8 @@
+# 世界マップ周回タスク (Issue #144)。
+# 実行経路: `anaden run templates/pipelines/worldmap_loop`。
+# pipeline.toml (manifest) は未整備のため start_task は宣言しない。
+id = "worldmap_loop"
+title = "世界マップ周回"
+kind = "pipeline_run"
+implemented = true
+pipeline_dir = "templates/pipelines/worldmap_loop"
