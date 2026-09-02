@@ -594,7 +594,9 @@ const deriveSliceMetadata = (changedFiles) => {
 const precheckScope = await agent(
   `PRECHECK SCOPE RESOLVER (Issue #99)。以下を実行し結果を返す:
 1. \`git diff HEAD --name-only\` — working-tree tracked 変更
-2. \`git status --porcelain\` — 全ファイル状態。untracked ("?? ") 行はパス部分のみ抽出して untrackedFiles へ
+2. \`git status --porcelain\` — 全ファイル状態。untracked ("?? ") 行はパス部分のみ抽出して untrackedFiles へ。
+   ※ .gitignore 済みファイル (.agents/, skills-lock.json 等) は porcelain 出力に現れないため
+   そのまま無視すること (--ignored は使わない。ignored 成果物は本 precheck の対象外)。
 3. commit-range fallback (working-tree diff が空の場合の救済 — UC-3):
    \`git diff HEAD~1..HEAD --name-only\` (HEAD~1 が解決不能な merge context は
    \`git diff \$(git merge-base origin/master HEAD)..HEAD --name-only\`)
