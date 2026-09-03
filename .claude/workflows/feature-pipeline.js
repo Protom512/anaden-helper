@@ -1160,6 +1160,221 @@ const buildOwnershipSerializationRationale = (tasks, treeHash, rid, rts) => {
 };
 // [file-ownership-end]
 
+// [dependency-readiness-begin]
+// Issue #104 Task 1: dependency-readiness pure block。Implement フェーズ
+// dispatcher がタスク N を dispatch する前に、依存タスク d ∈ deps(N) の成果物が
+// 「コミット済み (commit SHA が現在ブランチから到達可能) かつテスト green
+// evidence が .omc/logs/{run-id}/ 永続ログに存在」することを機械検証する
+// (.claude/rules/pipeline-evidence-verification.md §4 の機械強制化)。
+// 静的 deps 宣言のみを信じない — RED テスト・部分実装・working-tree のみの
+// 成果物の引き継ぎを fail-closed で block する (2026-08-25/26 entries)。
+// Pure block — unit-tested by .claude/workflows/tests/dependency-readiness.test.mjs
+// (same marker-extraction pattern as file-ownership #106 / done-evidence #68).
+//
+// depRecords 契約 (collector evidence — Task 2 wiring で固定):
+//   { [depTaskId]: {
+//       committed: boolean,     // dep の declared files に触る最終 commit SHA が存在
+//       reachable: boolean,     // branch-contains 相当 (現在ブランチから到達可能)
+//       greenEvidence: boolean, // .omc/logs/{run-id}/ 永続ログに green 記録あり
+//       commitSha?: string,     // 情報用 (verdict 判定には不要)
+//   } }
+// UC-3 (Issue #97 'unknown' 規約): record 欠損・malformed・flag 非 boolean は
+// 'unknown-evidence' で block — 一切 green-by-default にしない。deps を 1 つも
+// 宣言しないタスク (dependencies 非配列/null/欠損を含む) は trivially ready。
+const taskDeclaredDeps = (task) => {
+  const t = (task && typeof task === 'object') ? task : null;
+  if (!t || !Array.isArray(t.dependencies)) return [];
+  return t.dependencies.filter((d) => typeof d === 'string' && d.length > 0);
+};
+// 依存 1 件の collector evidence record → verdict。判定順序 (fail-closed):
+//   record 欠損/malformed → unknown-evidence
+//   > committed !== true → dep-not-committed (working-tree only, UC-2)
+//   > reachable !== true → dep-not-committed (stranded snapshot)
+//   > greenEvidence !== true → dep-evidence-missing
+//   > 全て true → ready
+// unknown 時は committed/reachable/greenEvidence を null で返す
+// (boolean を主張しない — Issue #97 'unknown' 規約)。
+const evaluateDepRecord = (depId, record) => {
+  if (record === null || record === undefined || typeof record !== 'object' || Array.isArray(record)) {
+    return {
+      dep: depId,
+      verdict: 'unknown-evidence',
+      committed: null,
+      reachable: null,
+      greenEvidence: null,
+      detail: 'dep record not collected or malformed (collector output absent/unparseable — Issue #97 unknown convention)',
+    };
+  }
+  if (typeof record.committed !== 'boolean'
+    || typeof record.reachable !== 'boolean'
+    || typeof record.greenEvidence !== 'boolean') {
+    return {
+      dep: depId,
+      verdict: 'unknown-evidence',
+      committed: null,
+      reachable: null,
+      greenEvidence: null,
+      detail: 'dep record malformed (committed/reachable/greenEvidence must all be booleans — unparseable, fail-closed)',
+    };
+  }
+  if (record.committed !== true) {
+    return {
+      dep: depId,
+      verdict: 'dep-not-committed',
+      committed: false,
+      reachable: record.reachable,
+      greenEvidence: record.greenEvidence,
+      detail: 'dep artifact not committed — working-tree only (UC-2)',
+    };
+  }
+  if (record.reachable !== true) {
+    return {
+      dep: depId,
+      verdict: 'dep-not-committed',
+      committed: true,
+      reachable: false,
+      greenEvidence: record.greenEvidence,
+      detail: 'commit exists but not reachable from current branch (stranded snapshot)',
+    };
+  }
+  if (record.greenEvidence !== true) {
+    return {
+      dep: depId,
+      verdict: 'dep-evidence-missing',
+      committed: true,
+      reachable: true,
+      greenEvidence: false,
+      detail: 'commit verified but persistent green-evidence log not found in .omc/logs/{run-id}/',
+    };
+  }
+  return {
+    dep: depId,
+    verdict: 'ready',
+    committed: true,
+    reachable: true,
+    greenEvidence: true,
+    detail: 'committed + reachable + persistent green evidence all verified',
+  };
+};
+// タスク単位の依存 readiness 判定。返り値: { taskId, ready, verdict, reason, deps }
+//   - ready: deps 全員が verdict 'ready' のときのみ true (deps 空は trivially true)
+//   - verdict: ready なら 'ready'、それ以外は宣言順で最初の blocking verdict
+//     ('dep-not-committed' | 'dep-evidence-missing' | 'unknown-evidence')
+//   - reason: ready なら null、それ以外は blocking dep の説明 (CEO 通知・ログ用)
+const evaluateDependencyReadiness = (task, depRecords) => {
+  const t = (task && typeof task === 'object') ? task : null;
+  const taskId = (t && (typeof t.id === 'string' || typeof t.id === 'number')) ? String(t.id) : null;
+  const records = (depRecords && typeof depRecords === 'object' && !Array.isArray(depRecords)) ? depRecords : {};
+  const deps = taskDeclaredDeps(t).map((depId) => {
+    const record = Object.hasOwn(records, depId) ? records[depId] : undefined;
+    return evaluateDepRecord(depId, record);
+  });
+  const blocking = deps.find((d) => d.verdict !== 'ready');
+  return {
+    taskId,
+    ready: blocking === undefined,
+    verdict: blocking === undefined ? 'ready' : blocking.verdict,
+    reason: blocking === undefined ? null : `dep ${blocking.dep}: ${blocking.verdict} — ${blocking.detail}`,
+    deps,
+  };
+};
+// Issue #104 §2 evidence: 判定根拠を .omc/logs/{run-id}/dependency-readiness.json
+// へ永続化する payload (per-task per-dep verdicts + treeHash)。recordedAt は
+// Date API 禁制のため runTimestamp を流用 (Issue #95 diff-kind short-circuit /
+// Issue #106 ownership rationale と同じ規約)。runTimestamp/treeHash 欠損は
+// 'unknown' (Issue #97 規約)。tasks 非配列は fail-closed で ready=false。
+const buildDependencyReadinessRationale = (tasks, depRecords, treeHash, rid, rts) => {
+  const ts = (typeof rts === 'string' && rts.length > 0) ? rts : 'unknown';
+  const taskResults = (Array.isArray(tasks) ? tasks : [])
+    .map((task) => evaluateDependencyReadiness(task, depRecords))
+    .filter((r) => r.taskId !== null);
+  const ready = Array.isArray(tasks) && taskResults.every((r) => r.ready);
+  return {
+    recordedAt: ts,
+    runTimestamp: ts,
+    runId: rid,
+    issue: 104,
+    ready,
+    status: ready ? 'all-ready' : 'dependency-not-ready',
+    tasks: taskResults,
+    treeHash: (typeof treeHash === 'string' && treeHash.length > 0) ? treeHash : 'unknown',
+    classifier: 'feature-pipeline.js evaluateDependencyReadiness (marker block, drift-guarded by tests/dependency-readiness.test.mjs)',
+  };
+};
+// Issue #104 Task 2: DEPENDENCY EVIDENCE COLLECTOR の StructuredOutput 契約。
+// deps は動的キーになるため map でなく配列形式で申告させ、正規化側で
+// { [depTaskId]: record } へ変換する (precheck scope resolver の schema 指定と
+// 同一パターン)。flag の boolean 厳密検証はここでなく evaluateDepRecord が
+// 行う (schema は申告形式の強制、verdict は fail-closed 判定 — 責務分離)。
+const DEPENDENCY_COLLECTOR_SCHEMA = {
+  type: 'object',
+  required: ['deps'],
+  properties: {
+    deps: {
+      type: 'array',
+      items: {
+        type: 'object',
+        required: ['dep', 'committed', 'reachable', 'greenEvidence'],
+        properties: {
+          dep: { type: 'string' },
+          committed: { type: 'boolean' },
+          reachable: { type: 'boolean' },
+          greenEvidence: { type: 'boolean' },
+          commitSha: { type: 'string' },
+        },
+      },
+    },
+  },
+};
+// Issue #104 Task 2: collector 出力の正規化。structured object (StructuredOutput)
+// / fenced-or-bare JSON 文字列の両方を受容し depRecords map へ変換する
+// (normalizeGateEvidence と同一パターン)。unparseable / missing → null —
+// この場合 evaluateDependencyReadiness は全 dep を unknown-evidence で
+// fail-closed block する (AC-2/AC-3。決して green-by-default にしない)。
+// greenEvidence の採用契約 (collector プロンプトに同一文面で指示):
+//   (a) 機械検証可能な green verdict (gate evidence の nextestExitCode=0 等)
+//   (b) 当該 dep の declared files の明示的参照 (ticket-precheck.json の
+//       declared/changed, gate-diff.json の basisFiles, ownership-serialization.json
+//       の taskFiles 等) — run 全体の包括 PASS のみでは不十分
+//   の両方を満たす .omc/logs/<run>/ 下の永続 JSON (現在 runId 優先、他 run は
+//   run-metadata.json で runTimestamp 検証可能なもののみ — Issue #97)。
+// dep エントリの除外 (null / dep 非文字列) は黙って無視すると record 欠損 =
+// unknown-evidence になるため fail-closed 側に倒れる (安全方向の劣化)。
+const normalizeDependencyCollectorOutput = (result) => {
+  let obj = null;
+  if (result && typeof result === 'object' && !Array.isArray(result)) {
+    obj = result;
+  } else if (typeof result === 'string' && result.length > 0) {
+    const fenced = result.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
+    // bare path は末尾 greedy ("deps" 以降最後の } まで) — lazy だと内側オブジェクトの
+    // } で打ち切られ壊れた JSON になる。過捕捉時は parse 失敗 → null (fail-closed 側)。
+    const bare = fenced ? null : result.match(/\{[\s\S]*?"deps"[\s\S]*\}/);
+    const candidate = fenced ? fenced[1] : (bare ? bare[0] : null);
+    if (candidate) {
+      try { obj = JSON.parse(candidate); } catch { obj = null; }
+    }
+  }
+  if (!obj || typeof obj !== 'object' || Array.isArray(obj)) return null;
+  const entries = Array.isArray(obj.deps)
+    ? obj.deps
+    : (obj.depRecords && typeof obj.depRecords === 'object' && !Array.isArray(obj.depRecords)
+      ? Object.entries(obj.depRecords).map(([dep, record]) => (
+          (record && typeof record === 'object' && !Array.isArray(record))
+            ? { ...record, dep }
+            : { dep }
+        ))
+      : null);
+  if (!entries) return null;
+  const records = {};
+  for (const entry of entries) {
+    if (!entry || typeof entry !== 'object' || Array.isArray(entry)) continue;
+    if (typeof entry.dep !== 'string' || entry.dep.length === 0) continue;
+    records[entry.dep] = entry;
+  }
+  return Object.keys(records).length > 0 ? records : null;
+};
+// [dependency-readiness-end]
+
 // ── Phase 3: Implement ──
 // [ownership-serialization-wiring-begin]
 // Issue #106 Task 2: ファイル所有権に基づく直列化ディスパッチ。
@@ -1239,6 +1454,73 @@ const runImplementTask = async (task) => {
         reason: `${laneResult.reason} — estimate task に metadata.lane ('release'|'merge'|'tdd') が未宣言か不正。TDD テンプレートへの黙墜ち防止 (Issue #99)。`,
       };
     }
+    // [dependency-readiness-wiring-begin]
+    // Issue #104 Task 2: dependency-readiness gate wiring。lane-gate 通過後・
+    // engineer dispatch 前に、deps を宣言するタスク (gated task) の依存成果物を
+    // 機械検証する — 静的 deps 宣言のみを信頼せず「コミット済み (SHA 到達可能)
+    // + テスト green evidence」を要求 (pipeline-evidence-verification.md §4 の
+    // 機械強制化)。RED テスト・部分実装・working-tree のみの成果物の引き継ぎを
+    // fail-closed で block する。per-task non-fatal: blocked は status
+    // 'dependency-not-ready' で1タスクだけスキップ (lane-missing / human-gated
+    // と同型) — workflow 全体は継続する。
+    const _declaredDeps = taskDeclaredDeps(task);
+    if (_declaredDeps.length > 0) {
+      // (1) DEPENDENCY EVIDENCE COLLECTOR — gated task ごとに1回 dispatch。
+      //     collector 出力は normalizeDependencyCollectorOutput で depRecords へ
+      //     正規化。unparseable/missing は null → 全 dep unknown-evidence で
+      //     block (AC-2/AC-3, Issue #97 'unknown' 規約 — green 払いしない)。
+      const _depTargets = _declaredDeps.map((depId) => {
+        const depTask = (Array.isArray(estimate.tasks) ? estimate.tasks : [])
+          .find((t) => t && String(t.id) === depId) || null;
+        const depFiles = depTask ? taskDeclaredFiles(depTask) : null;
+        return { depId, files: (Array.isArray(depFiles) ? depFiles : []) };
+      });
+      const collectorRaw = await agent(
+        `DEPENDENCY EVIDENCE COLLECTOR (Issue #104)。タスク ${task.id} を dispatch する前の依存タスク evidence 採取 (実装はしない — 調査のみ):
+${_depTargets.map(({ depId, files }) => `- dep ${depId}: declared files = ${files.length > 0 ? files.join(', ') : '(files 未宣言)'}`).join('\n')}
+
+各 dep について以下を調査して構造化レコードで返せ:
+1. committed: \`git log -1 --format=%H -- <files...>\` (files 未宣言の dep は committed=false)。空出力 = committed=false。SHA が得られれば committed=true かつ commitSha=SHA。
+2. reachable: commitSha がある場合のみ \`git branch -a --contains <SHA>\`。出力に現在ブランチ (\`git rev-parse --abbrev-ref HEAD\`) または remotes/origin/master (main) を含むなら reachable=true、それ以外 (含まない/コマンド失敗) は false。commitSha 無しは false。
+3. greenEvidence (fail-closed 契約 — 推測で true にしないこと):
+   - まず .omc/logs/${runId}/ を走査。無ければ .omc/logs/ 下の他 run ディレクトリ (run-metadata.json を持ち runTimestamp が読めるもののみ採用 — Issue #97。メタデータ欠損 run の evidence は不採用)。
+   - 採用条件は両方必須: (a) 機械検証可能な green verdict (gate evidence の nextestExitCode=0 / gate review の GO 等)、かつ (b) 当該 dep の declared files の明示的参照 (ticket-precheck.json の declared/changed、gate-diff.json の basisFiles、ownership-serialization.json の taskFiles 等)。run 全体の包括 PASS のみで files 参照が無いものは不採用。
+   - 見つからない/読めない/判断できない → greenEvidence=false。
+最後に StructuredOutput({ deps: [{dep, committed, reachable, greenEvidence, commitSha}] }) を呼べ。**宣言された全 dep を必ず1エントリずつ報告せよ (欠損 dep は fail-closed で block 扱いになる)。**`,
+        {
+          label: `implement:dependency-evidence:${task.id}`,
+          phase: 'Implement',
+          model: 'sonnet',
+          schema: DEPENDENCY_COLLECTOR_SCHEMA,
+        }
+      );
+      // (2) gate call — collector records を evaluateDependencyReadiness へ。
+      const depRecords = normalizeDependencyCollectorOutput(collectorRaw);
+      const readiness = evaluateDependencyReadiness(task, depRecords);
+      if (!readiness.ready) {
+        // blocked → 判定根拠を永続化して非 dispatch (§2 evidence は自己申告不可)。
+        // persister は ownership-serialization.json と同じ prompt shape (haiku)。
+        const depRationale = buildDependencyReadinessRationale(
+          [task], depRecords,
+          (precheckScope && precheckScope.treeHash) || '', runId, runTimestamp,
+        );
+        await agent(
+          `EVIDENCE PERSISTER (Issue #104 Task 2)。以下の JSON をファイル .omc/logs/${runId}/dependency-readiness.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
+${JSON.stringify(depRationale, null, 2)}
+書き出し後、書き込んだファイルのパスのみを返せ。`,
+          { label: 'implement:persist-dependency-readiness', phase: 'Implement', model: 'haiku' }
+        );
+        log(`[dependency-gate] task ${task.id}: ${readiness.verdict} → dependency-not-ready (no dispatch): ${readiness.reason}`);
+        return {
+          task: task.id,
+          status: 'dependency-not-ready',
+          reason: `${readiness.reason} — 依存タスクの成果物が「コミット済み (SHA 到達可能) + テスト green evidence」であることを機械検証できなかった (Issue #104, fail-closed)。依存タスクをコミット + gate PASS させてから再実行すること。`,
+        };
+      }
+      log(`[dependency-gate] task ${task.id}: deps [${_declaredDeps.join(', ')}] verified ready — dispatching`);
+    }
+    // (3) ready / deps 空 → 従来どおり dispatch (下記 agent 呼び出し)。
+    // [dependency-readiness-wiring-end]
     return agent(
       buildEngineerPrompt(laneResult, task, ticket, approval),
       { label: `engineer:${task.id}`, phase: 'Implement', model: 'sonnet' }
