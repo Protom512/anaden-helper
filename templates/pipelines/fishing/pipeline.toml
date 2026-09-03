@@ -1,0 +1,14 @@
+# つりパイプライン manifest (Issue #146 続編 / T4)。
+# TaskDef (fishing_start.toml) とは分離された宣言層。
+# schema 詳細は docs/goal-manifest.md および templates/pipelines/field_loop_pc/pipeline.toml 参照。
+
+# 最初に実行する TaskDef。fishing_start.toml の name="FishingStartPc" と一致すること。
+start_task = "FishingStartPc"
+
+# つり開始: フィールド HUD 右上 (hud_tr) を検出してつりメニューを開く想定の
+# 最小構成。テンプレートは field_loop_pc/hud_tr.png を流用 (実機キャプチャによる
+# つりボタン固有テンプレートは今後の実機タスクで差し替え)。
+[[goal]]
+name = "fishing_loop"
+[goal.stop]
+LoopCount = { target = 3 }

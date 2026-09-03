@@ -1820,7 +1820,8 @@ mod tests {
         app.toggle_task("launch");
         app.toggle_task("field_loop_pc");
         // 未実装タスクは選択拒否 (グレー表示の機械的保証)。
-        app.toggle_task("login");
+        // fishing は implemented=false (つりボタン固有テンプレ未作成)。
+        app.toggle_task("fishing");
         assert!(app.status.contains("未実装") || app.status.contains("implemented"));
 
         let specs: std::sync::Arc<std::sync::Mutex<Vec<crate::childproc::SpawnSpec>>> =

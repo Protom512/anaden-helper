@@ -1,0 +1,13 @@
+name      = "LoginWaitFieldPc"
+state     = "Field"
+algorithm = "ccoeff"
+# ログインパイプライン slice 2/2 (Issue #146 / UC-2 / T4)。最小構成。
+# Field 到達 = ログイン完了の検出のみ (発火しない)。HUD 検出は nav_to_field_pc/
+# field_hud_top.toml と同テンプレ・同 ROI。
+#
+# 座標系: RAW 1258x708 ピクセル空間 (PC版 GetClientRect 実測)。
+template  = "../../scenes/field_pc/hud_top.png"
+roi       = [400, 0, 480, 100]
+threshold = 0.80
+action    = { type = "do_nothing" }
+next      = []
