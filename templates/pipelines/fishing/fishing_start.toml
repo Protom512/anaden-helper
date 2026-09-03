@@ -1,0 +1,8 @@
+name      = "FishingStartPc"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "../field_loop_pc/hud_tr.png"
+roi       = [1038, 0, 218, 120]
+threshold = 0.70
+action    = { type = "click_self" }
+next      = ["FishingStartPc"]
