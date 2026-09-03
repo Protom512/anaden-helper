@@ -361,6 +361,10 @@ ${isBacklogPick
 - 受け入れ基準 (残作業完了の検証可能な条件)
 - ticket-declared files: この残作業が触るファイルを必ず files 配列で宣言する
   (PR-verification や残実装の対象ファイル)。
+- subject open PR (Issue #150): 対象が open PR の場合、その PR 番号を
+  StructuredOutput の subjectPrNumber として必ず返すこと (数値。継続チケットが
+  自分の subject PR で duplicate 判定されて自己 BLOCK するのを防ぐ前提情報)。
+  対象 open PR が存在しない (ブランチのみ継続等) 場合は宣言しなくてよい。
 
 未マージブランチも open PR も存在しない場合のみ、通常の新機能テンプレートにフォールバックする。`
   : `Use the GitHub Issue template from .claude/agents/org/pm.md.
@@ -400,6 +404,10 @@ GitHub Issue using: gh issue create`,
       issueNumber: { type: 'string' },
       files: { type: 'array', items: { type: 'string' } },
       ticketKind: { type: 'string', enum: ['new-implementation', 'continuation'] },
+      // Issue #150: continuation チケットの subject open PR 番号 (optional —
+      // required には追加しない。new-implementation / branch-only continuation は
+      // 宣言なし正常)。数値でも /^\d+$/ 数値文字列でも許容 (pure fn で正規化)。
+      subjectPrNumber: { type: ['number', 'string', 'null'] },
     },
     required: ['title', 'priority', 'summary', 'files', 'ticketKind'],
   }}
@@ -530,13 +538,15 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') =>
 };
 // canonical: ticket-precheck.js evaluateIssuePremise (verbatim inline copy)。
 // Issue #109 Task 1: stale (closed+merged) / duplicate (open PR) dispatch 検出。
+// Issue #150: continuation + declared subject open PR 一致の duplicate 例外
+// (subject 以外の open PR が残る / new-implementation / malformed は FAIL 維持)。
 // fail-closed: malformed/null 入力も FAIL (検証実施不能は dispatch 拒否)。
 const evaluateIssuePremise = (input) => {
   const invalid = { verdict: 'FAIL', stale: false, duplicate: false };
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
     return { ...invalid, reason: 'issue-premise FAIL — malformed input (fail-closed: precheck unverifiable, dispatch rejected)' };
   }
-  const { issueState, linkedBranchesContainIssue, openPRs } = input;
+  const { issueState, linkedBranchesContainIssue, openPRs, ticketKind, subjectPrNumber } = input;
   if (typeof issueState !== 'string' || (issueState !== 'open' && issueState !== 'closed')) {
     return { ...invalid, reason: 'issue-premise FAIL — malformed issueState (fail-closed: expected "open"|"closed")' };
   }
@@ -545,6 +555,31 @@ const evaluateIssuePremise = (input) => {
   }
   if (!Array.isArray(openPRs)) {
     return { ...invalid, reason: 'issue-premise FAIL — malformed openPRs (fail-closed: expected array)' };
+  }
+  // Issue #150: optional ticketKind — absent (undefined) = legacy behavior;
+  // present-but-invalid (incl. null) is fail-closed FAIL, never ignored.
+  if (ticketKind !== undefined && ticketKind !== 'new-implementation' && ticketKind !== 'continuation') {
+    return { ...invalid, reason: 'issue-premise FAIL — malformed ticketKind (fail-closed: expected "new-implementation"|"continuation")' };
+  }
+  // subjectPrNumber is only meaningful for continuation tickets — declaring it
+  // alongside new-implementation (or without any ticketKind) is contradictory.
+  if (subjectPrNumber !== undefined && ticketKind !== 'continuation') {
+    return { ...invalid, reason: 'issue-premise FAIL — contradictory input: subjectPrNumber declared without ticketKind "continuation" (fail-closed)' };
+  }
+  // Normalize subjectPrNumber: positive integer, or /^\d+$/ numeric string
+  // converted to number ("149" -> 149). Zero / negative / non-numeric FAIL.
+  let subjectPr = null;
+  if (subjectPrNumber !== undefined) {
+    let n = null;
+    if (typeof subjectPrNumber === 'number') {
+      n = subjectPrNumber;
+    } else if (typeof subjectPrNumber === 'string' && /^\d+$/.test(subjectPrNumber)) {
+      n = Number(subjectPrNumber);
+    }
+    if (n === null || !Number.isInteger(n) || n <= 0) {
+      return { ...invalid, reason: 'issue-premise FAIL — malformed subjectPrNumber (fail-closed: expected positive integer PR number)' };
+    }
+    subjectPr = n;
   }
   const stale = issueState === 'closed' && linkedBranchesContainIssue;
   const duplicate = openPRs.length > 0;
@@ -556,6 +591,39 @@ const evaluateIssuePremise = (input) => {
       reason: duplicate
         ? 'issue-premise FAIL — stale: issue is closed and already merged into trunk; duplicate: open PR(s) also exist'
         : 'issue-premise FAIL — stale: issue is closed and already merged into trunk',
+    };
+  }
+  // Issue #150 continuation duplicate exemption. Only reached when not stale
+  // (stale keeps priority — the exemption targets duplicate exclusively).
+  if (ticketKind === 'continuation' && subjectPr !== null) {
+    const isSubjectPr = (pr) =>
+      pr !== null && typeof pr === 'object' && pr.number === subjectPr;
+    if (!openPRs.some(isSubjectPr)) {
+      // Declared subject PR is not open (merged / number mismatch): the
+      // continuation premise itself is broken -> FAIL even when openPRs=[].
+      return {
+        verdict: 'FAIL',
+        stale: false,
+        duplicate,
+        reason: `issue-premise FAIL — subject premise broken: declared subject PR #${subjectPr} is not among the ${openPRs.length} open PR(s) referencing this issue (merged or number mismatch)`,
+      };
+    }
+    const remaining = openPRs.filter((pr) => !isSubjectPr(pr));
+    if (remaining.length === 0) {
+      // Exemption: every open PR referencing this issue IS the declared
+      // subject — the continuation ticket is not a duplicate of itself.
+      return {
+        verdict: 'PASS',
+        stale: false,
+        duplicate,
+        reason: `issue-premise PASS — continuation exemption (Issue #150): all ${openPRs.length} open PR(s) referencing this issue are the declared subject PR #${subjectPr}; no unrelated duplicate PRs`,
+      };
+    }
+    return {
+      verdict: 'FAIL',
+      stale: false,
+      duplicate: true,
+      reason: `issue-premise FAIL — duplicate: ${remaining.length} unrelated open PR(s) still reference this issue after excluding declared subject PR #${subjectPr}`,
     };
   }
   if (duplicate) {
@@ -734,10 +802,18 @@ const premiseEvidence = issueNumberForPremise ? await agent(
 ) : null;
 // fail-closed: evidence 欠損 (issueNumber 無し / collector 失敗 / null フィールド)
 // はそのまま pure fn へ流し malformed として FAIL 判定させる。
+// Issue #150: PM チケットの ticketKind / subjectPrNumber を配線 (continuation
+// チケットが自分の subject open PR で duplicate FAIL する自己 BLOCK の解消)。
+// ticketKind は schema required+enum — 不正値は pure fn が fail-closed FAIL。
+// subjectPrNumber は optional で schema type に null を含む (StructuredOutput の
+// 「値なし」表現) ため、null は undefined (= 宣言なし = 従来挙動) に正規化する。
+// null 以外の malformed 値は pure fn が FAIL させる (fail-open しない)。
 const issuePremise = evaluateIssuePremise({
   issueState: premiseEvidence && premiseEvidence.issueState,
   linkedBranchesContainIssue: premiseEvidence && premiseEvidence.linkedBranchesContainIssue,
   openPRs: premiseEvidence && premiseEvidence.openPRs,
+  ticketKind: ticket.ticketKind,
+  subjectPrNumber: (ticket.subjectPrNumber === null) ? undefined : ticket.subjectPrNumber,
 });
 // evidence persistence: verdict を .omc/logs/${runId} の
 // .omc/logs/{runId}/issue-premise-precheck.json へ永続化
@@ -749,6 +825,9 @@ ${JSON.stringify({
     runId,
     issue: 109,
     issueNumber: issueNumberForPremise || null,
+    // Issue #150: 例外判定の入力を evidence に残す (適用されたら exemption 根拠)。
+    ticketKind: ticket.ticketKind ?? null,
+    subjectPrNumber: ticket.subjectPrNumber ?? null,
     verdict: issuePremise.verdict,
     reason: issuePremise.reason,
     stale: issuePremise.stale,

@@ -105,6 +105,37 @@ test('drift guard: inline evaluateIssuePremise matches canonical across input ma
     { issueState: 'bogus', linkedBranchesContainIssue: false, openPRs: [] },
     { issueState: 'open', linkedBranchesContainIssue: 'no', openPRs: [] },
     { issueState: 'open', linkedBranchesContainIssue: false, openPRs: null },
+    // Issue #150 (Task 2) new-field cases: ticketKind / subjectPrNumber.
+    // UC-1 exemption: continuation + declared subject PR explains all open PRs.
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: 149 },
+    // numeric-string subjectPrNumber ("149") must normalize to 149 before match.
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: '149' },
+    // unrelated open PR remains after excluding the subject -> FAIL.
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }, { number: 200 }], ticketKind: 'continuation', subjectPrNumber: 149 },
+    // declared subject not among openPRs (mismatch) -> FAIL (premise broken).
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 200 }], ticketKind: 'continuation', subjectPrNumber: 149 },
+    // declared subject but openPRs empty (already merged) -> FAIL.
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], ticketKind: 'continuation', subjectPrNumber: 149 },
+    // new-implementation + open PR -> legacy duplicate FAIL (no exemption).
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 123 }], ticketKind: 'new-implementation' },
+    // branch-only continuation (no subjectPrNumber) + empty openPRs -> PASS.
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], ticketKind: 'continuation' },
+    // malformed ticketKind (incl. null) -> fail-closed FAIL.
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], ticketKind: 'bogus' },
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], ticketKind: null },
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], ticketKind: 42 },
+    // malformed subjectPrNumber (non-numeric / zero / negative / null) -> FAIL.
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: 'abc' },
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: 0 },
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: -5 },
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], ticketKind: 'continuation', subjectPrNumber: null },
+    // contradictory: subjectPrNumber without continuation ticketKind -> FAIL.
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], ticketKind: 'new-implementation', subjectPrNumber: 149 },
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], subjectPrNumber: 149 },
+    // stale + exemption collision: stale keeps priority -> FAIL.
+    { issueState: 'closed', linkedBranchesContainIssue: true, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: 149 },
+    // backward compat: fields entirely absent + open PR -> legacy duplicate FAIL.
+    { issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 123 }] },
   ];
   for (const c of cases) {
     assert.deepEqual(
@@ -112,5 +143,41 @@ test('drift guard: inline evaluateIssuePremise matches canonical across input ma
       evaluateIssuePremise(c),
       `evaluateIssuePremise(${JSON.stringify(c)}) diverged from canonical`
     );
+  }
+});
+
+// Issue #150 (Task 2): deepEqual alone cannot catch "both copies wrong the same
+// way" — the new-field cases must ALSO produce the semantically expected verdict
+// in BOTH the inline copy and the canonical module (UC-1..UC-4 of Issue #150).
+test('drift guard: inline evaluateIssuePremise Issue #150 semantics — expected verdicts on both copies', () => {
+  const inline = extractInlinePureFns();
+  const cases = [
+    // UC-1: continuation + subject PR explains every open PR -> PASS (exemption).
+    [{ issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: 149 }, 'PASS'],
+    // UC-1 variant: numeric-string "149" normalizes and matches -> PASS.
+    [{ issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: '149' }, 'PASS'],
+    // UC-2: unrelated open PR remains after excluding subject -> FAIL duplicate.
+    [{ issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }, { number: 200 }], ticketKind: 'continuation', subjectPrNumber: 149 }, 'FAIL'],
+    // UC-2: new-implementation + open PR -> legacy duplicate FAIL.
+    [{ issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 123 }], ticketKind: 'new-implementation' }, 'FAIL'],
+    // UC-3: subject declared but not among openPRs -> FAIL (premise broken).
+    [{ issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 200 }], ticketKind: 'continuation', subjectPrNumber: 149 }, 'FAIL'],
+    // UC-3: subject declared but openPRs empty (merged) -> FAIL.
+    [{ issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], ticketKind: 'continuation', subjectPrNumber: 149 }, 'FAIL'],
+    // UC-4: malformed ticketKind -> FAIL (fail-closed).
+    [{ issueState: 'open', linkedBranchesContainIssue: false, openPRs: [], ticketKind: 'bogus' }, 'FAIL'],
+    // UC-4: malformed subjectPrNumber -> FAIL (fail-closed).
+    [{ issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: 'abc' }, 'FAIL'],
+    // backward compat: fields absent + open PR -> legacy duplicate FAIL.
+    [{ issueState: 'open', linkedBranchesContainIssue: false, openPRs: [{ number: 123 }] }, 'FAIL'],
+    // stale + exemption collision: stale keeps priority over exemption -> FAIL.
+    [{ issueState: 'closed', linkedBranchesContainIssue: true, openPRs: [{ number: 149 }], ticketKind: 'continuation', subjectPrNumber: 149 }, 'FAIL'],
+  ];
+  for (const [c, expected] of cases) {
+    const fromInline = inline.evaluateIssuePremise(c);
+    const fromCanonical = evaluateIssuePremise(c);
+    assert.equal(fromInline.verdict, expected, `inline verdict for ${JSON.stringify(c)}`);
+    assert.equal(fromCanonical.verdict, expected, `canonical verdict for ${JSON.stringify(c)}`);
+    assert.deepEqual(fromInline, fromCanonical, `inline/canonical divergence for ${JSON.stringify(c)}`);
   }
 });

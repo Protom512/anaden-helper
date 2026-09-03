@@ -269,3 +269,90 @@ test('issuePremise wiring: fail-closed — gh failure surfaces as FAIL via malfo
   const bypass = block.match(/verdict\s*=\s*'PASS'/);
   assert.equal(bypass, null, 'no hardcoded PASS bypass of evaluateIssuePremise');
 });
+
+// ── Issue #150 Task 2: continuation subject-PR duplicate-exemption wiring ──
+// PM チケットの ticketKind / subjectPrNumber を evaluateIssuePremise へ配線し、
+// continuation チケットが自分の subject open PR で duplicate 判定されて
+// 自己 BLOCK する (wf_704cd835-cbd 再現) のを解消する。例外適用の判定根拠は
+// evidence JSON へ永続し機械検証可能にする (自己申告不可)。
+
+test('issuePremise wiring (#150): call site passes ticket.ticketKind and ticket.subjectPrNumber', () => {
+  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
+  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const block = fpSrc.slice(begin, end);
+  const call = block.match(/evaluateIssuePremise\(\{[\s\S]*?\}\)/);
+  assert.ok(call, 'evaluateIssuePremise({...}) call site found');
+  assert.match(call[0], /ticketKind:\s*ticket\.ticketKind/,
+    'ticketKind wired from PM ticket into evaluateIssuePremise');
+  assert.match(call[0], /subjectPrNumber[^,\n]*ticket\.subjectPrNumber/,
+    'subjectPrNumber wired from PM ticket into evaluateIssuePremise');
+});
+
+test('issuePremise wiring (#150): schema-null subjectPrNumber normalized to undefined at wiring boundary', () => {
+  // PM schema declares subjectPrNumber optional with type ['number','string','null']:
+  // null is the structured-output "value absent" representation. Passing it raw
+  // would treat every field-omitting ticket as "declared-but-malformed" and
+  // unconditionally FAIL (false fail-closed — the exact Issue #131 family bug
+  // this fix targets). The wiring must map null -> undefined (= declared-absent
+  // = legacy behavior). Non-null malformed values still reach the pure fn and
+  // FAIL there — no fail-open.
+  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
+  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const block = fpSrc.slice(begin, end);
+  const call = block.match(/evaluateIssuePremise\(\{[\s\S]*?\}\)/);
+  assert.ok(call, 'call site found');
+  assert.match(
+    call[0],
+    /subjectPrNumber:\s*\(ticket\.subjectPrNumber === null\)\s*\?\s*undefined\s*:\s*ticket\.subjectPrNumber/,
+    'null subjectPrNumber mapped to undefined before the pure fn'
+  );
+});
+
+test('PM schema (#150): optional subjectPrNumber declared, required array unchanged', () => {
+  const begin = fpSrc.indexOf('// [pm-ticket-files-begin]');
+  const end = fpSrc.indexOf('// [pm-ticket-files-end]');
+  assert.ok(begin >= 0 && end > begin, 'pm-ticket-files block present');
+  const block = fpSrc.slice(begin, end);
+  assert.match(
+    block,
+    /subjectPrNumber:\s*\{\s*type:\s*\['number',\s*'string',\s*'null'\]\s*\}/,
+    'subjectPrNumber property declared with type [number, string, null]'
+  );
+  // required MUST stay exactly the Issue #104 shape — pm-ticket-files.test.mjs
+  // anchors this regex (undeclared/unmodifiable file). subjectPrNumber is
+  // OPTIONAL only; new-implementation and branch-only continuation tickets
+  // legitimately omit it.
+  assert.match(
+    block,
+    /required:\s*\['title',\s*'priority',\s*'summary',\s*'files',\s*'ticketKind'\]/,
+    'required array unchanged (subjectPrNumber not required)'
+  );
+  assert.doesNotMatch(block, /required:[^\]]*subjectPrNumber/,
+    'subjectPrNumber must NOT appear in the required array');
+});
+
+test('PM prompt (#150): continuation branch instructs returning subject open PR number', () => {
+  const begin = fpSrc.indexOf('// [pm-ticket-files-begin]');
+  const end = fpSrc.indexOf('// [pm-ticket-files-end]');
+  const block = fpSrc.slice(begin, end);
+  // The instruction lives in the isBacklogPick (continuation/"next") branch.
+  const branchAt = block.indexOf('${isBacklogPick');
+  assert.ok(branchAt > 0, 'continuation branch found in PM prompt');
+  const branch = block.slice(branchAt, branchAt + 3000);
+  assert.match(branch, /subjectPrNumber/, 'continuation branch mentions subjectPrNumber');
+  assert.match(branch, /open PR の場合[^。]*PR 番号[^。]*subjectPrNumber/s,
+    'branch instructs: if target is an open PR, return its number as subjectPrNumber');
+});
+
+test('issuePremise evidence (#150): persisted JSON records ticketKind and subjectPrNumber', () => {
+  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
+  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const block = fpSrc.slice(begin, end);
+  const persistIdx = block.indexOf('issue-premise-precheck.json');
+  assert.ok(persistIdx > 0, 'persistence file present in issue-premise block');
+  const persist = block.slice(persistIdx, persistIdx + 2500);
+  assert.match(persist, /ticketKind:\s*ticket\.ticketKind/,
+    'ticketKind (exemption judgment input) recorded in evidence JSON');
+  assert.match(persist, /subjectPrNumber:\s*[^,}]*ticket\.subjectPrNumber/,
+    'subjectPrNumber (exemption judgment input) recorded in evidence JSON');
+});

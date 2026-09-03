@@ -278,3 +278,189 @@ test('issuePremise edge: invalid field types -> FAIL (fail-closed on gh failure 
     'FAIL'
   );
 });
+
+// ── Issue #150: continuation duplicate exemption in evaluateIssuePremise ──
+//
+// 入力契約拡張 (既存3フィールド不変、新規2フィールドは任意 — 不在 = 従来挙動):
+//   - ticketKind: 'new-implementation' | 'continuation' (存在するが不正値 = FAIL)
+//   - subjectPrNumber: 正整数または /^\d+$/ 数値文字列 (数値へ正規化)。
+//     ticketKind='continuation' の文脈でのみ意味を持つ (矛盾宣言 = FAIL)。
+//
+// 判定: continuation + subject open PR が openPRs を完全に説明 (残り無し) のみ
+// duplicate 例外 PASS。stale (closed+merged) は例外適用不可 (優先 FAIL)。
+
+// UC-1 (修正主対象): continuation + subject PR が openPRs を完全に説明 -> PASS
+test('issuePremise #150 UC-1: continuation + subject PR explains all openPRs -> PASS with exemption reason', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [{ number: 149, title: 'feat: same issue work' }],
+    ticketKind: 'continuation',
+    subjectPrNumber: 149,
+  });
+  assert.equal(r.verdict, 'PASS');
+  assert.equal(r.stale, false);
+  // reason に exemption 根拠 (subject PR 番号) の明記を検証
+  assert.match(r.reason, /exemption/i);
+  assert.match(r.reason, /#149/);
+});
+
+// 数値文字列 subjectPrNumber は数値へ正規化されて一致判定される
+test('issuePremise #150: numeric-string subjectPrNumber ("149") normalized to number for match', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [{ number: 149 }],
+    ticketKind: 'continuation',
+    subjectPrNumber: '149',
+  });
+  assert.equal(r.verdict, 'PASS');
+  assert.match(r.reason, /exemption/i);
+});
+
+// UC-2 (fail-closed 維持 その1): new-implementation + open PR -> 従来どおり FAIL
+test('issuePremise #150 UC-2: new-implementation + open PR -> FAIL duplicate (legacy behavior)', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [{ number: 123 }],
+    ticketKind: 'new-implementation',
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.equal(r.duplicate, true);
+  assert.match(r.reason, /duplicate/i);
+});
+
+// UC-2 (fail-closed 維持 その2): ticketKind 不在 + open PR -> 従来どおり FAIL
+test('issuePremise #150 UC-2: absent ticketKind + open PR -> FAIL duplicate (legacy behavior)', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [{ number: 123 }],
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.equal(r.duplicate, true);
+  assert.match(r.reason, /duplicate/i);
+});
+
+// UC-2 系: continuation + subject 一致だが無関係 open PR が残る -> 残り PR への duplicate FAIL
+test('issuePremise #150: continuation + subject match but unrelated open PR remains -> FAIL duplicate', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [{ number: 149 }, { number: 200 }],
+    ticketKind: 'continuation',
+    subjectPrNumber: 149,
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.equal(r.duplicate, true);
+  assert.match(r.reason, /duplicate/i);
+});
+
+// UC-3 (エッジ): 宣言 subject が openPRs に不在 (番号不一致) -> FAIL (premise broken)
+test('issuePremise #150 UC-3: declared subject PR not among openPRs -> FAIL (premise broken)', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [{ number: 200 }],
+    ticketKind: 'continuation',
+    subjectPrNumber: 149,
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.match(r.reason, /subject/i);
+});
+
+// UC-3 (エッジ): openPRs 空 (subject PR は merge 済み) でも FAIL — 過剰例外禁止
+test('issuePremise #150 UC-3: subject PR declared but openPRs empty (already merged) -> FAIL', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [],
+    ticketKind: 'continuation',
+    subjectPrNumber: 149,
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.match(r.reason, /subject/i);
+});
+
+// UC-4 (malformed その1): ticketKind 不正値 / null -> FAIL
+test('issuePremise #150 UC-4: invalid ticketKind -> FAIL (fail-closed)', () => {
+  for (const ticketKind of ['bogus', null, 'Continuation', 42]) {
+    const r = evaluateIssuePremise({
+      issueState: 'open',
+      linkedBranchesContainIssue: false,
+      openPRs: [],
+      ticketKind,
+    });
+    assert.equal(r.verdict, 'FAIL', `ticketKind=${JSON.stringify(ticketKind)} must FAIL`);
+    assert.match(r.reason, /ticketKind/i);
+  }
+});
+
+// UC-4 (malformed その2): subjectPrNumber 非数値・負数・小数・ゼロ -> FAIL
+test('issuePremise #150 UC-4: malformed subjectPrNumber -> FAIL (fail-closed)', () => {
+  for (const subjectPrNumber of ['abc', '-5', 1.5, 0, '0', null, true, { n: 149 }]) {
+    const r = evaluateIssuePremise({
+      issueState: 'open',
+      linkedBranchesContainIssue: false,
+      openPRs: [{ number: 149 }],
+      ticketKind: 'continuation',
+      subjectPrNumber,
+    });
+    assert.equal(r.verdict, 'FAIL', `subjectPrNumber=${JSON.stringify(subjectPrNumber)} must FAIL`);
+    assert.match(r.reason, /subjectPrNumber/i);
+  }
+});
+
+// UC-4 (malformed その3): new-implementation + subjectPrNumber 宣言の矛盾入力 -> FAIL
+test('issuePremise #150 UC-4: new-implementation + subjectPrNumber contradiction -> FAIL', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [],
+    ticketKind: 'new-implementation',
+    subjectPrNumber: 149,
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.match(r.reason, /contradict/i);
+});
+
+// UC-4 系: ticketKind 不在 + subjectPrNumber 宣言も矛盾 (continuation 文脈のみ有効)
+test('issuePremise #150 UC-4: absent ticketKind + subjectPrNumber -> FAIL (subject only valid for continuation)', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [],
+    subjectPrNumber: 149,
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.match(r.reason, /contradict/i);
+});
+
+// 回帰保護: continuation + subjectPrNumber 不在 + openPRs 空 = ブランチのみ継続の
+// 正規ケース -> 従来挙動 (PASS) を壊さないこと
+test('issuePremise #150: continuation without subjectPrNumber + empty openPRs -> PASS (branch-only continuation)', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'open',
+    linkedBranchesContainIssue: false,
+    openPRs: [],
+    ticketKind: 'continuation',
+  });
+  assert.equal(r.verdict, 'PASS');
+  assert.equal(r.duplicate, false);
+});
+
+// stale 優先: closed+merged は continuation 例外適用不可 (exemption は duplicate のみ対象)
+test('issuePremise #150: stale (closed+merged) takes priority over continuation exemption -> FAIL', () => {
+  const r = evaluateIssuePremise({
+    issueState: 'closed',
+    linkedBranchesContainIssue: true,
+    openPRs: [{ number: 149 }],
+    ticketKind: 'continuation',
+    subjectPrNumber: 149,
+  });
+  assert.equal(r.verdict, 'FAIL');
+  assert.equal(r.stale, true);
+  assert.match(r.reason, /stale/i);
+  assert.doesNotMatch(r.reason, /exemption/i);
+});
