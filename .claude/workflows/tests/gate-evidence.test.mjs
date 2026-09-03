@@ -128,7 +128,10 @@ test('wiring: evidence blob injected into reviewer prompts (both routes)', () =>
 });
 
 test('wiring: agent prompt demands fresh worktree checkout and both cargo commands', () => {
-  const evPromptIdx = src.indexOf('EVIDENCE COLLECTOR');
+  // anchor は S2 gate collector 固有の文面に固定 (Issue #104 が Implement に
+  // "DEPENDENCY EVIDENCE COLLECTOR" を追加し、旧 anchor 'EVIDENCE COLLECTOR'
+  // の最初の出現がそちらに変わるため — 意図は S2 collector の検証で不変)。
+  const evPromptIdx = src.indexOf('EVIDENCE COLLECTOR (S2');
   assert.ok(evPromptIdx >= 0, 'evidence agent prompt present');
   const promptSlice = src.slice(evPromptIdx, evPromptIdx + 4000);
   assert.match(promptSlice, /worktree/, 'fresh worktree required');

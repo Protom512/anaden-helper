@@ -129,9 +129,14 @@ test('fail-closed → buildEngineerPrompt は null (prompt 黙墜ち防止)', ()
 test('wiring: implement phase が resolveImplementLane を dispatch 前に呼ぶ', () => {
   const implIdx = src.indexOf('engineer:${task.id}');
   assert.ok(implIdx > 0, 'engineer agent call present');
-  const before = src.slice(Math.max(0, implIdx - 3000), implIdx);
-  assert.match(before, /resolveImplementLane\(/);
-  assert.match(before, /buildEngineerPrompt\(/);
+  // 位置窓 (旧: label 直前 3000 文字) は Issue #104 dependency-readiness wiring
+  // (lane-gate と dispatch の間に挿入) で距離が伸びるため、呼び出し位置の
+  // index 順序で直接検証する (anchor を call-site 文字列に固定 — より厳密)。
+  const laneCallIdx = src.indexOf('resolveImplementLane(task)');
+  const promptCallIdx = src.indexOf('buildEngineerPrompt(laneResult, task, ticket, approval)');
+  assert.ok(laneCallIdx > 0, 'resolveImplementLane call present');
+  assert.ok(promptCallIdx > laneCallIdx, 'lane resolution precedes engineer prompt build');
+  assert.ok(implIdx > promptCallIdx, 'engineer dispatch follows prompt build');
 });
 
 test('wiring: lane-missing はタスク結果として fail-closed 報告される', () => {
