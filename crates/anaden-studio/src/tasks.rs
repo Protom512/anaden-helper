@@ -592,6 +592,7 @@ implemented = true
             vec![
                 "field_loop_pc",
                 "launch",
+                "login",
                 "nav_to_field_pc",
                 "worldmap_loop"
             ]

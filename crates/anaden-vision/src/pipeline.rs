@@ -3779,4 +3779,52 @@ mod tests {
             anaden_core::StopCondition::LoopCount { target: 50 }
         );
     }
+
+    // ---- Issue #146 T3: fishing パイプライン最小構成 (UC-2) ----
+    //
+    // つりタスクの実体 (釣りUI固有の画像認識テンプレート・ROI) は別チケット切出し。
+    // 本スライスは「パース・起動可能な pipeline 構造」のみを検証する
+    // (estimate 承認条件: 画像認識精度は受入基準に含めない)。
+    // start_task の検出テンプレートは既存 pc-scoped field scene (hud_top.png) を
+    // 流用した暫定のもので、釣りシーンの実テンプレート導入時に差し替える。
+
+    /// templates/pipelines/fishing/ が load_pipeline で TaskDef として
+    /// 読み込めること (テンプレPNG実在・ROI 1258x708 収容)。
+    #[test]
+    fn fishing_pipeline_taskdefs_load() {
+        let dir = workspace_templates_root().join("pipelines").join("fishing");
+        let defs = load_pipeline(&dir).expect("fishing pipeline must load");
+        assert!(
+            defs.iter().any(|d| d.name == "FishingStartPc"),
+            "fishing must contain FishingStartPc, got {:?}",
+            defs.iter().map(|d| d.name.clone()).collect::<Vec<_>>()
+        );
+        let start = defs
+            .iter()
+            .find(|d| d.name == "FishingStartPc")
+            .expect("FishingStartPc present");
+        assert_eq!(start.algorithm, Algorithm::Ccoeff);
+        assert!(start.template.exists(), "template must exist");
+        let roi = start.roi.expect("FishingStartPc has ROI");
+        assert_roi_within_1258x708(roi, "FishingStartPc");
+    }
+
+    /// templates/pipelines/fishing/pipeline.toml が manifest として start_task +
+    /// goals に分離パースでき、start_task が同一ディレクトリの TaskDef 名と一致すること。
+    #[test]
+    fn fishing_pipeline_manifest_loads() {
+        let dir = workspace_templates_root().join("pipelines").join("fishing");
+        let manifest =
+            load_pipeline_manifest(&dir).expect("fishing/pipeline.toml must load as manifest");
+        assert_eq!(manifest.start_task, "FishingStartPc");
+        let defs = load_pipeline(&dir).expect("TaskDefs must load (manifest skipped)");
+        assert!(
+            defs.iter().any(|d| d.name == manifest.start_task),
+            "manifest.start_task must exist as a TaskDef"
+        );
+        assert!(
+            manifest.goals.iter().all(|g| g.validate().is_ok()),
+            "all fishing goals must validate"
+        );
+    }
 }

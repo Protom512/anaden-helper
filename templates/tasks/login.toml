@@ -1,7 +1,9 @@
-# ログインタスクのスケルトン (Issue #144)。
-# implemented = false: 未実装。グレー表示・チェック不可 (嘘の動作可能表示禁止)。
+# ログインタスク (Issue #146 / UC-2 / T4 実装)。
+# templates/pipelines/login/ に最小構成パイプライン
+# (LoginTapTitlePc → LoginWaitFieldPc, Field 到達で完了) を実装済み。
+# 受入基準は「パース・起動可能」のみ。画像認識精度は別チケット。
 id = "login"
 title = "ログイン"
 kind = "pipeline_run"
-implemented = false
+implemented = true
 pipeline_dir = "templates/pipelines/login"
