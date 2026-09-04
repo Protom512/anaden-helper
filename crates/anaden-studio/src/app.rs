@@ -519,6 +519,14 @@ impl StudioApp {
         self.task_queue.as_ref()
     }
 
+    /// タスク実行ログのスナップショット (読み取り専用)。
+    ///
+    /// runner.rs の `log_snapshot` と同じ公開パターンで、ヘッドレス E2E テスト
+    /// (`tests/task_queue_e2e_tests.rs`) がログの内容・順序を機械検証する経路。
+    pub fn task_log_lines(&self) -> &[LogEntry] {
+        &self.task_log_snapshot
+    }
+
     /// キューがアクティブ (未完了 = Pending/Running/PausedAfterFailure) か。
     fn task_queue_active(&self) -> bool {
         self.task_queue
