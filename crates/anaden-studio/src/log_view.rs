@@ -14,7 +14,6 @@
 use std::collections::VecDeque;
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Stdio};
-#[cfg(test)]
 use std::sync::mpsc::Receiver;
 use std::sync::mpsc::{SyncSender, TrySendError};
 use std::sync::{Arc, Mutex};
@@ -338,6 +337,45 @@ impl SharedLogBuffer {
     pub fn with_buf<R>(&self, f: impl FnOnce(&mut LogBuffer) -> R) -> Option<R> {
         self.inner.lock().ok().map(|mut b| f(&mut b))
     }
+}
+
+/// チャネルを drain してバッファへ反映し、観測した Exit code を返す
+/// 共有ヘルパ (Issue #154 Shard 1: runner.rs `drain_logs` / app.rs
+/// `drain_task_logs` の単一実装)。
+///
+/// - `LogEvent::Line` は [`LogBuffer::push_line`] で記録 (レベル自動推定)。
+/// - `LogEvent::Exit` は `[studio] プロセス終了: ...` 行として記録し、
+///   最初の Exit の exit code を戻り値の第 2 要素へ返す (Exit 無しは None)。
+///
+/// 戻り値の第 1 要素は今回記録した行数 (自動スクロール追従の新着行数用)。
+pub fn drain_channel_into(
+    log: &SharedLogBuffer,
+    rx: &Receiver<LogEvent>,
+) -> (usize, Option<Option<i32>>) {
+    let mut new_lines = 0usize;
+    let mut exit_code: Option<Option<i32>> = None;
+    while let Ok(ev) = rx.try_recv() {
+        match ev {
+            LogEvent::Line(l) => {
+                let _ = log.with_buf(|b| b.push_line(&l));
+                new_lines += 1;
+            }
+            LogEvent::Exit(code) => {
+                let (label, level) = match code {
+                    Some(0) => ("exit=0 (成功)", LogLevel::Info),
+                    Some(_) => ("exit=エラー", LogLevel::Error),
+                    None => ("exit=不明", LogLevel::Error),
+                };
+                let line = format!("[studio] プロセス終了: {label} (code={code:?})");
+                let _ = log.with_buf(|b| b.push_line_with_level(&line, level));
+                new_lines += 1;
+                if exit_code.is_none() {
+                    exit_code = Some(code);
+                }
+            }
+        }
+    }
+    (new_lines, exit_code)
 }
 
 /// 子プロセスの stdout を行単位で読み取り `tx` へ送るスレッドを起動する。
