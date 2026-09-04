@@ -727,17 +727,35 @@ impl StudioApp {
                 self.load_task_list(&Self::workspace_root().join("templates/tasks"));
             }
         } else if let Some(list) = self.task_defs.clone() {
+            // UC-3: 詳細プレビューは実行と同じ引数解決条件 (target/serial/root)。
+            let target = self.cli_target();
+            let serial = Some(self.adb_serial.as_str());
+            let root = Self::workspace_root();
+            let selected = list.selected_ids().to_vec();
             let mut clicked: Option<String> = None;
             for def in list.definitions() {
                 let mut checked = list.is_selected(&def.id);
                 let label = tasks::checkbox_label(def);
-                ui.add_enabled(
-                    def.is_selectable(),
-                    egui::Checkbox::new(&mut checked, label),
-                );
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        def.is_selectable(),
+                        egui::Checkbox::new(&mut checked, label),
+                    );
+                    // UC-3: 選択済みなら実行順位置を横に表示 (未選択は非表示)。
+                    if let Some(pos) = tasks::queue_position_label(&selected, &def.id) {
+                        ui.weak(pos);
+                    }
+                });
                 if checked != list.is_selected(&def.id) {
                     clicked = Some(def.id.clone());
                 }
+                // UC-3: 展開可能な詳細表示 (kind・pipeline_dir・start_task・
+                // 引数プレビュー — 読み取り専用・schema 変更なし)。
+                egui::CollapsingHeader::new(egui::RichText::new("詳細").weak())
+                    .id_salt(&def.id)
+                    .show(ui, |ui| {
+                        Self::task_detail_ui(ui, def, target, serial, &root);
+                    });
             }
             if let Some(id) = clicked {
                 self.toggle_task(&id);
@@ -749,6 +767,20 @@ impl StudioApp {
                     self.start_task_queue();
                 }
             });
+            // UC-3: 選択済みキューの実行順リスト (チェック順 1. 2. 3. ...・
+            // 未実装 (不整合検出時) はグレー表示)。
+            let rows = tasks::queue_order_rows(&selected, list.definitions());
+            if !rows.is_empty() {
+                ui.separator();
+                ui.label("実行順 (チェック順)");
+                for row in &rows {
+                    if row.runnable {
+                        ui.label(format!("{}. {}", row.position, row.title));
+                    } else {
+                        ui.weak(format!("{}. {} (未実装)", row.position, row.title));
+                    }
+                }
+            }
         }
         // UC-4: 進行サマリ + 実行制御 + チェック順キュー一覧。
         if let Some(queue) = self.task_queue.clone() {
@@ -784,6 +816,45 @@ impl StudioApp {
         self.task_log_ui(ui);
         ui.separator();
         ui.label(&self.status);
+    }
+
+    /// UC-3: タスク 1 件の詳細表示ボディ (collapsing header 配下・読み取り専用)。
+    ///
+    /// kind・pipeline_dir・start_task (未宣言時は解決結果)・実引数プレビューを
+    /// 表示する。引数解決は [`tasks::task_detail_view`] (実行の [`tasks::spawn_args`]
+    /// と単一情報源)。未実装タスクは赤字で理由を表示 (fail-closed)。
+    fn task_detail_ui(
+        ui: &mut egui::Ui,
+        def: &tasks::TaskDefinition,
+        target: &str,
+        serial: Option<&str>,
+        root: &Path,
+    ) {
+        let view = tasks::task_detail_view(def, target, serial, root);
+        ui.label(format!("ID: {}", view.id));
+        ui.label(format!("種別: {}", view.kind));
+        match &view.pipeline_dir {
+            Some(dir) => {
+                ui.label(format!("pipeline_dir: {dir}"));
+            }
+            None => {
+                ui.weak("pipeline_dir: なし (サブコマンド実行)");
+            }
+        }
+        match &view.start_task {
+            Some(task) => {
+                ui.label(format!("start_task: {task}"));
+            }
+            None if def.kind == tasks::TaskKind::PipelineRun => {
+                // pipeline_run なのに解決不能 = 実行不可 (fail-closed 表示)。
+                ui.colored_label(egui::Color32::RED, "start_task: 未解決");
+            }
+            None => {} // launch_subcommand は start_task を使用しない
+        }
+        ui.label(format!("引数プレビュー: {}", view.args_preview()));
+        if let Some(reason) = &view.unimplemented_reason {
+            ui.colored_label(egui::Color32::RED, format!("未実装: {reason}"));
+        }
     }
 
     /// Tasks ペインの実行ログビューア (log_view.rs の LogBuffer/AutoScroll 再利用)。
@@ -2225,6 +2296,27 @@ mod tests {
         app.abort_task_queue();
         // 中止後の描画も安定していること。
         ctx.begin_pass(egui::RawInput::default());
+        app.render_task_list(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
+    }
+
+    /// UC-3: 詳細展開ビュー (kind/pipeline_dir/start_task/引数プレビュー) を
+    /// 含む描画がパニックなく完了する。collapsing header 展開時に描画される
+    /// ボディを全タスク分直接描画 + 選択済み一覧 (実行順リスト含む) 全体描画。
+    #[test]
+    fn embed_render_task_list_with_detail_view_completes_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = StudioApp::default();
+        app.load_task_list(&tasks_dir());
+        app.toggle_task("launch");
+        app.toggle_task("field_loop_pc");
+        let root = StudioApp::workspace_root();
+        ctx.begin_pass(egui::RawInput::default());
+        let mut detail_ui = child_ui(&ctx);
+        let list = app.task_defs.clone().unwrap();
+        for def in list.definitions() {
+            StudioApp::task_detail_ui(&mut detail_ui, def, "windows", None, &root);
+        }
         app.render_task_list(&mut child_ui(&ctx));
         let _ = ctx.end_pass();
     }
