@@ -2790,6 +2790,19 @@ Only append if you have genuine feedback. Be specific.`,
 
 log(`Commit Gate: ${consensus.final_verdict}`);
 
+// Issue #152 / S2 FP-2: Commit Gate verdict の永続化 (§1.1 — PR review または
+// .omc/logs/{run-id}/ 永続ログ。PR 本文 interpolation と二重の evidence)。
+// NO-GO early return の前に置く — gate-blocked run の verdict こそ evidence。
+// best-effort: 失敗しても gate 判定には影響しない。
+try {
+  await agent(
+    `EVIDENCE PERSISTER (Issue #152 gate-verdicts)。以下の JSON を .omc/logs/${runId}/gate-verdicts.json へ書き出せ（ディレクトリが無ければ作成）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
+${JSON.stringify({ recordedAt: runTimestamp, runTimestamp, runId, issue: 152, finalVerdict: consensus && consensus.final_verdict, perLane: (gateReviews || []).map(r => ({ dimension: r && r.dimension, verdict: r && r.verdict })), commitMessage: consensus && consensus.commit_message || null }, null, 2)}
+書き出したら "persisted" とだけ返せ。`,
+    { label: 'gate:persist-verdicts', phase: 'Commit Gate', model: 'sonnet' }
+  );
+} catch (_e) { /* best-effort — gate 判定に影響させない */ }
+
 if (consensus.final_verdict === 'NO-GO') {
   return {
     status: 'gate-blocked',
@@ -2958,8 +2971,76 @@ log(`Release precheck (Issue #66): staged=${precheck.staged.length} excluded=${p
 // Task 1 の JS プレチェックに加え、エージェント内でも commit 直前に
 // git diff --cached --name-only を確認し、tracked 変更ゼロなら push/PR を中止する。
 // R7 整合: snapshot commit が存在し差分がそれのみの場合は正常パス扱い。
+// Issue #152 要件1 (UC-1/UC-2): Commit Gate consensus の実 verdict を interpolation。
+// 固定文字列 "(6次元 all GO)" (header) / "6-dimension commit gate: all GO" (PR body) は
+// 廃止し、buildGateVerdictSection が per-lane verdict・final verdict・CONDITIONAL 解消根拠
+// (judgment_calls の consensus 文) を生成する。"all GO" は全 active lane GO 時のみ出力。
+// lane 数は ACTIVE_GATE_DIMENSIONS 由来 (P-008 docs-only short-circuit で 6 未満になり得る)。
 // Unit-tested by .claude/workflows/tests/release-prompt-guard.test.mjs (TDD).
-const buildReleasePrompt = (consensus, ticket, snapshotBranch) => `RELEASE MANAGER (Step 1: branch → commit → push → PR)。変更は Commit Gate (6次元 all GO) 通過済み。
+// per-lane review の verdict 表示ラベル。欠損 (null/空) は MISSING (fail-closed 表示)。
+const gateVerdictLabel = (raw) => {
+  if (typeof raw !== 'string' || raw.length === 0) return 'MISSING';
+  const upper = raw.toUpperCase();
+  return upper === 'NOGO' ? 'NO-GO' : upper;
+};
+// activeDimensions は ACTIVE_GATE_DIMENSIONS ({key, prompt}) と等価の配列。key 文字列配列も許容。
+const activeDimensionKeysOf = (activeDimensions) =>
+  (Array.isArray(activeDimensions) ? activeDimensions : [])
+    .map((d) => {
+      if (typeof d === 'string' && d) return d;
+      if (d && typeof d === 'object' && typeof d.key === 'string' && d.key) return d.key;
+      return null;
+    })
+    .filter((k) => k != null);
+// 純関数 (Issue #152 要件1): consensus 実 verdict の gate セクション文字列を生成。
+//  - per-lane verdict 行 (lane 名 + GO/NO-GO/CONDITIONAL、欠損 lane は MISSING)
+//  - final verdict 行 (consensus.final_verdict)
+//  - CONDITIONAL lane の解消根拠 (consensus.judgment_calls の consensus 文)
+//  - "all GO" 文字列は全 active lane GO 時のみ出力 (UC-2 乖離防止)
+// gateReviews は ACTIVE_GATE_DIMENSIONS と同順 (parallel() map / team collected[idx])。
+// dimension 文字列一致を優先し、不一致時のみ同順 fallback (stale full-length 配列耐性)。
+const buildGateVerdictSection = (consensus, gateReviews, activeDimensionKeys) => {
+  const keys = activeDimensionKeysOf(activeDimensionKeys);
+  const reviews = Array.isArray(gateReviews) ? gateReviews : [];
+  const rows = keys.map((key, idx) => {
+    const byDim = reviews.find((r) => r && typeof r === 'object' && r.dimension === key);
+    const entry = byDim || reviews[idx] || null;
+    return { key, verdict: gateVerdictLabel(entry ? entry.verdict : null) };
+  });
+  const finalVerdict = consensus && typeof consensus.final_verdict === 'string' && consensus.final_verdict
+    ? consensus.final_verdict.toUpperCase()
+    : 'UNKNOWN';
+  const lines = [
+    `Commit Gate verdict — consensus 実 verdict (${rows.length} lane${rows.length === 1 ? '' : 's'}, Issue #152):`,
+    ...(rows.length > 0
+      ? rows.map((r) => `- ${r.key}: ${r.verdict}`)
+      : ['- (active lane なし — lane 構成不明。全 lane の再確認を要す)']),
+    `- final verdict: ${finalVerdict}`,
+  ];
+  if (rows.length > 0 && rows.every((r) => r.verdict === 'GO')) {
+    lines.push(`- all GO (${rows.length}/${rows.length} lanes)`);
+  }
+  const conditional = rows.filter((r) => r.verdict === 'CONDITIONAL');
+  if (conditional.length > 0) {
+    lines.push(`- CONDITIONAL lanes (${conditional.map((r) => r.key).join(', ')}) — 解消根拠 (consensus judgment_calls):`);
+    const calls = consensus && Array.isArray(consensus.judgment_calls) ? consensus.judgment_calls : [];
+    const callLines = calls
+      .filter((c) => c && typeof c === 'object')
+      .map((c) => {
+        const topic = typeof c.topic === 'string' && c.topic ? c.topic : 'no-topic';
+        const consensusText = typeof c.consensus === 'string' && c.consensus
+          ? c.consensus
+          : '(consensus 未記録)';
+        return `- [${topic}] ${consensusText}`;
+      });
+    lines.push(...(callLines.length > 0 ? callLines : ['- (judgment_calls 未記録 — CONDITIONAL 解消根拠の確認を要す)']));
+  }
+  return lines.join('\n');
+};
+const buildReleasePrompt = (consensus, gateReviews, activeDimensions, ticket, snapshotBranch) => {
+  const gateVerdictSection = buildGateVerdictSection(consensus, gateReviews, activeDimensionKeysOf(activeDimensions));
+  return `RELEASE MANAGER (Step 1: branch → commit → push → PR)。変更は Commit Gate 通過済み — consensus 実 verdict (Issue #152):
+${gateVerdictSection}
 
 【R7 事前 snapshot の可能性】Implement 直後の snapshot step が既に feature branch
 \`${snapshotBranch}\` へ実装を commit 済みかもしれない（work preservation）。まず確認:
@@ -3023,15 +3104,16 @@ Execute:
    <body>
    Closes #${ticket.issueNumber}
    ## Gate evidence
-   6-dimension commit gate: all GO
+   ${gateVerdictSection}
    ## Acceptance criteria
    ${JSON.stringify(ticket.acceptanceCriteria || [])}
 報告: branch名, PR URL, PR番号。**最終行に必ず \`PR_NUMBER=<番号>\` を記載**（後続ステップが抽出する）。`;
+};
 // [release-prompt-end]
 const releaseResult = precheckAbort
   ? `ABORTED (precheck: ${precheckAbort.reason}) — Release agent skipped (Issue #66 Task 3)`
   : await agent(
-      buildReleasePrompt(consensus, ticket, snapshotBranch),
+      buildReleasePrompt(consensus, gateReviews, ACTIVE_GATE_DIMENSIONS, ticket, snapshotBranch),
       { label: 'release:branch-push-pr', phase: 'Release', model: 'sonnet' }
     );
 log('Release: branch + push + PR 作成');
@@ -3046,6 +3128,12 @@ let goCount = 0;
 // workflow 死亡 (PR #70 マージは実施済みなのに status が返らない)。
 // hoist 宣言で修正。以降の Phase 6-7 変数は else ブロック内スコープのまま。
 let mergeResult = null;
+// Issue #152 (UC-3/UC-4/UC-5): Release Review verdict 永続化の成果。Phase 6 の
+// wiring は !aborted ブロック内で実行されるが、最終 return はブロック外から参照
+// する → P-006 と同一の hoist パターンで宣言 (aborted 時は 0 / false のまま =
+// persistedLog '未収集' の fail-closed 表示)。
+let prReviewsPosted = 0;
+let persistedLogOk = false;
 
 if (releaseAbort.aborted) {
   // Issue #66 Task 3: skip Phase 6-7 (Release Review / Merge) — nothing was
@@ -3068,6 +3156,13 @@ const reviewLens = [
   '品質証拠: テスト/gate 証拠が PR 本文に提示され再現可能か。コミットが 6次元 gate GO を経ているか。',
   '副作用・スコープ: 既存機能への回帰、スコープ逸脱、Closes #N の対象違い(不適切な issue close)がないか。',
 ];
+// Issue #152 Task 2: Release Review lane 表示名 (reviewLens 先頭語由来 — verdict と
+// 1:1 対応。永続化 md の lane 表・PR review COMMENT の lane 行で使用)。
+const releaseLaneLabel = (i) => {
+  const lens = reviewLens[i];
+  const head = typeof lens === 'string' ? lens.split(':')[0].trim() : '';
+  return `${i + 1}: ${head || `lane-${i + 1}`}`;
+};
 // [team-verdict-begin]
 // Pure verdict logic shared by the TeamCreate path and the parallel() fallback path.
 // Extracted as a marker-delimited block and unit-tested by
@@ -3100,6 +3195,138 @@ const mergeReleaseVerdicts = (verdicts, expectedTotal = 3) => {
   return { goCount, missingCount, expectedTotal, allGo, releaseBlocked: !allGo };
 };
 // [team-verdict-end]
+
+// [release-verdict-persistence-begin]
+// Issue #152 要件2 (UC-3/UC-4/UC-5): Release Review 3 lane verdict の自動永続化
+// 純関数群 (Task 2)。TeamCreate 経路・parallel() 経路の両方から利用される。
+// scope-free な marker block として抽出し、
+// .claude/workflows/tests/release-verdict-persistence.test.mjs が eval して単体検証する
+// (team-verdict / release-prompt と同一の TDD 規律)。
+// モデル: .omc/logs/run-1788474181/release-review-verdicts.md (PR #151 remediation
+// で確立した lane 表構造)。Date API 禁制 (workflow runtime) のため時刻は常に
+// runTimestamp 引数由来 — 新規に時刻を生成しない。
+
+// per-lane entry 正規化: StructuredOutput / TaskUpdate metadata 形式
+// {verdict, rationale} を永続化形式 {lane, verdict, rationale, reviewer} へ。
+// GO/NO-GO 以外 (欠損・malformed) は null = MISSING (fail-closed — fabrication しない)。
+const normalizeReleaseLaneEntry = (entry, lane, reviewer) => {
+  if (!(entry && typeof entry === 'object')) return null;
+  if (entry.verdict !== 'GO' && entry.verdict !== 'NO-GO') return null;
+  return {
+    lane: typeof lane === 'string' && lane.length > 0 ? lane : 'lane (unknown)',
+    verdict: entry.verdict,
+    rationale: typeof entry.rationale === 'string' ? entry.rationale.trim() : '',
+    reviewer: typeof reviewer === 'string' && reviewer.length > 0 ? reviewer : 'unknown',
+  };
+};
+
+// release agent 報告から PR_NUMBER=<n> を抽出 (最終行優先 — 報告末尾の
+// 「最終行に必ず PR_NUMBER=<番号> を記載」指示と整合)。欠損時は null。
+const extractPrNumber = (releaseResult) => {
+  if (typeof releaseResult !== 'string' || releaseResult.length === 0) return null;
+  const lines = releaseResult.split(/\r?\n/);
+  for (let i = lines.length - 1; i >= 0; i--) {
+    const m = lines[i].match(/PR_NUMBER\s*=\s*(\d+)/);
+    if (m) return Number(m[1]);
+  }
+  return null;
+};
+
+// PR review COMMENT 本文 (UC-3): 冒頭機械可読 "VERDICT: GO|NO-GO" 行 + lane 名。
+// parseTeamVerdict (strict single-token 規約) との round-trip 互換が要件:
+//  - rationale 内の "VERDICT[:=]GO|NO-GO|NOGO" トークンは除去 (複数トークン化防止)
+//  - GO コメントでは反対 verdict 語 (NO-GO/NOGO) も除去 (ANY_NOGO_RE 誤検出 →
+//    fail-closed null 化の防止。tests が round-trip を pin)
+// verdict が GO/NO-GO 以外 (MISSING/malformed) は null = 投稿しない (fabrication なし)。
+const PR_VERDICT_TOKEN_RE = /\bVERDICT\s*[:=]\s*(?:NO-GO|NOGO|GO)\b/gi;
+const PR_OPPOSING_NOGO_RE = /\b(?:NO-GO|NOGO)\b/gi;
+const buildPrReviewComment = (lane, verdict, rationale) => {
+  if (verdict !== 'GO' && verdict !== 'NO-GO') return null;
+  const laneLabel = typeof lane === 'string' && lane.length > 0 ? lane : 'lane (unknown)';
+  const raw = typeof rationale === 'string' ? rationale.trim() : '';
+  let safe = raw.replace(PR_VERDICT_TOKEN_RE, '');
+  if (verdict === 'GO') {
+    safe = safe.replace(PR_OPPOSING_NOGO_RE, '[opposing-verdict-redacted]');
+  }
+  safe = safe.replace(/[ \t]+/g, ' ').trim();
+  return [
+    `VERDICT: ${verdict}`,
+    `Lane: ${laneLabel}`,
+    '',
+    '### Rationale',
+    safe.length > 0 ? safe : '(rationale 未記録)',
+    '',
+    '---',
+    '(feature-pipeline Release Review 自動投稿 — Issue #152。冒頭行は機械可読判定トークン。)',
+  ].join('\n');
+};
+
+// .omc/logs/{runId}/release-review-verdicts.md 本文 (UC-3/UC-4)。
+// run-1788474181 の lane 表構造 (Lane | Reviewer agent | VERDICT | 記録時刻) に準拠。
+// 時刻は runTimestamp 由来のみ (Date API 禁制)。collected の malformed 要素は
+// MISSING 行として真実表示 (fabrication しない)。releaseDecision は
+// mergeReleaseVerdicts の出力 ({goCount, missingCount, releaseBlocked}) を想定するが、
+// 欠損時は collected から再計算する (自己申告に頼らない二重防御)。
+const buildReleaseVerdictsMd = (runId, runTimestamp, prNumber, collected, releaseDecision) => {
+  const list = Array.isArray(collected) ? collected : [];
+  const rows = [0, 1, 2].map((i) => {
+    const e = list[i];
+    if (e && typeof e === 'object' && (e.verdict === 'GO' || e.verdict === 'NO-GO')) {
+      return {
+        lane: typeof e.lane === 'string' && e.lane.length > 0 ? e.lane : `lane-${i + 1}`,
+        reviewer: typeof e.reviewer === 'string' && e.reviewer.length > 0 ? e.reviewer : 'unknown',
+        verdict: e.verdict,
+        rationale: typeof e.rationale === 'string' ? e.rationale.trim() : '',
+      };
+    }
+    return { lane: `lane-${i + 1}`, reviewer: 'unknown', verdict: 'MISSING', rationale: '' };
+  });
+  const dec = releaseDecision && typeof releaseDecision === 'object' ? releaseDecision : {};
+  const goCount = Number.isInteger(dec.goCount) ? dec.goCount : rows.filter((r) => r.verdict === 'GO').length;
+  const missingCount = Number.isInteger(dec.missingCount)
+    ? dec.missingCount
+    : rows.filter((r) => r.verdict === 'MISSING').length;
+  const releaseBlocked = typeof dec.releaseBlocked === 'boolean'
+    ? dec.releaseBlocked
+    : !(rows.length === 3 && rows.every((r) => r.verdict === 'GO'));
+  const ts = typeof runTimestamp === 'string' && runTimestamp.length > 0 ? runTimestamp : 'unknown';
+  const runIdLabel = String(runId != null ? runId : 'unknown');
+  const prNum = Number.isInteger(prNumber)
+    ? prNumber
+    : (/^\d+$/.test(String(prNumber != null ? prNumber : '')) ? Number(prNumber) : null);
+  const prLine = prNum != null ? `#${prNum}` : 'unknown (PR_NUMBER 未抽出 — PR review 投稿スキップ, UC-5)';
+  const mergeLine = releaseBlocked
+    ? `${goCount}/3 GO → **merge 阻止** (releaseBlocked=true)。NO-GO/MISSING lane の remediation が必要。`
+    : `${goCount}/3 GO → squash merge 条件充足。`;
+  return [
+    `# Release Review Verdicts — PR ${prLine} (run-${runIdLabel})`,
+    '',
+    `- runTimestamp: ${ts}`,
+    `- PR: ${prLine}`,
+    `- goCount: ${goCount}/3 GO${missingCount > 0 ? `, ${missingCount} MISSING` : ''}`,
+    '',
+    `## Verdicts: ${goCount}/3 GO${missingCount > 0 ? `, ${missingCount} MISSING` : ''} → ${releaseBlocked ? 'merge 阻止 (releaseBlocked)' : 'merge 条件充足'}`,
+    '',
+    '| Lane | Reviewer agent | VERDICT | 記録時刻 |',
+    '|------|----------------|---------|----------|',
+    ...rows.map((r) => `| ${r.lane} | ${r.reviewer} | ${r.verdict} | ${ts} |`),
+    '',
+    'verdict 実体は PR review 本文 (冒頭機械可読判定行 + lane 名。GitHub が author',
+    '自身の --approve を拒否するため COMMENT 形式 — PR #149/#151 で確立した実運用解)。',
+    'PR review 投稿失敗/スキップ時も本ログが verdict evidence の fail-closed 保全先',
+    'となる (UC-5)。',
+    '',
+    '### Rationale (per lane)',
+    '',
+    ...rows.map((r) => `- [${r.lane}] ${r.verdict}: ${r.rationale.length > 0 ? r.rationale.replace(/\s+/g, ' ') : '(rationale 未記録)'}`),
+    '',
+    '## Merge 判定',
+    '',
+    mergeLine,
+    '',
+  ].join('\n');
+};
+// [release-verdict-persistence-end]
 
 // TeamCreate-based Release Review (Issue #63 Task 3).
 // - reviewLens 3視点を teammate に割り当て、verdict を受信して 3/3 GO 判定する。
@@ -3153,7 +3380,7 @@ ${reviewerLensSpawnerPrompt(reviewerPrompt)}
     // Poll TaskList until all 3 verdict tasks are completed (structured metadata) or timeout.
     // Date API 禁制のため反復回数ベースの cap (15s interval × 80 = 20 min 相当)。
     const MAX_POLLS = 80;
-    const collected = new Array(3).fill(null);
+    const rawCollected = new Array(3).fill(null);
     for (let poll = 0; poll < MAX_POLLS; poll++) {
       const tasks = await TaskList();
       for (const t of (tasks || [])) {
@@ -3161,17 +3388,23 @@ ${reviewerLensSpawnerPrompt(reviewerPrompt)}
         const idx = reviewLens.findIndex(
           (_, i) => (t.metadata && (t.metadata.lensIndex === i)) || (t.subject || '').includes(`release-review-${i + 1}`)
         );
-        if (idx < 0 || collected[idx] != null) continue;
+        if (idx < 0 || rawCollected[idx] != null) continue;
         if (t.status === 'completed' && t.metadata && (t.metadata.verdict === 'GO' || t.metadata.verdict === 'NO-GO')) {
-          collected[idx] = { verdict: t.metadata.verdict, rationale: String(t.metadata.rationale || '') };
+          rawCollected[idx] = { verdict: t.metadata.verdict, rationale: String(t.metadata.rationale || '') };
         }
       }
-      if (collected.every((v) => v != null)) break;
+      if (rawCollected.every((v) => v != null)) break;
       await new Promise((r) => setTimeout(r, 15000));
     }
-    const merged = mergeReleaseVerdicts(collected, 3);
+    const merged = mergeReleaseVerdicts(rawCollected, 3);
     log(`Release Review (team ${teamName}): ${merged.goCount}/3 GO${merged.missingCount > 0 ? `, ${merged.missingCount} MISSING (block)` : ''} [spawn: ${String(spawnResult).slice(0, 200)}]`);
-    return merged;
+    // Issue #152 Task 2: 実 per-lane verdict を merged と併せて返す (goCount 由来の
+    // verdicts 再構成は呼び出し元で廃止)。lane 名は reviewLens 先頭語由来。
+    // rawCollected (TaskUpdate metadata {verdict, rationale}) を永続化形式
+    // {lane, verdict, rationale, reviewer} へ正規化して collected として返す。
+    const collected = rawCollected.map((entry, i) =>
+      normalizeReleaseLaneEntry(entry, releaseLaneLabel(i), `reviewer-${i + 1} (team)`));
+    return { collected, merged };
   } finally {
     // TeamDelete requires team_name — argument-less call silently deletes nothing (Issue #63 Task 3).
     try { await (typeof TeamDelete === 'function' ? TeamDelete({ team_name: teamName }) : null); } catch (_e) { /* best effort */ }
@@ -3183,20 +3416,40 @@ function reviewerLensSpawnerPrompt(makePrompt) {
 }
 
 let releaseReviewMerged = null;
+// Issue #152 Task 2: team 経路の実 per-lane verdict ({lane, verdict, rationale,
+// reviewer}[] — MISSING lane は null entry)。
+let releaseReviewCollected = null;
 try {
-  releaseReviewMerged = await runReleaseReviewViaTeam();
+  const teamOutcome = await runReleaseReviewViaTeam();
+  if (teamOutcome) {
+    releaseReviewMerged = teamOutcome.merged;
+    releaseReviewCollected = teamOutcome.collected;
+  }
 } catch (e) {
   log(`Release Review (team): unexpected failure (${e}) — falling back to parallel() path`);
   releaseReviewMerged = null;
+  releaseReviewCollected = null;
 }
 
 verdicts = [];
+// Fallback 経路の実 per-lane verdict (位置保持 — 失敗 lane は null = MISSING)。
+let fallbackLaneVerdicts = null;
 if (releaseReviewMerged) {
-  // Team path completed: use its merged result directly (same 3/3 GO semantics).
-  verdicts = new Array(releaseReviewMerged.goCount).fill({ verdict: 'GO' });
+  // Team path completed: real per-lane verdicts (GO/NO-GO ともに実データ —
+  // goCount 由来の fabrication は廃止, Issue #152 Task 2)。
+  verdicts = releaseReviewCollected
+    .filter(Boolean)
+    .map((v) => ({ verdict: v.verdict, rationale: v.rationale }));
 } else {
-  // Fallback path: original parallel() + StructuredOutput (R6-hardened route, unchanged).
-  verdicts = (await parallel(
+  // Fallback path: original parallel() + StructuredOutput (R6-hardened route)。
+  // Issue #152 Task 3 (per-lane verdict 真実化): 旧 master は parallel() 結果を
+  // [...verdicts, null, null, null].slice(0, 3) で mergeReleaseVerdicts へ渡して
+  // おり、結果自体は使用済みだった (= 常に全 MISSING ではなかった)。実害は
+  // (1) .filter(Boolean) による位置崩壊 — 失敗 lane が詰められ、生存 verdict の
+  // lane 帰属がズレる — と (2) team 経路の goCount fabrication — NO-GO lane が
+  // GO/null へ上書きされ verdict が消失する — の2点。位置を保持して (失敗 lane は
+  // null) normalizeReleaseLaneEntry で正規化し verdicts / releaseCollected へ反映。
+  const fallbackRaw = await parallel(
     reviewLens.map((lens, i) => () =>
       agent(
         `RELEASE REVIEWER ${i + 1}/3。視点: ${lens}
@@ -3213,16 +3466,96 @@ prose-only で終了した場合、review は MISSING とみなされ release �
         { schema: REVIEW_SCHEMA, phase: 'Release Review', label: `reviewer:${i + 1}`, model: 'sonnet' }
       )
     )
-  )).filter(Boolean);
+  );
+  // 位置保持の正規化 (失敗 lane は null = MISSING — fabrication しない)。
+  fallbackLaneVerdicts = (Array.isArray(fallbackRaw) ? fallbackRaw : []).map((entry, i) =>
+    normalizeReleaseLaneEntry(entry, releaseLaneLabel(i), `reviewer-${i + 1} (parallel)`));
+  verdicts = fallbackLaneVerdicts
+    .filter(Boolean)
+    .map((v) => ({ verdict: v.verdict, rationale: v.rationale }));
 }
 // Unified semantics gate (both paths): 3/3 GO required; missing/NO-GO blocks.
-const releaseDecision = mergeReleaseVerdicts(
-  releaseReviewMerged ? new Array(3).fill(null).map((_, i) => (i < releaseReviewMerged.goCount ? { verdict: 'GO' } : null)) : [...verdicts, null, null, null].slice(0, 3),
-  3
-);
+// Issue #152 Task 3: 入力は両経路の実 per-lane データ (releaseCollected) に統一 —
+// goCount からの verdicts 再構成 (fabrication) は廃止。MISSING lane は null entry
+// のまま mergeReleaseVerdicts が missingCount / releaseBlocked へ反映 (fail-closed)。
+const releaseCollected = (releaseReviewMerged && releaseReviewCollected)
+  ? releaseReviewCollected
+  : (fallbackLaneVerdicts || []);
+const releaseDecision = mergeReleaseVerdicts(releaseCollected, 3);
 goCount = releaseDecision.goCount;
 log(`Release Review: ${goCount}/3 GO`);
 allGo = releaseDecision.allGo;
+
+// ── Issue #152 (UC-3/UC-4/UC-5): verdict 永続化 — Phase 7 merge 判定の前・
+// if (allGo) の外 = NO-GO 時も実行 (blocked release の verdict も evidence)。──
+// PR review COMMENT 投稿 (UC-3) と .omc/logs/{runId}/release-review-verdicts.md
+// 永続化 (UC-4) はいずれも best-effort: 失敗しても merge 判定 (releaseDecision)
+// には影響しない。PR review 投稿失敗/スキップ時は永続ログが evidence の
+// fail-closed 保全先 (UC-5)。persister まで失敗した場合のみ return の
+// persistedLog を '未収集' で明示 (黙って収集済扱いにしない)。
+const prNumber = extractPrNumber(releaseResult);
+if (prNumber == null) {
+  log('Issue #152: PR_NUMBER not extractable — PR review 投稿スキップ (persistence log only, UC-5)');
+} else {
+  // 各 lane のコメント本文を純関数で生成 (冒頭機械可読 VERDICT 行 = 契約)。
+  // MISSING lane (null entry) は buildPrReviewComment が null → 投稿しない
+  // (fabrication なし)。
+  const commentBodies = releaseCollected
+    .map((entry) => (entry ? buildPrReviewComment(entry.lane, entry.verdict, entry.rationale) : null))
+    .filter(Boolean);
+  try {
+    const posterReport = await agent(
+      `PR REVIEW COMMENT POSTER (Issue #152, UC-3)。Release Review lane verdict を
+PR #${prNumber} へ PR review COMMENT として投稿せよ (GitHub が author 自身の
+--approve を拒否するため COMMENT 形式 — PR #149/#151 で確立した実運用解)。
+
+手順:
+1. 以下のコメント本文 ${commentBodies.length} 件を区切り (=== comment ===) ごとに分割し、
+   各々を一時ファイル (.omc/logs/${runId}/pr-review-comment-<n>.md) へ書き出す。
+2. 各ファイルに対して gh pr review ${prNumber} --comment --body-file <ファイルパス>
+   を実行する (本文は --body-file で verbatim 投稿 — shell quoting 破損防止)。
+3. コメント本文は編集禁止 — 冒頭の機械可読 "VERDICT: GO|NO-GO" 行と "Lane: ..." 行は
+   parseTeamVerdict round-trip 契約の一部であり、改変すると verdict チャネルが壊れる。
+4. 成功した件数を報告の最終行に "POSTED <n>" (n = 投稿成功件数) 形式で記載する。
+
+コメント本文 (${commentBodies.length} 件 — この順で 1 件ずつ投稿):
+${commentBodies.map((body) => `=== comment ===\n${body}`).join('\n')}
+
+報告: 各投稿の成否 + 最終行 "POSTED <n>"。`,
+      { phase: 'Release Review', label: 'release-review:pr-comment-poster', model: 'sonnet' }
+    );
+    // poster 報告の "POSTED <n>" を parse — 不明時は 0 (fail-closed)。
+    const postedMatch = String(posterReport || '').match(/POSTED\s+(\d+)/);
+    prReviewsPosted = postedMatch ? Number(postedMatch[1]) : 0;
+  } catch (e) {
+    log(`Issue #152: PR review 投稿 agent 失敗 (${e}) — 永続ログで evidence 保全 (UC-5)`);
+    prReviewsPosted = 0;
+  }
+}
+try {
+  // EVIDENCE PERSISTER: verdict を .omc/logs/{runId}/release-review-verdicts.md へ。
+  // 時刻は runTimestamp 由来のみ (Date API 禁制 — buildReleaseVerdictsMd 契約)。
+  // PR_NUMBER 未抽出 (prNumber == null) 時も実行 — PR: unknown 行として真実記録。
+  const verdictsMd = buildReleaseVerdictsMd(runId, runTimestamp, prNumber, releaseCollected, releaseDecision);
+  const persisterResult = await agent(
+    `EVIDENCE PERSISTER (Issue #152)。Release Review 3 lane verdict の永続化 (UC-4)。
+以下の markdown 本文を .omc/logs/${runId}/release-review-verdicts.md へ Write ツールで
+書き出せ (親ディレクトリが無ければ作成)。本文は編集禁止 — 一字一句そのまま書き出すこと
+(lane 表・Merge 判定行は機械可読 evidence)。
+
+${verdictsMd}
+
+報告: 書き出したファイルパスと成否。成功時は報告に "persisted" を含めること
+(機械可読 token — 呼び出し元が persistedLogOk をこの token で fail-closed parse する)。`,
+    { phase: 'Release Review', label: 'release-review:evidence-persister', model: 'sonnet' }
+  );
+  // persister 報告の "persisted" token を parse — 不明時は false のまま (fail-closed。
+  // poster の "POSTED <n>" parse と対称化)。throw 時は catch で false 維持。
+  persistedLogOk = /persisted/i.test(String(persisterResult || ''));
+} catch (e) {
+  log(`Issue #152: verdict 永続化 agent 失敗 (${e}) — persistedLog は '未収集' で報告 (UC-5 fail-closed)`);
+  persistedLogOk = false;
+}
 
 // ── Phase 7: Merge & Close ──
 phase('Merge & Close');
@@ -3282,7 +3615,13 @@ return {
       untrackedCount: (precheckAbort && precheckAbort.untrackedCount) || 0,
     },
   } : null,
-  releaseReview: { verdicts, goCount },
+  releaseReview: {
+    verdicts, goCount,
+    // Issue #152 (UC-4/UC-5): verdict evidence の保全状態。persister 失敗時は
+    // '未収集' を明示 (fail-closed — 黙って収集済扱いにしない)。
+    persistedLog: persistedLogOk ? `.omc/logs/${runId}/release-review-verdicts.md` : '未収集',
+    prReviewsPosted,
+  },
   mergeResult,
   selfImprove,
 };

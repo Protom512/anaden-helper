@@ -54,12 +54,42 @@ false-negative が繰り返した。上位 3 構造課題と修正案:
 4. 注入 evidence に `git write-tree` の tree hash を添付し、reviewer 側で
    「diff 空 vs tree 変更あり」の矛盾を検出可能にする。
 
-## FP-2: gate verdict の検証不能性 (偽 evidence 蓋然性)
+## FP-2: gate verdict の検証不能性 (偽 evidence 蓋然性) — **applied (Issue #152)**
 
 **症状** (org-feedback L259): verdict が PR 本文の自己申告のみで、PR review や
 永続ログが存在しないため verdict-vs-outcome が監査不能。
 
-**修正案**:
+> **適用済み (Issue #152, 2026-09-04)**: 本 FP-2 修正案は Issue #152
+> 「Release phase verdict 真実化: release prompt 固定文字列 "commit gate: all GO" の
+> consensus 実 verdict interpolation 化 + Release Review 3 lane verdict の
+> PR review/永続ログ自動永続化」として単一の verdict 永続化機構に統合・適用済み。
+> - **Release Review verdict (3 lane)**: verdict を PR review として投稿 —
+>   COMMENT 形式・冒頭機械可読行 `VERDICT: GO|NO-GO` + lane 名付き
+>   (GitHub が author 自身の `--approve` を拒否するため。PR #149/#151 の
+>   remediation で確立した実運用解) — かつ
+>   `.omc/logs/{run-id}/release-review-verdicts.md` を自動生成 (EVIDENCE PERSISTER
+>   パターン。TeamCreate 経路 (runReleaseReviewViaTeam) と parallel() 経路の
+>   両方を網羅)。PR review 投稿が API 制約等で失敗した場合は永続ログ fallback で
+>   evidence を失わせない (fail-closed)。
+> - **Commit Gate verdict (6-dimension consensus)**: per-lane verdict を
+>   `.omc/logs/{run-id}/gate-verdicts.json` に永続化 (下記修正案 1 の JSON 経路)。
+> - **release prompt の gate 記述**: 固定文字列 "commit gate: all GO" を廃止し、
+>   consensus 実 verdict (per-lane GO/NO-GO/CONDITIONAL + final verdict +
+>   CONDITIONAL を含む場合の解消根拠) の interpolation に置換。
+>   "all GO" は全 lane GO の実 verdict 由来としてのみ出力を許容
+>   (cycle-42 PR #151: reliability lane CONDITIONAL vs PR 本文 all GO 乖離が動機)。
+> - evidence collector 失敗 (429 等) 時に「未収集」を既定値 (green 払い) にしない
+>   要件は `.claude/rules/pipeline-evidence-verification.md` §3 として rule 化済み。
+> - テスト: `tests/release-prompt-guard.test.mjs` /
+>   `tests/release-verdict-persistence.test.mjs` / `tests/team-verdict.test.mjs` /
+>   `tests/release-verdict-docs.test.mjs` (docs drift-guard)。
+> - 参照実装 (手動 remediation で確立済み):
+>   `.omc/logs/run-1788456994/release-review-verdicts.md` (PR #149) /
+>   `.omc/logs/run-1788474181/release-review-verdicts.md` (PR #151)。
+> - **承認経緯**: estimate approval (CTO APPROVE, 2026-09-04) を経て適用
+>   (workflow スクリプト変更は P-007 / P-008 / #102 / #104 / #150 と同一の承認手順)。
+
+**修正案** (旧提案 — 上記のとおり適用済み):
 1. Merge agent が gate verdict を PR review として投稿 (`gh pr review --request` 相当の
    agent lane 追加、または verdict JSON を `.omc/logs/{run-id}/gate-verdicts.json` に保存)。
 2. evidence collector 失敗 (429 等) 時は「未収集」ステータスを明示的にマージ結果に記録。
