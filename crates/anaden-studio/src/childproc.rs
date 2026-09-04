@@ -16,7 +16,9 @@ use std::thread::JoinHandle;
 use crate::log_view::{self, LogEvent, SharedChild};
 
 /// 起動する子プロセスの指定。
-#[derive(Debug, Clone)]
+///
+/// `PartialEq` は tasks::QueueAction (QueueExec 純状態機械の出力) の等価検証用。
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SpawnSpec {
     /// 実行ファイル名またはパス。
     pub program: String,
