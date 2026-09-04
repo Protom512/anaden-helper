@@ -5,7 +5,7 @@
 
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::sync::mpsc::{self, Receiver};
+use std::sync::mpsc::{self, Receiver, SyncSender};
 
 use eframe::egui;
 use image::DynamicImage;
@@ -18,24 +18,24 @@ use anaden_vision::{
 
 use crate::batch::{self, ConfusionMatrix};
 use crate::canvas::{self, RoiEdit};
+use crate::childproc::{ChildProcess, SpawnSpec};
 use crate::library::{self, TemplateSpec};
+use crate::log_view::{
+    AutoScrollFollow, DEFAULT_MAX_LINES, LogBuffer, LogEntry, LogEvent, SharedLogBuffer,
+};
 use crate::proposals::{self, Proposal};
 use crate::scoring::{self, Discrimination};
 use crate::source::LiveCapture;
-use crate::tasks;
-
-/// 開始ボタン押下時の実行委譲先 (Issue #144 Task 3)。
-///
-/// SpawnSpec は `tasks::spawn_args` が Kind 分岐済み
-/// (LaunchSubcommand = `launch ...` → childproc 経由、PipelineRun = `run ...`
-/// → runner.rs 経由)。app.rs は配線のみとし、実際の ChildProcess/Runner への
-/// 接続は親シェルが注入する。未注入時は pending へ退避 (fail-closed)。
-pub type TaskDispatch = Box<dyn FnMut(&crate::childproc::SpawnSpec)>;
+use crate::tasks::{self, QueueAction, QueueEntry, QueueExec, QueueState};
 
 /// ヒートマップ計算用のダウンスケール倍率。
 /// imageproc の match_template は O(W·H·w·h) の総当たりのため、フル解像度では重い。
 /// 4倍縮小で速度と位置精度を両立する（位置精度 ±4px）。
 const HEATMAP_DOWNSCALE: u32 = 4;
+
+/// Tasks ペインのログチャネル容量 (reader スレッド try_send / UI 毎フレーム drain)。
+/// runner.rs の LOG_CHANNEL_CAPACITY と同値 (bounded・best-effort 破棄契約)。
+const TASK_LOG_CHANNEL_CAPACITY: usize = 1024;
 
 /// テンプレート保存時の状態選択肢。TemplateStore の parse_state_from_dir_name と整合。
 const STATE_OPTIONS: &[&str] = &[
@@ -381,11 +381,20 @@ pub struct StudioApp {
     task_action: PipelineActionKind,
     /// MAA 型タスク一覧の定義リスト (Issue #144)。None = 未読込。
     task_defs: Option<crate::tasks::TaskListState>,
-    /// MAA 型タスク一覧の選択キュー (Issue #144)。
-    /// 開始ボタンの実行委譲先 (未注入時は pending_spawn へ退避)。
-    task_dispatch: Option<TaskDispatch>,
-    /// 未注入時に直近の開始指定を退避するスロット (テスト・後段配線用)。
-    pending_spawn: Option<crate::childproc::SpawnSpec>,
+    /// チェック順逐次実行キューの状態機械 (Issue #154 Shard 1)。None = 未開始。
+    task_queue: Option<QueueExec>,
+    /// Tasks ペイン専有の子プロセス管理 (runner とは独立・Issue #154 Shard 1)。
+    task_child: ChildProcess,
+    /// Tasks ペイン専有のログバッファ (reader → channel → drain)。
+    task_log: SharedLogBuffer,
+    /// ログイベント送信口 (stdout/stderr reader 接続・キュー実行で再利用)。
+    task_log_tx: SyncSender<LogEvent>,
+    /// ログイベント受信口 (毎フレーム drain・Exit 観測がキュー進行の契機)。
+    task_log_rx: Receiver<LogEvent>,
+    /// UI 描画用ログスナップショット (drain 毎に更新)。
+    task_log_snapshot: Vec<LogEntry>,
+    /// ログの自動スクロール追従 (log_view.rs の純ロジック再用・UC-4)。
+    task_scroll: AutoScrollFollow,
     /// anaden CLI 実行ファイル (spawn 時の program)。
     anaden_program: String,
 }
@@ -418,6 +427,8 @@ impl StudioApp {
     pub fn with_initial_target(target: crate::source::Target, exe: Option<String>) -> Self {
         // engine は engine_kind（デフォルト CCOEFF）から構築。閾値0・ダウンスケール2。
         let default_kind = EngineKind::default();
+        // Tasks ペイン専有のログチャネル (reader try_send / UI drain)。
+        let (task_log_tx, task_log_rx) = mpsc::sync_channel::<LogEvent>(TASK_LOG_CHANNEL_CAPACITY);
         Self {
             screenshot: None,
             screenshot_tex: None,
@@ -455,8 +466,13 @@ impl StudioApp {
             task_dir: PathBuf::from("./templates/pipelines/created"),
             task_action: PipelineActionKind::ClickSelf,
             task_defs: None,
-            task_dispatch: None,
-            pending_spawn: None,
+            task_queue: None,
+            task_child: ChildProcess::new(),
+            task_log: SharedLogBuffer::new(DEFAULT_MAX_LINES),
+            task_log_tx,
+            task_log_rx,
+            task_log_snapshot: Vec::new(),
+            task_scroll: AutoScrollFollow::default(),
             anaden_program: "anaden".to_string(),
         }
     }
@@ -490,16 +506,32 @@ impl StudioApp {
         &self.connection
     }
 
-    // ---- Issue #144 Task 3: MAA 型タスク一覧の配線 (ロジックは tasks.rs) ----
-
-    /// 開始ボタンの実行委譲先を注入する (親シェルが ChildProcess/Runner へ接続)。
-    pub fn set_task_dispatch(&mut self, dispatch: TaskDispatch) {
-        self.task_dispatch = Some(dispatch);
-    }
+    // ---- Issue #144 Task 3 / Issue #154 Shard 1: MAA 型タスク一覧の配線 ----
+    // (ドメインロジックは tasks.rs・実行は Tasks ペイン専有の ChildProcess)
 
     /// anaden CLI 実行ファイル (spawn 時の program) を設定する。
     pub fn set_anaden_program(&mut self, program: impl Into<String>) {
         self.anaden_program = program.into();
+    }
+
+    /// 現在のタスクキュー (テスト・進行表示用)。
+    pub fn task_queue(&self) -> Option<&QueueExec> {
+        self.task_queue.as_ref()
+    }
+
+    /// タスク実行ログのスナップショット (読み取り専用)。
+    ///
+    /// runner.rs の `log_snapshot` と同じ公開パターンで、ヘッドレス E2E テスト
+    /// (`tests/task_queue_e2e_tests.rs`) がログの内容・順序を機械検証する経路。
+    pub fn task_log_lines(&self) -> &[LogEntry] {
+        &self.task_log_snapshot
+    }
+
+    /// キューがアクティブ (未完了 = Pending/Running/PausedAfterFailure) か。
+    fn task_queue_active(&self) -> bool {
+        self.task_queue
+            .as_ref()
+            .is_some_and(|q| !matches!(q.state(), QueueState::Completed))
     }
 
     /// タスク定義が未読込なら既定パスから読み込む (ホーム画面表示時に呼ぶ)。
@@ -546,78 +578,330 @@ impl StudioApp {
         }
     }
 
-    /// 開始ボタン: 選択キューを Kind 分岐済み SpawnSpec 列に組み立てて委譲する。
-    /// 実行本体は dispatch (親シェル経由で childproc/runner へ)。未注入時は
-    /// pending_spawn へ退避し、後段の注入で取り出せるようにする。
+    /// 開始ボタン: 選択キューからチェック順エントリ列を組み立てて開始する
+    /// (UC-2)。実行本体は Tasks ペイン専有の ChildProcess + QueueExec 状態機械
+    /// (runner とは独立・Issue #154 Shard 1。dispatch 注入方式は廃止)。
     pub fn start_task_queue(&mut self) {
         let Some(list) = &self.task_defs else {
             self.status = "タスク定義が未読込です".to_string();
             return;
         };
-        let specs = match list.spawn_specs(
+        let entries = match list.queue_entries(
             &self.anaden_program,
             self.cli_target(),
             Some(self.adb_serial.as_str()),
             &Self::workspace_root(),
         ) {
-            Ok(s) => s,
+            Ok(e) => e,
             Err(e) => {
                 self.status = e.to_string();
                 return;
             }
         };
-        if specs.is_empty() {
+        self.start_task_entries(entries);
+    }
+
+    /// QueueEntry 列を直接キューへ渡して開始する (queue handoff API)。
+    ///
+    /// [`Self::start_task_queue`] の本体で、テスト・埋め込み親シェルが
+    /// エントリ列を明示注入する経路も兼ねる (旧 set_task_dispatch /
+    /// pending_spawn 単一スロットの後継 — 複数 spec の逐次実行を表現可能)。
+    /// 実行中キューがある場合の再開始・空列は拒否する (fail-closed)。
+    pub fn start_task_entries(&mut self, entries: Vec<QueueEntry>) {
+        if self.task_queue_active() {
+            self.status = "キュー実行中のため開始できません（中止してから再開）".to_string();
+            return;
+        }
+        if entries.is_empty() {
             self.status = "チェックされたタスクがありません".to_string();
             return;
         }
-        let count = specs.len();
-        for spec in specs {
-            match self.task_dispatch.as_mut() {
-                Some(dispatch) => dispatch(&spec),
-                None => self.pending_spawn = Some(spec),
-            }
-        }
+        // 新規キュー: ログを初期化して状態機械を開始する。
+        self.task_log.with_buf(LogBuffer::clear);
+        self.task_scroll = AutoScrollFollow::default();
+        let mut queue = QueueExec::new(entries);
+        let action = queue.start();
+        let count = queue.total();
+        self.task_queue = Some(queue);
         self.status = format!("開始: {count} タスク");
+        self.apply_task_action(action);
+        self.refresh_task_log_snapshot();
     }
 
-    /// 直近の開始指定 (dispatch 未注入時に退避されたもの)。テスト・後段配線用。
-    pub fn pending_spawn(&self) -> Option<&crate::childproc::SpawnSpec> {
-        self.pending_spawn.as_ref()
+    /// 失敗停止中のキューを明示継続する (次タスクを起動・UC-4)。
+    pub fn resume_task_queue(&mut self) {
+        let action = match &mut self.task_queue {
+            Some(queue) => queue.resume(),
+            None => QueueAction::Noop,
+        };
+        self.apply_task_action(action);
+    }
+
+    /// キューを中止する (実行中の子も停止し残りタスクを破棄・UC-4)。
+    pub fn abort_task_queue(&mut self) {
+        let _ = self.task_child.stop();
+        if let Some(queue) = &mut self.task_queue {
+            queue.abort();
+        }
+        self.push_task_log("[studio] === キュー中止 ===");
+        self.status = "キューを中止しました".to_string();
+    }
+
+    /// 状態機械の出力アクションを実行へ反映する (配線)。
+    fn apply_task_action(&mut self, action: QueueAction) {
+        match action {
+            QueueAction::Start(spec) => self.spawn_task_spec(&spec),
+            // on_exit が WaitForExit を返すのは失敗停止時のみ (自動継続禁止)。
+            // UC-4: 失敗理由 (exit code) を status にも出す。
+            QueueAction::WaitForExit => {
+                if let Some(queue) = self.task_queue.as_ref() {
+                    self.status = queue.summary();
+                }
+            }
+            QueueAction::Noop => {}
+            QueueAction::QueueCompleted => {
+                self.push_task_log("[studio] === キュー完了 ===");
+                self.status = "全タスクが完了しました".to_string();
+            }
+        }
+    }
+
+    /// 1 タスクを起動する。タスク境界にセパレータ行を出す (UC-4)。
+    /// 起動失敗は当該タスクの失敗扱いとして失敗停止へ (自動継続禁止)。
+    fn spawn_task_spec(&mut self, spec: &SpawnSpec) {
+        let sep = match self.task_queue.as_ref().and_then(|q| q.current_entry()) {
+            Some(entry) => format!("[studio] === task: {} ===", entry.label),
+            None => "[studio] === task ===".to_string(),
+        };
+        self.push_task_log(&sep);
+        if let Err(e) = self.task_child.start(spec, self.task_log_tx.clone()) {
+            self.push_task_log(&format!("[studio] 起動に失敗: {e}"));
+            let action = match &mut self.task_queue {
+                Some(queue) => queue.on_exit(None),
+                None => QueueAction::Noop,
+            };
+            self.apply_task_action(action);
+            // 失敗停止サマリより起動失敗理由を優先表示する。
+            self.status = format!("起動に失敗: {e}");
+        }
+    }
+
+    /// チャネルを drain してログへ反映し、Exit 観測でキューを進める
+    /// (UC-4: 毎フレーム呼び出し。完了判定は LogEvent::Exit のみ)。
+    /// 行の記録自体は log_view::drain_channel_into (runner と共有) に委譲。
+    pub fn drain_task_logs(&mut self) {
+        if self.task_queue.is_none() {
+            return;
+        }
+        let (new_lines, exit_code) =
+            crate::log_view::drain_channel_into(&self.task_log, &self.task_log_rx);
+        if new_lines > 0 {
+            self.task_scroll.observe_new_lines(new_lines);
+        }
+        if let Some(code) = exit_code
+            && let Some(queue) = &mut self.task_queue
+        {
+            let action = queue.on_exit(code);
+            self.apply_task_action(action);
+        }
+        self.refresh_task_log_snapshot();
+    }
+
+    /// タスク実行ログへ 1 行 push する (セパレータ・システム行)。
+    fn push_task_log(&mut self, line: &str) {
+        let line = line.to_string();
+        self.task_log.with_buf(|b| b.push_line(&line));
+        self.refresh_task_log_snapshot();
+    }
+
+    /// UI 描画用ログスナップショットを最新化する。
+    fn refresh_task_log_snapshot(&mut self) {
+        self.task_log_snapshot = self
+            .task_log
+            .with_buf(|b| b.entries().cloned().collect())
+            .unwrap_or_default();
     }
 
     /// タスク一覧 UI (MAA 型チェックボックス) を描画する。
     /// implemented=false はグレー表示・チェック不可 (嘘の動作可能表示禁止)。
+    /// UC-4: 毎フレーム drain によるリアルタイム進行表示 (i/N + チェック順
+    /// キュー)・ログ表示・失敗時の明示的な「継続」「停止」ボタンを含む。
     pub fn render_task_list(&mut self, ui: &mut egui::Ui) {
         ui.heading("タスク一覧");
+        // 毎フレーム drain (UC-4: Exit 観測がキュー進行の唯一の契機)。
+        self.drain_task_logs();
         if self.task_defs.is_none() {
             if ui.button("タスク定義を読み込む").clicked() {
                 self.load_task_list(&Self::workspace_root().join("templates/tasks"));
             }
         } else if let Some(list) = self.task_defs.clone() {
+            // UC-3: 詳細プレビューは実行と同じ引数解決条件 (target/serial/root)。
+            let target = self.cli_target();
+            let serial = Some(self.adb_serial.as_str());
+            let root = Self::workspace_root();
+            let selected = list.selected_ids().to_vec();
             let mut clicked: Option<String> = None;
             for def in list.definitions() {
                 let mut checked = list.is_selected(&def.id);
                 let label = tasks::checkbox_label(def);
-                ui.add_enabled(
-                    def.is_selectable(),
-                    egui::Checkbox::new(&mut checked, label),
-                );
+                ui.horizontal(|ui| {
+                    ui.add_enabled(
+                        def.is_selectable(),
+                        egui::Checkbox::new(&mut checked, label),
+                    );
+                    // UC-3: 選択済みなら実行順位置を横に表示 (未選択は非表示)。
+                    if let Some(pos) = tasks::queue_position_label(&selected, &def.id) {
+                        ui.weak(pos);
+                    }
+                });
                 if checked != list.is_selected(&def.id) {
                     clicked = Some(def.id.clone());
                 }
+                // UC-3: 展開可能な詳細表示 (kind・pipeline_dir・start_task・
+                // 引数プレビュー — 読み取り専用・schema 変更なし)。
+                egui::CollapsingHeader::new(egui::RichText::new("詳細").weak())
+                    .id_salt(&def.id)
+                    .show(ui, |ui| {
+                        Self::task_detail_ui(ui, def, target, serial, &root);
+                    });
             }
             if let Some(id) = clicked {
                 self.toggle_task(&id);
             }
-            let can_start = list.selected_count() > 0;
+            // 開始ボタンはキュー非アクティブ時のみ有効 (実行中の再開始拒否)。
+            let can_start = list.selected_count() > 0 && !self.task_queue_active();
             ui.add_enabled_ui(can_start, |ui| {
                 if ui.button("開始").clicked() {
                     self.start_task_queue();
                 }
             });
+            // UC-3: 選択済みキューの実行順リスト (チェック順 1. 2. 3. ...・
+            // 未実装 (不整合検出時) はグレー表示)。
+            let rows = tasks::queue_order_rows(&selected, list.definitions());
+            if !rows.is_empty() {
+                ui.separator();
+                ui.label("実行順 (チェック順)");
+                for row in &rows {
+                    if row.runnable {
+                        ui.label(format!("{}. {}", row.position, row.title));
+                    } else {
+                        ui.weak(format!("{}. {} (未実装)", row.position, row.title));
+                    }
+                }
+            }
+        }
+        // UC-4: 進行サマリ + 実行制御 + チェック順キュー一覧。
+        if let Some(queue) = self.task_queue.clone() {
+            ui.separator();
+            ui.label(queue.summary());
+            match queue.state() {
+                QueueState::Running { .. } => {
+                    if ui.button("中止").clicked() {
+                        self.abort_task_queue();
+                    }
+                }
+                QueueState::PausedAfterFailure { .. } => {
+                    ui.colored_label(egui::Color32::RED, "タスクが失敗しました。継続しますか?");
+                    if ui.button("継続").clicked() {
+                        self.resume_task_queue();
+                    }
+                    if ui.button("停止").clicked() {
+                        self.abort_task_queue();
+                    }
+                }
+                QueueState::Pending | QueueState::Completed => {}
+            }
+            for (i, entry) in queue.entries().iter().enumerate() {
+                ui.label(format!(
+                    "{}. [{}] {}",
+                    i + 1,
+                    queue.entry_marker(i),
+                    entry.label
+                ));
+            }
         }
         ui.separator();
+        self.task_log_ui(ui);
+        ui.separator();
         ui.label(&self.status);
+    }
+
+    /// UC-3: タスク 1 件の詳細表示ボディ (collapsing header 配下・読み取り専用)。
+    ///
+    /// kind・pipeline_dir・start_task (未宣言時は解決結果)・実引数プレビューを
+    /// 表示する。引数解決は [`tasks::task_detail_view`] (実行の [`tasks::spawn_args`]
+    /// と単一情報源)。未実装タスクは赤字で理由を表示 (fail-closed)。
+    fn task_detail_ui(
+        ui: &mut egui::Ui,
+        def: &tasks::TaskDefinition,
+        target: &str,
+        serial: Option<&str>,
+        root: &Path,
+    ) {
+        let view = tasks::task_detail_view(def, target, serial, root);
+        ui.label(format!("ID: {}", view.id));
+        ui.label(format!("種別: {}", view.kind));
+        match &view.pipeline_dir {
+            Some(dir) => {
+                ui.label(format!("pipeline_dir: {dir}"));
+            }
+            None => {
+                ui.weak("pipeline_dir: なし (サブコマンド実行)");
+            }
+        }
+        match &view.start_task {
+            Some(task) => {
+                ui.label(format!("start_task: {task}"));
+            }
+            None if def.kind == tasks::TaskKind::PipelineRun => {
+                // pipeline_run なのに解決不能 = 実行不可 (fail-closed 表示)。
+                ui.colored_label(egui::Color32::RED, "start_task: 未解決");
+            }
+            None => {} // launch_subcommand は start_task を使用しない
+        }
+        ui.label(format!("引数プレビュー: {}", view.args_preview()));
+        if let Some(reason) = &view.unimplemented_reason {
+            ui.colored_label(egui::Color32::RED, format!("未実装: {reason}"));
+        }
+    }
+
+    /// Tasks ペインの実行ログビューア (log_view.rs の LogBuffer/AutoScroll 再利用)。
+    fn task_log_ui(&mut self, ui: &mut egui::Ui) {
+        ui.horizontal(|ui| {
+            ui.heading("実行ログ");
+            let mut follow = self.task_scroll.is_enabled();
+            ui.checkbox(&mut follow, "自動スクロール");
+            if follow != self.task_scroll.is_enabled() {
+                self.task_scroll.set_enabled(follow);
+            }
+            if ui.button("クリア").clicked() {
+                self.task_log.with_buf(LogBuffer::clear);
+                self.refresh_task_log_snapshot();
+            }
+            if self.task_scroll.pending_lines() > 0 {
+                ui.weak(format!("新着 {} 行", self.task_scroll.pending_lines()));
+            }
+        });
+        let stick = self.task_scroll.should_stick_to_bottom();
+        egui::ScrollArea::vertical()
+            .auto_shrink([false, false])
+            .stick_to_bottom(stick)
+            .show(ui, |ui| {
+                if self.task_log_snapshot.is_empty() {
+                    ui.weak("（ログなし）");
+                }
+                for entry in &self.task_log_snapshot {
+                    ui.monospace(
+                        egui::RichText::new(&entry.line)
+                            .monospace()
+                            .color(crate::runner::level_color(entry.level)),
+                    );
+                }
+            });
+        if stick {
+            // stick_to_bottom が有効な間は egui が末尾へ張り付くため追従清算する。
+            self.task_scroll.on_scrolled_to_bottom();
+        }
     }
 
     /// 接続チェックを実行して状態を更新する (Issue #139 T3)。
@@ -1799,7 +2083,7 @@ mod tests {
         }
     }
 
-    // ---- Issue #144 Task 3: MAA 型タスク一覧配線 ----
+    // ---- Issue #144 Task 3 / Issue #154 Shard 1: タスクキュー実行配線 ----
 
     fn tasks_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -1809,60 +2093,192 @@ mod tests {
             .join("tasks")
     }
 
-    /// リポジトリ実タスク定義 6 件を読み込み、実装済み 4 タスクを選択・
-    /// 開始できること (dispatch 注入で SpawnSpec が委譲される)。
+    /// 指定 exit code で即終了する子の SpawnSpec (Windows: cmd / Linux: sh)。
+    fn exit_spec(code: i32) -> SpawnSpec {
+        if cfg!(windows) {
+            SpawnSpec::new(
+                "cmd",
+                ["/C".to_string(), "exit".to_string(), code.to_string()],
+            )
+        } else {
+            SpawnSpec::new("sh", ["-c".to_string(), format!("exit {code}")])
+        }
+    }
+
+    /// 1 行出力して exit 0 で終了する子の SpawnSpec。
+    fn echo_spec() -> SpawnSpec {
+        if cfg!(windows) {
+            SpawnSpec::new("cmd", ["/C".to_string(), "echo task-log-line".to_string()])
+        } else {
+            SpawnSpec::new("sh", ["-c".to_string(), "echo task-log-line".to_string()])
+        }
+    }
+
+    /// 長時間 (約30秒) 生きる子の SpawnSpec (ping は両 OS に存在)。
+    fn long_spec() -> SpawnSpec {
+        if cfg!(windows) {
+            SpawnSpec::new(
+                "ping",
+                ["-n".to_string(), "30".to_string(), "127.0.0.1".to_string()],
+            )
+        } else {
+            SpawnSpec::new(
+                "ping",
+                ["-c".to_string(), "30".to_string(), "127.0.0.1".to_string()],
+            )
+        }
+    }
+
+    fn queue_entry(label: &str, spec: SpawnSpec) -> QueueEntry {
+        QueueEntry {
+            label: label.to_string(),
+            spec,
+        }
+    }
+
+    /// キューが指定状態になるまで drain を回す (実子プロセスの Exit 待ち)。
+    fn pump_until(
+        app: &mut StudioApp,
+        timeout_ms: u64,
+        done: impl Fn(&QueueState) -> bool,
+        what: &str,
+    ) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_millis(timeout_ms);
+        loop {
+            app.drain_task_logs();
+            if let Some(q) = app.task_queue()
+                && done(q.state())
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "timed out waiting for {what} (status: {})",
+                app.status
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// ログ中のタスク境界セパレータ行 ([studio] === task: X ===) を数える。
+    fn task_separator_count(app: &StudioApp) -> usize {
+        app.task_log_snapshot
+            .iter()
+            .filter(|e| e.line.starts_with("[studio] === task:"))
+            .count()
+    }
+
+    // ---- 正常系 ----
+
+    /// UC-2: チェック順どおり逐次実行され全タスク完了に到達する。
+    /// セパレータ行はタスク境界ごとに 1 行ずつ (UC-4)。
     #[test]
-    fn task_list_loads_and_starts_selected_tasks() {
+    fn task_queue_runs_entries_sequentially_in_check_order() {
+        let mut app = StudioApp::default();
+        app.start_task_entries(vec![
+            queue_entry("タスクA", exit_spec(0)),
+            queue_entry("タスクB", exit_spec(0)),
+        ]);
+        pump_until(
+            &mut app,
+            30_000,
+            |s| matches!(s, QueueState::Completed),
+            "queue completion",
+        );
+        let queue = app.task_queue().unwrap();
+        assert_eq!(queue.summary(), "完了 2/2");
+        assert_eq!(task_separator_count(&app), 2);
+        let lines: Vec<&str> = app
+            .task_log_snapshot
+            .iter()
+            .map(|e| e.line.as_str())
+            .collect();
+        let a = lines
+            .iter()
+            .position(|l| *l == "[studio] === task: タスクA ===");
+        let b = lines
+            .iter()
+            .position(|l| *l == "[studio] === task: タスクB ===");
+        assert!(a.is_some() && b.is_some() && a < b, "lines: {lines:?}");
+        assert!(lines.iter().any(|l| l.contains("キュー完了")));
+    }
+
+    /// 実リポジトリ TOML から組み立てたキューはチェック順を維持する。
+    /// program に存在しないバイナリを指定すると初回起動が失敗停止する
+    /// (fail-closed: 起動失敗は当該タスクの失敗扱い)。
+    #[test]
+    fn task_list_selection_starts_queue_in_check_order() {
         let mut app = StudioApp::default();
         app.load_task_list(&tasks_dir());
-        assert!(app.status.contains("6"), "status: {}", app.status);
-
-        app.toggle_task("launch");
         app.toggle_task("field_loop_pc");
-        // 未実装タスクは選択拒否 (グレー表示の機械的保証)。
-        // fishing は implemented=false (つりボタン固有テンプレ未作成)。
-        app.toggle_task("fishing");
-        assert!(app.status.contains("未実装") || app.status.contains("implemented"));
-
-        let specs: std::sync::Arc<std::sync::Mutex<Vec<crate::childproc::SpawnSpec>>> =
-            std::sync::Arc::new(std::sync::Mutex::new(Vec::new()));
-        let sink = specs.clone();
-        app.set_task_dispatch(Box::new(move |spec| {
-            sink.lock().unwrap().push(spec.clone());
-        }));
-        app.set_anaden_program("anaden-test-bin");
-        app.start_task_queue();
-
-        let got = specs.lock().unwrap();
-        assert_eq!(got.len(), 2, "specs: {got:?}");
-        assert_eq!(got[0].program, "anaden-test-bin");
-        // Kind 分岐: launch → launch サブコマンド、field_loop_pc → run。
-        assert_eq!(got[0].args[0], "launch");
-        assert_eq!(got[1].args[0], "run");
-        assert!(got[1].args.iter().any(|a| a.contains("field_loop_pc")));
-    }
-
-    /// dispatch 未注入時は pending_spawn へ退避 (fail-closed・後段配線用)。
-    #[test]
-    fn start_without_dispatch_stores_pending_spawn() {
-        let mut app = StudioApp::default();
-        app.load_task_list(&tasks_dir());
         app.toggle_task("launch");
+        app.set_anaden_program("anaden-nonexistent-bin-xyz");
         app.start_task_queue();
-        let spec = app.pending_spawn().unwrap();
-        assert_eq!(spec.args[0], "launch");
+        // 初回 spawn 失敗 → 同期的に失敗停止へ遷移するため drain 不要。
+        let queue = app.task_queue().unwrap();
+        assert!(matches!(
+            queue.state(),
+            QueueState::PausedAfterFailure { current: 0, .. }
+        ));
+        assert_eq!(queue.total(), 2);
+        assert_eq!(queue.entries()[0].label, "フィールド周回");
+        assert_eq!(queue.entries()[0].spec.args[0], "run");
+        assert_eq!(queue.entries()[1].label, "ゲーム起動");
+        assert_eq!(queue.entries()[1].spec.args[0], "launch");
+        assert!(app.status.contains("起動に失敗"), "status: {}", app.status);
     }
 
-    /// 未読込・未選択での開始は status に理由を残し何も起動しない。
+    /// UC-4: 実行中は i/N 進行サマリとログがリアルタイム参照できる。
     #[test]
-    fn start_without_selection_reports_status() {
+    fn task_queue_progress_summary_during_run() {
         let mut app = StudioApp::default();
-        app.start_task_queue();
-        assert!(app.status.contains("未読込"), "status: {}", app.status);
-        app.load_task_list(&tasks_dir());
-        app.start_task_queue();
-        assert!(app.status.contains("チェック"), "status: {}", app.status);
-        assert!(app.pending_spawn().is_none());
+        app.start_task_entries(vec![queue_entry("周回", long_spec())]);
+        let queue = app.task_queue().unwrap();
+        assert!(matches!(queue.state(), QueueState::Running { current: 0 }));
+        assert!(
+            queue.summary().contains("1/1"),
+            "summary: {}",
+            queue.summary()
+        );
+        assert!(
+            queue.summary().contains("周回"),
+            "summary: {}",
+            queue.summary()
+        );
+        // セパレータ行は起動直後に出ている。
+        app.drain_task_logs();
+        assert!(
+            app.task_log_snapshot
+                .iter()
+                .any(|e| e.line == "[studio] === task: 周回 ===")
+        );
+        app.abort_task_queue();
+    }
+
+    /// UC-4: 子プロセスの stdout がログスナップショットへ届く。
+    #[test]
+    fn task_queue_log_view_renders_child_output() {
+        let mut app = StudioApp::default();
+        app.start_task_entries(vec![queue_entry("出力", echo_spec())]);
+        pump_until(
+            &mut app,
+            30_000,
+            |s| matches!(s, QueueState::Completed),
+            "echo completion",
+        );
+        let lines: Vec<&str> = app
+            .task_log_snapshot
+            .iter()
+            .map(|e| e.line.as_str())
+            .collect();
+        assert!(
+            lines.iter().any(|l| l.contains("task-log-line")),
+            "lines: {lines:?}"
+        );
+        assert!(
+            lines.iter().any(|l| l.contains("exit=0")),
+            "lines: {lines:?}"
+        );
     }
 
     /// タスク一覧 UI (チェックボックス・開始ボタン含む) がパニックせず描画できる。
@@ -1874,5 +2290,139 @@ mod tests {
         ctx.begin_pass(egui::RawInput::default());
         app.render_task_list(&mut child_ui(&ctx));
         let _ = ctx.end_pass();
+    }
+
+    /// UC-4: キュー実行中の描画 (進行表示・失敗ボタン・ログ) もパニックしない。
+    #[test]
+    fn embed_render_task_list_with_active_queue_completes_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = StudioApp::default();
+        app.start_task_entries(vec![queue_entry("長時間", long_spec())]);
+        ctx.begin_pass(egui::RawInput::default());
+        app.render_task_list(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
+        app.abort_task_queue();
+        // 中止後の描画も安定していること。
+        ctx.begin_pass(egui::RawInput::default());
+        app.render_task_list(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
+    }
+
+    /// UC-3: 詳細展開ビュー (kind/pipeline_dir/start_task/引数プレビュー) を
+    /// 含む描画がパニックなく完了する。collapsing header 展開時に描画される
+    /// ボディを全タスク分直接描画 + 選択済み一覧 (実行順リスト含む) 全体描画。
+    #[test]
+    fn embed_render_task_list_with_detail_view_completes_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = StudioApp::default();
+        app.load_task_list(&tasks_dir());
+        app.toggle_task("launch");
+        app.toggle_task("field_loop_pc");
+        let root = StudioApp::workspace_root();
+        ctx.begin_pass(egui::RawInput::default());
+        let mut detail_ui = child_ui(&ctx);
+        let list = app.task_defs.clone().unwrap();
+        for def in list.definitions() {
+            StudioApp::task_detail_ui(&mut detail_ui, def, "windows", None, &root);
+        }
+        app.render_task_list(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
+    }
+
+    // ---- エッジケース ----
+
+    /// UC-4: タスク失敗で自動継続せず停止し、明示「継続」で次が走る。
+    #[test]
+    fn task_queue_failure_pauses_and_resume_continues() {
+        let mut app = StudioApp::default();
+        app.start_task_entries(vec![
+            queue_entry("失敗", exit_spec(1)),
+            queue_entry("次", exit_spec(0)),
+        ]);
+        pump_until(
+            &mut app,
+            30_000,
+            |s| matches!(s, QueueState::PausedAfterFailure { .. }),
+            "failure pause",
+        );
+        // 自動継続禁止: 2 番目はまだ起動していない。
+        assert_eq!(task_separator_count(&app), 1);
+        assert!(app.status.contains("失敗"), "status: {}", app.status);
+        app.resume_task_queue();
+        pump_until(
+            &mut app,
+            30_000,
+            |s| matches!(s, QueueState::Completed),
+            "resume completion",
+        );
+        assert_eq!(task_separator_count(&app), 2);
+        assert_eq!(app.task_queue().unwrap().summary(), "完了 2/2");
+    }
+
+    /// UC-4: 中止は実行中の子を停止し残りタスクを起動しない。
+    #[test]
+    fn task_queue_abort_discards_remaining() {
+        let mut app = StudioApp::default();
+        app.start_task_entries(vec![
+            queue_entry("長時間", long_spec()),
+            queue_entry("次", exit_spec(0)),
+        ]);
+        app.abort_task_queue();
+        let queue = app.task_queue().unwrap();
+        assert!(matches!(queue.state(), QueueState::Completed));
+        assert!(queue.is_aborted());
+        assert_eq!(queue.summary(), "中止");
+        // kill された子の Exit イベントが後段に届いても状態は崩れない。
+        pump_until(
+            &mut app,
+            30_000,
+            |s| matches!(s, QueueState::Completed),
+            "post-abort drain",
+        );
+        assert_eq!(task_separator_count(&app), 1, "残りタスクは起動しない");
+        assert!(app.status.contains("中止"), "status: {}", app.status);
+    }
+
+    /// 実行中の再開始は拒否され、キューは変更されない。
+    #[test]
+    fn task_queue_rejects_restart_while_active() {
+        let mut app = StudioApp::default();
+        app.load_task_list(&tasks_dir());
+        app.toggle_task("launch");
+        app.start_task_entries(vec![queue_entry("長時間", long_spec())]);
+        app.start_task_queue(); // 実行中の再開始試行
+        assert!(
+            app.status.contains("開始できません"),
+            "status: {}",
+            app.status
+        );
+        assert_eq!(app.task_queue().unwrap().total(), 1);
+        app.abort_task_queue();
+    }
+
+    /// 未読込・未選択・空エントリでの開始は status に理由を残しキュー不変。
+    #[test]
+    fn start_without_selection_reports_status() {
+        let mut app = StudioApp::default();
+        app.start_task_queue();
+        assert!(app.status.contains("未読込"), "status: {}", app.status);
+        assert!(app.task_queue().is_none());
+        app.load_task_list(&tasks_dir());
+        app.start_task_queue();
+        assert!(app.status.contains("チェック"), "status: {}", app.status);
+        assert!(app.task_queue().is_none());
+        app.toggle_task("launch");
+        app.set_anaden_program("anaden-nonexistent-bin-xyz");
+        app.start_task_queue();
+        // 起動失敗でもキュー自体は作成される (失敗停止として観測可能)。
+        assert!(app.task_queue().is_some());
+        app.abort_task_queue();
+        // 空エントリの直接注入も拒否。
+        app.start_task_entries(Vec::new());
+        assert!(
+            app.status.contains("チェックされたタスクがありません"),
+            "status: {}",
+            app.status
+        );
     }
 }

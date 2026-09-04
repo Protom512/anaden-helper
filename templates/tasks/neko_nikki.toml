@@ -1,0 +1,8 @@
+# ねこにっきタスクのスケルトン (Issue #154)。
+# implemented = false: 未実装。グレー表示・チェック不可。
+# パイプライン実装には実機キャプチャ (operator-gated) が必要 → 別issue。
+id = "neko_nikki"
+title = "ねこにっき"
+kind = "pipeline_run"
+implemented = false
+pipeline_dir = "templates/pipelines/neko_nikki"

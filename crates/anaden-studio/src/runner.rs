@@ -173,7 +173,10 @@ pub fn resolve_pipeline_arg(args: &[String], root: &Path) -> Vec<String> {
 }
 
 /// LogLevel の表示色（スクロールログビューアの色分け・純関数）。
-fn level_color(level: LogLevel) -> egui::Color32 {
+///
+/// Issue #154 Shard 1: Tasks ペイン (app.rs) のログビューアからも再利用する
+/// ため pub(crate) 化 (単一実装の共有)。
+pub(crate) fn level_color(level: LogLevel) -> egui::Color32 {
     match level {
         LogLevel::Error => egui::Color32::from_rgb(240, 80, 80),
         LogLevel::Warn => egui::Color32::from_rgb(230, 180, 50),
@@ -443,49 +446,17 @@ impl PipelineRunnerApp {
 
     /// チャネルを drain してログスナップショットを更新する（UI 毎フレーム呼出）。
     ///
+    /// 行の記録は log_view::drain_channel_into (Issue #154 Shard 1 で app.rs
+    /// タスクキューと共有化したヘルパ) に委譲する。
+    ///
     /// `LogEvent::Exit` を観測した場合:
     /// - exit code を保持し、異常終了（非零 / 不明）なら失敗状態サマリ
     ///   （run_status_summary + エラーログ末尾）を保持する（UC-3）
     /// - 履歴へ RunRecord を追記する（正常: Success / 非零・不明: Failed）
     pub fn drain_logs(&mut self) {
-        // Exit イベントを観測するため、イベント列を一度収集する。
-        let mut events = Vec::new();
-        while let Ok(ev) = self.log_rx.try_recv() {
-            events.push(ev);
-        }
-        let exit_seen = events.iter().any(|ev| matches!(ev, LogEvent::Exit(_)));
-        // Exit(Option<i32>) の中身は既に Option<i32> のため flatten で一意化する
-        // （Some(*c) で包むと二重ネストになる）。
-        let exit_code: Option<i32> = events
-            .iter()
-            .find_map(|ev| match ev {
-                LogEvent::Exit(c) => Some(*c),
-                LogEvent::Line(_) => None,
-            })
-            .flatten();
-        // バッファへ反映（SharedLogBuffer::drain 相当の直接 push）。
-        for ev in events {
-            match ev {
-                LogEvent::Line(l) => {
-                    let _ = self.log.with_buf(|b| b.push_line(&l));
-                }
-                LogEvent::Exit(code) => {
-                    let label = match code {
-                        Some(0) => "exit=0 (成功)",
-                        Some(_) => "exit=エラー",
-                        None => "exit=不明",
-                    };
-                    let line = format!("[studio] プロセス終了: {label} (code={code:?})");
-                    // 異常終了行は文字列推定にかからないため明示レベルで記録。
-                    let level = if matches!(code, Some(0)) {
-                        LogLevel::Info
-                    } else {
-                        LogLevel::Error
-                    };
-                    let _ = self.log.with_buf(|b| b.push_line_with_level(&line, level));
-                }
-            }
-        }
+        let (_new_lines, observed) = crate::log_view::drain_channel_into(&self.log, &self.log_rx);
+        let exit_seen = observed.is_some();
+        let exit_code: Option<i32> = observed.flatten();
         self.refresh_snapshot();
         if exit_seen && !self.exit_observed {
             self.exit_observed = true;
