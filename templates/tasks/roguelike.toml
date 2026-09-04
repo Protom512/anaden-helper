@@ -1,0 +1,8 @@
+# ローグライクタスクのスケルトン (Issue #154)。
+# implemented = false: 未実装。グレー表示・チェック不可。
+# パイプライン実装には実機キャプチャ (operator-gated) が必要 → 別issue。
+id = "roguelike"
+title = "ローグライク"
+kind = "pipeline_run"
+implemented = false
+pipeline_dir = "templates/pipelines/roguelike"

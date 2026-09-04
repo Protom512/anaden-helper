@@ -971,6 +971,9 @@ implemented = true
                 "launch",
                 "login",
                 "nav_to_field_pc",
+                "neko_nikki",
+                "roguelike",
+                "ticket_digest",
                 "worldmap_loop",
             ]
         );

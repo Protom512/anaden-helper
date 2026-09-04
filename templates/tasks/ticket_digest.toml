@@ -1,0 +1,8 @@
+# チケット消化タスクのスケルトン (Issue #154)。
+# implemented = false: 未実装。グレー表示・チェック不可。
+# パイプライン実装には実機キャプチャ (operator-gated) が必要 → 別issue。
+id = "ticket_digest"
+title = "チケット消化"
+kind = "pipeline_run"
+implemented = false
+pipeline_dir = "templates/pipelines/ticket_digest"
