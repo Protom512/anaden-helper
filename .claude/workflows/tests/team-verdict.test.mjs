@@ -82,10 +82,18 @@ assert(/return null;/.test(teamFn), 'unavailable primitives → return null (fal
 const fbIdx = src.indexOf('falling back to parallel() path');
 const gateIdx = src.indexOf("typeof TeamCreate === 'function'");
 assert(gateIdx > 0 && fbIdx > gateIdx, 'fall-back log follows the primitive gate');
-const useIdx = src.indexOf('releaseReviewMerged = await runReleaseReviewViaTeam()');
+const useIdx = src.indexOf('await runReleaseReviewViaTeam()');
 const branchIdx = src.indexOf('if (releaseReviewMerged)');
 assert(useIdx > 0 && branchIdx > useIdx, 'team result is branched on after the attempt');
 assert(/const releaseDecision = mergeReleaseVerdicts\(/.test(src.slice(branchIdx)), 'post-branch decision uses mergeReleaseVerdicts (unified semantics)');
+// ── Issue #152 Task 2: 実 per-lane verdict (fabrication 廃止) ──
+// runReleaseReviewViaTeam must return { collected, merged } — real per-lane
+// {lane, verdict, rationale} data. The goCount-derived verdict reconstruction
+// (new Array(merged.goCount).fill / i < goCount ternary) is removed; the
+// 3/3-GO mergeReleaseVerdicts invariant itself is unchanged (pins above).
+assert(src.includes('return { collected, merged };'), 'runReleaseReviewViaTeam returns { collected, merged } (real per-lane data)');
+assert(!src.includes('new Array(releaseReviewMerged.goCount)'), 'team-path verdicts are no longer fabricated from goCount');
+assert(!src.includes('i < releaseReviewMerged.goCount'), 'releaseDecision input is no longer fabricated from goCount');
 
 if (failures > 0) {
   console.error(`\n${failures} test(s) failed`);
