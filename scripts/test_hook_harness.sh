@@ -28,6 +28,25 @@
 #   (jq-scoped matcher + escape hatch + fail-closed fallback) lands.
 #   newcase-e/f/g/h/i pass against the current hook and must stay green after T2.
 #
+#   2026-09-05 (Issue #108 remediation, cycle-44 majors — T1 RED phase):
+#     - AC-2 quoted-flag: newcase-q/r/s/t/u/v pin BLOCK for fully-quoted FLAG tokens
+#       (`git reset "--hard"` etc.) — RED at head 069d16d because the (A) ALWAYS_BLOCK
+#       match runs on the plain (unquoted-token) list only, so a quoted flag token is
+#       invisible to it. newcase-o/p pin push-segment quoted --force as BORN-GREEN
+#       regression pins (the (B) full-token scan already blocks it — estimate-approval
+#       condition 1 correction: these were born-green at head, NOT RED), and newcase-w
+#       pins multi-word quoted DATA inside a git segment as ALLOW (false-positive-zero:
+#       the quoted-flag detection added by T2/T3 must not regress to raw-substring
+#       matching).
+#     - AC-3 audit trail: AUDIT_MARKER contract — the DISABLE_GIT_GUARD=1 hatch must
+#       leave a stderr audit trail (newcase-d2; RED at head: the hatch exits 0 with
+#       EMPTY stderr), and the hostile command-body env prefix must NOT carry the
+#       marker (newcase-i2; audit trail only on genuine hatch use).
+#     - AC-4 heredoc→interpreter bypass: newcase-n pins BLOCK (primary implementation:
+#       interpreter-argument scanning). FLIP RULE: if T3 instead adopts the §8
+#       explicit-acceptance-enumeration fallback, flip this expectation to ALLOW in
+#       the same lockstep commit (with the §7 pin recorded by T4).
+#
 # Portability: HOOK is derived from REPO_ROOT via `git rev-parse --show-toplevel`,
 # mirroring scripts/verify_pr_merge_safety.sh L25-37 (set -u, git-presence check,
 # REPO_ROOT derivation with fail-closed exit, cd into repo). No machine-specific
@@ -56,6 +75,13 @@ if [ ! -f "$HOOK" ]; then
   echo "ERROR: hook not found at $HOOK" >&2
   exit 1
 fi
+
+# --- AC-3 audit-trail marker contract (Issue #108 remediation, cycle-44 major-3) --
+# When the DISABLE_GIT_GUARD=1 escape hatch fires, the hook MUST emit this marker to
+# stderr (audit trail) — the hatch must never be silent. T3 implements the emission;
+# newcase-d2 asserts presence on genuine hatch use, newcase-i2 asserts absence when
+# the guard stays active (hostile command-body env prefix).
+AUDIT_MARKER='GIT_GUARD_DISABLED'
 
 TOTAL=0
 PASSED=0
@@ -138,6 +164,27 @@ expect_raw_payload() {
   assert_result "$1" "$2"
 }
 
+assert_stderr_marker() {
+  # assert_stderr_marker <present|absent> <label> — PASS iff HOOK_STDERR contains
+  # ($1=present) / does not contain ($1=absent) $AUDIT_MARKER. Composes with
+  # expect / expect_env / expect_raw_payload: call it immediately AFTER the
+  # exit-code assertion to check the SAME invocation's stderr (HOOK_STDERR is
+  # reused, the hook is NOT re-run).
+  local want="$1" label="$2" found="absent"
+  case "$HOOK_STDERR" in
+    *"$AUDIT_MARKER"*) found="present" ;;
+  esac
+  TOTAL=$((TOTAL + 1))
+  if [ "$found" = "$want" ]; then
+    PASSED=$((PASSED + 1))
+    printf 'PASS stderr[%s] %s\n' "$want" "$label"
+  else
+    FAILED=$((FAILED + 1))
+    FAILURE_SUMMARY+=("stderr[$want] audit marker '$AUDIT_MARKER' not satisfied $label | hook_stderr: ${HOOK_STDERR%%$'\n'*}")
+    printf 'FAIL stderr[%s] %s\n' "$want" "$label"
+  fi
+}
+
 echo "hook under test : $HOOK"
 echo "current branch  : ${CURRENT_BRANCH:-unknown} (§6.2 branch-dependent expectation: $BRANCH_DEPENDENT_EXPECT)"
 echo ""
@@ -194,6 +241,11 @@ expect ALLOW '[newcase-c] quoted string literal contains dangerous token' 'echo 
 #     (reviewer/verifier lane escape hatch).
 expect_env ALLOW '[newcase-d] DISABLE_GIT_GUARD=1 (process env) escape hatch (UC-3)' 'DISABLE_GIT_GUARD=1' 'git push origin master'
 
+# (d2) AC-3 (cycle-44 major-3): the hatch must not be SILENT — using it leaves an
+#      audit trail on stderr ($AUDIT_MARKER). RED at head 069d16d: the hatch exits 0
+#      with EMPTY stderr (verified 0-byte). T3 implements the trail; T4 pins §7.
+assert_stderr_marker present '[newcase-d2] escape hatch leaves stderr audit trail (AC-3)'
+
 # (e) UC-3 counterpart: env unset => guard stays fully active.
 expect BLOCK '[newcase-e] DISABLE_GIT_GUARD unset => guard active' 'git push origin master'
 
@@ -211,6 +263,11 @@ expect BLOCK '[newcase-h] echo && dangerous segment stays BLOCK' 'echo start && 
 #     env prefix must NOT disable the guard — an env prefix does not propagate to the
 #     hook process, so this remains a trunk push and must BLOCK.
 expect BLOCK '[newcase-i] command-body env prefix is not an escape hatch' 'DISABLE_GIT_GUARD=1 git push origin master'
+
+# (i2) AC-3 counterpart: the audit trail must appear ONLY on genuine hatch use —
+#      a hostile command-body env prefix leaves the guard active (BLOCK above) and
+#      its stderr must NOT carry the audit marker. Born-green at head.
+assert_stderr_marker absent '[newcase-i2] hostile env prefix BLOCK carries no audit marker (AC-3)'
 
 # (j) estimate-approval condition 3 (fail-closed fallback): invalid JSON whose raw text
 #     contains a dangerous payload must fall back to RAW scanning and BLOCK, never
@@ -232,6 +289,53 @@ expect BLOCK '[newcase-l] CRLF between segments still detected' "$(printf 'echo 
 #     (fully-quoted tokens included), so quoting the refspec is not a bypass; quoting
 #     in a NON-push segment (newcase-c) stays ALLOW.
 expect BLOCK '[newcase-m] quoted trunk refspec is not a bypass' 'git push origin "master"'
+
+# --- Issue #108 remediation (cycle-44 majors) — T1 RED phase (AC-2/AC-3/AC-4) ------
+# RED targets (expected to FAIL on the current head 069d16d hook; T2/T3 turn them
+# green): n (heredoc→interpreter bypass, AC-4), q/r/s/t/u/v (quoted-flag ALWAYS_BLOCK
+# surface, AC-2), d2 (DISABLE_GIT_GUARD audit trail, AC-3 — silent 0-byte stderr).
+# Guardrail-pinning cases (must pass now and stay green through T2/T3): o, p
+# (push-segment quoted force flags — born-green per estimate-approval condition 1),
+# w (multi-word quoted data in a git segment stays ALLOW), i2 (no audit marker on
+# hostile env prefix).
+echo ""
+echo "=== Issue #108 remediation new cases (T1 RED phase, cycle-44 majors) ==="
+
+# (n) AC-4 (cycle-44 major-4): a heredoc feeding an INTERPRETER (`bash <<'EOF'`)
+#     executes the body. The tokenizer correctly treats heredoc bodies as data
+#     (newcase-a: `cat <<'EOF'`), but when the consuming command is an interpreter
+#     the body becomes a bypass vector. Primary pin = BLOCK (interpreter-argument
+#     scanning, T3). FLIP RULE: if T3 adopts the §8 explicit-acceptance-enumeration
+#     fallback instead, flip this expectation to ALLOW in the same lockstep commit.
+HEREDOC_BYPASS_CMD="$(printf '%s\n' "bash <<'EOF'" 'git reset --hard HEAD~1' 'EOF')"
+expect BLOCK '[newcase-n] heredoc-to-interpreter bypass is blocked (AC-4)' "$HEREDOC_BYPASS_CMD"
+
+# (o/p) AC-2 born-green regression pins (estimate-approval condition 1): the push
+#     segment's (B) full-token scan already BLOCKs a quoted --force — quoting a push
+#     flag is NOT a bypass at head and must remain blocked through T2/T3.
+expect BLOCK '[newcase-o] push quoted --force before remote (born-green pin)' 'git push "--force" origin feat'
+expect BLOCK '[newcase-p] push quoted --force after remote (born-green pin)'  'git push origin "--force" feat'
+
+# (q-s) AC-2 RED: NON-push ALWAYS_BLOCK surface. The (A) pattern match runs on the
+#     plain (unquoted-token) list only, so a fully-quoted flag token (`--hard`,
+#     `-fd`, `-D`) is invisible to it and these are ALLOWED at head. T2/T3 close
+#     this by treating a fully-quoted token with an exact flag SHAPE as a flag —
+#     while multi-word quoted prose (newcase-w) must stay data/ALLOW.
+expect BLOCK '[newcase-q] git reset "--hard" (quoted-flag, dq)'   'git reset "--hard"'
+expect BLOCK '[newcase-r] git clean "-fd" (quoted-flag, dq)'      'git clean "-fd"'
+expect BLOCK '[newcase-s] git branch "-D" feat (quoted-flag, dq)' 'git branch "-D" feat'
+
+# (t-v) AC-2 RED, single-quote variants of the same three quoted-flag surfaces.
+expect BLOCK '[newcase-t] git reset --hard (quoted-flag, sq)'   "git reset '--hard'"
+expect BLOCK '[newcase-u] git clean -f (quoted-flag, sq)'       "git clean '-f'"
+expect BLOCK '[newcase-v] git branch -D feat (quoted-flag, sq)' "git branch '-D' feat"
+
+# (w) AC-2 false-positive-zero pin: a MULTI-WORD quoted string argument inside a git
+#     segment is DATA (newcase-c, but within a git command). The quoted-flag
+#     detection added by T2/T3 must distinguish a quoted FLAG token (exact `--hard` /
+#     `-fd` / `-D` shape → flag) from quoted PROSE containing danger words (→ data).
+#     Born-green at head; guards T2/T3 against regressing to raw-substring matching.
+expect ALLOW '[newcase-w] git commit -m quoted prose w/ danger words stays ALLOW' 'git commit -m "never run git reset --hard here"'
 
 # --- Summary ----------------------------------------------------------------------
 echo ""
