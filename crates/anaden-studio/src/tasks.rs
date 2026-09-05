@@ -9,6 +9,9 @@
 //! - TaskQueue: チェックボックス選択から実行順序を組み立てるキュー。
 //! - fail-closed: TOML 欠損・不正 kind はエラー。`implemented = false` は選択不可
 //!   (グレー表示) — 嘘の動作可能表示は禁止 (CEO 確定)。
+//! - enable_task (Issue #160 UC-3): task TOML の implemented フリップ +
+//!   pipeline_dir 紐付け書き戻し (コメント保全の外科的行編集・load 検証は
+//!   fail-closed)。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -49,6 +52,34 @@ pub enum TaskError {
     /// 選択に未知のタスク ID が含まれている。
     #[error("unknown task id: {0}")]
     UnknownTask(String),
+    /// タスク有効化: ファイル内 `id` が期待と一致しない (誤ファイル書き換え防止)。
+    #[error("task id mismatch in {path}: expected {expected:?}, file declares {actual:?}")]
+    IdMismatch {
+        expected: String,
+        actual: String,
+        path: PathBuf,
+    },
+    /// タスク有効化: `pipeline_run` 以外は pipeline 紐付け対象外。
+    #[error("task {id:?} is not kind = \"pipeline_run\" and cannot be linked to a pipeline")]
+    NotPipelineRun { id: String },
+    /// タスク有効化: pipeline_dir が load 不可 (manifest 無し・TaskDef パース不能)。
+    #[error("pipeline not loadable: {dir}: {reason}")]
+    PipelineNotLoadable { dir: String, reason: String },
+    /// タスク有効化: pipeline_dir に TaskDef TOML が 1 つも無い。
+    #[error("pipeline has no TaskDef TOMLs: {0}")]
+    PipelineNoTaskDefs(String),
+    /// タスク有効化: pipeline_dir 文字列が TOML 基本文字列として書き込めない。
+    #[error("pipeline_dir {dir:?} cannot be written as a TOML string value")]
+    InvalidPipelineDir { dir: String },
+    /// タスク有効化: 外科的行編集に失敗 (アンカー欠損・編集結果の検証不一致)。
+    #[error("surgical edit of task file {path} failed: {reason}")]
+    EditFailed { path: PathBuf, reason: String },
+    /// タスクファイルへの書き戻し IO 失敗。
+    #[error("failed to write task file {path}: {source}")]
+    Write {
+        path: PathBuf,
+        source: Box<std::io::Error>,
+    },
 }
 
 /// タスクの実行経路種別。
@@ -790,6 +821,245 @@ pub fn spawn_args(
     }
 }
 
+// ---- Issue #160 Shard 2 (UC-3): タスク有効化 API (task TOML 書き戻し) ----
+
+/// タスク TOML の `implemented` を `true` へフリップし、`pipeline_dir` 紐付けを
+/// 書き戻して [`TaskDefinition`] を返す (UC-3: 作成 pipeline をタスクに紐付け、
+/// ホーム一覧で選択可能にする)。
+///
+/// # 設計制約 (コメント保全)
+///
+/// 既存タスク TOML は先頭に由来コメント (issue 参照等) を持つため
+/// `toml::to_string` による全再生成はコメントを落とす。本関数は
+/// **implemented 行・pipeline_dir 行のみを外科的に置換する行編集**を行い、
+/// コメント行・インラインコメント・キー順・CRLF 改行をそのまま保存する
+/// ([`edit_task_toml_source`])。
+///
+/// # fail-closed (嘘の動作可能表示禁止)
+///
+/// - ファイル内 `id` が `expected_id` と不一致なら 1 バイトも書き換えない。
+/// - `kind = "launch_subcommand"` は pipeline 紐付け対象外として拒否。
+/// - `root.join(pipeline_dir_rel)` が load 不可 (manifest `pipeline.toml` 無し /
+///   TaskDef ゼロ / TaskDef パース不能) なら有効化を拒否。
+/// - 編集後ソースを書き込み前に [`TaskDefinition::parse_toml`] で完全検証し、
+///   parse 不能・期待と異なる場合は書き込まない。
+///
+/// `pipeline_dir_rel` は TOML 規約 (repo root 相対・forward slash) で書き戻す。
+/// Windows 区切りの backslash は forward slash へ正規化する。
+pub fn enable_task(
+    task_path: &Path,
+    expected_id: &str,
+    pipeline_dir_rel: &str,
+    root: &Path,
+) -> Result<TaskDefinition, TaskError> {
+    let dir_value = normalize_pipeline_dir_rel(pipeline_dir_rel)?;
+    let source = std::fs::read_to_string(task_path).map_err(|source| TaskError::Read {
+        path: task_path.to_path_buf(),
+        source: Box::new(source),
+    })?;
+    // RawTaskDefinition (緩い検証) で読む: pipeline_dir 未宣言の pipeline_run は
+    // 通常 [`TaskDefinition::parse_toml`] が MissingPipelineDir で拒否するが、
+    // 有効化は「pipeline_dir をこれから書き込む」操作のため kind 検証までで止める。
+    let raw: RawTaskDefinition = toml::from_str(&source).map_err(|source| TaskError::Parse {
+        path: task_path.to_path_buf(),
+        source: Box::new(source),
+    })?;
+    if raw.id != expected_id {
+        return Err(TaskError::IdMismatch {
+            expected: expected_id.to_string(),
+            actual: raw.id,
+            path: task_path.to_path_buf(),
+        });
+    }
+    if TaskKind::parse(&raw.kind, task_path)? != TaskKind::PipelineRun {
+        return Err(TaskError::NotPipelineRun {
+            id: expected_id.to_string(),
+        });
+    }
+    // fail-closed: 紐付け先 pipeline が load 可能 (manifest + TaskDef 1 件以上) か。
+    let abs_dir = root.join(&dir_value);
+    anaden_vision::load_pipeline_manifest(&abs_dir).map_err(|e| {
+        TaskError::PipelineNotLoadable {
+            dir: dir_value.clone(),
+            reason: e.to_string(),
+        }
+    })?;
+    if anaden_vision::load_pipeline(&abs_dir)
+        .map_err(|e| TaskError::PipelineNotLoadable {
+            dir: dir_value.clone(),
+            reason: e.to_string(),
+        })?
+        .is_empty()
+    {
+        return Err(TaskError::PipelineNoTaskDefs(dir_value));
+    }
+    // 外科的行編集 → 書き込み前の完全検証 → 書き戻し。
+    let edited = edit_task_toml_source(&source, &dir_value, task_path)?;
+    let def = TaskDefinition::parse_toml(&edited, task_path)?;
+    if !def.implemented || def.pipeline_dir.as_deref() != Some(Path::new(&dir_value)) {
+        return Err(TaskError::EditFailed {
+            path: task_path.to_path_buf(),
+            reason: format!(
+                "edited source must declare implemented = true and pipeline_dir = {dir_value:?}"
+            ),
+        });
+    }
+    std::fs::write(task_path, &edited).map_err(|source| TaskError::Write {
+        path: task_path.to_path_buf(),
+        source: Box::new(source),
+    })?;
+    Ok(def)
+}
+
+/// pipeline_dir 相対パスを TOML 値として書ける形へ正規化する。
+///
+/// - 前後の空白を除去し、backslash 区切りを TOML 規約の forward slash へ変える。
+/// - 空文字・`"`・改行を含む場合は TOML 基本文字列に埋め込めないため
+///   [`TaskError::InvalidPipelineDir`] で fail-closed。
+fn normalize_pipeline_dir_rel(rel: &str) -> Result<String, TaskError> {
+    let normalized = rel.trim().replace('\\', "/");
+    if normalized.is_empty()
+        || normalized.contains('"')
+        || normalized.contains('\n')
+        || normalized.contains('\r')
+    {
+        return Err(TaskError::InvalidPipelineDir {
+            dir: rel.to_string(),
+        });
+    }
+    Ok(normalized)
+}
+
+/// タスク TOML ソースへ「implemented = true フリップ」「pipeline_dir 書き戻し」を
+/// 最小変更の行編集で適用する。
+///
+/// コメント行・未編集行はバイト単位で素通しし、対象キー行は値部分のみ置換する
+/// (インラインコメント・行末改行を保存)。未宣言キーは `kind` 行をアンカーに
+/// その直後へ (implemented → pipeline_dir の順で) 挿入する。
+fn edit_task_toml_source(
+    source: &str,
+    pipeline_dir_rel: &str,
+    path: &Path,
+) -> Result<String, TaskError> {
+    let newline = if source.contains("\r\n") {
+        "\r\n"
+    } else {
+        "\n"
+    };
+    let mut lines: Vec<String> = Vec::new();
+    let mut kind_at: Option<usize> = None;
+    let mut implemented_at: Option<usize> = None;
+    let mut pipeline_dir_at: Option<usize> = None;
+
+    for line in source.split_inclusive('\n') {
+        if kind_at.is_none() && is_key_line(line, "kind") {
+            lines.push(line.to_string());
+            kind_at = Some(lines.len() - 1);
+        } else if implemented_at.is_none() && is_key_line(line, "implemented") {
+            let replaced =
+                replace_key_value(line, "implemented", "true").unwrap_or_else(|| line.to_string());
+            lines.push(replaced);
+            implemented_at = Some(lines.len() - 1);
+        } else if pipeline_dir_at.is_none() && is_key_line(line, "pipeline_dir") {
+            let replaced =
+                replace_key_value(line, "pipeline_dir", &format!("\"{pipeline_dir_rel}\""))
+                    .unwrap_or_else(|| line.to_string());
+            lines.push(replaced);
+            pipeline_dir_at = Some(lines.len() - 1);
+        } else {
+            lines.push(line.to_string());
+        }
+    }
+
+    let Some(kind_index) = kind_at else {
+        return Err(TaskError::EditFailed {
+            path: path.to_path_buf(),
+            reason: "no `kind` line to anchor the edit".to_string(),
+        });
+    };
+    if implemented_at.is_none() {
+        ensure_terminated(&mut lines, kind_index, newline);
+        lines.insert(kind_index + 1, format!("implemented = true{newline}"));
+        implemented_at = Some(kind_index + 1);
+    }
+    if pipeline_dir_at.is_none() {
+        // implemented を挿入済みなら必ず Some (直上で代入)、既存行のみの
+        // 場合も kind 行以降のアンカーへ挿入する。
+        let anchor = implemented_at.unwrap_or(kind_index);
+        ensure_terminated(&mut lines, anchor, newline);
+        lines.insert(
+            anchor + 1,
+            format!("pipeline_dir = \"{pipeline_dir_rel}\"{newline}"),
+        );
+    }
+    Ok(lines.concat())
+}
+
+/// 行がトップレベルの `key = ...` 行か (コメント行は除外・前方空白は許容)。
+fn is_key_line(line: &str, key: &str) -> bool {
+    let t = line.trim_start();
+    !t.starts_with('#')
+        && t.strip_prefix(key)
+            .is_some_and(|rest| rest.trim_start().starts_with('='))
+}
+
+/// `key = <旧値> [# コメント]` 行の値部分のみを `new_value` へ置換する
+/// (インデント・インラインコメント (直前空白込み)・行末改行を保存)。
+/// `key = ...` 行でない場合は `None`。
+fn replace_key_value(line: &str, key: &str, new_value: &str) -> Option<String> {
+    let trimmed = line.trim_start();
+    let indent = &line[..line.len() - trimmed.len()];
+    let after_eq = trimmed.strip_prefix(key)?.trim_start().strip_prefix('=')?;
+    let (terminator, value_part) = split_line_terminator(after_eq);
+    let comment_start = match find_comment_start(value_part) {
+        // コメント直前の空白 (整形) も含めて保全する。
+        Some(i) => value_part[..i].trim_end().len(),
+        None => value_part.trim_end().len(),
+    };
+    let comment = value_part.get(comment_start..).unwrap_or("");
+    Some(format!("{indent}{key} = {new_value}{comment}{terminator}"))
+}
+
+/// 行末の改行 (CRLF/LF/無し) を分離する。
+fn split_line_terminator(s: &str) -> (&str, &str) {
+    if let Some(rest) = s.strip_suffix("\r\n") {
+        ("\r\n", rest)
+    } else if let Some(rest) = s.strip_suffix('\n') {
+        ("\n", rest)
+    } else {
+        ("", s)
+    }
+}
+
+/// 値部分内のインラインコメント開始位置 (`#` の位置) を返す。
+/// TOML 基本文字列の引用符内の `#` は無視する。
+fn find_comment_start(s: &str) -> Option<usize> {
+    let mut in_quotes = false;
+    let mut escaped = false;
+    for (i, ch) in s.char_indices() {
+        if escaped {
+            escaped = false;
+            continue;
+        }
+        match ch {
+            '\\' if in_quotes => escaped = true,
+            '"' => in_quotes = !in_quotes,
+            '#' if !in_quotes => return Some(i),
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `lines[index]` が改行終端でない場合 (ファイル末尾行への挿入時) は改行を補う。
+fn ensure_terminated(lines: &mut [String], index: usize, newline: &str) {
+    if let Some(line) = lines.get_mut(index)
+        && !line.ends_with('\n')
+    {
+        line.push_str(newline);
+    }
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]
@@ -957,41 +1227,78 @@ implemented = true
 
     // ---- Issue #144 Task 3: spawn_args (実行経路分岐の引数組み立て) ----
 
-    /// タスク定義一覧 TOML (リポジトリ実ファイル) から全定義をパースできる。
+    /// テスト用独立オラクル: ソースから implemented 行の真偽値を生テキスト走査で
+    /// 読む (load_task_definitions と異なる経路での照合用)。
+    fn raw_implemented_flag(source: &str) -> Option<bool> {
+        source.lines().find_map(|l| {
+            let t = l.trim_start();
+            if t.starts_with('#') {
+                return None;
+            }
+            let rest = t.strip_prefix("implemented")?;
+            let value = rest.trim_start().strip_prefix('=')?.trim();
+            match value {
+                "true" => Some(true),
+                "false" => Some(false),
+                _ => None,
+            }
+        })
+    }
+
+    /// タスク定義一覧 TOML (リポジトリ実ファイル 9 件) から全定義をパースできる。
+    ///
+    /// selectable 期待値は各ファイルの implemented 行の生走査 (独立オラクル) からの
+    /// 辞書導出とする (Issue #160 T4): UC-3 有効化でファイルの implemented が
+    /// フリップしても本テストが偽 RED しない構造化。既知 implemented 5 タスクの
+    /// superset 不変チェックは残し、迂回 regress を検出する。
     #[test]
     fn test_repo_task_definitions_all_parse() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let defs = load_task_definitions(&root.join("templates/tasks")).unwrap();
+        let tasks_dir = root.join("templates/tasks");
+        let defs = load_task_definitions(&tasks_dir).unwrap();
+        let all_ids = [
+            "field_loop_pc",
+            "fishing",
+            "launch",
+            "login",
+            "nav_to_field_pc",
+            "neko_nikki",
+            "roguelike",
+            "ticket_digest",
+            "worldmap_loop",
+        ];
         let ids: Vec<&str> = defs.iter().map(|d| d.id.as_str()).collect();
-        assert_eq!(
-            ids,
-            vec![
-                "field_loop_pc",
-                "fishing",
-                "launch",
-                "login",
-                "nav_to_field_pc",
-                "neko_nikki",
-                "roguelike",
-                "ticket_digest",
-                "worldmap_loop",
-            ]
-        );
+        assert_eq!(ids, all_ids);
+
         let selectable: Vec<&str> = defs
             .iter()
             .filter(|d| d.is_selectable())
             .map(|d| d.id.as_str())
             .collect();
-        assert_eq!(
-            selectable,
-            vec![
-                "field_loop_pc",
-                "launch",
-                "login",
-                "nav_to_field_pc",
-                "worldmap_loop"
-            ]
-        );
+        for id in all_ids {
+            let source = std::fs::read_to_string(tasks_dir.join(format!("{id}.toml"))).unwrap();
+            let file_implemented = raw_implemented_flag(&source)
+                .unwrap_or_else(|| panic!("{id}.toml has no parsable `implemented` line"));
+            let def = defs
+                .iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("{id} missing from loaded defs"));
+            assert_eq!(
+                def.is_selectable(),
+                file_implemented,
+                "{id}: is_selectable must reflect the file's implemented flag"
+            );
+        }
+        // 既知 implemented セット (superset 不変 — 有効化で増えても壊れない)。
+        for known in [
+            "field_loop_pc",
+            "launch",
+            "login",
+            "nav_to_field_pc",
+            "worldmap_loop",
+        ] {
+            assert!(selectable.contains(&known), "{known} must stay selectable");
+        }
     }
 
     #[test]
@@ -1460,5 +1767,306 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert_eq!(rows[0].id, "launch");
         // 元の選択順位置を維持 (歯抜け番号 — 隠蔽しない)。
         assert_eq!(rows[0].position, 2);
+    }
+
+    // ---- Issue #160 Shard 2 (UC-3): タスク有効化 API (enable_task) ----
+
+    /// 有効化検証用の最小 pipeline fixture: manifest (pipeline.toml) + TaskDef 1 件。
+    /// テンプレート画像は遅延読込のため実ファイル不要。
+    fn write_min_pipeline(dir: &Path) {
+        std::fs::create_dir_all(dir).unwrap();
+        std::fs::write(dir.join("pipeline.toml"), "start_task = \"stub_start\"\n").unwrap();
+        std::fs::write(
+            dir.join("stub_start.toml"),
+            "name = \"stub_start\"\nstate = \"Field\"\nalgorithm = \"ccoeff\"\ntemplate = \"stub.png\"\n",
+        )
+        .unwrap();
+    }
+
+    /// CRLF 改行・冒頭コメント付きの未実装 pipeline_run タスク TOML を書く
+    /// (リポジトリ実 neko_nikki.toml と同構造)。
+    fn write_unimplemented_task(tasks_dir: &Path) -> PathBuf {
+        std::fs::create_dir_all(tasks_dir).unwrap();
+        let src = "# ねこにっきタスクのスケルトン (Issue #154)。\r\n\
+                   # implemented = false: 未実装。グレー表示・チェック不可。\r\n\
+                   id = \"neko_nikki\"\r\n\
+                   title = \"ねこにっき\"\r\n\
+                   kind = \"pipeline_run\"\r\n\
+                   implemented = false\r\n\
+                   pipeline_dir = \"templates/pipelines/neko_nikki\"\r\n";
+        let path = tasks_dir.join("neko_nikki.toml");
+        std::fs::write(&path, src).unwrap();
+        path
+    }
+
+    /// 正常系: 有効化は implemented を flip し pipeline_dir を書き戻し、
+    /// 冒頭コメント・CRLF 改行を保全したまま parse 可能な TOML を残す。
+    #[test]
+    fn test_enable_task_flips_implemented_and_keeps_comments_crlf() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("templates").join("tasks");
+        let task_path = write_unimplemented_task(&tasks_dir);
+        write_min_pipeline(
+            &tmp.path()
+                .join("templates")
+                .join("pipelines")
+                .join("neko_nikki"),
+        );
+
+        let def = enable_task(
+            &task_path,
+            "neko_nikki",
+            "templates/pipelines/neko_nikki",
+            tmp.path(),
+        )
+        .unwrap();
+        assert!(def.implemented);
+        assert_eq!(
+            def.pipeline_dir.as_deref(),
+            Some(Path::new("templates/pipelines/neko_nikki"))
+        );
+        assert_eq!(def.kind, TaskKind::PipelineRun);
+
+        let after = std::fs::read_to_string(&task_path).unwrap();
+        // 冒頭コメントが保全されている (toml::to_string 全再生成でない保証)。
+        assert!(
+            after.starts_with("# ねこにっきタスクのスケルトン (Issue #154)。\r\n"),
+            "comments dropped:\n{after}"
+        );
+        assert!(after.contains("# implemented = false: 未実装。グレー表示・チェック不可。\r\n"));
+        // implemented 行のみフリップ・CRLF 保全。
+        assert!(after.contains("kind = \"pipeline_run\"\r\nimplemented = true\r\n"));
+        assert!(
+            after.contains("pipeline_dir = \"templates/pipelines/neko_nikki\"\r\n"),
+            "after:\n{after}"
+        );
+        // 書き戻し後に再パース可能で、選択可能になっている。
+        let defs = load_task_definitions(&tasks_dir).unwrap();
+        let neko = defs
+            .iter()
+            .find(|d| d.id == "neko_nikki")
+            .unwrap_or_else(|| panic!("neko_nikki missing after rewrite"));
+        assert!(neko.is_selectable());
+    }
+
+    /// エッジケース: ファイル内 id と期待 id が不一致なら 1 バイトも書き換えない。
+    #[test]
+    fn test_enable_task_rejects_id_mismatch_and_keeps_file() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        let task_path = write_unimplemented_task(&tasks_dir);
+        write_min_pipeline(&tmp.path().join("pipe"));
+        let before = std::fs::read_to_string(&task_path).unwrap();
+        let err = enable_task(&task_path, "roguelike", "pipe", tmp.path()).unwrap_err();
+        assert!(matches!(err, TaskError::IdMismatch { .. }), "got {err:?}");
+        assert_eq!(std::fs::read_to_string(&task_path).unwrap(), before);
+    }
+
+    /// エッジケース: launch_subcommand は pipeline 紐付け対象外として拒否。
+    #[test]
+    fn test_enable_task_rejects_launch_subcommand() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("launch.toml");
+        std::fs::write(
+            &task_path,
+            "# ゲーム起動\r\nid = \"launch\"\r\ntitle = \"起動\"\r\nkind = \"launch_subcommand\"\r\nimplemented = true\r\n",
+        )
+        .unwrap();
+        write_min_pipeline(&tmp.path().join("pipe"));
+        let before = std::fs::read_to_string(&task_path).unwrap();
+        let err = enable_task(&task_path, "launch", "pipe", tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, TaskError::NotPipelineRun { .. }),
+            "got {err:?}"
+        );
+        assert_eq!(std::fs::read_to_string(&task_path).unwrap(), before);
+    }
+
+    /// エッジケース (fail-closed): pipeline_dir が load 不可 (ディレクトリ無し /
+    /// manifest 無し) なタスクの有効化は拒否し、ファイルは未変更のまま。
+    #[test]
+    fn test_enable_task_rejects_pipeline_without_manifest() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        let task_path = write_unimplemented_task(&tasks_dir);
+
+        // (a) pipeline ディレクトリ自体が存在しない。
+        let err = enable_task(&task_path, "neko_nikki", "pipelines/ghost", tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, TaskError::PipelineNotLoadable { .. }),
+            "got {err:?}"
+        );
+
+        // (b) ディレクトリはあるが manifest (pipeline.toml) が無い。
+        let pipe = tmp.path().join("pipelines").join("neko_nikki");
+        std::fs::create_dir_all(&pipe).unwrap();
+        std::fs::write(
+            pipe.join("stub_start.toml"),
+            "name = \"stub_start\"\nstate = \"Field\"\nalgorithm = \"ccoeff\"\ntemplate = \"stub.png\"\n",
+        )
+        .unwrap();
+        let err =
+            enable_task(&task_path, "neko_nikki", "pipelines/neko_nikki", tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, TaskError::PipelineNotLoadable { .. }),
+            "got {err:?}"
+        );
+
+        let after = std::fs::read_to_string(&task_path).unwrap();
+        assert!(after.contains("implemented = false\r\n"), "after:\n{after}");
+    }
+
+    /// エッジケース (fail-closed): manifest のみで TaskDef がゼロの pipeline への
+    /// 有効化は拒否する。
+    #[test]
+    fn test_enable_task_rejects_pipeline_with_zero_taskdefs() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        let task_path = write_unimplemented_task(&tasks_dir);
+        let pipe = tmp.path().join("pipe");
+        std::fs::create_dir_all(&pipe).unwrap();
+        std::fs::write(pipe.join("pipeline.toml"), "start_task = \"stub_start\"\n").unwrap();
+        let err = enable_task(&task_path, "neko_nikki", "pipe", tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, TaskError::PipelineNoTaskDefs(_)),
+            "got {err:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&task_path)
+                .unwrap()
+                .contains("implemented = false")
+        );
+    }
+
+    /// エッジケース: implemented 行・pipeline_dir 行が無い TOML でも kind 行を
+    /// アンカーに挿入して有効化できる (explicit > implicit)。
+    #[test]
+    fn test_enable_task_inserts_missing_implemented_and_pipeline_dir() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("bare.toml");
+        std::fs::write(
+            &task_path,
+            "id = \"bare\"\ntitle = \"B\"\nkind = \"pipeline_run\"\n",
+        )
+        .unwrap();
+        write_min_pipeline(&tmp.path().join("pipe"));
+        let def = enable_task(&task_path, "bare", "pipe", tmp.path()).unwrap();
+        assert!(def.implemented);
+        assert_eq!(def.pipeline_dir.as_deref(), Some(Path::new("pipe")));
+        let after = std::fs::read_to_string(&task_path).unwrap();
+        assert!(
+            after
+                .contains("kind = \"pipeline_run\"\nimplemented = true\npipeline_dir = \"pipe\"\n"),
+            "after:\n{after}"
+        );
+    }
+
+    /// エッジケース: implemented 行のインラインコメントは値フリップ後も保全する。
+    #[test]
+    fn test_enable_task_preserves_inline_comment_on_implemented_line() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        std::fs::create_dir_all(&tasks_dir).unwrap();
+        let task_path = tasks_dir.join("c.toml");
+        std::fs::write(
+            &task_path,
+            "id = \"c\"\ntitle = \"C\"\nkind = \"pipeline_run\"\nimplemented = false  # 有効化待ち\npipeline_dir = \"old\"\n",
+        )
+        .unwrap();
+        write_min_pipeline(&tmp.path().join("pipe"));
+        let def = enable_task(&task_path, "c", "pipe", tmp.path()).unwrap();
+        assert!(def.implemented);
+        assert_eq!(def.pipeline_dir.as_deref(), Some(Path::new("pipe")));
+        let after = std::fs::read_to_string(&task_path).unwrap();
+        assert!(
+            after.contains("implemented = true  # 有効化待ち\n"),
+            "after:\n{after}"
+        );
+        assert!(after.contains("pipeline_dir = \"pipe\"\n"));
+    }
+
+    /// 正常系: backslash 区切りの pipeline_dir は TOML 規約 (forward slash) へ
+    /// 正規化して書き戻す。
+    #[test]
+    fn test_enable_task_normalizes_backslash_path_to_forward_slash() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        let task_path = write_unimplemented_task(&tasks_dir);
+        write_min_pipeline(&tmp.path().join("pipe").join("sub"));
+        let def = enable_task(&task_path, "neko_nikki", "pipe\\sub", tmp.path()).unwrap();
+        assert_eq!(def.pipeline_dir.as_deref(), Some(Path::new("pipe/sub")));
+        let after = std::fs::read_to_string(&task_path).unwrap();
+        assert!(
+            after.contains("pipeline_dir = \"pipe/sub\"\r\n"),
+            "after:\n{after}"
+        );
+    }
+
+    /// エッジケース: TOML 値にできない pipeline_dir (引用符含み) は拒否。
+    #[test]
+    fn test_enable_task_rejects_unwritable_pipeline_dir_value() {
+        let tmp = tempfile::tempdir().unwrap();
+        let tasks_dir = tmp.path().join("tasks");
+        let task_path = write_unimplemented_task(&tasks_dir);
+        write_min_pipeline(&tmp.path().join("pipe"));
+        let err = enable_task(&task_path, "neko_nikki", "pipe\"quote", tmp.path()).unwrap_err();
+        assert!(
+            matches!(err, TaskError::InvalidPipelineDir { .. }),
+            "got {err:?}"
+        );
+        assert!(
+            std::fs::read_to_string(&task_path)
+                .unwrap()
+                .contains("implemented = false")
+        );
+    }
+
+    /// 既存タスク TOML (リポジトリ実ファイル 9 件中 pipeline_run 8 件) は有効化の
+    /// 書き戻し後も parse 可能・全コメント行が保全されていることの固定
+    /// (設計制約: toml::to_string 全再生成はコメントを落とすため行編集を採る)。
+    #[test]
+    fn test_enable_task_repo_tomls_stay_parseable_with_comments() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let repo_tasks = root.join("templates").join("tasks");
+        // launch (launch_subcommand) は pipeline 紐付け対象外のため除外。
+        let pipeline_run_ids = [
+            "field_loop_pc",
+            "fishing",
+            "login",
+            "nav_to_field_pc",
+            "neko_nikki",
+            "roguelike",
+            "ticket_digest",
+            "worldmap_loop",
+        ];
+        for id in pipeline_run_ids {
+            let tmp = tempfile::tempdir().unwrap();
+            let tasks_dir = tmp.path().join("tasks");
+            std::fs::create_dir_all(&tasks_dir).unwrap();
+            write_min_pipeline(&tmp.path().join("pipe"));
+            let task_path = tasks_dir.join(format!("{id}.toml"));
+            std::fs::copy(repo_tasks.join(format!("{id}.toml")), &task_path).unwrap();
+            let original = std::fs::read_to_string(&task_path).unwrap();
+
+            let def = enable_task(&task_path, id, "pipe", tmp.path())
+                .unwrap_or_else(|e| panic!("enable failed for {id}: {e}"));
+            assert!(def.implemented, "{id}");
+            assert_eq!(def.pipeline_dir.as_deref(), Some(Path::new("pipe")), "{id}");
+
+            let after = std::fs::read_to_string(&task_path).unwrap();
+            for line in original.lines().filter(|l| l.trim_start().starts_with('#')) {
+                assert!(after.contains(line), "{id}: comment line lost: {line}");
+            }
+            let defs = load_task_definitions(&tasks_dir).unwrap();
+            let enabled = defs
+                .iter()
+                .find(|d| d.id == id)
+                .unwrap_or_else(|| panic!("{id} missing after rewrite"));
+            assert!(enabled.is_selectable(), "{id}");
+        }
     }
 }
