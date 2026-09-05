@@ -24,8 +24,9 @@ pub use engine::{SseVisionEngine, VisionEngine};
 pub use letterbox::{CropInfo, crop_to_content, crop_to_content_with_info};
 pub use matcher::{MatchResult, TemplateMatcher};
 pub use pipeline::{
-    Action, Algorithm, PipelineManifest, StepOutcome, TaskDef, TaskDefError, load_pipeline,
-    load_pipeline_manifest, run_step,
+    Action, Algorithm, PIPELINE_MANIFEST_FILENAME, PipelineManifest, StepOutcome, TaskDef,
+    TaskDefError, load_pipeline, load_pipeline_manifest, run_step, save_pipeline_manifest,
+    save_task_def,
 };
 pub use scale::{BASE_HEIGHT, BASE_WIDTH, ScreenScaler, roi_to_normalized};
 pub use scene_detector::SceneDetector;

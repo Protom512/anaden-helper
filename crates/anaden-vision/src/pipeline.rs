@@ -59,8 +59,7 @@ pub enum Algorithm {
 ///
 /// 注: anaden-core の `InputAction` はデバイス実行用の別型（Tap/Swipe/LongPress 等）で、
 /// MAA 宣言的 Action とは責務が違うため本 enum は pipeline 内に新設する。
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-#[serde(rename_all = "snake_case", tag = "type")]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
     /// マッチしたテンプレート位置（[`MatchResult::region`]）をクリック。
     ClickSelf,
@@ -169,6 +168,57 @@ impl<'de> Deserialize<'de> for Action {
             }
             other => Err(D::Error::custom(format!("unknown action type `{other}`"))),
         }
+    }
+}
+
+/// 保存形式を手書き TOML と機械一致させるための [`Serialize`] 手動実装。
+///
+/// derive は `roi`/`from`/`to` を ScreenRegion 構造体テーブル（`[action.roi]` の
+/// `x`/`y`/`width`/`height`）として書き出すが、手書き TaskDef は serde の
+/// seq 形式受容（`visit_seq`）を利用した `[x, y, width, height]` 配列
+/// （`action = { type = "click_rect", roi = [900, 466, 30, 30] }`）で書かれている。
+/// 本実装は配列形式で書き出し、[`save_task_def`] の出力が既存手書き TaskDef と
+/// `toml::Value` として完全一致することを保証する（AC-1/AC-4 の土台）。
+impl Serialize for Action {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        use serde::ser::SerializeMap;
+
+        /// ScreenRegion を `[x, y, width, height]` 配列として直列化するヘルパ。
+        struct RoiArray(ScreenRegion);
+
+        impl Serialize for RoiArray {
+            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+            where
+                S: serde::Serializer,
+            {
+                [self.0.x, self.0.y, self.0.width, self.0.height].serialize(serializer)
+            }
+        }
+
+        let len = match self {
+            Action::ClickSelf | Action::DoNothing | Action::Stop => 1,
+            Action::ClickRect { .. } => 2,
+            Action::Swipe { .. } => 3,
+        };
+        let mut map = serializer.serialize_map(Some(len))?;
+        match self {
+            Action::ClickSelf => map.serialize_entry("type", "click_self")?,
+            Action::DoNothing => map.serialize_entry("type", "do_nothing")?,
+            Action::Stop => map.serialize_entry("type", "stop")?,
+            Action::ClickRect { roi } => {
+                map.serialize_entry("type", "click_rect")?;
+                map.serialize_entry("roi", &RoiArray(*roi))?;
+            }
+            Action::Swipe { from, to } => {
+                map.serialize_entry("type", "swipe")?;
+                map.serialize_entry("from", &RoiArray(*from))?;
+                map.serialize_entry("to", &RoiArray(*to))?;
+            }
+        }
+        map.end()
     }
 }
 
@@ -323,6 +373,11 @@ pub enum TaskDefError {
     /// TOML 解析失敗（構文エラー・未知キー・未知 algorithm・型不一致を含む）。
     #[error("TOML parse failed {path}: {reason}")]
     ParseFailed { path: PathBuf, reason: String },
+
+    /// 保存（シリアライズ・書き出し）失敗。UC-1 シナリオ作成 GUI の save 経路
+    /// （[`save_task_def`] / [`save_pipeline_manifest`]）。
+    #[error("save failed: {reason}")]
+    SaveFailed { reason: String },
 }
 
 /// ディレクトリ内の `*.toml` を走査し、各1ファイルを1 [`TaskDef`] として読み込む。
@@ -449,8 +504,9 @@ pub struct PipelineManifest {
     /// 無限ループとして振る舞う（後方互換）。
     ///
     /// フィールド名は Rust 慣習で `goals` だが、TOML では `[[goal]]` 配列表記で
-    /// 宣言するため `#[serde(rename = "goal")]` で同期する。
-    #[serde(default, rename = "goal")]
+    /// 宣言するため `#[serde(rename = "goal")]` で同期する。保存時、空なら
+    /// `goal` 行自体を出力しない（無宣言 = 無限ループの手書き後方互換形式）。
+    #[serde(default, rename = "goal", skip_serializing_if = "Vec::is_empty")]
     pub goals: Vec<anaden_core::Goal>,
 }
 
@@ -487,6 +543,144 @@ pub fn load_pipeline_manifest(dir: &Path) -> Result<PipelineManifest, TaskDefErr
             reason: e.to_string(),
         })?;
     Ok(manifest)
+}
+
+/// [`TaskDef`] を1ファイル1タスク慣例（[`load_pipeline`] が読む形式）で
+/// `path` へ書き出す（UC-1 シナリオ作成 GUI の保存経路）。
+///
+/// 保存 TOML は既存 schema と同一形式（保存形式の単一情報源は本関数）:
+/// - `template` が絶対パスの場合は `path` の親ディレクトリ（パイプライン
+///   ディレクトリ）基準の相対パス・フォワードスラッシュ形式へ変換する
+///   （fishing/fishing_start.toml の `"../field_loop_pc/hud_tr.png"` 形式）。
+///   [`load_pipeline`] が相対 template を TOML 親ディレクトリ基準で絶対化するのと対称。
+/// - 相対化不能な絶対パス（共通祖先なし = 別ドライブ等）は絶対形式のまま
+///   保存する（[`TaskDef::detect`] は絶対パスを優先するため動作可能）。
+/// - manifest 慣例ファイル名（[`PIPELINE_MANIFEST_FILENAME`]）への保存は拒否する
+///   （`load_pipeline` が TaskDef として読まないため、書き出すと実行不能になる）。
+///
+/// # Errors
+/// - [`TaskDefError::SaveFailed`]: manifest 慣例パス指定・シリアライズ失敗・
+///   書き出し失敗（親ディレクトリ不在等）。1 バイトも書き出さず fail する。
+///
+/// 保存 → [`load_pipeline`] 往復はテストで機械保証されている
+/// （`save_task_def_roundtrips_through_load_pipeline` 等）。
+pub fn save_task_def(def: &TaskDef, path: &Path) -> Result<(), TaskDefError> {
+    if is_pipeline_manifest_path(path) {
+        return Err(TaskDefError::SaveFailed {
+            reason: format!(
+                "refusing to save a TaskDef into the manifest convention path {path:?} \
+                 (load_pipeline skips it; save the manifest via save_pipeline_manifest instead)"
+            ),
+        });
+    }
+    let base = path.parent().unwrap_or_else(|| Path::new(""));
+    let mut savable = def.clone();
+    savable.template = PathBuf::from(relativize_template(&def.template, base));
+    let content = to_pretty_toml(&savable).map_err(|e| TaskDefError::SaveFailed {
+        reason: e.to_string(),
+    })?;
+    std::fs::write(path, content).map_err(|e| TaskDefError::SaveFailed {
+        reason: format!("write {path:?}: {e}"),
+    })
+}
+
+/// [`PipelineManifest`] を `dir/pipeline.toml`（[`PIPELINE_MANIFEST_FILENAME`]）へ
+/// 書き出す（UC-1 シナリオ作成 GUI の保存経路）。
+///
+/// `goals` は `[[goal]]` 配列テーブルとして書き出される（`rename` の対称）。
+/// 空なら `goal` 行自体を出力しない（無宣言 = 無限ループの手書き後方互換形式）。
+///
+/// # Errors
+/// シリアライズ失敗・書き出し失敗（`dir` 不在等）は
+/// [`TaskDefError::SaveFailed`] を返す。1 バイトも書き出さず fail する。
+///
+/// 保存 → [`load_pipeline_manifest`] 往復はテストで機械保証されている
+/// （`save_pipeline_manifest_roundtrips_through_load`）。
+pub fn save_pipeline_manifest(manifest: &PipelineManifest, dir: &Path) -> Result<(), TaskDefError> {
+    let content = to_pretty_toml(manifest).map_err(|e| TaskDefError::SaveFailed {
+        reason: e.to_string(),
+    })?;
+    let path = dir.join(PIPELINE_MANIFEST_FILENAME);
+    std::fs::write(&path, content).map_err(|e| TaskDefError::SaveFailed {
+        reason: format!("write {path:?}: {e}"),
+    })
+}
+
+/// 保存用 TOML 文字列を生成する（f32 浮動小数点の最短表現正規化付き）。
+///
+/// toml 0.8 は `serialize_f32` を `v as f64` で書き出すため `0.7f32` が
+/// `0.699999988079071` に展開され、手書き形式（`threshold = 0.70` 等）との
+/// 機械一致が壊れる。本関数は一度 `toml::Value` へ落としてから float を
+/// 「f32 へ丸め → 最短10進表現 → f64」へ正規化する。schema の浮動小数点は
+/// 全て f32（threshold/confidence）のため値は往復不変（f32 表示は f32 を
+/// 一意に復元する Rust の roundtrip 表示保証）。
+fn to_pretty_toml<T: Serialize + ?Sized>(value: &T) -> Result<String, toml::ser::Error> {
+    let mut v = toml::Value::try_from(value)?;
+    normalize_f32_floats(&mut v);
+    toml::to_string(&v)
+}
+
+/// [`to_pretty_toml`] 用: `toml::Value` ツリー内の float を f32 最短表現へ
+/// 正規化する（再帰）。f32 起源の float のみ値が変化しない（schema 契約）。
+fn normalize_f32_floats(value: &mut toml::Value) {
+    match value {
+        toml::Value::Float(f) => {
+            if let Ok(shortest) = format!("{}", *f as f32).parse::<f64>() {
+                *f = shortest;
+            }
+        }
+        toml::Value::Array(items) => {
+            for item in items {
+                normalize_f32_floats(item);
+            }
+        }
+        toml::Value::Table(table) => {
+            for (_, v) in table.iter_mut() {
+                normalize_f32_floats(v);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// `template` を `base` 基準の相対パス（フォワードスラッシュ区切り）へ変換する。
+///
+/// - `template` が相対パスならセパレータ正規化のみ行う。
+/// - 絶対パスなら `base` との共通コンポーネント接頭辞を求め、`..` 遷移 + 残差で
+///   相対化する（`templates/pipelines/fishing` 基準の `../field_loop_pc/hud_tr.png` 形式）。
+/// - 共通祖先を持たない（Windows のドライブ違い等）場合は絶対・フォワードスラッシュ
+///   形式を返す（[`TaskDef::detect`] は絶対パスをそのまま使うため動作可能）。
+///
+/// レキシカル変換のみ（`.`/`..` 成分の正規化・シンボリックリンク解決はしない）。
+/// `load_pipeline` が絶対化に使う `parent.join(rel)` と対称のため、`..` 成分を
+/// 含むパスも正しく往復する。
+fn relativize_template(template: &Path, base: &Path) -> String {
+    let forward = |p: &Path| p.to_string_lossy().replace('\\', "/");
+    if !template.is_absolute() || base.as_os_str().is_empty() {
+        return forward(template);
+    }
+    let target: Vec<_> = template.components().collect();
+    let base_components: Vec<_> = base.components().collect();
+    let common = target
+        .iter()
+        .zip(base_components.iter())
+        .take_while(|(t, b)| t == b)
+        .count();
+    // 先頭（Prefix/RootDir）が一致しない = 共通祖先なし → 絶対パス保持。
+    if common == 0 {
+        return forward(template);
+    }
+    let mut rel = PathBuf::new();
+    for _ in common..base_components.len() {
+        rel.push("..");
+    }
+    for c in &target[common..] {
+        rel.push(c.as_os_str());
+    }
+    if rel.as_os_str().is_empty() {
+        return forward(template);
+    }
+    forward(&rel)
 }
 
 /// 1ステップの実行結果。action は省略時 [`Action::DoNothing`] を補充済み。
@@ -3826,5 +4020,397 @@ mod tests {
             manifest.goals.iter().all(|g| g.validate().is_ok()),
             "all fishing goals must validate"
         );
+    }
+
+    // ---- T1 (Issue #160 Shard 1 / UC-1): 保存ヘルパー save → load round-trip ----
+    //
+    // シナリオ作成 GUI (UC-1) が書き出す TOML は既存 schema (load_pipeline /
+    // load_pipeline_manifest) で parse 可能であることを機械保証する (AC-1 の土台)。
+    // 保存形式の単一情報源は vision 側の save_task_def / save_pipeline_manifest。
+
+    /// テスト用の最小 TaskDef を作る (フィールドは呼び出し側で上書き)。
+    fn sample_task_def() -> TaskDef {
+        TaskDef {
+            name: "T".into(),
+            state: "Field".into(),
+            algorithm: Algorithm::Ccoeff,
+            template: PathBuf::from("hud_tr.png"),
+            roi: None,
+            threshold: 0.7,
+            base: None,
+            action: None,
+            next: None,
+        }
+    }
+
+    /// 全フィールド (base/next/click_rect action 含む) の TaskDef を
+    /// save → load_pipeline で完全往復できること (deny_unknown_fields 対称性:
+    /// シリアライザが未知キーを吐けば load の deny_unknown_fields が弾く)。
+    #[test]
+    fn save_task_def_roundtrips_through_load_pipeline() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let def = TaskDef {
+            name: "TitleScreen".into(),
+            state: "TitleScreen".into(),
+            algorithm: Algorithm::Ccoeff,
+            template: PathBuf::from("scenes/title/title_center.png"),
+            roi: Some([520, 320, 240, 80]),
+            threshold: 0.95,
+            base: Some("TitleBase".into()),
+            action: Some(Action::ClickRect {
+                roi: anaden_core::ScreenRegion::new(625, 273, 30, 30),
+            }),
+            next: Some(vec!["LoadGame".into()]),
+        };
+        let path = tmp.path().join("title.toml");
+        save_task_def(&def, &path).expect("save must succeed");
+
+        let defs = load_pipeline(tmp.path()).expect("saved TOML must load");
+        assert_eq!(defs.len(), 1, "exactly one task");
+        let d = &defs[0];
+        assert_eq!(d.name, "TitleScreen");
+        assert_eq!(d.state, "TitleScreen");
+        assert_eq!(d.algorithm, Algorithm::Ccoeff);
+        assert_eq!(d.roi, Some([520, 320, 240, 80]));
+        assert!((d.threshold - 0.95).abs() < 1e-6);
+        assert_eq!(d.base.as_deref(), Some("TitleBase"));
+        assert_eq!(
+            d.action.as_ref(),
+            Some(&Action::ClickRect {
+                roi: anaden_core::ScreenRegion::new(625, 273, 30, 30)
+            })
+        );
+        assert_eq!(d.next.as_deref(), Some(&["LoadGame".to_string()][..]));
+        // template は保存 TOML の親ディレクトリ基準で絶対化されて戻る。
+        assert_eq!(
+            d.template,
+            tmp.path().join("scenes/title/title_center.png"),
+            "template must re-absolutize against the saved TOML's parent"
+        );
+    }
+
+    /// 保存文字列のトップレベルキー集合は TaskDef の既知フィールドと完全一致する
+    /// こと (load 側 deny_unknown_fields との明示的な対称性検証)。
+    #[test]
+    fn saved_taskdef_key_set_is_exactly_known_fields() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let def = TaskDef {
+            roi: Some([1, 2, 3, 4]),
+            base: Some("Base".into()),
+            action: Some(Action::ClickSelf),
+            next: Some(vec!["N".into()]),
+            ..sample_task_def()
+        };
+        let path = tmp.path().join("t.toml");
+        save_task_def(&def, &path).expect("save");
+        let content = fs::read_to_string(&path).expect("read");
+        let v: toml::Value = toml::from_str(&content).expect("saved TOML is a value");
+        let mut keys: Vec<&str> = v
+            .as_table()
+            .expect("top level must be a table")
+            .keys()
+            .map(String::as_str)
+            .collect();
+        keys.sort_unstable();
+        let mut expected = [
+            "action",
+            "algorithm",
+            "base",
+            "name",
+            "next",
+            "roi",
+            "state",
+            "template",
+            "threshold",
+        ];
+        expected.sort_unstable();
+        assert_eq!(keys, expected, "no unknown keys, no missing keys");
+    }
+
+    /// 絶対 template パスは保存先 TOML の親ディレクトリ基準の相対パス
+    /// (フォワードスラッシュ) として書き出されること。
+    /// fishing/fishing_start.toml の `../field_loop_pc/hud_tr.png` 形式。
+    #[test]
+    fn save_task_def_relativizes_absolute_template_forward_slash() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pipelines = tmp.path().join("pipelines");
+        let fishing = pipelines.join("fishing");
+        let tpl = pipelines.join("field_loop_pc").join("hud_tr.png");
+        fs::create_dir_all(&fishing).expect("mkdir fishing");
+        fs::create_dir_all(tpl.parent().expect("tpl parent")).expect("mkdir field_loop_pc");
+        fs::write(&tpl, b"png").expect("write template file");
+
+        let def = TaskDef {
+            name: "FishingStartPc".into(),
+            template: tpl,
+            roi: Some([1038, 0, 218, 120]),
+            action: Some(Action::ClickSelf),
+            next: Some(vec!["FishingStartPc".into()]),
+            ..sample_task_def()
+        };
+        let saved_path = fishing.join("fishing_start.toml");
+        save_task_def(&def, &saved_path).expect("save");
+
+        let content = fs::read_to_string(&saved_path).expect("read");
+        assert!(
+            content.contains("template = \"../field_loop_pc/hud_tr.png\""),
+            "forward-slash relative form expected:\n{content}"
+        );
+        // round-trip: load は親ディレクトリ基準で絶対化し、実在ファイルへ解決する。
+        let defs = load_pipeline(&fishing).expect("reload");
+        assert_eq!(defs.len(), 1);
+        assert!(
+            defs[0].template.exists(),
+            "resolved template must exist: {:?}",
+            defs[0].template
+        );
+    }
+
+    /// template がパイプラインディレクトリ配下なら `<sub>/x.png` 形式で保存される。
+    #[test]
+    fn save_task_def_template_under_pipeline_dir_saves_relative() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let def = TaskDef {
+            template: tmp.path().join("scenes").join("x.png"),
+            ..sample_task_def()
+        };
+        let path = tmp.path().join("task.toml");
+        save_task_def(&def, &path).expect("save");
+        let content = fs::read_to_string(&path).expect("read");
+        assert!(
+            content.contains("template = \"scenes/x.png\""),
+            "in-dir relative form expected:\n{content}"
+        );
+    }
+
+    /// 共通祖先を持たない絶対パス (Windows の別ドライブ等) は絶対・フォワード
+    /// スラッシュ形式のまま保存されること ([`TaskDef::detect`] は絶対パスを優先)。
+    #[test]
+    fn relativize_template_without_common_ancestor_keeps_absolute() {
+        let got = relativize_template(Path::new("Z:\\a\\b.png"), Path::new("C:\\x\\y"));
+        assert_eq!(got, "Z:/a/b.png");
+    }
+
+    /// manifest 慣例ファイル名 (pipeline.toml) への TaskDef 保存は拒否されること
+    /// (load_pipeline が TaskDef として読まないため、書き出すと実行不能になる)。
+    #[test]
+    fn save_task_def_rejects_manifest_convention_filename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = save_task_def(
+            &sample_task_def(),
+            &tmp.path().join(PIPELINE_MANIFEST_FILENAME),
+        )
+        .expect_err("manifest filename must be rejected");
+        assert!(matches!(err, TaskDefError::SaveFailed { .. }));
+    }
+
+    /// 親ディレクトリが存在しないパスへの保存は SaveFailed (fail-closed)。
+    #[test]
+    fn save_task_def_missing_parent_dir_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = save_task_def(
+            &sample_task_def(),
+            &tmp.path().join("no-such-dir").join("t.toml"),
+        )
+        .expect_err("missing parent dir must fail");
+        assert!(matches!(err, TaskDefError::SaveFailed { .. }));
+    }
+
+    /// manifest (複数 goal: LoopCount + TemplateMatch) の save → load 往復。
+    #[test]
+    fn save_pipeline_manifest_roundtrips_through_load() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = PipelineManifest {
+            start_task: "Farm".into(),
+            goals: vec![
+                anaden_core::Goal {
+                    name: "loop_50".into(),
+                    stop: anaden_core::StopCondition::LoopCount { target: 50 },
+                },
+                anaden_core::Goal {
+                    name: "find_clear".into(),
+                    stop: anaden_core::StopCondition::TemplateMatch {
+                        task: "clear".into(),
+                        confidence: 0.85,
+                    },
+                },
+            ],
+        };
+        save_pipeline_manifest(&manifest, tmp.path()).expect("save");
+        let back = load_pipeline_manifest(tmp.path()).expect("reload");
+        assert_eq!(back, manifest);
+    }
+
+    /// goals 空の manifest は `goal` 行自体を書き出さない (無宣言 = 無限ループの
+    /// 後方互換形式)。
+    #[test]
+    fn save_pipeline_manifest_empty_goals_omits_goal_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = PipelineManifest {
+            start_task: "TapBottom".into(),
+            goals: Vec::new(),
+        };
+        save_pipeline_manifest(&manifest, tmp.path()).expect("save");
+        let content =
+            fs::read_to_string(tmp.path().join(PIPELINE_MANIFEST_FILENAME)).expect("read");
+        assert!(
+            !content.contains("goal"),
+            "goal key must be omitted:\n{content}"
+        );
+    }
+
+    /// Rust 側フィールド名 `goals` は TOML 上 `[[goal]]` 配列テーブルとして
+    /// 書き出されること (`#[serde(rename = "goal")]` のシリアライズ対称性。
+    /// `[[goals]]` は手書き形式に存在しない)。
+    #[test]
+    fn save_pipeline_manifest_writes_goal_array_table_rename() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = PipelineManifest {
+            start_task: "TapBottom".into(),
+            goals: vec![anaden_core::Goal {
+                name: "farm50".into(),
+                stop: anaden_core::StopCondition::LoopCount { target: 50 },
+            }],
+        };
+        save_pipeline_manifest(&manifest, tmp.path()).expect("save");
+        let content =
+            fs::read_to_string(tmp.path().join(PIPELINE_MANIFEST_FILENAME)).expect("read");
+        assert!(
+            content.contains("[[goal]]"),
+            "[[goal]] expected:\n{content}"
+        );
+        assert!(
+            !content.contains("[[goals]]"),
+            "[[goals]] must not appear:\n{content}"
+        );
+    }
+
+    /// 存在しないディレクトリへの manifest 保存は SaveFailed (fail-closed)。
+    #[test]
+    fn save_pipeline_manifest_missing_dir_errors() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let err = save_pipeline_manifest(
+            &PipelineManifest {
+                start_task: "X".into(),
+                goals: Vec::new(),
+            },
+            &tmp.path().join("no-such-dir"),
+        )
+        .expect_err("missing dir must fail");
+        assert!(matches!(err, TaskDefError::SaveFailed { .. }));
+    }
+
+    /// 既存手書き manifest と保存形式の機械一致: 既存 pipeline.toml を
+    /// load → save し、手書きファイルと保存ファイルを toml::Value として比較して
+    /// 完全一致すること (コメント・インライン/サブテーブル表記差は Value 比較で
+    /// 吸収され、キー構造・値のみが検証される = 「保存形式が既存手書き形式と
+    /// 同一 schema」の機械保証)。
+    #[test]
+    fn saved_manifest_matches_handwritten_value_form_for_existing_pipelines() {
+        let pipelines = workspace_templates_root().join("pipelines");
+        let mut checked = 0;
+        for entry in fs::read_dir(&pipelines).expect("read pipelines dir") {
+            let dir = entry.expect("entry").path();
+            if !dir.join(PIPELINE_MANIFEST_FILENAME).exists() {
+                continue;
+            }
+            let handwritten =
+                fs::read_to_string(dir.join(PIPELINE_MANIFEST_FILENAME)).expect("handwritten");
+            let manifest = load_pipeline_manifest(&dir)
+                .expect("existing manifest must load (handwritten form is parseable)");
+            let out = tempfile::tempdir().expect("tempdir");
+            save_pipeline_manifest(&manifest, out.path()).expect("save");
+            let saved =
+                fs::read_to_string(out.path().join(PIPELINE_MANIFEST_FILENAME)).expect("saved");
+            let hw: toml::Value = toml::from_str(&handwritten).expect("handwritten value");
+            let sv: toml::Value = toml::from_str(&saved).expect("saved value");
+            assert_eq!(
+                sv, hw,
+                "manifest form mismatch dir={dir:?}\n--handwritten--\n{handwritten}\n--saved--\n{saved}"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked >= 3,
+            "expected >= 3 existing manifests (field_loop_pc/fishing/login), checked {checked}"
+        );
+    }
+
+    /// 既存手書き TaskDef (全 pipeline の *.toml) と保存形式の機械一致。
+    /// load_pipeline で絶対化された template を save で相対化し直しても、
+    /// 手書きファイルと toml::Value 完全一致すること (AC-4「既存 pipeline の
+    /// parse 互換を壊さない」の構造的保証)。
+    ///
+    /// template の相対化基準は保存先 TOML の親ディレクトリ (= パイプライン
+    /// ディレクトリ) のため、リポジトリ実ファイルを直接上書きせず、TOML のみを
+    /// tempdir へコピーした同一階層構造上で load → 同場所 save → 比較する。
+    /// (PNG は load_pipeline が読まないためコピー不要。)
+    #[test]
+    fn saved_taskdefs_match_handwritten_value_form_for_existing_pipelines() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let copy_root = tmp.path().join("templates");
+        copy_toml_files_only(&workspace_templates_root(), &copy_root);
+        let pipelines = copy_root.join("pipelines");
+        let mut checked = 0;
+        for entry in fs::read_dir(&pipelines).expect("read pipelines dir") {
+            let dir = entry.expect("entry").path();
+            let defs = load_pipeline(&dir).expect("taskdefs load");
+            for f in fs::read_dir(&dir).expect("read pipeline dir") {
+                let p = f.expect("entry").path();
+                let is_toml = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+                if !is_toml || is_pipeline_manifest_path(&p) {
+                    continue;
+                }
+                let handwritten = fs::read_to_string(&p).expect("handwritten");
+                let hw: toml::Value = toml::from_str(&handwritten).expect("handwritten value");
+                let name = hw
+                    .get("name")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or_else(|| panic!("TaskDef file {p:?} has no name"))
+                    .to_string();
+                let def = defs
+                    .iter()
+                    .find(|d| d.name == name)
+                    .unwrap_or_else(|| panic!("TaskDef {name} not loaded from {dir:?}"))
+                    .clone();
+                // 同じパイプラインディレクトリ内へ上書き保存 → 再読込比較。
+                save_task_def(&def, &p).expect("save in place");
+                let saved = fs::read_to_string(&p).expect("saved");
+                let sv: toml::Value = toml::from_str(&saved).expect("saved value");
+                assert_eq!(
+                    sv, hw,
+                    "taskdef form mismatch file={p:?}\n--handwritten--\n{handwritten}\n--saved--\n{saved}"
+                );
+                checked += 1;
+            }
+        }
+        assert!(
+            checked >= 14,
+            "expected all 14 handwritten TaskDefs, checked {checked}"
+        );
+    }
+
+    /// `src` 以下のディレクトリ構造と `*.toml` のみを `dst` へ再帰コピーする
+    /// (PNG 等の実ファイルはコピーしない — 機械一致テストはパス解決まで検証する
+    /// ため template 実体は不要)。
+    fn copy_toml_files_only(src: &Path, dst: &Path) {
+        fs::create_dir_all(dst).expect("mkdir dst");
+        for entry in fs::read_dir(src).expect("read src") {
+            let p = entry.expect("entry").path();
+            if p.is_dir() {
+                copy_toml_files_only(&p, &dst.join(p.file_name().expect("dir name")));
+            } else {
+                let is_toml = p
+                    .extension()
+                    .and_then(|e| e.to_str())
+                    .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+                if is_toml {
+                    fs::copy(&p, dst.join(p.file_name().expect("file name"))).expect("copy toml");
+                }
+            }
+        }
     }
 }
