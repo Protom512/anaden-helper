@@ -1,9 +1,8 @@
-//! anaden-studio: 単一ウィンドウ統合 GUI (Issue #119)。
+//! anaden-studio: 単一ウィンドウ統合 GUI (Issue #119 / #157)。
 //!
-//! フラグなし起動で作成 / バッチ評価 / pipeline 実行 / 履歴 の全タブを
-//! 利用できる統合アプリ (`shell::UnifiedShell`) を起動する。
-//! `--pipeline` は後方互換のため同一の統合アプリを起動する deprecated
-//! フラグとして残る（ヘルプ文言に deprecated 表記・GUI 上に警告バナー）。
+//! フラグなし起動で「ホーム (タスク一覧) + ツール (旧 6 タブ統合)」の
+//! 2 タブ構成の統合アプリ (`shell::UnifiedShell`) を起動する。
+//! `--pipeline` は Issue #123 (shard 2) で完全削除済み。
 //!
 //! 引数解析の実体は lib 側 `cli` モジュール（テスト可能な純関数）。
 
