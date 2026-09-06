@@ -232,6 +232,9 @@ pub struct PipelineRunnerApp {
     log: SharedLogBuffer,
     /// UI 描画用ログスナップショット（毎フレーム drain で更新）。
     log_snapshot: Vec<LogEntry>,
+    /// スナップショット差分更新用の改訂番号キャッシュ (Issue #160 UC-5:
+    /// 新着行のないフレームの全行 clone を回避。LogBuffer::revision と比較)。
+    log_revision: u64,
     /// ログの自動スクロール。
     auto_scroll: bool,
     /// 戦略選択パネル(シャード3スコープ、runner に統合)。
@@ -296,6 +299,7 @@ impl PipelineRunnerApp {
             log_rx,
             log: SharedLogBuffer::new(DEFAULT_MAX_LINES),
             log_snapshot: Vec::new(),
+            log_revision: 0,
             auto_scroll: true,
             strategy_panel: crate::strategy_ui::StrategyPanel::default(),
             strategy_summary: "戦略未選択".to_string(),
@@ -519,17 +523,26 @@ impl PipelineRunnerApp {
         self.failure_summary.as_deref()
     }
 
+    /// UI 描画用スナップショットを最新化する (Issue #160 UC-5: 差分更新)。
+    ///
+    /// 従来は毎フレームバッファ全行 (上限 5000 行) を clone していた。
+    /// 現在は [`SharedLogBuffer::changed_entries`] で改訂番号を比較し、
+    /// バッファが変化したフレームのみ複製する。内容の契約は不変。
     fn refresh_snapshot(&mut self) {
-        self.log_snapshot = self
-            .log
-            .with_buf(|b| b.entries().cloned().collect())
-            .unwrap_or_default();
+        if let Some((rev, entries)) = self.log.changed_entries(self.log_revision) {
+            self.log_revision = rev;
+            self.log_snapshot = entries;
+        }
     }
 
     /// ログをクリアする（クリアボタンのハンドラ）。
+    ///
+    /// clear も改訂番号を進めるため、続く [`Self::refresh_snapshot`] は
+    /// 空スナップショットへ更新される (Issue #160 UC-5 で差分化しても
+    /// 「クリア後に古い行が残る」ことがない構造)。
     pub fn clear_logs(&mut self) {
         self.log.with_buf(LogBuffer::clear);
-        self.log_snapshot.clear();
+        self.refresh_snapshot();
     }
 
     /// 現在のログスナップショット（昇順・UI 描画とテストで使用）。
@@ -983,6 +996,24 @@ mod tests {
         assert!(app.log_snapshot().is_empty());
         let buf_empty = app.log.with_buf(|b| b.is_empty()).unwrap_or(false);
         assert!(buf_empty);
+    }
+
+    /// UC-5 (Issue #160): 差分更新スナップショットであっても行が欠けず、
+    /// 新着行のないフレームを連続してもスナップショット内容が冪等に保たれる
+    /// (60 フレーム相当 = 1 秒 @60fps のアイドル drain)。
+    #[test]
+    fn test_log_snapshot_idempotent_across_idle_drains() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        app.push_log_line("INFO line-1");
+        app.push_log_line("ERROR line-2");
+        app.drain_logs();
+        let first: Vec<String> = app.log_snapshot().iter().map(|e| e.line.clone()).collect();
+        assert_eq!(first.len(), 2);
+        for _ in 0..60 {
+            app.drain_logs();
+        }
+        let second: Vec<String> = app.log_snapshot().iter().map(|e| e.line.clone()).collect();
+        assert_eq!(first, second);
     }
 
     /// LogLevel → 表示色の対応（色分け描画の純ロジック部分）。

@@ -396,6 +396,9 @@ pub struct StudioApp {
     task_log_rx: Receiver<LogEvent>,
     /// UI 描画用ログスナップショット (drain 毎に更新)。
     task_log_snapshot: Vec<LogEntry>,
+    /// スナップショット差分更新用の改訂番号キャッシュ (Issue #160 UC-5:
+    /// 新着行のないフレームの全行 clone を回避。LogBuffer::revision と比較)。
+    task_log_revision: u64,
     /// ログの自動スクロール追従 (log_view.rs の純ロジック再用・UC-4)。
     task_scroll: AutoScrollFollow,
     /// anaden CLI 実行ファイル (spawn 時の program)。
@@ -478,6 +481,7 @@ impl StudioApp {
             task_log_tx,
             task_log_rx,
             task_log_snapshot: Vec::new(),
+            task_log_revision: 0,
             task_scroll: AutoScrollFollow::default(),
             anaden_program: "anaden".to_string(),
         }
@@ -749,12 +753,17 @@ impl StudioApp {
         self.refresh_task_log_snapshot();
     }
 
-    /// UI 描画用ログスナップショットを最新化する。
+    /// UI 描画用ログスナップショットを最新化する (Issue #160 UC-5: 差分更新)。
+    ///
+    /// 従来は毎フレームバッファ全行 (上限 5000 行) を clone していた。
+    /// 現在は [`SharedLogBuffer::changed_entries`] で改訂番号を比較し、
+    /// バッファが変化したフレームのみ複製する (新着行なしのフレームは
+    /// ロック 1 回 + 整数比較で完了)。内容の契約は不変 (更新後は全行相当)。
     fn refresh_task_log_snapshot(&mut self) {
-        self.task_log_snapshot = self
-            .task_log
-            .with_buf(|b| b.entries().cloned().collect())
-            .unwrap_or_default();
+        if let Some((rev, entries)) = self.task_log.changed_entries(self.task_log_revision) {
+            self.task_log_revision = rev;
+            self.task_log_snapshot = entries;
+        }
     }
 
     /// タスク一覧 UI (MAA 型チェックボックス) を描画する。
@@ -2376,6 +2385,43 @@ mod tests {
             lines.iter().any(|l| l.contains("exit=0")),
             "lines: {lines:?}"
         );
+    }
+
+    /// UC-5 (Issue #160): 差分更新スナップショット (revision-gated) でも
+    /// 行が欠けず、新着行のないフレームを連続してもスナップショット内容が
+    /// 冪等に保たれる (60 フレーム相当 = 1 秒 @60fps のアイドル drain)。
+    #[test]
+    fn task_log_snapshot_idempotent_across_idle_drains_and_keeps_lines() {
+        let mut app = StudioApp::default();
+        // 起動即失敗 (存在しない program を持つ spec) → セパレータ + 起動失敗行
+        // を記録して失敗停止。以降はキュー滞留のまま毎フレーム drain が回る状態。
+        let bogus = SpawnSpec::new("anaden-nonexistent-bin-xyz", Vec::new());
+        app.start_task_entries(vec![queue_entry("失敗", bogus)]);
+        pump_until(
+            &mut app,
+            30_000,
+            |s| matches!(s, QueueState::PausedAfterFailure { .. }),
+            "pause after spawn failure",
+        );
+        app.drain_task_logs();
+        let before: Vec<String> = app
+            .task_log_lines()
+            .iter()
+            .map(|e| e.line.clone())
+            .collect();
+        assert!(
+            before.iter().any(|l| l.contains("起動に失敗")),
+            "lines: {before:?}"
+        );
+        for _ in 0..60 {
+            app.drain_task_logs();
+        }
+        let after: Vec<String> = app
+            .task_log_lines()
+            .iter()
+            .map(|e| e.line.clone())
+            .collect();
+        assert_eq!(before, after);
     }
 
     /// タスク一覧 UI (チェックボックス・開始ボタン含む) がパニックせず描画できる。
