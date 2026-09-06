@@ -24,6 +24,7 @@ pub mod scenario_ui;
 pub mod scoring;
 pub mod settings;
 pub mod shell;
+pub mod shell_nav;
 pub mod source;
 pub mod strategy_ui;
 pub mod tasks;
