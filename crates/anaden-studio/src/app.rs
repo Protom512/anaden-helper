@@ -571,6 +571,35 @@ impl StudioApp {
         }
     }
 
+    /// UC-3 (Shard 4): シナリオパネルのイベントを処理する。
+    ///
+    /// タスク登録・有効化 (`TaskEnabled`) 後はホーム一覧 (`task_defs`) を
+    /// 既定パスから再読込して有効化タスクを選択可能にする (4 段階フローの
+    /// (d) queue 追加 = 既存ホーム一覧への反映)。再読込でチェック済み選択が
+    /// 失われるため、保持して復元する (定義が消えた/未実装化した ID は除外)。
+    fn on_scenario_task_event(&mut self, event: crate::scenario_task_link::ScenarioPanelEvent) {
+        match event {
+            crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled { message } => {
+                let selected: Vec<String> = self
+                    .task_defs
+                    .as_ref()
+                    .map(|list| list.selected_ids().to_vec())
+                    .unwrap_or_default();
+                self.load_task_list(&Self::workspace_root().join("templates/tasks"));
+                if let Some(list) = &mut self.task_defs {
+                    for id in selected {
+                        if list.find(&id).is_some_and(|def| def.is_selectable()) {
+                            // 事前条件 (定義存在 + 選択可能) を満たすため失敗しない。
+                            let _ = list.toggle(&id);
+                        }
+                    }
+                }
+                // load_task_list が status を上書きするため、成功メッセージを再設定。
+                self.status = message;
+            }
+        }
+    }
+
     /// workspace ルート (runner.rs と同一の決定論的解決)。
     fn workspace_root() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
@@ -1512,12 +1541,34 @@ impl StudioApp {
                     // シナリオ作成 (Issue #160 T3 / UC-1+UC-2): 単一 TaskDef 保存 (上)
                     // を多 TaskDef + manifest 保存へ拡張する collapsing セクション。
                     // パネル本体は scenario_ui (ドメイン)、ここは配線のみ。
+                    // UC-3 (Shard 4): 保存済み pipeline をタスクへ登録・有効化する
+                    // サブフロー (ui_task_link) も配線する。stub 一覧は読込済み
+                    // タスク定義から導出 (未読込なら既定パスから遅延読込)。
+                    self.ensure_task_list_loaded();
+                    let link_root = Self::workspace_root();
+                    let link_tasks_dir = link_root.join("templates/tasks");
+                    let stubs = self
+                        .task_defs
+                        .as_ref()
+                        .map(|list| crate::scenario_task_link::stub_options(list.definitions()))
+                        .unwrap_or_default();
                     let scenario_candidate = self.scenario_candidate();
+                    let mut task_event = None;
                     egui::CollapsingHeader::new("シナリオ作成")
                         .default_open(true)
                         .show(ui, |ui| {
                             self.scenario.ui(ui, scenario_candidate, &mut self.status);
+                            let link_ctx = crate::scenario_task_link::TaskLinkContext {
+                                root: &link_root,
+                                tasks_dir: &link_tasks_dir,
+                                stubs: &stubs,
+                            };
+                            task_event =
+                                self.scenario.ui_task_link(ui, &link_ctx, &mut self.status);
                         });
+                    if let Some(event) = task_event {
+                        self.on_scenario_task_event(event);
+                    }
                     ui.separator();
                     ui.label(&self.status);
                 });
@@ -2373,6 +2424,34 @@ mod tests {
         }
         app.render_task_list(&mut child_ui(&ctx));
         let _ = ctx.end_pass();
+    }
+
+    /// UC-3 (Shard 4): タスク登録・有効化イベントでホーム一覧が再読込され、
+    /// 有効化タスクが選択可能になる。既存のチェック選択は保持される。
+    /// (実リポジトリ templates/tasks は読み取り専用に使用 — 書き込み無し)
+    #[test]
+    fn scenario_task_enabled_event_reloads_home_list_preserving_selection() {
+        let mut app = StudioApp::default();
+        app.load_task_list(&tasks_dir());
+        app.toggle_task("login");
+        let selected_before = app.task_defs.as_ref().unwrap().selected_ids().to_vec();
+        assert_eq!(selected_before, vec!["login".to_string()]);
+
+        app.on_scenario_task_event(crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled {
+            message: "タスク登録・有効化: テスト".to_string(),
+        });
+
+        let list = app.task_defs.as_ref().unwrap();
+        assert!(
+            list.find("login").is_some_and(|def| def.is_selectable()),
+            "再読込後も有効化タスクが選択可能"
+        );
+        assert_eq!(
+            list.selected_ids(),
+            selected_before.as_slice(),
+            "選択は復元"
+        );
+        assert_eq!(app.status, "タスク登録・有効化: テスト");
     }
 
     // ---- エッジケース ----

@@ -466,12 +466,27 @@ impl GoalKind {
     }
 }
 
+/// 保存済みシナリオの記録 (UC-3 登録フローの対象)。
+///
+/// `save()` 成功時の実体 (保存先 dir + manifest の start_task) を保持する。
+/// 以後の名前変更・編集が未保存でも、登録はこの保存済み実体に対して行う。
+#[derive(Debug, Clone)]
+struct SavedScenario {
+    /// 保存済み pipeline ディレクトリ (絶対パス)。
+    dir: PathBuf,
+    /// 保存済み manifest の start_task。
+    start_task: String,
+}
+
 /// Authoring ペイン埋め込みのシナリオ作成パネル (UC-1/UC-2)。
 ///
 /// `strategy_ui::StrategyPanel` と同じ「純状態モデル + egui パネル」パターン。
 /// 保持する編集データは [`ScenarioEditorState`]、保存は [`save_scenario`] へ
 /// 委譲。描画は [`Self::ui`] を Authoring ペインの collapsing セクションから
 /// 呼ぶ (app.rs は配線のみ)。
+///
+/// UC-3 (Shard 4): 保存済み pipeline をタスクへ登録・有効化するサブフローは
+/// [`Self::ui_task_link`] (ドメインは `scenario_task_link`)。
 pub struct ScenarioPanel {
     /// 編集中のシナリオ (純状態モデル)。フォームがフィールドを直接編集する。
     pub state: ScenarioEditorState,
@@ -488,6 +503,15 @@ pub struct ScenarioPanel {
     goal_value: String,
     /// ゴール追加フォーム: ゴール名。
     goal_name: String,
+    /// UC-3: 直近の保存成功実体 (未保存 = None。登録フローの対象)。
+    saved: Option<SavedScenario>,
+    /// UC-3 登録フォーム: task id (保存時にシナリオ名へ同期・編集可)。
+    pub task_id_input: String,
+    /// UC-3 登録フォーム: title (保存時にシナリオ名へ同期・編集可)。
+    pub task_title_input: String,
+    /// UC-3: 既存 stub タスク (implemented=false の pipeline_run) からの
+    /// 紐付け先選択 (未選択 = None)。
+    pub bind_selection: Option<String>,
 }
 
 impl ScenarioPanel {
@@ -502,6 +526,10 @@ impl ScenarioPanel {
             goal_kind: GoalKind::default(),
             goal_value: GoalKind::default().default_value().to_string(),
             goal_name: "goal_1".to_string(),
+            saved: None,
+            task_id_input: String::new(),
+            task_title_input: String::new(),
+            bind_selection: None,
         }
     }
 
@@ -582,15 +610,179 @@ impl ScenarioPanel {
 
     /// 現在の状態を保存する (「シナリオ保存」ボタンの実体)。
     /// UC-2 参照は最終 pipeline dir 基準で再相対化してから保存する。
+    /// UC-3: 保存成功時は保存実体 (dir + start_task) を記録し、登録フォームの
+    /// 既定値 (task id / title = シナリオ名) を同期する。
     pub fn save(&mut self, status: &mut String) {
         let dir = self.pipeline_dir();
         for (name, png) in self.assigned_pngs.clone() {
             self.state.assign_template(&name, &png, &dir);
         }
         match save_scenario(&self.state, &self.pending_pngs, &self.pipelines_root) {
-            Ok(dir) => *status = format!("シナリオ保存: {}", dir.display()),
+            Ok(dir) => {
+                *status = format!("シナリオ保存: {}", dir.display());
+                self.saved = Some(SavedScenario {
+                    start_task: self.state.start_task.clone(),
+                    dir,
+                });
+                let name = self.state.name.trim().to_string();
+                self.task_id_input = name.clone();
+                self.task_title_input = name;
+            }
             Err(e) => *status = format!("シナリオ保存失敗: {e}"),
         }
+    }
+
+    /// 直近の保存済み pipeline ディレクトリ (未保存 = None)。
+    #[must_use]
+    pub fn saved_pipeline(&self) -> Option<&Path> {
+        self.saved.as_ref().map(|s| s.dir.as_path())
+    }
+
+    /// UC-3 (i): 保存済み pipeline を新規タスクとして登録・有効化する
+    /// (「新規タスクとして登録・有効化」ボタンの実体。ドメインは
+    /// `scenario_task_link::register_and_enable_task`)。
+    /// 成功時は [`scenario_task_link::ScenarioPanelEvent::TaskEnabled`] を返す。
+    pub fn register_as_new_task(
+        &mut self,
+        ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
+        status: &mut String,
+    ) -> Option<crate::scenario_task_link::ScenarioPanelEvent> {
+        let Some(saved) = self.saved.clone() else {
+            *status = "タスク登録には先にシナリオを保存してください".to_string();
+            return None;
+        };
+        match crate::scenario_task_link::register_and_enable_task(
+            ctx.tasks_dir,
+            ctx.root,
+            &saved.dir,
+            &self.task_id_input,
+            &self.task_title_input,
+            &saved.start_task,
+        ) {
+            Ok(def) => {
+                *status = format!(
+                    "タスク登録・有効化: {} [{}] (ホーム一覧へ反映)",
+                    def.title, def.id
+                );
+                Some(crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled {
+                    message: status.clone(),
+                })
+            }
+            Err(e) => {
+                *status = format!("タスク登録失敗: {e}");
+                None
+            }
+        }
+    }
+
+    /// UC-3 (ii): 選択中の既存 stub タスク (implemented=false の pipeline_run) へ
+    /// 保存済み pipeline を紐付けて有効化する (「選択タスクへ紐付け・有効化」
+    /// ボタンの実体。ドメインは `scenario_task_link::bind_and_enable_task`)。
+    pub fn bind_stub_task(
+        &mut self,
+        ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
+        status: &mut String,
+    ) -> Option<crate::scenario_task_link::ScenarioPanelEvent> {
+        let Some(saved) = self.saved.clone() else {
+            *status = "タスク紐付けには先にシナリオを保存してください".to_string();
+            return None;
+        };
+        let Some(id) = self.bind_selection.clone() else {
+            *status = "紐付け先の未実装タスクを選択してください".to_string();
+            return None;
+        };
+        match crate::scenario_task_link::bind_and_enable_task(
+            ctx.tasks_dir,
+            ctx.root,
+            &id,
+            &saved.dir,
+        ) {
+            Ok(def) => {
+                *status = format!(
+                    "タスク有効化: {} [{}] (ホーム一覧へ反映)",
+                    def.title, def.id
+                );
+                Some(crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled {
+                    message: status.clone(),
+                })
+            }
+            Err(e) => {
+                *status = format!("タスク有効化失敗: {e}");
+                None
+            }
+        }
+    }
+
+    /// UC-3: 保存済み pipeline をタスクへ登録・有効化するセクションを描画する。
+    ///
+    /// 保存済みでない場合は何も描画しない (4 段階フローの (b)(c) は保存 (a) が前提)。
+    /// 2 経路: (i) 新規タスクとして登録 (task id / title 編集可)・
+    /// (ii) 既存の未実装タスク (`ctx.stubs`) へ紐付け+有効化。
+    /// 成功時は [`scenario_task_link::ScenarioPanelEvent`] を返す
+    /// (app.rs がホーム一覧を再読込して反映)。
+    pub fn ui_task_link(
+        &mut self,
+        ui: &mut egui::Ui,
+        ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
+        status: &mut String,
+    ) -> Option<crate::scenario_task_link::ScenarioPanelEvent> {
+        // 未保存時はセクション自体を表示しない (イベントも無し)。
+        let saved = self.saved.clone()?;
+        let mut event = None;
+        egui::CollapsingHeader::new("タスク登録・有効化")
+            .default_open(true)
+            .show(ui, |ui| {
+                ui.label(format!("pipeline: {}", saved.dir.display()));
+                ui.label(format!("start_task: {}", saved.start_task));
+                ui.separator();
+                // (i) 新規タスクとして登録 (task id 既定 = シナリオ名・title 編集可)。
+                ui.horizontal(|ui| {
+                    ui.label("task id:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.task_id_input).desired_width(120.0),
+                    );
+                });
+                ui.horizontal(|ui| {
+                    ui.label("title:");
+                    ui.add(
+                        egui::TextEdit::singleline(&mut self.task_title_input).desired_width(160.0),
+                    );
+                });
+                if ui.button("新規タスクとして登録・有効化").clicked() {
+                    event = self.register_as_new_task(ctx, status);
+                }
+                ui.separator();
+                // (ii) 既存の未実装タスク (implemented=false の pipeline_run) へ紐付け。
+                if ctx.stubs.is_empty() {
+                    ui.weak("紐付け可能な未実装タスクがありません");
+                } else {
+                    ui.horizontal(|ui| {
+                        ui.label("既存タスク:");
+                        let selected = self
+                            .bind_selection
+                            .clone()
+                            .unwrap_or_else(|| "(選択してください)".to_string());
+                        egui::ComboBox::from_id_salt("scenario_bind_stub")
+                            .selected_text(selected)
+                            .show_ui(ui, |ui| {
+                                for stub in ctx.stubs {
+                                    ui.selectable_value(
+                                        &mut self.bind_selection,
+                                        Some(stub.id.clone()),
+                                        format!("{} [{}]", stub.title, stub.id),
+                                    );
+                                }
+                            });
+                        let can_bind = self.bind_selection.is_some();
+                        ui.add_enabled_ui(can_bind, |ui| {
+                            if ui.button("選択タスクへ紐付け・有効化").clicked() {
+                                event = self.bind_stub_task(ctx, status);
+                            }
+                        });
+                    });
+                }
+            });
+        event
     }
 
     /// パネル本体を描画する。`candidate` は呼出側 (app.rs) が現在のROI・入力から
@@ -1126,5 +1318,29 @@ mod tests {
         let end = defs.iter().find(|d| d.name == "End").expect("End");
         assert_eq!(end.roi, None);
         assert_eq!(end.action, Some(Action::ClickSelf));
+    }
+
+    /// UC-3 (Shard 4): save() 成功で保存実体 (dir) が記録され、登録フォームの
+    /// 既定値 (task id / title = シナリオ名) が同期される。
+    #[test]
+    fn save_tracks_saved_scenario_and_syncs_register_form_defaults() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+        let mut panel = ScenarioPanel::new(root.clone());
+        panel.state.name = "fishing2".to_string();
+        panel.state.add_task(task_def("Start", None));
+        panel.state.add_goal(loop_goal("g", 3));
+        let mut status = String::new();
+
+        assert!(panel.saved_pipeline().is_none(), "未保存時は None");
+        panel.save(&mut status);
+        assert!(status.contains("シナリオ保存"), "status: {status}");
+        assert_eq!(
+            panel.saved_pipeline(),
+            Some(root.join("fishing2").as_path()),
+            "保存実体を記録"
+        );
+        assert_eq!(panel.task_id_input, "fishing2");
+        assert_eq!(panel.task_title_input, "fishing2");
     }
 }
