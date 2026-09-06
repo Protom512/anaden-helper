@@ -227,7 +227,9 @@ impl Serialize for Action {
 /// 1ファイル1タスク構成（[`load_pipeline`] はディレクトリ内 `*.toml` を各1タスクとして集約）。
 /// 将来の action/next/base 継承拡張に備え、これらは `Option` で前方互換を持たせる。
 /// 本スライスの [`TaskDef::detect`] は action/next/base を **使わない**（パースして保持するだけ）。
-#[derive(Debug, Clone, Serialize, Deserialize)]
+// PartialEq は UC-4 (Issue #160 Shard 5) のロスレス往復検証 (load -> save -> load
+// の意味比較) 用の trait 追加のみ。serde schema・直列化形式は不変。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskDef {
     /// タスク名（= 識別子）。

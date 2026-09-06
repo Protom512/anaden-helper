@@ -16,6 +16,7 @@ pub mod library;
 pub mod log_view;
 pub mod proposals;
 pub mod runner;
+pub mod scenario_load;
 pub mod scenario_task_link;
 pub mod scenario_ui;
 pub mod scoring;

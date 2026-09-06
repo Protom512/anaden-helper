@@ -88,6 +88,17 @@ pub enum ScenarioValidationError {
         /// はみ出し/ゼロサイズだった ROI `[x, y, w, h]`。
         roi: [u32; 4],
     },
+    /// 新規・リネーム TaskDef 名が MAA/MDA pipeline 命名規約 (PascalCase 強制・
+    /// 連番禁止・過汎用名禁止) に違反 (Issue #160 UC-4 / 設計ノート C)。
+    /// ロード済み既存名 ([`ScenarioEditorState::loaded_task_names`]) は対象外
+    /// (変更しない限り警告しない)。
+    #[error("task name `{name}` violates the pipeline node naming convention: {reason}")]
+    TaskNaming {
+        /// 違反したタスク名。
+        name: String,
+        /// 違反理由 ([`crate::scenario_load::task_name_issue`] 由来)。
+        reason: String,
+    },
 }
 
 /// シナリオ編集の純状態モデル (UC-1)。
@@ -95,8 +106,9 @@ pub enum ScenarioValidationError {
 /// 保持するのは「保存したい値」のみ。UI 入力バッファや egui 状態は持たず、
 /// フォームパネルが本モデルのフィールドを直接編集する。
 ///
-/// `TaskDef` が `PartialEq` 非実装のため本構造体も `PartialEq` を持たない
-/// (等価比較はフィールド単位で行う)。
+/// 本構造体自体は UI 編集状態のため `PartialEq` を持たない (等価比較が必要な
+/// 箇所は `TaskDef` の `PartialEq` — UC-4 (Issue #160 Shard 5) で追加 — を
+/// `tasks` ベクタ単位で使う)。
 #[derive(Debug, Clone)]
 pub struct ScenarioEditorState {
     /// シナリオ名 (= `templates/pipelines/<name>/` ディレクトリ名)。
@@ -107,6 +119,20 @@ pub struct ScenarioEditorState {
     pub goals: Vec<Goal>,
     /// TaskDef 編集リスト (name/state/algorithm/template/roi/threshold/action/next)。
     pub tasks: Vec<TaskDef>,
+    /// UC-4 (Shard 5): ディスクからロードした元タスク名集合 (作成時検査の
+    /// baseline)。命名規約 ([`ScenarioValidationError::TaskNaming`]) と ROI
+    /// 画面内検査 ([`ScenarioValidationError::RoiOutOfBounds`]) は baseline 外の
+    /// 名前 (= 新規追加・リネーム後) にのみ適用する — 既存 pipeline の資産
+    /// (20:9 座標系 ROI 等の PC 1258x708 契約外データ) を編集なき保存で弾か
+    /// ないため。新規シナリオでは空 (= 全タスクが検査対象)。
+    pub loaded_task_names: Vec<String>,
+    /// UC-4: ロード済みタスクの元 TOML ファイル名 (TaskDef name → ファイル stem)。
+    /// [`save_scenario`] は元ファイルへ書き戻す — 既存 pipeline は stem ≠ name
+    /// (例: `tap_bottom.toml` の name は `TapBottomStable`) のため、name で保存
+    /// すると同一 TaskDef の重複ファイルができ再 load でタスクが倍化する。
+    /// 対応エントリの無い (新規追加) タスクは `<name>.toml` へ保存される。
+    /// リネームは「新規ファイルへ保存 + 旧ファイルの掃除」として扱われる。
+    pub loaded_task_files: Vec<(String, String)>,
 }
 
 impl ScenarioEditorState {
@@ -118,6 +144,8 @@ impl ScenarioEditorState {
             start_task: String::new(),
             goals: Vec::new(),
             tasks: Vec::new(),
+            loaded_task_names: Vec::new(),
+            loaded_task_files: Vec::new(),
         }
     }
 
@@ -228,7 +256,17 @@ impl ScenarioEditorState {
     /// 検査内容: シナリオ名非空・ディレクトリ名として安全・TaskDef 1 件以上・
     /// タスク名一意・start_task が TaskDef 名前空間に存在・next 参照が解決可能・
     /// 各 Goal の [`Goal::validate`] 委譲・ROI が [`SCREEN_WIDTH`]x[`SCREEN_HEIGHT`]
-    /// 画面内で有効サイズ。
+    /// 画面内で有効サイズ・新規/リネーム TaskDef 名が命名規約適合
+    /// ([`crate::scenario_load::task_name_issue`])。
+    ///
+    /// **UC-4 baseline ゲーティング**: 命名規約検査と ROI 画面内検査は
+    /// [`Self::loaded_task_names`] に含まれない名前 (= 新規追加・リネーム後)
+    /// にのみ適用する。既存 pipeline のタスクは (a) 名前は命名規約導入前の
+    /// 資産である可能性、(b) 20:9 pipeline の ROI は 1280 基準座標系で
+    /// PC 1258x708 空間の契約外 (例: `field_loop/tap_hud_tr.toml` の
+    /// `[1080,150,180,150]` は x+w=1260)、の理由で作成時検査の対象外とし、
+    /// 編集なき保存 (ロスレス往復) を妨げない。リネームすると両検査が再有効
+    /// になる (新規名は命名規約に、ROI は保存先座標系契約に従うべき)。
     /// 出力順は決定論的 (名前 → TaskDef 存在 → 重複 → start_task → タスク毎 →
     /// ゴール毎)。
     #[must_use]
@@ -268,6 +306,13 @@ impl ScenarioEditorState {
         }
 
         for task in &self.tasks {
+            let is_loaded = self.loaded_task_names.iter().any(|n| n == &task.name);
+            if !is_loaded && let Some(reason) = crate::scenario_load::task_name_issue(&task.name) {
+                issues.push(ScenarioValidationError::TaskNaming {
+                    name: task.name.clone(),
+                    reason: reason.to_string(),
+                });
+            }
             if let Some(nexts) = &task.next {
                 for next in nexts {
                     if !self.tasks.iter().any(|t| &t.name == next) {
@@ -279,6 +324,7 @@ impl ScenarioEditorState {
                 }
             }
             if let Some(roi) = task.roi
+                && !is_loaded
                 && !roi_within_screen(roi)
             {
                 issues.push(ScenarioValidationError::RoiOutOfBounds {
@@ -390,13 +436,23 @@ pub enum ScenarioSaveError {
 /// `template` は追加時に `<name>.png` (pipeline dir 基準の裸相対) が設定済みの
 /// ため、保存 TOML の template 参照と PNG 実体が一致する。
 ///
+/// UC-4 (Shard 5): [`ScenarioEditorState::loaded_task_files`] に対応する
+/// (ロード済み) タスクは **元のファイル名 (stem)** へ書き戻す。既存 pipeline は
+/// stem ≠ name (`tap_bottom.toml` ↔ `TapBottomStable`) のため、name で保存すると
+/// 同一 TaskDef の重複ファイルができ再 load でタスクが倍化する。対応エントリの
+/// 無い新規タスクは `<name>.toml` へ保存される。また、削除・リネーム済みタスク
+/// の旧 TaskDef ファイルを保存成功後に掃除する ([`sweep_removed_taskdefs`]) —
+/// 残ると `load_pipeline` が再読込時に旧タスクを復活させるため。
+///
 /// # Errors
 /// - [`ScenarioSaveError::Invalid`]: バリデーション不合格 (1 バイトも書かない)。
 /// - それ以外: 各書き出し段階の失敗 ([`ScenarioSaveError::DirCreate`] /
 ///   [`ScenarioSaveError::PngWrite`] / [`ScenarioSaveError::Vision`])。
 ///
 /// 保存 → [`anaden_vision::load_pipeline`] / [`load_pipeline_manifest` 往復は
-/// `tests/scenario_editor_tests.rs` (AC-1) で機械保証されている。
+/// `tests/scenario_editor_tests.rs` (AC-1) と
+/// `tests/scenario_uc4_roundtrip_tests.rs` (UC-4・既存 8 pipeline ロスレス往復)
+/// で機械保証されている。
 ///
 /// [`load_pipeline_manifest`]: anaden_vision::load_pipeline_manifest
 pub fn save_scenario(
@@ -415,10 +471,47 @@ pub fn save_scenario(
             .map_err(ScenarioSaveError::PngWrite)?;
     }
     anaden_vision::save_pipeline_manifest(&state.to_manifest(), &dir)?;
+    // UC-4: ロード済みタスクは元ファイル (stem) へ、新規タスクは <name>.toml へ。
+    let mut written: Vec<PathBuf> = Vec::new();
     for task in &state.tasks {
-        anaden_vision::save_task_def(task, &dir.join(format!("{}.toml", task.name)))?;
+        let stem = state
+            .loaded_task_files
+            .iter()
+            .find(|(n, _)| n == &task.name)
+            .map(|(_, stem)| stem.as_str())
+            .unwrap_or(task.name.as_str());
+        let path = dir.join(format!("{stem}.toml"));
+        anaden_vision::save_task_def(task, &path)?;
+        written.push(path);
     }
+    sweep_removed_taskdefs(&dir, &written);
     Ok(dir)
+}
+
+/// 今回の保存で書き出さなかった旧 TaskDef ファイル (削除・リネーム前) を
+/// 掃除する (UC-4)。manifest 慣例ファイル (`pipeline.toml`) は対象外。
+///
+/// 保存した全 TaskDef の書き出しに成功した後にのみ呼ぶ (失敗時の部分状態で
+/// 旧ファイルを消さない)。削除自体は best-effort — 失敗しても再 load 時に
+/// 旧タスクが復活するだけでデータ破損にはならないためエラーにはしない。
+fn sweep_removed_taskdefs(dir: &Path, written: &[PathBuf]) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        let is_toml = path
+            .extension()
+            .and_then(|e| e.to_str())
+            .is_some_and(|e| e.eq_ignore_ascii_case("toml"));
+        let is_manifest = path
+            .file_name()
+            .and_then(|n| n.to_str())
+            .is_some_and(|n| n == anaden_vision::PIPELINE_MANIFEST_FILENAME);
+        if is_toml && !is_manifest && !written.contains(&path) {
+            let _ = std::fs::remove_file(&path);
+        }
+    }
 }
 
 /// StopCondition の UI 表示要約 (ゴール一覧行・豆腐なし ASCII + 日本語)。
@@ -490,8 +583,14 @@ struct SavedScenario {
 pub struct ScenarioPanel {
     /// 編集中のシナリオ (純状態モデル)。フォームがフィールドを直接編集する。
     pub state: ScenarioEditorState,
-    /// 保存先ルート (既定は workspace の `templates/pipelines`)。
+    /// 保存先ルート (既定は workspace の `templates/pipelines`。
+    /// UC-4 ロード編集モードではロード元 dir の親に固定される)。
     pipelines_root: PathBuf,
+    /// UC-4 (Shard 5): 新規作成モードの保存先ルート。「既存 pipeline を開く」と
+    /// `pipelines_root` がロード元へ移動するため、新規モードへ戻る際の復元元。
+    default_root: PathBuf,
+    /// UC-4: 「既存 pipeline を開く」コンボの選択中 pipeline 名 (未選択 = None)。
+    open_selection: Option<String>,
     /// ROI 追加タスクのテンプレ PNG 本体 (task 名 → crop)。保存時に書き出す。
     pending_pngs: Vec<(String, DynamicImage)>,
     /// UC-2 でファイル参照を割り当てた PNG の元絶対パス (task 名 → 絶対パス)。
@@ -520,7 +619,9 @@ impl ScenarioPanel {
     pub fn new(pipelines_root: PathBuf) -> Self {
         Self {
             state: ScenarioEditorState::new("my_scenario"),
+            default_root: pipelines_root.clone(),
             pipelines_root,
+            open_selection: None,
             pending_pngs: Vec::new(),
             assigned_pngs: Vec::new(),
             goal_kind: GoalKind::default(),
@@ -537,6 +638,64 @@ impl ScenarioPanel {
     #[must_use]
     pub fn pipeline_dir(&self) -> PathBuf {
         self.pipelines_root.join(self.state.name.trim())
+    }
+
+    /// UC-4 (Shard 5): 既存 pipeline ディレクトリをエディタへロードする
+    /// (「開く」ボタンの実体。ドメインは [`crate::scenario_load::load_scenario_from_dir`])。
+    ///
+    /// ロード後は (a) 既定の保存先を **ロード元 dir に固定** する
+    /// (`pipelines_root` = dir の親。シナリオ名 = dir 名のため
+    /// [`Self::pipeline_dir`] がロード元と一致する)、(b) 編集用の未確定データ
+    /// (pending/参照 PNG・保存実体・登録フォーム) をリセットする。ロード済み
+    /// TaskDef の template は load_pipeline が絶対化済みで、保存時
+    /// `save_task_def` が同じ dir 基準で再相対化するため元の相対参照へ戻る。
+    ///
+    /// シナリオ名を書き換えて保存すると別ディレクトリへの新規保存
+    /// (save-as) になる — その場合 template 参照は新しい dir 基準で再相対化
+    /// されるが PNG 実体はコピーされない点は既知の制約。
+    ///
+    /// 戻り値はロード成否。失敗理由は `status` へ。
+    pub fn open_existing(&mut self, dir: &Path, status: &mut String) -> bool {
+        match crate::scenario_load::load_scenario_from_dir(dir) {
+            Ok(state) => {
+                if let Some(parent) = dir.parent() {
+                    self.pipelines_root = parent.to_path_buf();
+                }
+                let task_count = state.tasks.len();
+                self.state = state;
+                self.pending_pngs.clear();
+                self.assigned_pngs.clear();
+                self.saved = None;
+                self.open_selection = None;
+                self.task_id_input.clear();
+                self.task_title_input.clear();
+                self.bind_selection = None;
+                *status = format!(
+                    "pipeline ロード: {} (タスク {task_count} 件・保存先はロード元に固定)",
+                    dir.display()
+                );
+                true
+            }
+            Err(e) => {
+                *status = format!("pipeline ロード失敗: {e}");
+                false
+            }
+        }
+    }
+
+    /// UC-4: 新規作成モードへ戻る (ロード編集状態を破棄し、保存先を既定ルートへ
+    /// 復元する。「新規シナリオ」ボタンの実体)。
+    pub fn new_scenario(&mut self, status: &mut String) {
+        self.pipelines_root = self.default_root.clone();
+        self.state = ScenarioEditorState::new("my_scenario");
+        self.pending_pngs.clear();
+        self.assigned_pngs.clear();
+        self.saved = None;
+        self.open_selection = None;
+        self.task_id_input.clear();
+        self.task_title_input.clear();
+        self.bind_selection = None;
+        *status = "新規シナリオ作成モードへ戻りました".to_string();
     }
 
     /// 現在のROI候補タスク (TaskDef + crop PNG) を追加する
@@ -794,6 +953,42 @@ impl ScenarioPanel {
         candidate: Option<(TaskDef, DynamicImage)>,
         status: &mut String,
     ) {
+        // --- UC-4 (Shard 5): 既存 pipeline を開く / 新規作成モード切替 ---
+        // コンボは既定ルート (workspace `templates/pipelines`) 直下の pipeline
+        // ディレクトリ列挙。rfd のフォルダ参照は列挙外の場所を開く経路。
+        ui.horizontal(|ui| {
+            let names = crate::scenario_load::list_pipeline_dirs(&self.default_root);
+            let selected = self
+                .open_selection
+                .clone()
+                .unwrap_or_else(|| "(選択してください)".to_string());
+            egui::ComboBox::from_id_salt("scenario_open_pipeline")
+                .selected_text(selected)
+                .show_ui(ui, |ui| {
+                    for n in &names {
+                        ui.selectable_value(&mut self.open_selection, Some(n.clone()), n.as_str());
+                    }
+                });
+            let open_dir = self
+                .open_selection
+                .clone()
+                .map(|n| self.default_root.join(n));
+            ui.add_enabled_ui(open_dir.is_some(), |ui| {
+                if ui.button("既存 pipeline を開く").clicked()
+                    && let Some(dir) = &open_dir
+                {
+                    self.open_existing(dir, status);
+                }
+            });
+            if ui.button("フォルダ参照...").clicked()
+                && let Some(dir) = rfd::FileDialog::new().pick_folder()
+            {
+                self.open_existing(&dir, status);
+            }
+            if ui.button("新規シナリオ").clicked() {
+                self.new_scenario(status);
+            }
+        });
         ui.horizontal(|ui| {
             ui.label("名前:");
             ui.add(egui::TextEdit::singleline(&mut self.state.name).desired_width(120.0));
@@ -1342,5 +1537,115 @@ mod tests {
         );
         assert_eq!(panel.task_id_input, "fishing2");
         assert_eq!(panel.task_title_input, "fishing2");
+    }
+
+    // ---- UC-4 (Shard 5): baseline ゲーティング + 既存 pipeline ロード編集 ----
+
+    /// baseline (loaded_task_names) 外の名前 (= 新規追加・リネーム後) のみ
+    /// 命名規約・ROI 画面内検査の対象。既存名は変更しない限り警告しない。
+    #[test]
+    fn naming_and_roi_checks_apply_only_to_non_baseline_tasks() {
+        // 20:9 pipeline 相当: ROI [1080,150,180,150] は x+w=1260 > 1258
+        // (1280 基準座標系 = PC 1258x708 契約外)。
+        let mut st = ScenarioEditorState::new("field_loop");
+        let mut loaded = task_def("TapHudTr", None);
+        loaded.roi = Some([1080, 150, 180, 150]);
+        st.add_task(loaded);
+        st.loaded_task_names = vec!["TapHudTr".to_string()];
+        assert!(
+            st.validate().is_ok(),
+            "baseline タスクは命名・ROI 検査の対象外: {:?}",
+            st.validation_issues()
+        );
+
+        // リネーム (baseline 外の新名) は命名規約で拒否。
+        st.task_mut("TapHudTr").unwrap().name = "tap_hud_v2".to_string();
+        assert!(
+            st.validation_issues()
+                .iter()
+                .any(|i| matches!(i, ScenarioValidationError::TaskNaming { .. }))
+        );
+
+        // PascalCase へ直しても baseline 外なので ROI 検査が再有効。
+        st.task_mut("tap_hud_v2").unwrap().name = "FieldHudWidePc".to_string();
+        assert!(
+            st.validation_issues()
+                .iter()
+                .any(|i| matches!(i, ScenarioValidationError::RoiOutOfBounds { .. })),
+            "baseline 外の ROI 超過は検出される"
+        );
+    }
+
+    /// baseline 無し (新規シナリオ) は全タスクが命名規約の対象。
+    #[test]
+    fn new_scenario_names_are_all_validated() {
+        let mut st = ScenarioEditorState::new("s");
+        st.add_task(task_def("Start", None)); // PascalCase: OK
+        st.add_task(task_def("confirm_now", None)); // snake_case: 拒否
+        let issues = st.validation_issues();
+        assert!(!issues.iter().any(|i| matches!(
+            i,
+            ScenarioValidationError::TaskNaming { name, .. } if name == "Start"
+        )));
+        assert!(
+            issues.contains(&ScenarioValidationError::TaskNaming {
+                name: "confirm_now".to_string(),
+                reason: crate::scenario_load::task_name_issue("confirm_now")
+                    .unwrap_or_default()
+                    .to_string(),
+            })
+        );
+    }
+
+    /// UC-4: open_existing でロード → 保存先がロード元 dir に固定され、
+    /// 編集なし保存で同 dir へ書き戻る。new_scenario で既定ルートへ復元。
+    #[test]
+    fn open_existing_fixes_save_target_and_new_scenario_restores_root() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+        // ロード対象 pipeline を先に保存しておく (name ≠ file stem の検証も兼ね、
+        // 手書きで stem ファイルを置く)。
+        let dir = root.join("fishing2");
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(
+            dir.join("fishing_start.toml"),
+            "name = \"FishingStartPc\"\nstate = \"Field\"\nalgorithm = \"ccoeff\"\n\
+             template = \"fishing.png\"\nroi = [10, 20, 100, 50]\nthreshold = 0.8\n",
+        )
+        .expect("write");
+
+        let mut panel = ScenarioPanel::new(root.clone());
+        panel.state.name = "other".to_string();
+        let mut status = String::new();
+        assert!(panel.open_existing(&dir, &mut status), "status: {status}");
+        assert!(status.contains("pipeline ロード"), "status: {status}");
+        assert_eq!(panel.state.name, "fishing2", "シナリオ名 = dir 名");
+        assert_eq!(panel.state.task_names(), vec!["FishingStartPc"]);
+        assert_eq!(panel.state.start_task, "FishingStartPc");
+        assert_eq!(panel.pipeline_dir(), dir, "既定の保存先 = ロード元 dir");
+        assert!(panel.saved_pipeline().is_none(), "ロード直後は未保存");
+
+        // 編集なし保存 → 同一 dir へ。stem ファイル (fishing_start.toml) へ書き戻り、
+        // name ファイル (FishingStartPc.toml) は作られない (重複 TaskDef 防止)。
+        panel.save(&mut status);
+        assert_eq!(panel.saved_pipeline(), Some(dir.as_path()));
+        assert!(
+            dir.join("fishing_start.toml").exists(),
+            "元 stem ファイルへ書き戻す"
+        );
+        assert!(
+            !dir.join("FishingStartPc.toml").exists(),
+            "name ファイルを二重に作らない"
+        );
+        let defs = anaden_vision::load_pipeline(&dir).expect("reload");
+        assert_eq!(defs.len(), 1, "TaskDef が倍化しない");
+        assert_eq!(defs[0].name, "FishingStartPc");
+
+        // 新規シナリオへ戻ると既定ルート・空状態へ復元。
+        panel.new_scenario(&mut status);
+        assert_eq!(panel.pipeline_dir(), root.join("my_scenario"));
+        assert!(panel.state.tasks.is_empty());
+        assert!(panel.state.loaded_task_names.is_empty());
+        assert!(panel.saved_pipeline().is_none());
     }
 }
