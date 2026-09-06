@@ -379,6 +379,9 @@ pub struct StudioApp {
     task_dir: PathBuf,
     /// pipeline task の認識成功時アクション選択 (UC-3)。
     task_action: PipelineActionKind,
+    /// シナリオ作成パネル (Issue #160 T3: UC-1/UC-2 Authoring 埋め込み)。
+    /// ドメインは scenario_ui、ここは配線のみ。
+    scenario: crate::scenario_ui::ScenarioPanel,
     /// MAA 型タスク一覧の定義リスト (Issue #144)。None = 未読込。
     task_defs: Option<crate::tasks::TaskListState>,
     /// チェック順逐次実行キューの状態機械 (Issue #154 Shard 1)。None = 未開始。
@@ -465,6 +468,9 @@ impl StudioApp {
             connection: ConnectionStatus::default(),
             task_dir: PathBuf::from("./templates/pipelines/created"),
             task_action: PipelineActionKind::ClickSelf,
+            scenario: crate::scenario_ui::ScenarioPanel::new(
+                Self::workspace_root().join("templates/pipelines"),
+            ),
             task_defs: None,
             task_queue: None,
             task_child: ChildProcess::new(),
@@ -1112,6 +1118,35 @@ impl StudioApp {
             Err(e) => self.status = format!("pipeline task 保存失敗: {e}"),
         }
     }
+
+    /// 現在のROI・入力からシナリオ追加候補 (TaskDef + crop PNG) を構築する
+    /// (Issue #160 T3 / UC-1)。名前/状態/閾値/action は
+    /// [`Self::save_current_pipeline_task`] と同一の導出を使う。
+    /// スクショ/ROI 未確定・未知方式は None (fail-closed)。
+    fn scenario_candidate(&self) -> Option<(anaden_vision::TaskDef, DynamicImage)> {
+        let roi = self.roi.rect()?;
+        let img = self.screenshot.as_ref()?;
+        let name = if self.tpl_name.trim().is_empty() {
+            "template_01".to_string()
+        } else {
+            self.tpl_name.trim().to_string()
+        };
+        let threshold = self
+            .discrimination
+            .as_ref()
+            .map(|d| ((d.own_min + d.other_max) / 2.0).clamp(0.5, 0.99))
+            .unwrap_or(0.9);
+        let spec = pipeline_task_spec(
+            &name,
+            STATE_OPTIONS[self.tpl_state_idx],
+            self.engine_kind.method_str(),
+            roi,
+            threshold,
+            self.task_action,
+        )?;
+        let crop = img.crop_imm(roi.x, roi.y, roi.width, roi.height);
+        Some((spec, crop))
+    }
 }
 
 impl eframe::App for StudioApp {
@@ -1472,6 +1507,17 @@ impl StudioApp {
                     if task_save_clicked {
                         self.save_current_pipeline_task();
                     }
+                    ui.separator();
+
+                    // シナリオ作成 (Issue #160 T3 / UC-1+UC-2): 単一 TaskDef 保存 (上)
+                    // を多 TaskDef + manifest 保存へ拡張する collapsing セクション。
+                    // パネル本体は scenario_ui (ドメイン)、ここは配線のみ。
+                    let scenario_candidate = self.scenario_candidate();
+                    egui::CollapsingHeader::new("シナリオ作成")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            self.scenario.ui(ui, scenario_candidate, &mut self.status);
+                        });
                     ui.separator();
                     ui.label(&self.status);
                 });

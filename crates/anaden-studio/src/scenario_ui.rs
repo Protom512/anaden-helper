@@ -13,11 +13,15 @@
 //!   (保存 -> load 往復はテストで機械保証)。
 //! - UC-2: テンプレート PNG (ライブラリ由来の絶対パス) を pipeline dir 基準の
 //!   相対パス・フォワードスラッシュ形式へ解決する ([`resolve_template_reference`])。
+//!
+//! Shard 3 (T3) はこの上に保存フロー ([`save_scenario`]) と Authoring ペイン埋め込み
+//! 用 egui パネル ([`ScenarioPanel`]) を構築する (UC-1/UC-2 の GUI 配線)。
 
 use std::path::{Path, PathBuf};
 
 use anaden_core::{Goal, GoalError, StopCondition};
 use anaden_vision::{PipelineManifest, TaskDef};
+use image::DynamicImage;
 
 /// ROI 検証基準の画面寸法 (raw-1258x708 PC キャプチャ空間)。
 /// pipeline.rs テストの `assert_roi_within_1258x708` と同一契約。
@@ -30,6 +34,13 @@ pub enum ScenarioValidationError {
     /// シナリオ名が空 (保存先ディレクトリ名になれない)。
     #[error("scenario name must not be empty")]
     EmptyName,
+    /// シナリオ名が保存先ディレクトリ名として不適 (パス区切り・`.`/`..` 等)。
+    /// `templates/pipelines/<name>/` の `<name>` は単一パス要素でなければならない。
+    #[error("scenario name `{name}` is not a safe directory name")]
+    UnsafeName {
+        /// 不適だったシナリオ名。
+        name: String,
+    },
     /// TaskDef が 1 つもない (manifest 単独では実行不能)。
     #[error("scenario must contain at least 1 task")]
     NoTasks,
@@ -214,9 +225,10 @@ impl ScenarioEditorState {
 
     /// 全バリデーション問題を収集して返す (フォームで全件一覧表示する用途)。
     ///
-    /// 検査内容: シナリオ名非空・TaskDef 1 件以上・タスク名一意・start_task が
-    /// TaskDef 名前空間に存在・next 参照が解決可能・各 Goal の [`Goal::validate`]
-    /// 委譲・ROI が [`SCREEN_WIDTH`]x[`SCREEN_HEIGHT`] 画面内で有効サイズ。
+    /// 検査内容: シナリオ名非空・ディレクトリ名として安全・TaskDef 1 件以上・
+    /// タスク名一意・start_task が TaskDef 名前空間に存在・next 参照が解決可能・
+    /// 各 Goal の [`Goal::validate`] 委譲・ROI が [`SCREEN_WIDTH`]x[`SCREEN_HEIGHT`]
+    /// 画面内で有効サイズ。
     /// 出力順は決定論的 (名前 → TaskDef 存在 → 重複 → start_task → タスク毎 →
     /// ゴール毎)。
     #[must_use]
@@ -225,6 +237,14 @@ impl ScenarioEditorState {
 
         if self.name.trim().is_empty() {
             issues.push(ScenarioValidationError::EmptyName);
+        }
+        // 保存先ディレクトリ名として安全か。file_name() が名前全体と一致すれば
+        // パス区切りを含まない単一要素 (`.`/`..`/末尾区切りは不一致になる)。
+        let name = self.name.trim();
+        if !name.is_empty() && Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
+            issues.push(ScenarioValidationError::UnsafeName {
+                name: self.name.clone(),
+            });
         }
         if self.tasks.is_empty() {
             issues.push(ScenarioValidationError::NoTasks);
@@ -337,6 +357,418 @@ pub fn resolve_template_reference(png: &Path, pipeline_dir: &Path) -> String {
         return forward(png);
     }
     forward(&rel)
+}
+
+// ---- Shard 3 (T3): 保存フロー + Authoring ペイン埋め込みパネル (UC-1/UC-2) ----
+
+/// シナリオ保存 (manifest + TaskDef 群 + ROI 由来テンプレート PNG) のエラー。
+#[derive(Debug, thiserror::Error)]
+pub enum ScenarioSaveError {
+    /// エディタ状態のバリデーション不合格 ([`ScenarioEditorState::validate`])。
+    #[error("scenario invalid: {0}")]
+    Invalid(#[from] ScenarioValidationError),
+    /// pipeline ディレクトリ作成失敗。
+    #[error("pipeline dir create failed")]
+    DirCreate(#[source] std::io::Error),
+    /// ROI 追加タスクのテンプレート PNG 書き出し失敗。
+    #[error("template PNG write failed")]
+    PngWrite(#[source] image::ImageError),
+    /// manifest / TaskDef TOML の保存失敗 (anaden-vision save ヘルパー)。
+    #[error("pipeline save failed: {0}")]
+    Vision(#[from] anaden_vision::TaskDefError),
+}
+
+/// 検証済みシナリオを `<pipelines_root>/<シナリオ名>/` へ保存する (UC-1 保存経路)。
+///
+/// 書き出し構成 (既存 pipeline ディレクトリと完全互換):
+/// - `pipeline.toml` — manifest (start_task + goals)。[`anaden_vision::save_pipeline_manifest`]
+/// - `<task>.toml` — 各 TaskDef。[`anaden_vision::save_task_def`]
+/// - `<task>.png` — ROI から追加したタスクのテンプレート PNG 本体
+///
+/// `pngs` は「タスク追加時に確保した crop」のリストで、TaskDef 名前空間に残る
+/// タスクのみ書き出す (削除済みタスクの crop は無視)。ROI 追加タスクの
+/// `template` は追加時に `<name>.png` (pipeline dir 基準の裸相対) が設定済みの
+/// ため、保存 TOML の template 参照と PNG 実体が一致する。
+///
+/// # Errors
+/// - [`ScenarioSaveError::Invalid`]: バリデーション不合格 (1 バイトも書かない)。
+/// - それ以外: 各書き出し段階の失敗 ([`ScenarioSaveError::DirCreate`] /
+///   [`ScenarioSaveError::PngWrite`] / [`ScenarioSaveError::Vision`])。
+///
+/// 保存 → [`anaden_vision::load_pipeline`] / [`load_pipeline_manifest` 往復は
+/// `tests/scenario_editor_tests.rs` (AC-1) で機械保証されている。
+///
+/// [`load_pipeline_manifest`]: anaden_vision::load_pipeline_manifest
+pub fn save_scenario(
+    state: &ScenarioEditorState,
+    pngs: &[(String, DynamicImage)],
+    pipelines_root: &Path,
+) -> Result<PathBuf, ScenarioSaveError> {
+    state.validate()?;
+    let dir = pipelines_root.join(state.name.trim());
+    std::fs::create_dir_all(&dir).map_err(ScenarioSaveError::DirCreate)?;
+    for (name, img) in pngs {
+        if !state.tasks.iter().any(|t| &t.name == name) {
+            continue; // 削除済みタスクの crop は書かない
+        }
+        img.save(dir.join(format!("{name}.png")))
+            .map_err(ScenarioSaveError::PngWrite)?;
+    }
+    anaden_vision::save_pipeline_manifest(&state.to_manifest(), &dir)?;
+    for task in &state.tasks {
+        anaden_vision::save_task_def(task, &dir.join(format!("{}.toml", task.name)))?;
+    }
+    Ok(dir)
+}
+
+/// StopCondition の UI 表示要約 (ゴール一覧行・豆腐なし ASCII + 日本語)。
+fn goal_summary(stop: &StopCondition) -> String {
+    match stop {
+        StopCondition::LoopCount { target } => format!("ループ {target} 回"),
+        StopCondition::TemplateMatch { task, confidence } => {
+            format!("テンプレ {task} @ {confidence:.2}")
+        }
+        StopCondition::Timeout { secs } => format!("{secs} 秒"),
+        StopCondition::All { .. } => "ALL 合成".to_string(),
+        StopCondition::Any { .. } => "ANY 合成".to_string(),
+    }
+}
+
+/// ゴール追加フォームの停止条件種別。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum GoalKind {
+    /// 指定回数ループで停止。
+    #[default]
+    LoopCount,
+    /// 指定秒数でタイムアウト停止。
+    Timeout,
+    /// 開始タスクのテンプレ一致で停止 (task 名は start_task を採用)。
+    TemplateMatch,
+}
+
+impl GoalKind {
+    /// UI コンボ表示ラベル。
+    fn label(self) -> &'static str {
+        match self {
+            Self::LoopCount => "ループ回数",
+            Self::Timeout => "タイムアウト秒",
+            Self::TemplateMatch => "テンプレ一致(開始タスク)",
+        }
+    }
+
+    /// 種別切替時の値入力既定値。
+    fn default_value(self) -> &'static str {
+        match self {
+            Self::LoopCount => "10",
+            Self::Timeout => "600",
+            Self::TemplateMatch => "0.85",
+        }
+    }
+}
+
+/// Authoring ペイン埋め込みのシナリオ作成パネル (UC-1/UC-2)。
+///
+/// `strategy_ui::StrategyPanel` と同じ「純状態モデル + egui パネル」パターン。
+/// 保持する編集データは [`ScenarioEditorState`]、保存は [`save_scenario`] へ
+/// 委譲。描画は [`Self::ui`] を Authoring ペインの collapsing セクションから
+/// 呼ぶ (app.rs は配線のみ)。
+pub struct ScenarioPanel {
+    /// 編集中のシナリオ (純状態モデル)。フォームがフィールドを直接編集する。
+    pub state: ScenarioEditorState,
+    /// 保存先ルート (既定は workspace の `templates/pipelines`)。
+    pipelines_root: PathBuf,
+    /// ROI 追加タスクのテンプレ PNG 本体 (task 名 → crop)。保存時に書き出す。
+    pending_pngs: Vec<(String, DynamicImage)>,
+    /// UC-2 でファイル参照を割り当てた PNG の元絶対パス (task 名 → 絶対パス)。
+    /// 保存直前に最終 pipeline dir 基準で再相対化する (シナリオ名変更耐性)。
+    assigned_pngs: Vec<(String, PathBuf)>,
+    /// ゴール追加フォーム: 停止条件種別。
+    goal_kind: GoalKind,
+    /// ゴール追加フォーム: 値 (回数 / 秒 / 信頼度)。
+    goal_value: String,
+    /// ゴール追加フォーム: ゴール名。
+    goal_name: String,
+}
+
+impl ScenarioPanel {
+    /// 保存先ルートを指定して構築する。
+    #[must_use]
+    pub fn new(pipelines_root: PathBuf) -> Self {
+        Self {
+            state: ScenarioEditorState::new("my_scenario"),
+            pipelines_root,
+            pending_pngs: Vec::new(),
+            assigned_pngs: Vec::new(),
+            goal_kind: GoalKind::default(),
+            goal_value: GoalKind::default().default_value().to_string(),
+            goal_name: "goal_1".to_string(),
+        }
+    }
+
+    /// 保存先 pipeline ディレクトリ (`<pipelines_root>/<シナリオ名>`)。
+    #[must_use]
+    pub fn pipeline_dir(&self) -> PathBuf {
+        self.pipelines_root.join(self.state.name.trim())
+    }
+
+    /// 現在のROI候補タスク (TaskDef + crop PNG) を追加する
+    /// (「+ 現在のROIをタスク追加」ボタンの実体)。同名タスク既存時は Err。
+    pub fn add_candidate(&mut self, task: TaskDef, png: DynamicImage) -> Result<(), String> {
+        if self.state.task(&task.name).is_some() {
+            return Err(format!("同名タスクが既に存在します: {}", task.name));
+        }
+        let name = task.name.clone();
+        self.state.add_task(task);
+        self.pending_pngs.push((name, png));
+        Ok(())
+    }
+
+    /// タスクを削除する (pending PNG・UC-2 参照も同期除去)。
+    fn remove_task(&mut self, name: &str) {
+        self.state.remove_task(name);
+        self.pending_pngs.retain(|(n, _)| n != name);
+        self.assigned_pngs.retain(|(n, _)| n != name);
+    }
+
+    /// 追加フォーム入力から Goal を構築する。種別ごとに値をパースし、不正入力は
+    /// Err (fail-closed・黙って既定値へフォールバックしない)。値域検証
+    /// (`target > 0` 等) は保存時の [`ScenarioEditorState::validate`] に委ねる。
+    fn build_goal(&self) -> Result<Goal, String> {
+        let name = if self.goal_name.trim().is_empty() {
+            format!("goal_{}", self.state.goals.len() + 1)
+        } else {
+            self.goal_name.trim().to_string()
+        };
+        match self.goal_kind {
+            GoalKind::LoopCount => {
+                let target: u64 = self.goal_value.trim().parse().map_err(|_| {
+                    format!("ゴール値は正の整数で入力してください: {}", self.goal_value)
+                })?;
+                Ok(Goal {
+                    name,
+                    stop: StopCondition::LoopCount { target },
+                })
+            }
+            GoalKind::Timeout => {
+                let secs: u64 = self.goal_value.trim().parse().map_err(|_| {
+                    format!(
+                        "ゴール値は正の整数 (秒) で入力してください: {}",
+                        self.goal_value
+                    )
+                })?;
+                Ok(Goal {
+                    name,
+                    stop: StopCondition::Timeout { secs },
+                })
+            }
+            GoalKind::TemplateMatch => {
+                let confidence: f32 = self.goal_value.trim().parse().map_err(|_| {
+                    format!(
+                        "ゴール値は信頼度 (0 < v <= 1) で入力してください: {}",
+                        self.goal_value
+                    )
+                })?;
+                let task = self.state.start_task.clone();
+                if task.is_empty() {
+                    return Err("テンプレ一致ゴールには開始タスクの設定が必要です".to_string());
+                }
+                Ok(Goal {
+                    name,
+                    stop: StopCondition::TemplateMatch { task, confidence },
+                })
+            }
+        }
+    }
+
+    /// 現在の状態を保存する (「シナリオ保存」ボタンの実体)。
+    /// UC-2 参照は最終 pipeline dir 基準で再相対化してから保存する。
+    pub fn save(&mut self, status: &mut String) {
+        let dir = self.pipeline_dir();
+        for (name, png) in self.assigned_pngs.clone() {
+            self.state.assign_template(&name, &png, &dir);
+        }
+        match save_scenario(&self.state, &self.pending_pngs, &self.pipelines_root) {
+            Ok(dir) => *status = format!("シナリオ保存: {}", dir.display()),
+            Err(e) => *status = format!("シナリオ保存失敗: {e}"),
+        }
+    }
+
+    /// パネル本体を描画する。`candidate` は呼出側 (app.rs) が現在のROI・入力から
+    /// 構築した追加候補タスク (None = スクショ/ROI 未確定で追加不可表示)。
+    /// 失敗・結果は `status` へ書き出す (Authoring ペインのステータス行と共有)。
+    pub fn ui(
+        &mut self,
+        ui: &mut egui::Ui,
+        candidate: Option<(TaskDef, DynamicImage)>,
+        status: &mut String,
+    ) {
+        ui.horizontal(|ui| {
+            ui.label("名前:");
+            ui.add(egui::TextEdit::singleline(&mut self.state.name).desired_width(120.0));
+        });
+        ui.label(format!("保存先: {}", self.pipeline_dir().display()));
+        ui.separator();
+
+        // --- タスク一覧 (名前一覧を先に clone して borrow を分離) ---
+        let names: Vec<String> = self.state.tasks.iter().map(|t| t.name.clone()).collect();
+        let mut removed: Option<String> = None;
+        let mut pick_png: Option<String> = None;
+        for name in &names {
+            let Some(task) = self.state.task_mut(name) else {
+                continue;
+            };
+            egui::CollapsingHeader::new(format!("タスク: {name}"))
+                .default_open(false)
+                .show(ui, |ui| {
+                    ui.monospace(format!("template: {}", task.template.display()));
+                    ui.add(egui::Slider::new(&mut task.threshold, 0.5..=0.99).text("閾値"));
+                    // next 参照 (他タスク名のチェックボックスでON/OFF)。
+                    let mut nexts = task.next.clone().unwrap_or_default();
+                    let mut changed = false;
+                    for other in &names {
+                        if other == name {
+                            continue;
+                        }
+                        let mut on = nexts.iter().any(|n| n == other);
+                        if ui.checkbox(&mut on, format!("next: {other}")).changed() {
+                            if on {
+                                nexts.push(other.clone());
+                            } else {
+                                nexts.retain(|n| n != other);
+                            }
+                            changed = true;
+                        }
+                    }
+                    if changed {
+                        task.next = Some(nexts);
+                    }
+                    // UC-2: 既存 PNG (テンプレート作成ペイン成果物等) をファイル
+                    // 参照として割り当てる (pipeline dir 基準の相対パスへ解決)。
+                    if ui.small_button("テンプレPNG参照...").clicked() {
+                        pick_png = Some(name.clone());
+                    }
+                });
+            if ui.small_button(format!("[{name}] を削除")).clicked() {
+                removed = Some(name.clone());
+            }
+        }
+        if let Some(name) = removed {
+            self.remove_task(&name);
+        }
+        // UC-2: ファイルダイアログで選んだ PNG を相対参照として割り当てる。
+        // 元絶対パスも保持し、保存直前に最終 pipeline dir 基準で再相対化する。
+        if let Some(name) = pick_png
+            && let Some(png) = rfd::FileDialog::new()
+                .add_filter("PNG image", &["png"])
+                .pick_file()
+        {
+            let dir = self.pipeline_dir();
+            self.assigned_pngs.retain(|(n, _)| n != &name);
+            self.assigned_pngs.push((name.clone(), png.clone()));
+            if self.state.assign_template(&name, &png, &dir) {
+                *status = format!("テンプレート参照: {name} <- {}", png.display());
+            }
+        }
+
+        // --- タスク追加 (現在のROI候補) ---
+        match candidate {
+            Some((task, crop)) => {
+                if ui
+                    .button(format!("+ 現在のROIをタスク追加: {}", task.name))
+                    .clicked()
+                    && let Err(e) = self.add_candidate(task, crop)
+                {
+                    *status = e;
+                }
+            }
+            None => {
+                ui.label("タスク追加にはスクリーンショットとROI確定が必要です");
+            }
+        }
+        ui.separator();
+
+        // --- 開始タスク選択 (TaskDef 名前空間から) ---
+        ui.horizontal(|ui| {
+            ui.label("開始タスク:");
+            egui::ComboBox::from_id_salt("scenario_start_task")
+                .selected_text(if self.state.start_task.is_empty() {
+                    "(未設定)".to_string()
+                } else {
+                    self.state.start_task.clone()
+                })
+                .show_ui(ui, |ui| {
+                    let mut picked: Option<String> = None;
+                    for name in &names {
+                        if ui
+                            .selectable_label(self.state.start_task == *name, name.as_str())
+                            .clicked()
+                        {
+                            picked = Some(name.clone());
+                        }
+                    }
+                    if let Some(p) = picked {
+                        self.state.set_start_task(&p);
+                    }
+                });
+        });
+        ui.separator();
+
+        // --- ゴール一覧 + 追加フォーム ---
+        ui.strong(format!("ゴール ({})", self.state.goals.len()));
+        let mut remove_goal: Option<usize> = None;
+        for (i, goal) in self.state.goals.iter().enumerate() {
+            ui.horizontal(|ui| {
+                ui.label(format!("[{i}] {}", goal.name));
+                ui.label(goal_summary(&goal.stop));
+                if ui.small_button("削除").clicked() {
+                    remove_goal = Some(i);
+                }
+            });
+        }
+        if let Some(i) = remove_goal {
+            self.state.remove_goal(i);
+        }
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("scenario_goal_kind")
+                .selected_text(self.goal_kind.label())
+                .show_ui(ui, |ui| {
+                    for kind in [
+                        GoalKind::LoopCount,
+                        GoalKind::Timeout,
+                        GoalKind::TemplateMatch,
+                    ] {
+                        ui.selectable_value(&mut self.goal_kind, kind, kind.label());
+                    }
+                });
+            ui.label("値:");
+            ui.add(egui::TextEdit::singleline(&mut self.goal_value).desired_width(50.0));
+            ui.label("名前:");
+            ui.add(egui::TextEdit::singleline(&mut self.goal_name).desired_width(80.0));
+            if ui.small_button("+ ゴール追加").clicked() {
+                match self.build_goal() {
+                    Ok(goal) => self.state.add_goal(goal),
+                    Err(e) => *status = e,
+                }
+            }
+        });
+        ui.separator();
+
+        // --- 保存 (検証不合格時は全問題を一覧表示してボタン無効化) ---
+        let issues = self.state.validation_issues();
+        if issues.is_empty() {
+            if ui.button("シナリオ保存").clicked() {
+                self.save(status);
+            }
+        } else {
+            ui.add_enabled_ui(false, |ui| {
+                // 無効化表示のみ (クリックは起きない)。Response は未使用でよい。
+                let _ = ui.button("シナリオ保存");
+            });
+            for issue in &issues {
+                ui.colored_label(egui::Color32::from_rgb(220, 60, 60), issue.to_string());
+            }
+        }
+    }
 }
 
 #[cfg(test)]
@@ -483,6 +915,30 @@ mod tests {
         assert!(issues.contains(&ScenarioValidationError::EmptyName));
         assert!(issues.contains(&ScenarioValidationError::NoTasks));
         assert!(issues.contains(&ScenarioValidationError::EmptyStartTask));
+    }
+
+    #[test]
+    fn validate_flags_unsafe_directory_name() {
+        // パス区切り・`.`/`..` は保存先ディレクトリ名として不適。
+        for bad in ["a/b", "..", ".", "a\\b", "abc/"] {
+            let mut st = ScenarioEditorState::new(bad);
+            st.add_task(task_def("A", None));
+            assert!(
+                st.validation_issues()
+                    .contains(&ScenarioValidationError::UnsafeName {
+                        name: bad.to_string()
+                    }),
+                "name {bad:?} must be flagged unsafe"
+            );
+        }
+        // 通常の名前は UnsafeName を出さない。
+        let mut ok = ScenarioEditorState::new("my_scenario");
+        ok.add_task(task_def("A", None));
+        assert!(
+            !ok.validation_issues()
+                .iter()
+                .any(|i| matches!(i, ScenarioValidationError::UnsafeName { .. }))
+        );
     }
 
     #[test]
