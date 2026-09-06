@@ -133,6 +133,15 @@ pub struct ScenarioEditorState {
     /// 対応エントリの無い (新規追加) タスクは `<name>.toml` へ保存される。
     /// リネームは「新規ファイルへ保存 + 旧ファイルの掃除」として扱われる。
     pub loaded_task_files: Vec<(String, String)>,
+    /// この編集状態の由来 pipeline ディレクトリ (ロード元、または直近の新規保存先)。
+    ///
+    /// [`save_scenario`] の既存 dir 上書きガード
+    /// ([`ScenarioSaveError::PipelineDirAlreadyExists`]) が「同一 dir への
+    /// 書き戻し (ロード編集・連続保存)」を許可するための所有権証明。
+    /// [`crate::scenario_load::load_scenario_from_dir`] がロード元を設定し、
+    /// [`ScenarioPanel::save`] が保存成功時に保存先へ更新する。
+    /// 新規シナリオ (未保存) では `None` (= 既存 dir への保存は全て拒否)。
+    pub loaded_from: Option<std::path::PathBuf>,
 }
 
 impl ScenarioEditorState {
@@ -146,6 +155,7 @@ impl ScenarioEditorState {
             tasks: Vec::new(),
             loaded_task_names: Vec::new(),
             loaded_task_files: Vec::new(),
+            loaded_from: None,
         }
     }
 
@@ -422,6 +432,19 @@ pub enum ScenarioSaveError {
     /// manifest / TaskDef TOML の保存失敗 (anaden-vision save ヘルパー)。
     #[error("pipeline save failed: {0}")]
     Vision(#[from] anaden_vision::TaskDefError),
+    /// 保存先ディレクトリが既存だが、この編集状態の所有対象ではない
+    /// (ロード元でも直近の保存先でもない)。1 バイトも書かない。
+    ///
+    /// Issue #160 レビュー M-1: 既存 pipeline への無警告上書き (新 TaskDef 群で
+    /// 置換 + [`sweep_removed_taskdefs`] による旧 TaskDef 削除) を防ぐ fail-closed。
+    /// task 登録経路の `TaskAlreadyExists` 拒否と対称。
+    #[error(
+        "pipeline dir already exists: {dir} (既存 pipeline の無警告上書きは禁止。ロードして編集するか別名を指定してください)"
+    )]
+    PipelineDirAlreadyExists {
+        /// 拒否された保存先ディレクトリ。
+        dir: PathBuf,
+    },
 }
 
 /// 検証済みシナリオを `<pipelines_root>/<シナリオ名>/` へ保存する (UC-1 保存経路)。
@@ -462,6 +485,13 @@ pub fn save_scenario(
 ) -> Result<PathBuf, ScenarioSaveError> {
     state.validate()?;
     let dir = pipelines_root.join(state.name.trim());
+    // 既存 dir 上書きガード (レビュー M-1): 保存先 dir が既に存在する場合、
+    // この編集状態の所有対象 (ロード元 / 直近の保存先 = loaded_from) と同一の
+    // ときのみ書き込みを許可する。それ以外 (新規シナリオ名が既存 pipeline と
+    // 衝突、ロード編集のリネーム先が別 pipeline と衝突) は 1 バイトも書かない。
+    if dir.is_dir() && !is_owned_dir(state, &dir) {
+        return Err(ScenarioSaveError::PipelineDirAlreadyExists { dir: dir.clone() });
+    }
     std::fs::create_dir_all(&dir).map_err(ScenarioSaveError::DirCreate)?;
     for (name, img) in pngs {
         if !state.tasks.iter().any(|t| &t.name == name) {
@@ -486,6 +516,20 @@ pub fn save_scenario(
     }
     sweep_removed_taskdefs(&dir, &written);
     Ok(dir)
+}
+
+/// `dir` が編集状態の所有対象 (loaded_from) と同一か。
+///
+/// 比較は canonicalize 後のパスで行う (大文字小文字違い・区切り文字違いの
+/// 同一ディレクトリ表現を同値扱い)。canonicalize 失敗時は素のパス比較へ
+/// フォールバックする (不一致 = 拒否方向の fail-closed)。
+fn is_owned_dir(state: &ScenarioEditorState, dir: &Path) -> bool {
+    state.loaded_from.as_deref().is_some_and(|src| {
+        match (std::fs::canonicalize(src), std::fs::canonicalize(dir)) {
+            (Ok(a), Ok(b)) => a == b,
+            _ => src == dir,
+        }
+    })
 }
 
 /// 今回の保存で書き出さなかった旧 TaskDef ファイル (削除・リネーム前) を
@@ -779,6 +823,9 @@ impl ScenarioPanel {
         match save_scenario(&self.state, &self.pending_pngs, &self.pipelines_root) {
             Ok(dir) => {
                 *status = format!("シナリオ保存: {}", dir.display());
+                // 保存成功 = この編集状態は保存先 pipeline の所有者 (連続保存が
+                // PipelineDirAlreadyExists ガードを通るための所有権証明)。
+                self.state.loaded_from = Some(dir.clone());
                 self.saved = Some(SavedScenario {
                     start_task: self.state.start_task.clone(),
                     dir,

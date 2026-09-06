@@ -133,6 +133,9 @@ pub fn load_scenario_from_dir(dir: &Path) -> Result<ScenarioEditorState, Scenari
         tasks: defs,
         loaded_task_names,
         loaded_task_files: stems,
+        // 保存ガード (ScenarioSaveError::PipelineDirAlreadyExists) のための
+        // 所有権証明: ロード元 dir への書き戻しは同一 dir 上書きとして許可する。
+        loaded_from: Some(dir.to_path_buf()),
     })
 }
 

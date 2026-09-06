@@ -49,6 +49,118 @@ fn solid_image(w: u32, h: u32, v: u8) -> DynamicImage {
     DynamicImage::ImageLuma8(GrayImage::from_pixel(w, h, Luma([v])))
 }
 
+/// 検証可能な最小シナリオ状態 (タスク 1 件 + LoopCount goal)。
+fn minimal_state(name: &str) -> ScenarioEditorState {
+    let mut st = ScenarioEditorState::new(name);
+    st.add_task(task_def("Start"));
+    st.add_goal(Goal {
+        name: "loop3".to_string(),
+        stop: StopCondition::LoopCount { target: 3 },
+    });
+    st
+}
+
+/// ディレクトリ内ファイル名 → (ファイル名, バイト長) のソート済み snapshot。
+/// 「拒否時に 1 バイトも書いていない」ことのバイト比較 evidence に使う。
+fn dir_snapshot(dir: &Path) -> Vec<(String, u64)> {
+    let mut out: Vec<_> = std::fs::read_dir(dir)
+        .expect("read dir")
+        .map(|e| {
+            let e = e.expect("entry");
+            let len = std::fs::metadata(e.path()).expect("metadata").len();
+            (e.file_name().to_string_lossy().into_owned(), len)
+        })
+        .collect();
+    out.sort();
+    out
+}
+
+// ---- レビュー M-1: 既存 pipeline 上書きガード (PipelineDirAlreadyExists) ----
+
+/// M-1 t1: 新規シナリオ名が既存 pipeline と衝突 → 保存拒否・バイト不変。
+#[test]
+fn save_scenario_refuses_existing_pipeline_dir_of_other_scenario() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("pipelines");
+    let victim = root.join("login");
+    save_scenario(&minimal_state("login"), &[], &root).expect("create victim pipeline");
+    let before = dir_snapshot(&victim);
+
+    // 別の新規シナリオ (loaded_from = None) が同名で保存しようとしても拒否。
+    let mut other = minimal_state("login");
+    other.task_mut("Start").unwrap().threshold = 0.99;
+    let err = save_scenario(&other, &[], &root).expect_err("must refuse existing dir");
+    assert!(
+        matches!(err, ScenarioSaveError::PipelineDirAlreadyExists { ref dir } if dir == &victim),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(dir_snapshot(&victim), before, "拒否時は 1 バイトも書かない");
+}
+
+/// M-1 t2: ロード済み pipeline の同一 dir 書き戻しは許可 (UC-4 編集保存)。
+#[test]
+fn save_scenario_allows_writeback_to_loaded_source_dir() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("pipelines");
+    save_scenario(&minimal_state("field"), &[], &root).expect("create pipeline");
+
+    let mut st =
+        anaden_studio::scenario_load::load_scenario_from_dir(&root.join("field")).expect("load");
+    assert_eq!(
+        st.loaded_from.as_deref(),
+        Some(root.join("field").as_path())
+    );
+    let first_task = st.tasks[0].name.clone();
+    st.task_mut(&first_task).unwrap().threshold = 0.9;
+    save_scenario(&st, &[], &root).expect("writeback to loaded dir must be allowed");
+}
+
+/// M-1 t3: ロード編集でリネーム先が別の既存 pipeline と衝突 → 拒否・バイト不変。
+#[test]
+fn save_scenario_refuses_rename_onto_other_existing_pipeline() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("pipelines");
+    save_scenario(&minimal_state("alpha"), &[], &root).expect("alpha");
+    save_scenario(&minimal_state("beta"), &[], &root).expect("beta");
+    let before = dir_snapshot(&root.join("beta"));
+
+    let mut st =
+        anaden_studio::scenario_load::load_scenario_from_dir(&root.join("alpha")).expect("load");
+    st.name = "beta".to_string(); // alpha を編集して beta へ保存 (save-as 衝突)
+    let err = save_scenario(&st, &[], &root).expect_err("must refuse rename onto beta");
+    assert!(
+        matches!(err, ScenarioSaveError::PipelineDirAlreadyExists { .. }),
+        "unexpected error: {err:?}"
+    );
+    assert_eq!(dir_snapshot(&root.join("beta")), before, "beta は不変");
+}
+
+/// M-1 t4: パネル経由の連続保存 (新規作成 → 保存 → 再保存) は同一 dir 所有で許可。
+#[test]
+fn panel_consecutive_saves_of_new_scenario_are_allowed() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path().join("pipelines");
+    let mut panel = ScenarioPanel::new(root.clone());
+    panel.state = minimal_state("neko_run");
+
+    let mut status = String::new();
+    panel.save(&mut status);
+    assert!(status.contains("シナリオ保存"), "first save: {status}");
+    let saved_dir = root.join("neko_run");
+    assert_eq!(
+        panel.state.loaded_from.as_deref(),
+        Some(saved_dir.as_path())
+    );
+
+    // 2 回目の保存は dir が既存でも所有対象のため拒否されない。
+    panel.state.task_mut("Start").unwrap().threshold = 0.95;
+    panel.save(&mut status);
+    assert!(
+        status.contains("シナリオ保存"),
+        "second save must pass: {status}"
+    );
+}
+
 /// AC-1: エディタ状態 → 保存 → load_pipeline / load_pipeline_manifest 往復。
 /// ROI 追加タスク (pending PNG) 込みで manifest・TaskDef・PNG が揃い、
 /// start_task が解決し、各タスクのテンプレート PNG が実在する。
