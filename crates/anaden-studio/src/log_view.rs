@@ -206,6 +206,12 @@ impl RunStatus {
 pub struct LogBuffer {
     entries: VecDeque<LogEntry>,
     max_lines: usize,
+    /// バッファ内容の改訂番号 (push/clear 時に増分・単調増加)。
+    ///
+    /// UI 側スナップショットの差分更新 ([`SharedLogBuffer::changed_entries`])
+    /// で「新着行のないフレームの全行 clone」を回避するためのカウンタ
+    /// (Issue #160 UC-5)。
+    revision: u64,
     /// 実行状態サマリ（ログ行から漸進更新）。
     pub status: RunStatus,
 }
@@ -222,6 +228,7 @@ impl LogBuffer {
         Self {
             entries: VecDeque::with_capacity(max_lines.min(1024)),
             max_lines: max_lines.max(1),
+            revision: 0,
             status: RunStatus::new(),
         }
     }
@@ -243,11 +250,18 @@ impl LogBuffer {
             self.entries.pop_front();
         }
         self.status.observe(line);
+        self.revision = self.revision.wrapping_add(1);
     }
 
     /// 明示レベル指定の push（終了/システム通知行。公開ヘッドレステスト用）。
     pub fn push_line_with_level(&mut self, line: &str, level: LogLevel) {
         self.push_entry(line, level);
+    }
+
+    /// 現在の改訂番号 (スナップショット差分更新用・[`SharedLogBuffer::changed_entries`] 参照)。
+    #[must_use]
+    pub fn revision(&self) -> u64 {
+        self.revision
     }
 
     /// 現在保持している行数。
@@ -271,6 +285,7 @@ impl LogBuffer {
     pub fn clear(&mut self) {
         self.entries.clear();
         self.status = RunStatus::new();
+        self.revision = self.revision.wrapping_add(1);
     }
 }
 
@@ -337,6 +352,27 @@ impl SharedLogBuffer {
     pub fn with_buf<R>(&self, f: impl FnOnce(&mut LogBuffer) -> R) -> Option<R> {
         self.inner.lock().ok().map(|mut b| f(&mut b))
     }
+
+    /// 前回取得時 (`cached_revision`) からバッファが変化している場合のみ、
+    /// 全行を複製したスナップショットを `(新改訂番号, 行列)` で返す
+    /// (Issue #160 UC-5)。
+    ///
+    /// 従来 UI は毎フレーム `with_buf(|b| b.entries().cloned().collect())`
+    /// （上限 [`DEFAULT_MAX_LINES`] = 5000 行の全 `String` clone）を払って
+    /// いた。本メソッドは改訂番号が同じ間（新着行なしのフレーム）は
+    /// [`None`] を返し、ロック 1 回 + 整数比較の O(1) で完了する。
+    /// [`Some`] が返った場合は呼び出し側で改訂番号をキャッシュし、次回の
+    /// `cached_revision` へ渡すこと。
+    ///
+    /// ロック中毒時は [`None`]（旧スナップショットを維持・best-effort）。
+    #[must_use]
+    pub fn changed_entries(&self, cached_revision: u64) -> Option<(u64, Vec<LogEntry>)> {
+        let buf = self.inner.lock().ok()?;
+        if buf.revision == cached_revision {
+            return None;
+        }
+        Some((buf.revision, buf.entries().cloned().collect()))
+    }
 }
 
 /// チャネルを drain してバッファへ反映し、観測した Exit code を返す
@@ -348,16 +384,26 @@ impl SharedLogBuffer {
 ///   最初の Exit の exit code を戻り値の第 2 要素へ返す (Exit 無しは None)。
 ///
 /// 戻り値の第 1 要素は今回記録した行数 (自動スクロール追従の新着行数用)。
+///
+/// Issue #160 UC-5: 1 フレーム分のイベント列を **ロック 1 回** で反映する
+/// (旧実装は行ごとに `with_buf` で lock/unlock していた)。バッファの
+/// ロック取得者は UI スレッド (drain / push / snapshot) のみで reader
+/// スレッドはチャネルへ送るだけのため、ドレイン中の保持で競合しない。
+/// ロック中毒時は何も反映せず `(0, None)` を返す (旧実装も行を破棄して
+/// いたのと同じ best-effort)。
 pub fn drain_channel_into(
     log: &SharedLogBuffer,
     rx: &Receiver<LogEvent>,
 ) -> (usize, Option<Option<i32>>) {
     let mut new_lines = 0usize;
     let mut exit_code: Option<Option<i32>> = None;
+    let Ok(mut buf) = log.inner.lock() else {
+        return (0, None);
+    };
     while let Ok(ev) = rx.try_recv() {
         match ev {
             LogEvent::Line(l) => {
-                let _ = log.with_buf(|b| b.push_line(&l));
+                buf.push_line(&l);
                 new_lines += 1;
             }
             LogEvent::Exit(code) => {
@@ -366,8 +412,10 @@ pub fn drain_channel_into(
                     Some(_) => ("exit=エラー", LogLevel::Error),
                     None => ("exit=不明", LogLevel::Error),
                 };
-                let line = format!("[studio] プロセス終了: {label} (code={code:?})");
-                let _ = log.with_buf(|b| b.push_line_with_level(&line, level));
+                buf.push_line_with_level(
+                    &format!("[studio] プロセス終了: {label} (code={code:?})"),
+                    level,
+                );
                 new_lines += 1;
                 if exit_code.is_none() {
                     exit_code = Some(code);
@@ -660,6 +708,84 @@ mod tests {
         // 空チャネルの再 drain は追記しない（drain はバッファ全体を返すため
         // 行数は増えないことを検証する）。
         assert_eq!(shared.drain(&rx).len(), 2);
+    }
+
+    // ---- revision / changed_entries / drain_channel_into (Issue #160 UC-5) ----
+
+    /// 変化なしのフレームでは changed_entries は None を返す
+    /// (全行 clone が発生しないことの契約)。
+    #[test]
+    fn changed_entries_returns_none_when_buffer_unchanged() {
+        let shared = SharedLogBuffer::new(100);
+        shared.with_buf(|b| b.push_line("line-1")).unwrap();
+        let (rev, snap) = shared.changed_entries(0).unwrap();
+        assert_eq!(snap.len(), 1);
+        assert_eq!(rev, shared.with_buf(|b| b.revision()).unwrap());
+        assert!(shared.changed_entries(rev).is_none());
+    }
+
+    /// push 後は改訂番号が進み、全行 (既存 + 新規) のスナップショットを返す。
+    #[test]
+    fn changed_entries_returns_full_entries_after_push() {
+        let shared = SharedLogBuffer::new(100);
+        shared.with_buf(|b| b.push_line("line-1")).unwrap();
+        let (rev1, _) = shared.changed_entries(0).unwrap();
+        shared.with_buf(|b| b.push_line("line-2")).unwrap();
+        let (rev2, snap) = shared.changed_entries(rev1).unwrap();
+        assert_ne!(rev1, rev2);
+        let lines: Vec<&str> = snap.iter().map(|e| e.line.as_str()).collect();
+        assert_eq!(lines, vec!["line-1", "line-2"]);
+    }
+
+    /// clear も改訂番号を進める (クリア後の stale スナップショット残留防止)。
+    #[test]
+    fn changed_entries_detects_clear_as_change_to_empty() {
+        let shared = SharedLogBuffer::new(100);
+        shared.with_buf(|b| b.push_line("line-1")).unwrap();
+        let (rev1, _) = shared.changed_entries(0).unwrap();
+        shared.with_buf(LogBuffer::clear);
+        let (rev2, snap) = shared.changed_entries(rev1).unwrap();
+        assert_ne!(rev1, rev2);
+        assert!(snap.is_empty());
+        assert!(shared.changed_entries(rev2).is_none());
+    }
+
+    /// 上限到達後の push (最古行破棄) も改訂番号を進め、破棄込みの内容を返す。
+    #[test]
+    fn changed_entries_reflects_eviction_at_capacity() {
+        let shared = SharedLogBuffer::new(3);
+        for i in 0..3 {
+            shared.with_buf(|b| b.push_line(&format!("l{i}"))).unwrap();
+        }
+        let (rev1, snap1) = shared.changed_entries(0).unwrap();
+        assert_eq!(snap1.len(), 3);
+        shared.with_buf(|b| b.push_line("l3")).unwrap();
+        let (_rev2, snap2) = shared.changed_entries(rev1).unwrap();
+        let lines: Vec<&str> = snap2.iter().map(|e| e.line.as_str()).collect();
+        assert_eq!(lines, vec!["l1", "l2", "l3"]);
+    }
+
+    /// drain_channel_into (単一ロック版): 行数カウント・Exit 行記録・
+    /// 最初の Exit のみ観測という契約は旧実装と同一。
+    #[test]
+    fn drain_channel_into_batches_lines_and_first_exit_wins() {
+        let (tx, rx) = std::sync::mpsc::sync_channel(16);
+        let shared = SharedLogBuffer::new(100);
+        tx.send(LogEvent::Line("INFO run_loop 開始: goal=g".into()))
+            .unwrap();
+        tx.send(LogEvent::Exit(Some(0))).unwrap();
+        tx.send(LogEvent::Exit(Some(2))).unwrap();
+        tx.send(LogEvent::Line("tail".into())).unwrap();
+        let (new_lines, exit) = drain_channel_into(&shared, &rx);
+        // 行 2 + Exit 行 2 が記録され、観測 Exit は最初の 1 件のみ。
+        assert_eq!(new_lines, 4);
+        assert_eq!(exit, Some(Some(0)));
+        let lines = shared
+            .with_buf(|b| b.entries().cloned().collect::<Vec<_>>())
+            .unwrap();
+        assert_eq!(lines.len(), 4);
+        assert!(lines.iter().any(|e| e.line.contains("exit=0")));
+        assert!(lines.iter().any(|e| e.line == "tail"));
     }
 
     // ---- spawn_output_readers (stdout/stderr 並行 drain) ----

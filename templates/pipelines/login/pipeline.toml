@@ -9,7 +9,13 @@ start_task = "LoginTapTitlePc"
 # 最小構成: title 画面の Tap-to-Start をタップし、その後のロード/自動ログインを
 # Field HUD 検出で完了判定する (Issue #146 では起動可能性のみを受入基準とし、
 # 認識精度は別チケット)。Timeout は実機調整前の安全弁。
+# 修正 (Issue #160 T1): 旧記述は TemplateMatch テーブル内に Timeout を混在させた
+# 不正形式 (deny_unknown_fields で load 不可) だった。意図通り Any 合成
+# (Field 到達 OR 120s 安全弁) へ修正した。
 [[goal]]
 name = "login_field_reached"
-[goal.stop]
-TemplateMatch = { task = "LoginWaitFieldPc", confidence = 0.70, Timeout = { secs = 120 } }
+[goal.stop.Any]
+conditions = [
+  { TemplateMatch = { task = "LoginWaitFieldPc", confidence = 0.70 } },
+  { Timeout = { secs = 120 } },
+]

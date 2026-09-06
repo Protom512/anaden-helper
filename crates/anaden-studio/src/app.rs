@@ -379,6 +379,9 @@ pub struct StudioApp {
     task_dir: PathBuf,
     /// pipeline task の認識成功時アクション選択 (UC-3)。
     task_action: PipelineActionKind,
+    /// シナリオ作成パネル (Issue #160 T3: UC-1/UC-2 Authoring 埋め込み)。
+    /// ドメインは scenario_ui、ここは配線のみ。
+    scenario: crate::scenario_ui::ScenarioPanel,
     /// MAA 型タスク一覧の定義リスト (Issue #144)。None = 未読込。
     task_defs: Option<crate::tasks::TaskListState>,
     /// チェック順逐次実行キューの状態機械 (Issue #154 Shard 1)。None = 未開始。
@@ -393,6 +396,9 @@ pub struct StudioApp {
     task_log_rx: Receiver<LogEvent>,
     /// UI 描画用ログスナップショット (drain 毎に更新)。
     task_log_snapshot: Vec<LogEntry>,
+    /// スナップショット差分更新用の改訂番号キャッシュ (Issue #160 UC-5:
+    /// 新着行のないフレームの全行 clone を回避。LogBuffer::revision と比較)。
+    task_log_revision: u64,
     /// ログの自動スクロール追従 (log_view.rs の純ロジック再用・UC-4)。
     task_scroll: AutoScrollFollow,
     /// anaden CLI 実行ファイル (spawn 時の program)。
@@ -465,6 +471,9 @@ impl StudioApp {
             connection: ConnectionStatus::default(),
             task_dir: PathBuf::from("./templates/pipelines/created"),
             task_action: PipelineActionKind::ClickSelf,
+            scenario: crate::scenario_ui::ScenarioPanel::new(
+                Self::workspace_root().join("templates/pipelines"),
+            ),
             task_defs: None,
             task_queue: None,
             task_child: ChildProcess::new(),
@@ -472,6 +481,7 @@ impl StudioApp {
             task_log_tx,
             task_log_rx,
             task_log_snapshot: Vec::new(),
+            task_log_revision: 0,
             task_scroll: AutoScrollFollow::default(),
             anaden_program: "anaden".to_string(),
         }
@@ -562,6 +572,35 @@ impl StudioApp {
         match list.toggle(id) {
             Ok(()) => self.status = format!("選択: {} 件", list.selected_count()),
             Err(e) => self.status = e.to_string(),
+        }
+    }
+
+    /// UC-3 (Shard 4): シナリオパネルのイベントを処理する。
+    ///
+    /// タスク登録・有効化 (`TaskEnabled`) 後はホーム一覧 (`task_defs`) を
+    /// 既定パスから再読込して有効化タスクを選択可能にする (4 段階フローの
+    /// (d) queue 追加 = 既存ホーム一覧への反映)。再読込でチェック済み選択が
+    /// 失われるため、保持して復元する (定義が消えた/未実装化した ID は除外)。
+    fn on_scenario_task_event(&mut self, event: crate::scenario_task_link::ScenarioPanelEvent) {
+        match event {
+            crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled { message } => {
+                let selected: Vec<String> = self
+                    .task_defs
+                    .as_ref()
+                    .map(|list| list.selected_ids().to_vec())
+                    .unwrap_or_default();
+                self.load_task_list(&Self::workspace_root().join("templates/tasks"));
+                if let Some(list) = &mut self.task_defs {
+                    for id in selected {
+                        if list.find(&id).is_some_and(|def| def.is_selectable()) {
+                            // 事前条件 (定義存在 + 選択可能) を満たすため失敗しない。
+                            let _ = list.toggle(&id);
+                        }
+                    }
+                }
+                // load_task_list が status を上書きするため、成功メッセージを再設定。
+                self.status = message;
+            }
         }
     }
 
@@ -714,12 +753,17 @@ impl StudioApp {
         self.refresh_task_log_snapshot();
     }
 
-    /// UI 描画用ログスナップショットを最新化する。
+    /// UI 描画用ログスナップショットを最新化する (Issue #160 UC-5: 差分更新)。
+    ///
+    /// 従来は毎フレームバッファ全行 (上限 5000 行) を clone していた。
+    /// 現在は [`SharedLogBuffer::changed_entries`] で改訂番号を比較し、
+    /// バッファが変化したフレームのみ複製する (新着行なしのフレームは
+    /// ロック 1 回 + 整数比較で完了)。内容の契約は不変 (更新後は全行相当)。
     fn refresh_task_log_snapshot(&mut self) {
-        self.task_log_snapshot = self
-            .task_log
-            .with_buf(|b| b.entries().cloned().collect())
-            .unwrap_or_default();
+        if let Some((rev, entries)) = self.task_log.changed_entries(self.task_log_revision) {
+            self.task_log_revision = rev;
+            self.task_log_snapshot = entries;
+        }
     }
 
     /// タスク一覧 UI (MAA 型チェックボックス) を描画する。
@@ -1112,6 +1156,35 @@ impl StudioApp {
             Err(e) => self.status = format!("pipeline task 保存失敗: {e}"),
         }
     }
+
+    /// 現在のROI・入力からシナリオ追加候補 (TaskDef + crop PNG) を構築する
+    /// (Issue #160 T3 / UC-1)。名前/状態/閾値/action は
+    /// [`Self::save_current_pipeline_task`] と同一の導出を使う。
+    /// スクショ/ROI 未確定・未知方式は None (fail-closed)。
+    fn scenario_candidate(&self) -> Option<(anaden_vision::TaskDef, DynamicImage)> {
+        let roi = self.roi.rect()?;
+        let img = self.screenshot.as_ref()?;
+        let name = if self.tpl_name.trim().is_empty() {
+            "template_01".to_string()
+        } else {
+            self.tpl_name.trim().to_string()
+        };
+        let threshold = self
+            .discrimination
+            .as_ref()
+            .map(|d| ((d.own_min + d.other_max) / 2.0).clamp(0.5, 0.99))
+            .unwrap_or(0.9);
+        let spec = pipeline_task_spec(
+            &name,
+            STATE_OPTIONS[self.tpl_state_idx],
+            self.engine_kind.method_str(),
+            roi,
+            threshold,
+            self.task_action,
+        )?;
+        let crop = img.crop_imm(roi.x, roi.y, roi.width, roi.height);
+        Some((spec, crop))
+    }
 }
 
 impl eframe::App for StudioApp {
@@ -1471,6 +1544,39 @@ impl StudioApp {
                     });
                     if task_save_clicked {
                         self.save_current_pipeline_task();
+                    }
+                    ui.separator();
+
+                    // シナリオ作成 (Issue #160 T3 / UC-1+UC-2): 単一 TaskDef 保存 (上)
+                    // を多 TaskDef + manifest 保存へ拡張する collapsing セクション。
+                    // パネル本体は scenario_ui (ドメイン)、ここは配線のみ。
+                    // UC-3 (Shard 4): 保存済み pipeline をタスクへ登録・有効化する
+                    // サブフロー (ui_task_link) も配線する。stub 一覧は読込済み
+                    // タスク定義から導出 (未読込なら既定パスから遅延読込)。
+                    self.ensure_task_list_loaded();
+                    let link_root = Self::workspace_root();
+                    let link_tasks_dir = link_root.join("templates/tasks");
+                    let stubs = self
+                        .task_defs
+                        .as_ref()
+                        .map(|list| crate::scenario_task_link::stub_options(list.definitions()))
+                        .unwrap_or_default();
+                    let scenario_candidate = self.scenario_candidate();
+                    let mut task_event = None;
+                    egui::CollapsingHeader::new("シナリオ作成")
+                        .default_open(true)
+                        .show(ui, |ui| {
+                            self.scenario.ui(ui, scenario_candidate, &mut self.status);
+                            let link_ctx = crate::scenario_task_link::TaskLinkContext {
+                                root: &link_root,
+                                tasks_dir: &link_tasks_dir,
+                                stubs: &stubs,
+                            };
+                            task_event =
+                                self.scenario.ui_task_link(ui, &link_ctx, &mut self.status);
+                        });
+                    if let Some(event) = task_event {
+                        self.on_scenario_task_event(event);
                     }
                     ui.separator();
                     ui.label(&self.status);
@@ -2281,6 +2387,43 @@ mod tests {
         );
     }
 
+    /// UC-5 (Issue #160): 差分更新スナップショット (revision-gated) でも
+    /// 行が欠けず、新着行のないフレームを連続してもスナップショット内容が
+    /// 冪等に保たれる (60 フレーム相当 = 1 秒 @60fps のアイドル drain)。
+    #[test]
+    fn task_log_snapshot_idempotent_across_idle_drains_and_keeps_lines() {
+        let mut app = StudioApp::default();
+        // 起動即失敗 (存在しない program を持つ spec) → セパレータ + 起動失敗行
+        // を記録して失敗停止。以降はキュー滞留のまま毎フレーム drain が回る状態。
+        let bogus = SpawnSpec::new("anaden-nonexistent-bin-xyz", Vec::new());
+        app.start_task_entries(vec![queue_entry("失敗", bogus)]);
+        pump_until(
+            &mut app,
+            30_000,
+            |s| matches!(s, QueueState::PausedAfterFailure { .. }),
+            "pause after spawn failure",
+        );
+        app.drain_task_logs();
+        let before: Vec<String> = app
+            .task_log_lines()
+            .iter()
+            .map(|e| e.line.clone())
+            .collect();
+        assert!(
+            before.iter().any(|l| l.contains("起動に失敗")),
+            "lines: {before:?}"
+        );
+        for _ in 0..60 {
+            app.drain_task_logs();
+        }
+        let after: Vec<String> = app
+            .task_log_lines()
+            .iter()
+            .map(|e| e.line.clone())
+            .collect();
+        assert_eq!(before, after);
+    }
+
     /// タスク一覧 UI (チェックボックス・開始ボタン含む) がパニックせず描画できる。
     #[test]
     fn embed_render_task_list_completes_without_panic() {
@@ -2327,6 +2470,34 @@ mod tests {
         }
         app.render_task_list(&mut child_ui(&ctx));
         let _ = ctx.end_pass();
+    }
+
+    /// UC-3 (Shard 4): タスク登録・有効化イベントでホーム一覧が再読込され、
+    /// 有効化タスクが選択可能になる。既存のチェック選択は保持される。
+    /// (実リポジトリ templates/tasks は読み取り専用に使用 — 書き込み無し)
+    #[test]
+    fn scenario_task_enabled_event_reloads_home_list_preserving_selection() {
+        let mut app = StudioApp::default();
+        app.load_task_list(&tasks_dir());
+        app.toggle_task("login");
+        let selected_before = app.task_defs.as_ref().unwrap().selected_ids().to_vec();
+        assert_eq!(selected_before, vec!["login".to_string()]);
+
+        app.on_scenario_task_event(crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled {
+            message: "タスク登録・有効化: テスト".to_string(),
+        });
+
+        let list = app.task_defs.as_ref().unwrap();
+        assert!(
+            list.find("login").is_some_and(|def| def.is_selectable()),
+            "再読込後も有効化タスクが選択可能"
+        );
+        assert_eq!(
+            list.selected_ids(),
+            selected_before.as_slice(),
+            "選択は復元"
+        );
+        assert_eq!(app.status, "タスク登録・有効化: テスト");
     }
 
     // ---- エッジケース ----
