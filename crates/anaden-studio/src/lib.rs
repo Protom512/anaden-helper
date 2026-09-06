@@ -27,3 +27,5 @@ pub mod shell;
 pub mod source;
 pub mod strategy_ui;
 pub mod tasks;
+pub mod tasks_toml;
+pub mod tasks_view;

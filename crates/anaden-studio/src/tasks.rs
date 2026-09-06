@@ -12,12 +12,23 @@
 //! - enable_task (Issue #160 UC-3): task TOML の implemented フリップ +
 //!   pipeline_dir 紐付け書き戻し (コメント保全の外科的行編集・load 検証は
 //!   fail-closed)。
+//!
+//! Issue #162 Shard 2: 表示モデル純関数 (checkbox_label / TaskDetailView /
+//! queue 表示) は [`crate::tasks_view`] へ、TOML 外科的行編集の純粋関数は
+//! [`crate::tasks_toml`] へ分割した。本モジュールは facade として
+//! tasks_view の公開シンボルを re-export する (呼び出し元パス不変)。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
 use thiserror::Error;
+
+use crate::tasks_toml::{edit_task_toml_source, normalize_pipeline_dir_rel};
+pub use crate::tasks_view::{
+    QueueOrderRow, TaskDetailView, checkbox_label, queue_order_rows, queue_position_label,
+    task_detail_view,
+};
 
 /// タスク定義の読み込み・パース・キュー組み立てに関するエラー。
 #[derive(Debug, Error)]
@@ -264,147 +275,6 @@ impl TaskQueue {
     pub fn clear(&mut self) {
         self.selected.clear();
     }
-}
-
-/// チェックボックスの表示ラベル (豆腐なし ASCII 括弧 + 日本語)。
-/// implemented=false には「未実装」接尾を付けグレー表示 (嘘の動作可能表示禁止)。
-#[must_use]
-pub fn checkbox_label(def: &TaskDefinition) -> String {
-    format!(
-        "{} ({}){}",
-        def.title,
-        def.kind.as_str(),
-        if def.implemented {
-            String::new()
-        } else {
-            " — 未実装".to_string()
-        }
-    )
-}
-
-// ---- Issue #154 Shard 2 (UC-3): タスク TOML 設定の GUI 可視 (読み取り専用表示モデル) ----
-
-/// 1 タスク定義の GUI 詳細表示モデル (UC-3: 何をするか・引数の可視化)。
-///
-/// pipeline TOML schema (TaskDef 契約) は一切変更しない — 読み取り専用の
-/// 可視化専用構造。実引数プレビューは [`spawn_args`] と同一の解決結果
-/// (実行と表示の単一情報源)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TaskDetailView {
-    /// タスク定義 ID。
-    pub id: String,
-    /// 表示ラベル (title)。
-    pub title: String,
-    /// kind 表示文字列 ([`TaskKind::as_str`])。
-    pub kind: &'static str,
-    /// pipeline 実行時の対象ディレクトリ (root 結合済みパス文字列)。
-    pub pipeline_dir: Option<String>,
-    /// 開始タスク名 (未宣言時は [`resolve_start_task`] の解決結果)。
-    pub start_task: Option<String>,
-    /// 実引数プレビュー (子プロセスへ実際に渡される引数列)。
-    pub spawn_args: Vec<String>,
-    /// 「未実装」ラベル表示対象 (implemented = false または引数解決不能)。
-    pub unimplemented: bool,
-    /// 「未実装」ラベルの理由 (fail-closed 表示用)。
-    pub unimplemented_reason: Option<String>,
-}
-
-impl TaskDetailView {
-    /// 引数プレビューの 1 行表示 (スペース結合)。
-    #[must_use]
-    pub fn args_preview(&self) -> String {
-        self.spawn_args.join(" ")
-    }
-}
-
-/// タスク定義から GUI 詳細表示モデルを組み立てる純関数 (UC-3)。
-///
-/// - `start_task` は未宣言時に [`resolve_start_task`] の解決結果を反映
-///   ([`spawn_args`] と同じ解決 — 実行と表示で同一の引数になる)。
-/// - `implemented = false`、または実行に必要な引数が解決不能 (pipeline_dir
-///   実在せず start_task 不明) の場合は `unimplemented = true` + 理由を含む
-///   (fail-closed: 嘘の実行可能表示をしない)。
-#[must_use]
-pub fn task_detail_view(
-    def: &TaskDefinition,
-    target: &str,
-    serial: Option<&str>,
-    root: &Path,
-) -> TaskDetailView {
-    let pipeline_dir = def
-        .pipeline_dir
-        .as_ref()
-        .map(|d| root.join(d).to_string_lossy().into_owned());
-    let start_task = match def.kind {
-        TaskKind::LaunchSubcommand => None, // 実行に start_task を使用しない
-        TaskKind::PipelineRun => match &def.start_task {
-            Some(s) => Some(s.clone()),
-            None => def
-                .pipeline_dir
-                .as_ref()
-                .map(|d| root.join(d))
-                .and_then(|abs| resolve_start_task(&abs)),
-        },
-    };
-    let spawn_args = spawn_args(def, target, serial, root);
-    let unimplemented_reason = if !def.implemented {
-        Some("implemented = false (未実装タスク)".to_string())
-    } else if spawn_args.is_empty() {
-        Some("実行引数を解決できません (pipeline_dir/start_task 不明)".to_string())
-    } else {
-        None
-    };
-    TaskDetailView {
-        id: def.id.clone(),
-        title: def.title.clone(),
-        kind: def.kind.as_str(),
-        pipeline_dir,
-        start_task,
-        spawn_args,
-        unimplemented: unimplemented_reason.is_some(),
-        unimplemented_reason,
-    }
-}
-
-/// 選択キュー内の実行順位置ラベル (例: 「実行順 2/3」)。未選択は None (UC-3)。
-#[must_use]
-pub fn queue_position_label(selected_ids: &[String], id: &str) -> Option<String> {
-    let pos = selected_ids.iter().position(|s| s == id)?;
-    Some(format!("実行順 {}/{}", pos + 1, selected_ids.len()))
-}
-
-/// 選択キューの実行順表示行 (UC-3: チェック順に 1. 2. 3. ... と番号付き)。
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub struct QueueOrderRow {
-    /// 実行順 (1-based・チェック順)。
-    pub position: usize,
-    /// タスク定義 ID。
-    pub id: String,
-    /// 表示ラベル (title)。
-    pub title: String,
-    /// 実行可能 (false = 未実装のためグレー表示)。
-    pub runnable: bool,
-}
-
-/// 選択キューから実行順表示行列を組み立てる純関数 (UC-3)。
-///
-/// 通常 UI では未実装タスクは選択不可能だが、不整合時にもグレー表示用の
-/// `runnable = false` 行として残す (fail-closed 表示)。未知の ID は実行時
-/// [`TaskQueue::build`] が fail-closed で拒否するため表示では除外する。
-#[must_use]
-pub fn queue_order_rows(selected_ids: &[String], defs: &[TaskDefinition]) -> Vec<QueueOrderRow> {
-    selected_ids
-        .iter()
-        .enumerate()
-        .filter_map(|(i, id)| {
-            defs.iter().find(|d| &d.id == id).map(|def| QueueOrderRow {
-                position: i + 1,
-                id: def.id.clone(),
-                title: def.title.clone(),
-                runnable: def.implemented,
-            })
-        })
-        .collect()
 }
 
 /// タスク一覧 UI の状態機械 (app.rs 配線用・Issue #144 Task 3)。
@@ -833,7 +703,7 @@ pub fn spawn_args(
 /// `toml::to_string` による全再生成はコメントを落とす。本関数は
 /// **implemented 行・pipeline_dir 行のみを外科的に置換する行編集**を行い、
 /// コメント行・インラインコメント・キー順・CRLF 改行をそのまま保存する
-/// ([`edit_task_toml_source`])。
+/// (`tasks_toml::edit_task_toml_source`)。
 ///
 /// # fail-closed (嘘の動作可能表示禁止)
 ///
@@ -909,155 +779,6 @@ pub fn enable_task(
         source: Box::new(source),
     })?;
     Ok(def)
-}
-
-/// pipeline_dir 相対パスを TOML 値として書ける形へ正規化する。
-///
-/// - 前後の空白を除去し、backslash 区切りを TOML 規約の forward slash へ変える。
-/// - 空文字・`"`・改行を含む場合は TOML 基本文字列に埋め込めないため
-///   [`TaskError::InvalidPipelineDir`] で fail-closed。
-fn normalize_pipeline_dir_rel(rel: &str) -> Result<String, TaskError> {
-    let normalized = rel.trim().replace('\\', "/");
-    if normalized.is_empty()
-        || normalized.contains('"')
-        || normalized.contains('\n')
-        || normalized.contains('\r')
-    {
-        return Err(TaskError::InvalidPipelineDir {
-            dir: rel.to_string(),
-        });
-    }
-    Ok(normalized)
-}
-
-/// タスク TOML ソースへ「implemented = true フリップ」「pipeline_dir 書き戻し」を
-/// 最小変更の行編集で適用する。
-///
-/// コメント行・未編集行はバイト単位で素通しし、対象キー行は値部分のみ置換する
-/// (インラインコメント・行末改行を保存)。未宣言キーは `kind` 行をアンカーに
-/// その直後へ (implemented → pipeline_dir の順で) 挿入する。
-fn edit_task_toml_source(
-    source: &str,
-    pipeline_dir_rel: &str,
-    path: &Path,
-) -> Result<String, TaskError> {
-    let newline = if source.contains("\r\n") {
-        "\r\n"
-    } else {
-        "\n"
-    };
-    let mut lines: Vec<String> = Vec::new();
-    let mut kind_at: Option<usize> = None;
-    let mut implemented_at: Option<usize> = None;
-    let mut pipeline_dir_at: Option<usize> = None;
-
-    for line in source.split_inclusive('\n') {
-        if kind_at.is_none() && is_key_line(line, "kind") {
-            lines.push(line.to_string());
-            kind_at = Some(lines.len() - 1);
-        } else if implemented_at.is_none() && is_key_line(line, "implemented") {
-            let replaced =
-                replace_key_value(line, "implemented", "true").unwrap_or_else(|| line.to_string());
-            lines.push(replaced);
-            implemented_at = Some(lines.len() - 1);
-        } else if pipeline_dir_at.is_none() && is_key_line(line, "pipeline_dir") {
-            let replaced =
-                replace_key_value(line, "pipeline_dir", &format!("\"{pipeline_dir_rel}\""))
-                    .unwrap_or_else(|| line.to_string());
-            lines.push(replaced);
-            pipeline_dir_at = Some(lines.len() - 1);
-        } else {
-            lines.push(line.to_string());
-        }
-    }
-
-    let Some(kind_index) = kind_at else {
-        return Err(TaskError::EditFailed {
-            path: path.to_path_buf(),
-            reason: "no `kind` line to anchor the edit".to_string(),
-        });
-    };
-    if implemented_at.is_none() {
-        ensure_terminated(&mut lines, kind_index, newline);
-        lines.insert(kind_index + 1, format!("implemented = true{newline}"));
-        implemented_at = Some(kind_index + 1);
-    }
-    if pipeline_dir_at.is_none() {
-        // implemented を挿入済みなら必ず Some (直上で代入)、既存行のみの
-        // 場合も kind 行以降のアンカーへ挿入する。
-        let anchor = implemented_at.unwrap_or(kind_index);
-        ensure_terminated(&mut lines, anchor, newline);
-        lines.insert(
-            anchor + 1,
-            format!("pipeline_dir = \"{pipeline_dir_rel}\"{newline}"),
-        );
-    }
-    Ok(lines.concat())
-}
-
-/// 行がトップレベルの `key = ...` 行か (コメント行は除外・前方空白は許容)。
-fn is_key_line(line: &str, key: &str) -> bool {
-    let t = line.trim_start();
-    !t.starts_with('#')
-        && t.strip_prefix(key)
-            .is_some_and(|rest| rest.trim_start().starts_with('='))
-}
-
-/// `key = <旧値> [# コメント]` 行の値部分のみを `new_value` へ置換する
-/// (インデント・インラインコメント (直前空白込み)・行末改行を保存)。
-/// `key = ...` 行でない場合は `None`。
-fn replace_key_value(line: &str, key: &str, new_value: &str) -> Option<String> {
-    let trimmed = line.trim_start();
-    let indent = &line[..line.len() - trimmed.len()];
-    let after_eq = trimmed.strip_prefix(key)?.trim_start().strip_prefix('=')?;
-    let (terminator, value_part) = split_line_terminator(after_eq);
-    let comment_start = match find_comment_start(value_part) {
-        // コメント直前の空白 (整形) も含めて保全する。
-        Some(i) => value_part[..i].trim_end().len(),
-        None => value_part.trim_end().len(),
-    };
-    let comment = value_part.get(comment_start..).unwrap_or("");
-    Some(format!("{indent}{key} = {new_value}{comment}{terminator}"))
-}
-
-/// 行末の改行 (CRLF/LF/無し) を分離する。
-fn split_line_terminator(s: &str) -> (&str, &str) {
-    if let Some(rest) = s.strip_suffix("\r\n") {
-        ("\r\n", rest)
-    } else if let Some(rest) = s.strip_suffix('\n') {
-        ("\n", rest)
-    } else {
-        ("", s)
-    }
-}
-
-/// 値部分内のインラインコメント開始位置 (`#` の位置) を返す。
-/// TOML 基本文字列の引用符内の `#` は無視する。
-fn find_comment_start(s: &str) -> Option<usize> {
-    let mut in_quotes = false;
-    let mut escaped = false;
-    for (i, ch) in s.char_indices() {
-        if escaped {
-            escaped = false;
-            continue;
-        }
-        match ch {
-            '\\' if in_quotes => escaped = true,
-            '"' => in_quotes = !in_quotes,
-            '#' if !in_quotes => return Some(i),
-            _ => {}
-        }
-    }
-    None
-}
-
-/// `lines[index]` が改行終端でない場合 (ファイル末尾行への挿入時) は改行を補う。
-fn ensure_terminated(lines: &mut [String], index: usize, newline: &str) {
-    if let Some(line) = lines.get_mut(index)
-        && !line.ends_with('\n')
-    {
-        line.push_str(newline);
-    }
 }
 
 #[cfg(test)]
@@ -1605,168 +1326,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert_eq!(entries[0].spec.args[0], "run");
         assert_eq!(entries[1].label, "ゲーム起動");
         assert_eq!(entries[1].spec.args[0], "launch");
-    }
-
-    // ---- Issue #154 Shard 2 (UC-3): 表示モデル純関数 ----
-
-    /// 正常系: launch_subcommand の詳細ビュー (windows・serial は使わない)。
-    #[test]
-    fn test_detail_view_launch_subcommand() {
-        let def = TaskDefinition::parse_toml(LAUNCH_TOML, Path::new("launch.toml")).unwrap();
-        let view = task_detail_view(&def, "windows", Some("ignored"), Path::new("/root"));
-        assert_eq!(view.id, "launch");
-        assert_eq!(view.title, "ゲーム起動");
-        assert_eq!(view.kind, "launch_subcommand");
-        assert_eq!(view.pipeline_dir, None);
-        assert_eq!(view.start_task, None);
-        assert_eq!(view.args_preview(), "launch --target windows");
-        assert!(!view.unimplemented);
-        assert_eq!(view.unimplemented_reason, None);
-    }
-
-    /// 正常系: launch_subcommand (android) は serial 引数をプレビューに含む。
-    #[test]
-    fn test_detail_view_launch_android_serial_preview() {
-        let def = TaskDefinition::parse_toml(LAUNCH_TOML, Path::new("launch.toml")).unwrap();
-        let view = task_detail_view(&def, "android", Some("localhost:5555"), Path::new("/root"));
-        assert_eq!(
-            view.args_preview(),
-            "launch --target android localhost:5555"
-        );
-        assert!(!view.unimplemented);
-    }
-
-    /// 正常系: pipeline_run 宣言済み start_task の詳細ビュー
-    /// (pipeline_dir は root 結合済み・宣言値がそのまま使われる)。
-    #[test]
-    fn test_detail_view_pipeline_run_declared_start_task() {
-        let def =
-            TaskDefinition::parse_toml(FIELD_LOOP_TOML, Path::new("field_loop_pc.toml")).unwrap();
-        let view = task_detail_view(&def, "windows", None, Path::new("/root"));
-        assert_eq!(view.kind, "pipeline_run");
-        let dir = view.pipeline_dir.as_deref().unwrap();
-        assert!(
-            dir.ends_with("templates/pipelines/field_loop_pc")
-                || dir.ends_with("templates\\pipelines\\field_loop_pc"),
-            "dir: {dir}"
-        );
-        assert_eq!(view.start_task.as_deref(), Some("start"));
-        assert_eq!(view.spawn_args.len(), 5);
-        assert_eq!(view.spawn_args.last().map(String::as_str), Some("start"));
-        assert!(!view.unimplemented);
-    }
-
-    /// 正常系: start_task 未宣言タスクは resolve_start_task の解決結果を
-    /// 詳細ビューへ反映する (リポジトリ実 pipeline で結合検証)。
-    #[test]
-    fn test_detail_view_pipeline_run_resolves_undeclared_start_task() {
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let src = r#"
-id = "nav_to_field_pc"
-title = "マップ移動"
-kind = "pipeline_run"
-implemented = true
-pipeline_dir = "templates/pipelines/nav_to_field_pc"
-"#;
-        let def = TaskDefinition::parse_toml(src, Path::new("nav_to_field_pc.toml")).unwrap();
-        let view = task_detail_view(&def, "windows", None, &root);
-        assert_eq!(view.start_task.as_deref(), Some("field_hud_top"));
-        assert_eq!(
-            view.spawn_args.last().map(String::as_str),
-            Some("field_hud_top")
-        );
-        assert!(!view.unimplemented);
-    }
-
-    /// 正常系 (UC-3): 実行順位置ラベルはチェック順位置と総数を含む。
-    #[test]
-    fn test_queue_position_label_uses_check_order() {
-        let selected = vec!["b".to_string(), "a".to_string(), "c".to_string()];
-        assert_eq!(
-            queue_position_label(&selected, "b").as_deref(),
-            Some("実行順 1/3")
-        );
-        assert_eq!(
-            queue_position_label(&selected, "a").as_deref(),
-            Some("実行順 2/3")
-        );
-        assert_eq!(queue_position_label(&selected, "zzz"), None);
-    }
-
-    /// 正常系 (UC-3): 実行順リスト行はチェック順に 1 始まりで番号付き。
-    #[test]
-    fn test_queue_order_rows_numbered_in_check_order() {
-        let defs = parse_all(&[
-            ("launch.toml", LAUNCH_TOML),
-            ("field_loop_pc.toml", FIELD_LOOP_TOML),
-        ]);
-        // チェック順: field_loop_pc → launch (定義順と逆にチェック)。
-        let selected = vec!["field_loop_pc".to_string(), "launch".to_string()];
-        let rows = queue_order_rows(&selected, &defs);
-        assert_eq!(rows.len(), 2);
-        assert_eq!(rows[0].position, 1);
-        assert_eq!(rows[0].title, "フィールド周回");
-        assert_eq!(rows[1].position, 2);
-        assert_eq!(rows[1].title, "ゲーム起動");
-        assert!(rows.iter().all(|r| r.runnable));
-    }
-
-    /// エッジケース: 未実装タスク (implemented = false) は「未実装」ラベル用
-    /// データを持つ (引数自体は解決可能でも implemented 優先)。
-    #[test]
-    fn test_detail_view_unimplemented_task_carries_label_data() {
-        let defs = parse_all(&[("login.toml", LOGIN_TOML)]);
-        let view = task_detail_view(&defs[0], "windows", None, Path::new("/root"));
-        assert!(view.unimplemented);
-        let reason = view.unimplemented_reason.as_deref().unwrap();
-        assert!(reason.contains("implemented = false"), "reason: {reason}");
-    }
-
-    /// エッジケース: pipeline_dir が実在せず start_task も未宣言なら引数解決不能
-    /// として fail-closed 表示 (実行時は queue_entries が拒否する)。
-    #[test]
-    fn test_detail_view_unresolvable_pipeline_fail_closed() {
-        let src = r#"
-id = "ghost"
-title = "G"
-kind = "pipeline_run"
-implemented = true
-pipeline_dir = "templates/pipelines/nonexistent-xyz"
-"#;
-        let def = TaskDefinition::parse_toml(src, Path::new("ghost.toml")).unwrap();
-        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
-        let view = task_detail_view(&def, "windows", None, &root);
-        assert!(view.spawn_args.is_empty());
-        assert_eq!(view.start_task, None);
-        assert!(view.unimplemented);
-        let reason = view.unimplemented_reason.as_deref().unwrap();
-        assert!(reason.contains("解決"), "reason: {reason}");
-    }
-
-    /// エッジケース: 不整合 (未実装タスクが選択済み) でも行はグレー表示用に
-    /// runnable = false で残る (fail-closed 表示)。
-    #[test]
-    fn test_queue_order_rows_flags_unimplemented_for_gray() {
-        let defs = parse_all(&[("launch.toml", LAUNCH_TOML), ("login.toml", LOGIN_TOML)]);
-        let selected = vec!["login".to_string(), "launch".to_string()];
-        let rows = queue_order_rows(&selected, &defs);
-        assert_eq!(rows.len(), 2);
-        assert!(!rows[0].runnable);
-        assert_eq!(rows[0].title, "ログイン");
-        assert!(rows[1].runnable);
-    }
-
-    /// エッジケース: 未知の選択 ID は表示から除外する (実行時 build が
-    /// fail-closed で拒否するため表示側で番号がずれても誤実行はない)。
-    #[test]
-    fn test_queue_order_rows_skips_unknown_selected_id() {
-        let defs = parse_all(&[("launch.toml", LAUNCH_TOML)]);
-        let selected = vec!["ghost".to_string(), "launch".to_string()];
-        let rows = queue_order_rows(&selected, &defs);
-        assert_eq!(rows.len(), 1);
-        assert_eq!(rows[0].id, "launch");
-        // 元の選択順位置を維持 (歯抜け番号 — 隠蔽しない)。
-        assert_eq!(rows[0].position, 2);
     }
 
     // ---- Issue #160 Shard 2 (UC-3): タスク有効化 API (enable_task) ----
