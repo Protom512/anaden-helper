@@ -228,7 +228,12 @@ impl eframe::App for UnifiedShell {
 
 impl UnifiedShell {
     /// 統合 modebar（ウィンドウ上部のタブバー・Issue #157: 2 タブ構成）。
-    fn render_modebar(&mut self, ui: &mut egui::Ui) {
+    ///
+    /// 公開 API (app.rs の render_modebar/render_body と同一パターン)。
+    /// `eframe::App::ui` は `&mut eframe::Frame` を要求するためヘッドレス
+    /// テストからは呼べず、E2E 証跡テスト (`tests/e2e_evidence_tests.rs`) は
+    /// modebar/サブバー/content を分割呼出して実シェル構成を描画する。
+    pub fn render_modebar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("unified_modebar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 for mode in UnifiedMode::ALL {
@@ -244,7 +249,7 @@ impl UnifiedShell {
     /// 使うため、同一親 Ui 内で複数セクションを同時展開すると panel id 衝突が
     /// 起きる。排他切替なら旧ペインの描画コードを無変更で再利用できる
     /// （Issue #157: 統合・再配置のみでロジック変更なし）。
-    fn render_tools_sectionbar(&mut self, ui: &mut egui::Ui) {
+    pub fn render_tools_sectionbar(&mut self, ui: &mut egui::Ui) {
         egui::Panel::top("tools_sectionbar").show_inside(ui, |ui| {
             ui.horizontal(|ui| {
                 for section in ToolsSection::ALL {
@@ -258,7 +263,7 @@ impl UnifiedShell {
     ///
     /// `eframe::App::ui` から切り出した内部 API。ヘッドレス描画テストから
     /// modebar/サブバーと分割して呼べるようにしている。
-    fn render_content(&mut self, ui: &mut egui::Ui) {
+    pub fn render_content(&mut self, ui: &mut egui::Ui) {
         egui::CentralPanel::default().show_inside(ui, |ui| match self.pane() {
             UnifiedPane::Tasks => {
                 // ホーム (Issue #154): タスク一覧 + 開始 + 状態。
