@@ -6,6 +6,8 @@
 //! (main / eframe 起動 / フォント登録) は main.rs に残る。
 
 pub mod app;
+pub mod app_state;
+pub mod app_ui;
 pub mod batch;
 pub mod canvas;
 pub mod childproc;
