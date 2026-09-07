@@ -18,6 +18,8 @@ pub mod library;
 pub mod log_view;
 pub mod proposals;
 pub mod runner;
+pub mod runner_exec;
+pub mod runner_ui;
 pub mod scenario_editor;
 pub mod scenario_load;
 pub mod scenario_panel;
