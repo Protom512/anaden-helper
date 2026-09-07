@@ -32,5 +32,7 @@ pub mod shell_nav;
 pub mod source;
 pub mod strategy_ui;
 pub mod tasks;
+pub mod tasks_def;
+pub mod tasks_queue;
 pub mod tasks_toml;
 pub mod tasks_view;
