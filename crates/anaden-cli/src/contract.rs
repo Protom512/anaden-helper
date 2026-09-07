@@ -50,12 +50,12 @@ pub fn resolve_target(value: &str) -> Result<EnsureOpenTarget, String> {
 /// [`EnsureOutcome`] を終了コードへ射影する純粋関数。
 ///
 /// 契約(Issue #21 AC):
-///   - [`EnsureOutcome::AlreadyOpen`] → [`EXIT_ALREADY_OR_LAUNCHED`](0)
-///   - [`EnsureOutcome::Launched`]    → [`EXIT_ALREADY_OR_LAUNCHED`](0)
-///   - [`EnsureOutcome::Timeout`]     → [`EXIT_TIMEOUT`](2)
+///   - [`EnsureOutcome::AlreadyOpen`] → [`EXIT_ALREADY_OR_LAUNCHED`] = 0
+///   - [`EnsureOutcome::Launched`]    → [`EXIT_ALREADY_OR_LAUNCHED`] = 0
+///   - [`EnsureOutcome::Timeout`]     → [`EXIT_TIMEOUT`] = 2
 ///
 /// ハードエラー(`AdbError` / spawn / OpenProcess 失敗)の終了コード
-/// ([`EXIT_HARDCERROR`](1))は、呼び出し側が `Err` を受け取った時に使う。
+/// ([`EXIT_HARDCERROR`] = 1)は、呼び出し側が `Err` を受け取った時に使う。
 /// 本関数は `Ok(outcome)` のみを扱う。借用で受け取るため、呼び出し側は
 /// 同一の `outcome` から [`ensure_outcome_label`] も併用できる。
 pub fn ensure_open_exit_code(outcome: &EnsureOutcome) -> i32 {
@@ -69,7 +69,7 @@ pub fn ensure_open_exit_code(outcome: &EnsureOutcome) -> i32 {
 /// スタンドアロン ensure-open/launch の終了コード決定(Ok/Err 双方を覆盖・純粋・決定論的)。
 ///
 /// Issue #21 AC4: Ok 側は [`ensure_open_exit_code`] へ委任、Err 側(ハードエラー:
-/// AdbError / spawn / OpenProcess 失敗)は [`EXIT_HARDCERROR`](1)。本関数が AC4 の
+/// AdbError / spawn / OpenProcess 失敗)は [`EXIT_HARDCERROR`] = 1。本関数が AC4 の
 /// 「hard error ⇒ exit 1」契約の唯一の真実の源。`std::process::exit` はテスト不能なため、
 /// exit の発動は呼出側(main の `exit_standalone`)が行い、本関数は純粋に射影するだけ
 /// (テスト可能性と rust-anti-patterns panic 禁止の両立)。ジェネリック `<E>` により

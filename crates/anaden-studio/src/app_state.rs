@@ -265,7 +265,7 @@ pub fn pipeline_task_spec(
 /// pipeline task を TOML + テンプレート PNG としてディレクトリへ保存する。
 ///
 /// 出力: `<dir>/<name>.toml` + `<dir>/<name>.png`。既存 `load_pipeline`
-/// (anaden-vision) でそのまま読み込める形式 (templates/pipelines/<pipeline>/ 互換)。
+/// (anaden-vision) でそのまま読み込める形式 (`templates/pipelines/<pipeline>/` 互換)。
 pub fn save_pipeline_task(
     dir: &Path,
     spec: &anaden_vision::TaskDef,
@@ -349,7 +349,7 @@ pub struct StudioApp {
     pub(crate) save_dir: PathBuf,
     /// 現在のモード。
     pub(crate) mode: AppMode,
-    /// バッチ評価のテストフォルダ（<dir>/<label>/*.png）。
+    /// バッチ評価のテストフォルダ（`<dir>/<label>/*.png`）。
     pub(crate) test_dir: PathBuf,
     /// バッチ評価の決定閾値。
     pub(crate) batch_threshold: f32,

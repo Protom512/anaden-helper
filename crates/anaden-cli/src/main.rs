@@ -188,7 +188,7 @@ enum Commands {
 /// / `Win32Launch::ensure_open`)を行って生の [`anaden_device::EnsureOutcome`] を返す。
 /// 戻り値のラベル化/ログ/終了コードは呼出側の責務:
 /// - `run` パスは soft warn でパイプラインを継続(Timeout でも止まらない)。
-/// - standalone(`ensure-open`/`launch`)は [`ensure_open_exit_code`] で非ゼロ終了。
+/// - standalone(`ensure-open`/`launch`)は [`anaden_cli_contract::ensure_open_exit_code`] で非ゼロ終了。
 ///
 /// これを抽出することで、`run_pipeline_live` の android/windows 両経路と standalone 経路が
 /// 同一の起動保証本体を共有し、ドリフトを防ぐ(architecture-coupling-balance: high-cohesion,
@@ -827,7 +827,7 @@ async fn run_with_windows(
 /// [`anaden_cli_contract::validate_goal`] で不変量を検証し、invalid なら anyhow エラー
 /// ([`anaden_core::GoalError`] の Display を伝播)として即座に返す(panic しない)。
 /// [`None`] のときは非ゴールモード(従来の max_iterations 停止)。`Some` のときは
-/// [`PipelineDriver::run_loop_with_goal`] へ [`SystemClock`] を渡して実配線する
+/// [`anaden_engine::PipelineDriver::run_loop_with_goal`] へ [`anaden_engine::SystemClock`] を渡して実配線する
 /// (Issue #40 受入基準: --goal で渡した Goal が run_loop_with_goal へ配送されること)。
 async fn run_driver<C, I>(
     mut driver: anaden_engine::PipelineDriver<C, I>,

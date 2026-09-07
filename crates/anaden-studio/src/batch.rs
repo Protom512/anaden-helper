@@ -275,7 +275,7 @@ pub fn load_templates_for_eval(base_dir: &Path) -> Vec<LoadedTemplate> {
     out
 }
 
-/// テストディレクトリ（<dir>/<label>/*.png）からテストセットを読み込む。
+/// テストディレクトリ（`<dir>/<label>/*.png`）からテストセットを読み込む。
 pub fn load_test_set(test_dir: &Path) -> Vec<TestImage> {
     let mut out = Vec::new();
     let Ok(label_dirs) = std::fs::read_dir(test_dir) else {

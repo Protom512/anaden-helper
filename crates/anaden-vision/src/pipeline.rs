@@ -274,7 +274,7 @@ impl TaskDef {
     /// PC版テンプレート/ROI は raw-1258x708 空間で定義されるが、呼出側が screenshot を
     /// どの寸法に正規化して渡してもよい（黒帯クロップ + normalize 後は 1280x720 等）。
     /// 本メソッドは入力 screenshot の `width()/height()` から X/Y 別比を再計算し、
-    /// [`crate::scale::roi_to_normalized`] / [`crate::scale::needle_to_normalized`] で
+    /// [`crate::scale::roi_to_normalized`] / `crate::scale::needle_to_normalized` で
     /// ROI・needle をその空間へ揃える。よって **detect シグネチャは不変**で、呼出側は
     /// 正規化済み screenshot を渡すだけでよい（クロップ/resize は内部で吸収）。
     ///

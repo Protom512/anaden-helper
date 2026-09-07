@@ -472,7 +472,7 @@ pub fn spawn_stdout_reader(
 /// 複数スレッド（UI 側 kill/wait と reader スレッドの終了検出）で共有する子プロセス。
 ///
 /// `Child::wait` は blocking かつ排他のため共有できない。本型では
-/// [`SharedChild::wait_for_exit`] が `try_wait` をポーリングし、UI 側の
+/// `SharedChild::wait_for_exit` が `try_wait` をポーリングし、UI 側の
 /// kill/wait と競合しない（lock は各呼び出し毎に短時間のみ保持）。
 #[derive(Clone)]
 pub struct SharedChild(Arc<Mutex<Child>>);

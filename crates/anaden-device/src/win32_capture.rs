@@ -156,7 +156,7 @@ impl Win32Capture {
     /// [`Win32Capture::capture`] の同期版。tokio ランタイム無しで呼べる。
     ///
     /// `anaden-studio` のような tokio を持たない std::thread ベースの呼び出し元向け。
-    /// 内部手順は [`capture`](Self::capture) と同一(共通の [`resolve_and_capture`] を呼ぶ)。
+    /// 内部手順は [`capture`](Self::capture) と同一(共通の `resolve_and_capture` を呼ぶ)。
     /// HWND キャッシュの扱い(HWND 解決→PrintWindow→GetDIBits、失敗時キャッシュ破棄)も同等。
     pub fn capture_blocking(&self) -> Result<DynamicImage, AdbError> {
         let process = self.process.clone();

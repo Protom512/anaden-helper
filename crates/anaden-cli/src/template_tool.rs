@@ -1,6 +1,7 @@
 //! テンプレート抽出・マッチング検証ツール。
 //!
 //! 使い方:
+//! ```text
 //!   cargo run --bin anaden-tool -- capture <serial> <output_dir>
 //!   cargo run --bin anaden-tool -- extract <screenshot> <x> <y> <w> <h> <output>
 //!   cargo run --bin anaden-tool -- match <screenshot> <template> <threshold>
@@ -9,6 +10,7 @@
 //!   cargo run --bin anaden-tool -- record <serial> [options]
 //!   cargo run --bin anaden-tool -- explore <serial> [options]
 //!   cargo run --bin anaden-tool -- run-pipeline <screenshot> <pipeline_dir> <start_task> [--algorithm sse|ccoeff]
+//! ```
 
 use std::path::PathBuf;
 
