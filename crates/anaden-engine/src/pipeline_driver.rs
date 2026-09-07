@@ -495,14 +495,14 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// [`StepOutcome::Fired`] を返す。
     ///
     /// # current の巻き戻し
-    /// [`PipelineState::tick`] は内部で `current` を next[0] へ進める。検証失敗時は対象残存なので
+    /// [`PipelineState::tick`] は内部で `current` を `next[0]` へ進める。検証失敗時は対象残存なので
     /// next へ進むべきでない。本メソッドは [`FiredUnverified`][StepOutcome::FiredUnverified] 返却前に
     /// `current` を発火前のタスク名へ巻き戻す(=caller は次サイクルで同じタスクを再試行できる)。
     ///
-    /// 検証成功時は next へ進んだ状態を維持([`run_once`] と同じ)。
+    /// 検証成功時は next へ進んだ状態を維持([`Self::run_once`] と同じ)。
     ///
     /// # 戻り値
-    /// - 発火しなかった(NoMatch/NoFire/Error) → [`run_once`] と同じ結果をそのまま返す。
+    /// - 発火しなかった(NoMatch/NoFire/Error) → [`Self::run_once`] と同じ結果をそのまま返す。
     /// - 発火した → 事後検証を実施:
     ///   - テンプレ消失/変化 → [`StepOutcome::Fired`]
     ///   - テンプレ残存(高 conf で再マッチ) → [`StepOutcome::FiredUnverified`](current 巻き戻し済み)
@@ -791,7 +791,7 @@ pub fn bump_task_match(current: &str, list: &mut Vec<TaskMatchCount>) {
 /// そのまま流せる単一文字列。
 ///
 /// # 引数
-/// 整形対象の [`LoopOutcome`](`&LoopOutcome`)。`progress_report` フィールドを優先し、
+/// 整形対象の `&`[`LoopOutcome`]。`progress_report` フィールドを優先し、
 /// 旧フィールド(`iterations`/`fired_commands`/`terminal`)はフォールバック参照する。
 pub fn format_progress_report(outcome: &LoopOutcome) -> String {
     let pr = &outcome.progress_report;
@@ -1071,8 +1071,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// `run_loop_with_recovery` + 宣言的ゴール評価(Issue #37 T4)。
     ///
     /// `goal=Some` のとき各 tick後に [`anaden_core::goal::evaluate`] を呼び、
-    /// [`GoalStatus::Reached`] → [`LoopStopReason::GoalReached`]
-    /// [`GoalStatus::Failed`] → [`LoopStopReason::GoalTimeout`] で停止する。
+    /// [`anaden_core::goal::GoalStatus::Reached`] → [`LoopStopReason::GoalReached`]
+    /// [`anaden_core::goal::GoalStatus::Failed`] → [`LoopStopReason::GoalTimeout`] で停止する。
     /// `goal=None` のときは [`Self::run_loop_with_recovery`] と完全等価(後方互換)。
     ///
     /// 経過秒数は [`GoalClock`] から供給する。本番は [`SystemClock`]、テストは

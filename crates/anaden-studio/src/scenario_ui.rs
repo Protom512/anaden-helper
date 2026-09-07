@@ -436,7 +436,7 @@ pub enum ScenarioSaveError {
     /// (ロード元でも直近の保存先でもない)。1 バイトも書かない。
     ///
     /// Issue #160 レビュー M-1: 既存 pipeline への無警告上書き (新 TaskDef 群で
-    /// 置換 + [`sweep_removed_taskdefs`] による旧 TaskDef 削除) を防ぐ fail-closed。
+    /// 置換 + `sweep_removed_taskdefs` による旧 TaskDef 削除) を防ぐ fail-closed。
     /// task 登録経路の `TaskAlreadyExists` 拒否と対称。
     #[error(
         "pipeline dir already exists: {dir} (既存 pipeline の無警告上書きは禁止。ロードして編集するか別名を指定してください)"
@@ -464,7 +464,7 @@ pub enum ScenarioSaveError {
 /// stem ≠ name (`tap_bottom.toml` ↔ `TapBottomStable`) のため、name で保存すると
 /// 同一 TaskDef の重複ファイルができ再 load でタスクが倍化する。対応エントリの
 /// 無い新規タスクは `<name>.toml` へ保存される。また、削除・リネーム済みタスク
-/// の旧 TaskDef ファイルを保存成功後に掃除する ([`sweep_removed_taskdefs`]) —
+/// の旧 TaskDef ファイルを保存成功後に掃除する (`sweep_removed_taskdefs`) —
 /// 残ると `load_pipeline` が再読込時に旧タスクを復活させるため。
 ///
 /// # Errors
@@ -847,7 +847,7 @@ impl ScenarioPanel {
     /// UC-3 (i): 保存済み pipeline を新規タスクとして登録・有効化する
     /// (「新規タスクとして登録・有効化」ボタンの実体。ドメインは
     /// `scenario_task_link::register_and_enable_task`)。
-    /// 成功時は [`scenario_task_link::ScenarioPanelEvent::TaskEnabled`] を返す。
+    /// 成功時は [`crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled`] を返す。
     pub fn register_as_new_task(
         &mut self,
         ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
@@ -924,7 +924,7 @@ impl ScenarioPanel {
     /// 保存済みでない場合は何も描画しない (4 段階フローの (b)(c) は保存 (a) が前提)。
     /// 2 経路: (i) 新規タスクとして登録 (task id / title 編集可)・
     /// (ii) 既存の未実装タスク (`ctx.stubs`) へ紐付け+有効化。
-    /// 成功時は [`scenario_task_link::ScenarioPanelEvent`] を返す
+    /// 成功時は [`crate::scenario_task_link::ScenarioPanelEvent`] を返す
     /// (app.rs がホーム一覧を再読込して反映)。
     pub fn ui_task_link(
         &mut self,

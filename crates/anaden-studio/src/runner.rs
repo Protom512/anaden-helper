@@ -87,7 +87,7 @@ pub fn build_spawn_spec(program: &str, args: &[String]) -> SpawnSpec {
     SpawnSpec::new(program, args.to_vec())
 }
 
-/// [`StrategySelection`] から `anaden run` の CLI 引数列を組み立てる純関数
+/// [`anaden_strategies::StrategySelection`] から `anaden run` の CLI 引数列を組み立てる純関数
 /// （Issue #88 受け入れ基準: egui 非依存・ヘッドレスユニットテスト対象）。
 ///
 /// Issue #139 T1 単一情報源化: 引数列はハードコード match ではなく
@@ -537,7 +537,7 @@ impl PipelineRunnerApp {
 
     /// ログをクリアする（クリアボタンのハンドラ）。
     ///
-    /// clear も改訂番号を進めるため、続く [`Self::refresh_snapshot`] は
+    /// clear も改訂番号を進めるため、続く `Self::refresh_snapshot` は
     /// 空スナップショットへ更新される (Issue #160 UC-5 で差分化しても
     /// 「クリア後に古い行が残る」ことがない構造)。
     pub fn clear_logs(&mut self) {

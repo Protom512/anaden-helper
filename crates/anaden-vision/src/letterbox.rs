@@ -68,7 +68,7 @@ impl CropInfo {
 
 /// `img` の上下左右の黒帯を検出し、中央の描画領域をクロップして返す。
 ///
-/// 黒帯（平均輝度 < [`BLACK_BAR_LUMINANCE_THRESHOLD`] の端から連続する行/列）が
+/// 黒帯（平均輝度 < `BLACK_BAR_LUMINANCE_THRESHOLD` の端から連続する行/列）が
 /// 上下・左右いずれにも存在しない場合は、元画像を複製して返す。
 ///
 /// # 引数
@@ -88,7 +88,7 @@ pub fn crop_to_content(img: &DynamicImage) -> DynamicImage {
 /// 戻り値は `(クロップ後画像, CropInfo)`。`CropInfo` は:
 /// - 黒帯あり → コンテンツ領域の左上オフセット（`offset_x`/`offset_y`）と寸法。
 /// - 黒帯なし → `offset=(0,0)`, `size=元画像寸法`（[`CropInfo::full`]）。
-/// - フォールバック（全面黒等で残りが [`MIN_CONTENT_PX`] 未満）→ 元画像寸法で `offset=(0,0)`。
+/// - フォールバック（全面黒等で残りが `MIN_CONTENT_PX` 未満）→ 元画像寸法で `offset=(0,0)`。
 /// - 入力が空(0x0) → `(0,0,0,0)`。
 ///
 /// この `CropInfo` は発火座標の逆変換（normalize後1280空間 → 元画像＝黒帯込み生画像）に

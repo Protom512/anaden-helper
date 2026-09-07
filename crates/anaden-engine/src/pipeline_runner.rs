@@ -146,7 +146,7 @@ impl PipelineState {
 
     /// 現在のタスク名を強制設定する。
     ///
-    /// [`Self::tick`] は next[0] へ自動遷移するが、発火後検証で対象が残存した場合など
+    /// [`Self::tick`] は `next[0]` へ自動遷移するが、発火後検証で対象が残存した場合など
     /// caller が current を発火前へ巻き戻したいときに使う(アンドゥ用途)。
     /// 通常のループ駆動では使わない(tick が current を管理する)。
     pub fn set_current(&mut self, current: impl Into<String>) {
@@ -157,7 +157,7 @@ impl PipelineState {
     ///
     /// 内部で [`run_step`]（現在タスク名で [`TaskDef`] を検索 → detect）を呼ぶ。
     /// 戻り値 [`Option<TickResult>`]:
-    /// - マッチ成功 → [`Some`]([`TickResult`])。`command` は action から変換、`next_current` は next[0]。
+    /// - マッチ成功 → [`Some`]([`TickResult`])。`command` は action から変換、`next_current` は `next[0]`。
     ///   `next_current` が [`Some`] なら `current` をそこへ更新する。
     /// - 非マッチ・閾値下・ROI 外・テンプレ欠落・未知タスク名 → [`None`]（`current` は変更せず）。
     ///
