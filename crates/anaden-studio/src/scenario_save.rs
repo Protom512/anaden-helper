@@ -44,6 +44,25 @@ pub enum ScenarioSaveError {
         /// 拒否された保存先ディレクトリ。
         dir: PathBuf,
     },
+    /// 書き出し TaskDef ファイル (stem または name の .toml) が複数タスクで
+    /// 衝突する。1 バイトも書かない。
+    ///
+    /// Issue #180 (minor-3): stem ≠ name のロード済みタスク (stem `<X>.toml`) と
+    /// 新規タスク (name `<X>`) が同じファイルを指すと後書きが前者を上書きし、
+    /// 再 load でタスクがサイレント消失する。保存前の事前検査で拒否する
+    /// (検査はケースインセンシティブ — Windows FS では大文字小文字違いも
+    /// 同一ファイル)。
+    #[error(
+        "task file path collision: {path} is the write target of tasks `{first}` and `{second}` (stem 衝突。stem ≠ name の既存タスクと衝突する名前は使えません)"
+    )]
+    TaskFileCollision {
+        /// 衝突した書き出しファイルパス。
+        path: PathBuf,
+        /// 先に書き出すタスク (TaskDef name)。
+        first: String,
+        /// 同じパスを指すもう一方のタスク (TaskDef name)。
+        second: String,
+    },
 }
 
 /// 検証済みシナリオを `<pipelines_root>/<シナリオ名>/` へ保存する (UC-1 保存経路)。
@@ -85,6 +104,14 @@ pub fn save_scenario(
 ) -> Result<PathBuf, ScenarioSaveError> {
     state.validate()?;
     let dir = pipelines_root.join(state.name.trim());
+    // UC-4: ロード済みタスクは元ファイル (stem) へ、新規タスクは <name>.toml へ。
+    let out_paths = task_out_paths(state, &dir);
+    // stem 衝突検査 (Issue #180 minor-3・fail-closed): 書き出しパスの一意性。
+    // stem ≠ name のロード済みタスクと新規タスク名が同じファイルを指すと
+    // 後書きが前者を上書きしてタスクがサイレント消失するため、1 バイトも
+    // 書く前に拒否する (既存バリデーションはタスク *名* の一意性しか見ない
+    // ため、この衝突は検出できない)。
+    check_unique_out_paths(state, &out_paths)?;
     // 既存 dir 上書きガード (レビュー M-1): 保存先 dir が既に存在する場合、
     // この編集状態の所有対象 (ロード元 / 直近の保存先 = loaded_from) と同一の
     // ときのみ書き込みを許可する。それ以外 (新規シナリオ名が既存 pipeline と
@@ -101,21 +128,64 @@ pub fn save_scenario(
             .map_err(ScenarioSaveError::PngWrite)?;
     }
     anaden_vision::save_pipeline_manifest(&state.to_manifest(), &dir)?;
-    // UC-4: ロード済みタスクは元ファイル (stem) へ、新規タスクは <name>.toml へ。
-    let mut written: Vec<PathBuf> = Vec::new();
-    for task in &state.tasks {
-        let stem = state
-            .loaded_task_files
-            .iter()
-            .find(|(n, _)| n == &task.name)
-            .map(|(_, stem)| stem.as_str())
-            .unwrap_or(task.name.as_str());
-        let path = dir.join(format!("{stem}.toml"));
-        anaden_vision::save_task_def(task, &path)?;
-        written.push(path);
+    for (task, path) in state.tasks.iter().zip(&out_paths) {
+        anaden_vision::save_task_def(task, path)?;
     }
-    sweep_removed_taskdefs(&dir, &written);
+    sweep_removed_taskdefs(&dir, &out_paths);
     Ok(dir)
+}
+
+/// 各 TaskDef の書き出し先 `<dir>/<stem-or-name>.toml` を導出する (UC-4:
+/// ロード済みタスクは元ファイル stem、対応エントリの無い新規タスクは
+/// TaskDef name)。順序は `state.tasks` と一致する。
+fn task_out_paths(state: &ScenarioEditorState, dir: &Path) -> Vec<PathBuf> {
+    state
+        .tasks
+        .iter()
+        .map(|task| {
+            let stem = state
+                .loaded_task_files
+                .iter()
+                .find(|(n, _)| n == &task.name)
+                .map(|(_, stem)| stem.as_str())
+                .unwrap_or(task.name.as_str());
+            dir.join(format!("{stem}.toml"))
+        })
+        .collect()
+}
+
+/// 書き出しパスの一意性検査 (Issue #180 minor-3)。
+///
+/// 比較は [`path_eq_ignore_case`] (Windows FS では大文字小文字違いも同一
+/// ファイル)。最初の衝突 (タスク順) を [`ScenarioSaveError::TaskFileCollision`]
+/// で返す。
+fn check_unique_out_paths(
+    state: &ScenarioEditorState,
+    out_paths: &[PathBuf],
+) -> Result<(), ScenarioSaveError> {
+    for (i, path_a) in out_paths.iter().enumerate() {
+        for (j, path_b) in out_paths.iter().enumerate().skip(i + 1) {
+            if path_eq_ignore_case(path_a, path_b) {
+                let name = |idx: usize| {
+                    state
+                        .tasks
+                        .get(idx)
+                        .map_or_else(String::new, |t| t.name.clone())
+                };
+                return Err(ScenarioSaveError::TaskFileCollision {
+                    path: path_b.clone(),
+                    first: name(i),
+                    second: name(j),
+                });
+            }
+        }
+    }
+    Ok(())
+}
+
+/// パスのケースインセンシティブ比較 (ASCII — Windows FS の同一ファイル判定)。
+fn path_eq_ignore_case(a: &Path, b: &Path) -> bool {
+    a.to_string_lossy().to_ascii_lowercase() == b.to_string_lossy().to_ascii_lowercase()
 }
 
 /// `dir` が編集状態の所有対象 (loaded_from) と同一か。
@@ -135,6 +205,12 @@ fn is_owned_dir(state: &ScenarioEditorState, dir: &Path) -> bool {
 /// 今回の保存で書き出さなかった旧 TaskDef ファイル (削除・リネーム前) を
 /// 掃除する (UC-4)。manifest 慣例ファイル (`pipeline.toml`) は対象外。
 ///
+/// 書き出しパスとの比較はケースインセンシティブ ([`path_eq_ignore_case`] —
+/// Issue #180 minor-4): Windows FS では大文字小文字違いも同一ファイルのため、
+/// バイト比較だとケース違い stem 衝突のファイルを「未書き出し」と誤認して
+/// 書いた直後のファイルを sweep しうる (本来は保存前の stem 衝突検査
+/// [`ScenarioSaveError::TaskFileCollision`] で拒否される組み合わせの二重防御)。
+///
 /// 保存した全 TaskDef の書き出しに成功した後にのみ呼ぶ (失敗時の部分状態で
 /// 旧ファイルを消さない)。削除自体は best-effort — 失敗しても再 load 時に
 /// 旧タスクが復活するだけでデータ破損にはならないためエラーにはしない。
@@ -142,6 +218,10 @@ fn sweep_removed_taskdefs(dir: &Path, written: &[PathBuf]) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
     };
+    let written_lower: Vec<String> = written
+        .iter()
+        .map(|w| w.to_string_lossy().to_ascii_lowercase())
+        .collect();
     for entry in entries.flatten() {
         let path = entry.path();
         let is_toml = path
@@ -152,7 +232,8 @@ fn sweep_removed_taskdefs(dir: &Path, written: &[PathBuf]) {
             .file_name()
             .and_then(|n| n.to_str())
             .is_some_and(|n| n == anaden_vision::PIPELINE_MANIFEST_FILENAME);
-        if is_toml && !is_manifest && !written.contains(&path) {
+        let is_written = written_lower.contains(&path.to_string_lossy().to_ascii_lowercase());
+        if is_toml && !is_manifest && !is_written {
             let _ = std::fs::remove_file(&path);
         }
     }
@@ -244,5 +325,115 @@ mod tests {
         let end = defs.iter().find(|d| d.name == "End").expect("End");
         assert_eq!(end.roi, None);
         assert_eq!(end.action, Some(Action::ClickSelf));
+    }
+
+    /// dir 内の (ファイル名, バイト列) の決定論的スナップショット
+    /// (バイト不変アサーション用)。
+    fn dir_snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
+        let mut out: Vec<_> = fs::read_dir(dir)
+            .expect("read_dir")
+            .flatten()
+            .map(|e| {
+                let p = e.path();
+                let name = p.file_name().unwrap().to_string_lossy().to_string();
+                (name, fs::read(&p).unwrap())
+            })
+            .collect();
+        out.sort();
+        out
+    }
+
+    /// minor-3 (Issue #180): stem ≠ name の既存 pipeline へ stem と同名の新規
+    /// タスクを追加すると書き出しパスが衝突する → 保存前に専用エラーで拒否し
+    /// 1 バイトも書かない (バイト不変)。
+    #[test]
+    fn save_refuses_stem_collision_writing_nothing() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pipelines_root = tmp.path().join("pipelines");
+
+        // (1) 既存 pipeline を作る: ファイル FieldHudTr.toml の TaskDef name は
+        //     FieldHudWide (stem ≠ name — UC-4 の往復契約と同構成)。
+        let mut st = ScenarioEditorState::new("field_hud");
+        st.add_task(task_def("FieldHudWide", Some(vec![])));
+        st.loaded_task_names = vec!["FieldHudWide".to_string()];
+        st.loaded_task_files = vec![("FieldHudWide".to_string(), "FieldHudTr".to_string())];
+        st.add_goal(loop_goal("loop3", 3));
+        let dir = save_scenario(&st, &[], &pipelines_root).expect("initial save");
+        let before = dir_snapshot(&dir);
+
+        // (2) ロード → 新規タスク FieldHudTr (= 既存 stem) を追加。
+        //     既存バリデーション (タスク名一意性・命名規約) では検出できない。
+        let mut st2 = crate::scenario_load::load_scenario_from_dir(&dir).expect("load");
+        st2.add_task(task_def("FieldHudTr", Some(vec![])));
+        assert!(
+            st2.validate().is_ok(),
+            "stem 衝突は既存バリデーションでは検出できないこと: {:?}",
+            st2.validation_issues()
+        );
+
+        // (3) 保存拒否 (TaskFileCollision) + dir は 1 バイトも変わらない。
+        let err = save_scenario(&st2, &[], &pipelines_root).expect_err("must refuse");
+        assert!(
+            matches!(
+                err,
+                ScenarioSaveError::TaskFileCollision { ref path, .. }
+                    if path.file_name().is_some_and(|n| n == "FieldHudTr.toml")
+            ),
+            "err: {err:?}"
+        );
+        assert_eq!(dir_snapshot(&dir), before, "1 バイトも書かない");
+    }
+
+    /// minor-3 (ケース違い): ロード済み 2 タスクの stem がケース違いのみ
+    /// (StartPc / startpc) でも Windows では同一ファイル → 衝突として拒否。
+    #[test]
+    fn save_refuses_case_variant_stem_collision() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let pipelines_root = tmp.path().join("pipelines");
+
+        let mut st = ScenarioEditorState::new("s");
+        st.add_task(task_def("StartPc", Some(vec![])));
+        st.add_task(task_def("StartPcSub", Some(vec![])));
+        st.loaded_task_names = vec!["StartPc".to_string(), "StartPcSub".to_string()];
+        st.loaded_task_files = vec![
+            ("StartPc".to_string(), "StartPc".to_string()),
+            ("StartPcSub".to_string(), "startpc".to_string()),
+        ];
+        st.add_goal(loop_goal("g", 1));
+        assert!(st.validate().is_ok());
+
+        let err = save_scenario(&st, &[], &pipelines_root).expect_err("must refuse");
+        assert!(
+            matches!(err, ScenarioSaveError::TaskFileCollision { .. }),
+            "err: {err:?}"
+        );
+        assert!(
+            !pipelines_root.join("s").exists(),
+            "保存先ディレクトリすら作らない"
+        );
+    }
+
+    /// minor-4 (Issue #180): sweep の書き出しパス比較はケースインセンシティブ。
+    /// ケース違い stem (beta.toml vs Beta.toml) は同一ファイル扱いし sweep され
+    /// ない (保存前の stem 衝突検査で本来拒否される組み合わせの二重防御)。
+    #[test]
+    fn sweep_keeps_case_variant_of_written_task_file() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let dir = tmp.path().join("p");
+        fs::create_dir_all(&dir).expect("mkdir");
+        fs::write(dir.join("Alpha.toml"), b"a").expect("write");
+        fs::write(dir.join("Beta.toml"), b"b").expect("write");
+
+        // 書き出しパス beta.toml は Beta.toml とケース違いのみ → 同一ファイル扱い。
+        sweep_removed_taskdefs(&dir, &[dir.join("beta.toml")]);
+
+        assert!(
+            dir.join("Beta.toml").exists(),
+            "ケース違い stem は sweep されない"
+        );
+        assert!(
+            !dir.join("Alpha.toml").exists(),
+            "完全不一致の旧ファイルは sweep される"
+        );
     }
 }

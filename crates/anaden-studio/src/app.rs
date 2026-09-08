@@ -28,7 +28,7 @@ pub use crate::app_state::{
     AppMode, ConnectionState, ConnectionStatus, PipelineActionKind, StudioApp,
     check_android_device, check_windows_process, pipeline_task_spec, save_pipeline_task,
 };
-use crate::app_state::{EngineKind, HEATMAP_DOWNSCALE, STATE_OPTIONS};
+use crate::app_state::{DEFAULT_TEMPLATE_NAME, EngineKind, HEATMAP_DOWNSCALE, STATE_OPTIONS};
 
 impl StudioApp {
     /// engine_kind から生スコア評価用エンジンを構築する（downscale=2, 閾値0）。
@@ -488,7 +488,7 @@ impl StudioApp {
             return;
         };
         let name = if self.tpl_name.trim().is_empty() {
-            "template_01".to_string()
+            DEFAULT_TEMPLATE_NAME.to_string()
         } else {
             self.tpl_name.trim().to_string()
         };
@@ -528,7 +528,7 @@ impl StudioApp {
         let roi = self.roi.rect()?;
         let img = self.screenshot.as_ref()?;
         let name = if self.tpl_name.trim().is_empty() {
-            "template_01".to_string()
+            DEFAULT_TEMPLATE_NAME.to_string()
         } else {
             self.tpl_name.trim().to_string()
         };
@@ -750,6 +750,30 @@ mod tests {
         app.save_current_pipeline_task();
         let tasks = anaden_vision::load_pipeline(dir.path()).unwrap();
         assert!((tasks[0].threshold - 0.9).abs() < 1e-4);
+    }
+
+    /// minor-7 (Issue #180): 既定候補名 (tpl_name の初期値・空欄時フォールバック)
+    /// はパイプラインノード命名規約 (task_name_issue: PascalCase・連番禁止) に
+    /// 適合し、tpl_name 空欄時に scenario_candidate がその名前を採用する。
+    #[test]
+    fn scenario_candidate_default_name_follows_naming_convention() {
+        assert!(
+            crate::scenario_load::task_name_issue(DEFAULT_TEMPLATE_NAME).is_none(),
+            "既定候補名 {DEFAULT_TEMPLATE_NAME} は命名規約に適合すること"
+        );
+
+        let mut app = StudioApp::default();
+        assert_eq!(app.tpl_name, DEFAULT_TEMPLATE_NAME, "フォーム初期値");
+        app.tpl_name = String::new();
+        app.screenshot = Some(Arc::new(DynamicImage::ImageLuma8(
+            image::GrayImage::from_pixel(200, 100, Luma([255])),
+        )));
+        app.roi.anchor = Some((10, 10));
+        app.roi.current = Some((110, 60)); // 100x50
+
+        let (spec, _crop) = app.scenario_candidate().expect("candidate");
+
+        assert_eq!(spec.name, DEFAULT_TEMPLATE_NAME);
     }
 
     // ---- Issue #144 Task 3 / Issue #154 Shard 1: タスクキュー実行配線 ----

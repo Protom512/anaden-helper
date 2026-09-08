@@ -42,6 +42,12 @@ pub(crate) const STATE_OPTIONS: &[&str] = &[
     "title", "field", "loading", "battle", "fishing", "menu", "dialog", "unknown",
 ];
 
+/// tpl_name 未入力時のフォールバック・フォーム初期値として使う既定テンプレート/
+/// task 名 (Issue #180 minor-7)。パイプラインノード命名規約
+/// ([`crate::scenario_load::task_name_issue`]: PascalCase 強制・連番禁止・
+/// 過汎用名禁止) に適合する値であること (app.rs のテストで機械保証)。
+pub(crate) const DEFAULT_TEMPLATE_NAME: &str = "MyFirstTapPc";
+
 /// GUI のモード。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
@@ -103,7 +109,8 @@ pub struct StudioApp {
     pub(crate) heatmap_search: ScreenRegion,
     /// テンプレートの最良マッチ位置（元画像座標・ROI解放時に更新）。
     pub(crate) best_match: Option<ScreenRegion>,
-    /// 保存時のテンプレート名入力。
+    /// 保存時のテンプレート名入力。空欄時は [`DEFAULT_TEMPLATE_NAME`]
+    /// (命名規約適合) を採用する。
     pub(crate) tpl_name: String,
     /// 保存時の状態選択（STATE_OPTIONS のインデックス）。
     pub(crate) tpl_state_idx: usize,
@@ -215,7 +222,7 @@ impl StudioApp {
             heatmap_tex: None,
             heatmap_search: ScreenRegion::new(0, 0, 0, 0),
             best_match: None,
-            tpl_name: String::from("template_01"),
+            tpl_name: String::from(DEFAULT_TEMPLATE_NAME),
             tpl_state_idx: 0,
             save_dir: PathBuf::from("./templates/scenes"),
             mode: AppMode::Authoring,
