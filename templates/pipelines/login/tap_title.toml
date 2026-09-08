@@ -8,7 +8,7 @@ algorithm = "ccoeff"
 #
 # 座標系: RAW 1258x708 ピクセル空間 (PC版 GetClientRect 実測)。nav_to_field_pc と同一。
 template  = "../../scenes/title_pc/version_label.png"
-roi       = [65, 7, 121, 35]
+roi       = [8, 2, 138, 20]
 threshold = 0.80
 # タップ位置: "Tap to Start" (nav_to_field_pc/tap_to_start.toml と同座標)。
 action    = { type = "click_rect", roi = [900, 466, 30, 30] }
