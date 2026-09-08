@@ -6,10 +6,12 @@
 //! のうち (b)(c) を担う純ドメイン。egui 非依存。task = pipeline への名前参照
 //! (MAA taskItem の entry と同型) であり pipeline 本体とは完全分離。
 //!
-//! - fail-closed: 同名 task TOML 既存時は上書き拒否、task id の安全性検証、
-//!   書き込み前に [`TaskDefinition::parse_toml`] で完全検証、有効化は
+//! - fail-closed: 同名 task TOML 既存時は上書き拒否、task id の安全性検証
+//!   (register・bind 両経路・Issue #180)、書き込み前に
+//!   [`TaskDefinition::parse_toml`] で完全検証、有効化は
 //!   [`crate::tasks::enable_task`] の pipeline load 検証に委譲。
-//! - 有効化失敗時は登録した TOML を補償削除し部分状態を残さない。
+//! - TOML 書き込み中断・有効化失敗時は登録した TOML を補償削除し部分状態を
+//!   残さない (Issue #180)。
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
@@ -104,7 +106,11 @@ fn is_safe_task_id(id: &str) -> bool {
 ///
 /// [`crate::scenario_ui::resolve_template_reference`] を再用し、結果が
 /// 絶対パス・`..` 遷移含み・空の場合は [`ScenarioTaskError::NotRootRelative`]
-/// で fail-closed (TOML 規約 `templates/pipelines/<name>` のみ受け入れる)。
+/// で fail-closed する。受け入れるのは **root 相対の任意パス**
+/// (セパレータは forward slash) であって、`templates/pipelines/<name>` は
+/// 慣例上の代表例にすぎない — ディレクトリ prefix としては検証しない
+/// (doc-code 整合・Issue #180: prefix 検証の追加は既存 task TOML の受け付け
+/// を変える動作変更になるため非スコープ)。
 fn pipeline_dir_rel(pipeline_dir: &Path, root: &Path) -> Result<String, ScenarioTaskError> {
     let rel = crate::scenario_ui::resolve_template_reference(pipeline_dir, root);
     let unsafe_rel =
@@ -179,8 +185,9 @@ fn generate_task_toml(
 /// - 生成 TOML は stub 状態 (`implemented = false` + pipeline_dir + start_task 宣言)
 ///   で書き出し直後に [`crate::tasks::enable_task`] でフリップする — 有効化の
 ///   fail-closed 検証 (pipeline load 可能・id 一致) を新規経路にも適用する。
-/// - 有効化失敗時は登録した TOML を補償削除する (部分状態を残さない。
-///   削除自体の失敗は stub (選択不可) が残るのみで無害なため伝播しない)。
+/// - TOML 書き込み中断 (部分ファイル残留)・有効化失敗時は登録した TOML を
+///   補償削除する (部分状態を残さない・Issue #180。削除自体の失敗は stub
+///   (選択不可) が残るのみで無害なため伝播しない)。
 ///
 /// # Errors
 /// 上記 fail-closed 条件いずれかで [`ScenarioTaskError`]。
@@ -215,10 +222,16 @@ pub fn register_and_enable_task(
         path: tasks_dir.to_path_buf(),
         source: Box::new(source),
     })?;
-    std::fs::write(&task_path, &source).map_err(|source| ScenarioTaskError::Write {
-        path: task_path.clone(),
-        source: Box::new(source),
-    })?;
+    if let Err(source) = std::fs::write(&task_path, &source) {
+        // 補償削除 (Issue #180): 呼出前は task_path が存在しなかった (冒頭の
+        // exists 検査で保証) ため、write 中断で残留した部分ファイルはすべて
+        // 本呼出の産物。削除して部分状態を残さない (削除失敗は stub 残留のみ)。
+        let _ = std::fs::remove_file(&task_path);
+        return Err(ScenarioTaskError::Write {
+            path: task_path,
+            source: Box::new(source),
+        });
+    }
     match tasks::enable_task(&task_path, id, &dir_rel, root) {
         Ok(def) => Ok(def),
         Err(e) => {
@@ -232,10 +245,15 @@ pub fn register_and_enable_task(
 /// 既存 stub タスク (`implemented = false` の pipeline_run) へ pipeline を
 /// 紐付けて有効化する (ルート (ii): (b) スキップで enable_task のみ)。
 ///
-/// 検証 (id 一致・kind・pipeline load 可能・外科的行編集の往復確認) はすべて
-/// [`crate::tasks::enable_task`] に委譲する — 有効化の単一情報源。
+/// task id は [`register_and_enable_task`] と対称に
+/// [`ScenarioTaskError::UnsafeTaskId`] で検証する (Issue #180: 公開 API の
+/// 引数がそのまま `tasks_dir.join` へ入るため、不正 id はパス構築の前段で
+/// 拒否する)。それ以外の検証 (id 一致・kind・pipeline load 可能・外科的行編集の
+/// 往復確認) はすべて [`crate::tasks::enable_task`] に委譲する — 有効化の
+/// 単一情報源。
 ///
 /// # Errors
+/// [`ScenarioTaskError::UnsafeTaskId`] (不正 task id)、
 /// [`ScenarioTaskError::TaskNotFound`] (TOML 無し) または
 /// [`ScenarioTaskError::Enable`] (enable_task の fail-closed 検証失敗)。
 pub fn bind_and_enable_task(
@@ -245,6 +263,11 @@ pub fn bind_and_enable_task(
     pipeline_dir: &Path,
 ) -> Result<TaskDefinition, ScenarioTaskError> {
     let id = task_id.trim();
+    if !is_safe_task_id(id) {
+        return Err(ScenarioTaskError::UnsafeTaskId {
+            id: task_id.to_string(),
+        });
+    }
     let dir_rel = pipeline_dir_rel(pipeline_dir, root)?;
     let task_path = tasks_dir.join(format!("{id}.toml"));
     if !task_path.exists() {
@@ -431,6 +454,88 @@ mod tests {
         assert!(
             matches!(err, ScenarioTaskError::NotRootRelative { .. }),
             "err: {err:?}"
+        );
+    }
+
+    /// minor-1 (Issue #180): bind_and_enable_task も task id を検証する
+    /// (register_and_enable_task と対称)。不正 id (パス区切り・予約文字・空) は
+    /// `tasks_dir.join` される前に UnsafeTaskId で拒否される。
+    #[test]
+    fn bind_rejects_unsafe_task_id_before_path_join() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let tasks_dir = root.join("templates/tasks");
+        fs::create_dir_all(&tasks_dir).expect("mkdir");
+        let pipeline = saved_pipeline(root, "fishing2");
+
+        for bad in ["a/b", "..", "", "a\\b", "a:b", "a<b", "a\"b"] {
+            let err =
+                bind_and_enable_task(&tasks_dir, root, bad, &pipeline).expect_err("must reject");
+            assert!(
+                matches!(err, ScenarioTaskError::UnsafeTaskId { .. }),
+                "bad {bad:?}: {err:?}"
+            );
+        }
+        // tasks_dir には何も書かれていない (検査はパス構築後の IO より前段)。
+        assert!(
+            fs::read_dir(&tasks_dir).expect("read_dir").next().is_none(),
+            "不正 id では一切の副作用を残さない"
+        );
+    }
+
+    /// minor-2 (Issue #180): TOML write 失敗も補償削除対象。id としては安全
+    /// (単一パス要素・予約文字なし) だがファイル名が FS のパス成分長上限
+    /// (255 文字) を超える id で write を失敗させ、部分ファイルを含む残留
+    /// ゼロを検証する (部分書き込みそのものは std::fs を差し替えられない
+    /// ため再現不可 — write 失敗経路の補償挙動を実パスで確認)。
+    #[test]
+    fn register_compensates_task_toml_on_write_failure() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let tasks_dir = root.join("templates/tasks");
+        let pipeline = saved_pipeline(root, "fishing2");
+        let long_id = "A".repeat(300); // `<id>.toml` = 304 文字 > 255
+
+        let err =
+            register_and_enable_task(&tasks_dir, root, &pipeline, &long_id, "長い名前", "Start")
+                .expect_err("write must fail");
+
+        assert!(
+            matches!(err, ScenarioTaskError::Write { .. }),
+            "err: {err:?}"
+        );
+        let residue: Vec<_> = fs::read_dir(&tasks_dir)
+            .expect("tasks_dir exists (create_dir_all 成功後)")
+            .collect();
+        assert!(
+            residue.is_empty(),
+            "write 失敗時は部分ファイルを含め残留ゼロ: {residue:?}"
+        );
+    }
+
+    /// minor-2 (create 系エラーパス): tasks_dir 自体が既存ファイルなら
+    /// create_dir_all が失敗する。前提資産 (そのファイル) は 1 バイトも変わらない。
+    #[test]
+    fn register_write_failure_keeps_preexisting_tasks_dir_file_intact() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path();
+        let tasks_dir = root.join("templates/tasks");
+        fs::create_dir_all(root.join("templates")).expect("mkdir");
+        fs::write(&tasks_dir, b"not a directory").expect("prepare file");
+        let pipeline = saved_pipeline(root, "fishing2");
+
+        let err =
+            register_and_enable_task(&tasks_dir, root, &pipeline, "fishing2", "新規", "Start")
+                .expect_err("must fail");
+
+        assert!(
+            matches!(err, ScenarioTaskError::Write { .. }),
+            "err: {err:?}"
+        );
+        assert_eq!(
+            fs::read(&tasks_dir).expect("read"),
+            b"not a directory",
+            "前提資産は 1 バイトも変わらない"
         );
     }
 
