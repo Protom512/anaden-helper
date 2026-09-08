@@ -8,6 +8,10 @@
 pub mod app;
 pub mod app_state;
 pub mod app_ui;
+pub mod app_ui_authoring;
+pub mod app_ui_batch;
+pub mod app_ui_body;
+pub mod app_ui_tasks;
 pub mod batch;
 pub mod canvas;
 pub mod childproc;
