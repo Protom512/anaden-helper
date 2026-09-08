@@ -7,6 +7,9 @@
 
 pub mod app;
 pub mod app_state;
+pub mod app_state_connection;
+pub mod app_state_core;
+pub mod app_state_pipeline_task;
 pub mod app_ui;
 pub mod app_ui_authoring;
 pub mod app_ui_batch;
