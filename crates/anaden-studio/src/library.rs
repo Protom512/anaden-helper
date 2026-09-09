@@ -72,6 +72,32 @@ pub(crate) fn template_structure_warning(image: &DynamicImage) -> Option<String>
     ))
 }
 
+/// needle (テンプレート PNG) が TaskDef の ROI に収まらない場合の警告文を返す
+/// (Issue #187・fail-visible)。
+///
+/// 収容判定は anaden-vision の単一実装 ([`anaden_vision::needle_fits_roi`]) に委譲する
+/// (Issue #184 の stddev 検証と同じ「GUI 側で再実装しない」原則)。
+///
+/// - `Some(warning)`: needle の幅/高さが roi の幅/高さを超えている。ROI cropping 後の
+///   haystack に needle が置けず恒久 NoMatch になる (Issue #182: 再生成テンプレ 138px 幅
+///   vs 旧 roi 幅 121px で発火しなかった実例)。
+/// - `None`: 収まる、または roi = 全面 (省略)。
+///
+/// 呼出側 (シナリオ保存) はこの警告を status へ表示するのみで、**保存自体は
+/// ブロックしない** (テンプレート差し替えと ROI 更新は対で行うべきだが、警告で
+/// 促すに留める — [`template_structure_warning`] と同じ方針)。
+pub(crate) fn needle_roi_warning(needle: (u32, u32), roi: Option<[u32; 4]>) -> Option<String> {
+    if anaden_vision::needle_fits_roi(needle, roi) {
+        return None;
+    }
+    let [_, _, rw, rh] = roi?;
+    let (nw, nh) = needle;
+    Some(format!(
+        "警告: テンプレート ({nw}x{nh}) が ROI ({rw}x{rh}) より大きい — ROI 内に needle が\
+         収まらず恒久 NoMatch になります (テンプレート差し替え時は ROI を対で更新してください)"
+    ))
+}
+
 /// ベースディレクトリ下の全 sidecar TOML を読み込み、仕様一覧を返す。
 /// PNG の存在は確認しない（TOML のみ基準）。
 #[allow(dead_code)] // M4 バッチ混同行列で使用
