@@ -2123,14 +2123,16 @@ mod tests {
              (avoids duplicate detection across cold-start steps)"
         );
 
-        // Issue #57: TapToStartPc の検出 ROI は左上 version 表示帯 [65,7,121,35] に固定。
-        // 旧値 [1046,668,112,28] は 20:9 自己クロップ由来の右下暫定値で実機(左上帯)と
-        // 不一致だった。テンプレ差し替え(version_label.png 再生成)と ROI は対で更新される
-        // ため、片方だけ戻る回帰をこのテストで弁別する。
+        // Issue #57→#182: TapToStartPc の検出 ROI は左上 ID 表示帯 [8,2,138,20] に固定。
+        // 旧値 [1046,668,112,28] は 20:9 自己クロップ由来の右下暫定値、[65,7,121,35] は
+        // version 帯時代の値で、Issue #182 のテンプレ再生成(ID 帯 138x20・stddev 53.1)後は
+        // needle 幅 138 > roi 幅 121 となり恒久 NoMatch だった。テンプレ差し替えと ROI は
+        // 対で更新されるため、片方だけ戻る回帰をこのテストで弁別する。
         assert_eq!(
             tap_roi,
-            [65, 7, 121, 35],
-            "TapToStartPc ROI must be the top-left version label band (Issue #57)"
+            [8, 2, 138, 20],
+            "TapToStartPc ROI must be the top-left ID label band [8,2,138,20] \
+             (Issue #182 template regeneration pair-update)"
         );
     }
 
@@ -2991,9 +2993,11 @@ mod tests {
             assert_roi_within_1258x708(roi, &d.name);
             // 小テンプレ要件(TASKS.md: 小テンプレ化): 各辺 50..=120 程度。
             // 大型(title_center 800x300 相当)だと背景差に弱くなるため寸法上限で縛る。
+            // 上限は 140 (Issue #182): version_label アンカーは左上 ID 表示帯 138x20 で、
+            // 旧上限 130 を 8px 超える。ID 帯の全文幅を保つ必要があるため上限を拡張した。
             assert!(
-                roi[2] <= 130 && roi[3] <= 130,
-                "{}: sub-template ROI {:?} exceeds small-template ceiling (~130px) \
+                roi[2] <= 140 && roi[3] <= 140,
+                "{}: sub-template ROI {:?} exceeds small-template ceiling (~140px) \
                  (large templates are background-diff sensitive per TASKS.md:30-33)",
                 d.name,
                 roi
@@ -3251,18 +3255,27 @@ mod tests {
     // TOML ROI は実測値([712,8,121,35] / [624,263,120,120])へ更新済み。よって旧ガードは
     // 陳腐化し、テストは「実機プローブで grounded した導出ナラティブ」を固定し直す。
     //
-    // 新契約(Branch A — real-probe-grounded):
-    //   (A) 両 TOML ROI が実測値(operator probe 2026-07-07, PC RAW 1258x708 space) に等しい。
-    //       silent revert to the old 20:9 self-crop values を RED で検出する。
+    // さらに Issue #182 (2026-09, 実機 E2E run-180-live-e2e) で version_label のアンカーは
+    // 右上 version 帯 [712,8,121,35] から【左上 ID 表示帯 [8,2,138,20]】へ再選択された:
+    // 旧帯から切り出したテンプレは無構造のほぼ白一色(stddev 3.76)で原理的に match 不能
+    // (65 iters 発火 0)だった。ID 帯テンプレ(138x20, stddev 53.1)は実機エンジンキャプチャ
+    // から再生成され、発火 1/10 iters・フィールド到達まで実証済み。
+    //
+    // 新契約(Branch A — real-probe-grounded / Issue #182 改訂):
+    //   (A) 両 TOML ROI が実測値(operator probe 2026-07-07 = logo, 実機 E2E 2026-09 =
+    //       version_label ID 帯, PC RAW 1258x708 space) に等しい。silent revert to the old
+    //       values ([1046,668,112,28] / [140,60,60,60] / [712,8,121,35] version 帯時代) を
+    //       RED で検出する。
     //   (B) 実機プローブ title_pc_probe.png が存在し、取り込み寸法不変量を持つ:
     //       - 生ファイルは 1918x1048 RGBA(オペレータ制御不可の取得ウィンドウサイズ)。
-    //       - pipeline.rs はこれを 1258x708(PC RAW) へ resize_exact してから detect に渡す
-    //         (pc_title_pc_templates_match_real_capture_above_threshold:2701- 参照)。
-    //   (C) 実機プローブから再導出した列分散 run が、実測 ROI 帯の存在を裏付けること:
-    //       version_label 带 (y=8..43, x=712..833) と logo 带 (y=63..468, x=164..1096) に
-    //       run が再現する = 旧 retain-old-value ガードが待っていた geometric corroboration。
+    //       - pipeline.rs は crop_to_content → normalize 経路で detect に渡す。
+    //   (C) 実機プローブから再導出した列分散 run が、実測 ROI 帯の存在を裏付けること
+    //       (logo 带 y=63..468, x=164..1096 に run が再現する)。version_label の ID 帯は
+    //       2026-07-07 プローブより後の実機観測(run-180)で選出されたアンカーのため、
+    //       当該プローブ上の run 裏付けは logo 帯のみに適用する(ID 帯の実証は run-180
+    //       の実機 E2E evidence による)。
     //   (D) 旧暫定値([1046,668,112,28]=右下 / [140,60,60,60]=左上小マーク) は 20:9 自己クロップ
-    //       由来の不正確さ(version_label は実際は右上) を文書化済み。実測値への移行完了を固定。
+    //       由来の不正確さ を文書化済み。実測値への移行完了を固定。
     //
     // ※プローブ不在時(古い CI checkout) は presence-of-probe 不変量 (B) で panic せず、
     //    実測値保持 (A) だけを検証して残りを明示ログで skip する。プローブは tracked なので
@@ -3316,8 +3329,9 @@ mod tests {
     }
 
     /// Issue #12 Branch A contract: title_pc ROI は実機プローブ title_pc_probe.png で
-    /// grounded しており、TOML ROI が実測値([712,8,121,35] / [624,263,120,120]) に等しいこと、
-    /// かつプローブから再導出した列分散 run が幾何学的裏付けを与えることを固定する。
+    /// grounded しており、TOML ROI が実測値(ID 帯 [8,2,138,20] (Issue #182) /
+    /// [624,263,120,120]) に等しいこと、かつプローブから再導出した列分散 run が
+    /// 幾何学的裏付けを与えることを固定する。
     /// 旧 Issue #13 retain-old-value ガード(=no-probe 時代のグリーンウォッシュ防止) は
     /// 実機プローブ到着により陳腐化したため、real-probe-grounded ナラティブへ置換した。
     /// What(テスト対象): version_label.toml / title_logo_corner.toml の ROI 導出契約。
@@ -3334,20 +3348,25 @@ mod tests {
             .get("TitlePcLogoCorner")
             .expect("TitlePcLogoCorner must exist");
 
-        // (A) 実測値保持契約: 両 ROI は operator probe 2026-07-07 (PC RAW 1258x708 space) で
-        //     実測/選出された値でなければならない。旧 20:9 自己クロップ暫定値
-        //     ([1046,668,112,28] / [140,60,60,60]) への silent revert を RED で検出する。
-        //     version_label は実機では右上(旧暫定の右下は不正確)。logo_corner は operator
-        //     がドラッグした全帯 [164,63,932,405] を、小テンプレ上限(<=130px)・背景差耐性の
-        //     ため find_logo_corner_subfeature.rs で最高エネルギー 120x120 窓へ再クロップ
-        //     (DEFER option b)。候補 [624,263,120,120] はロゴグリフ上の安定小特徴。
+        // (A) 実測値保持契約: 両 ROI は実機観測 (PC RAW 1258x708 space) で実測/選出された
+        //     値でなければならない。旧値への silent revert を RED で検出する:
+        //     - version_label: Issue #182 で左上 ID 表示帯 [8,2,138,20] へ再選択。旧
+        //       [712,8,121,35] (右上 version 帯・operator probe 2026-07-07) から切り出した
+        //       テンプレは無構造 (stddev 3.76) で恒久 NoMatch、さらにその前の Issue #13
+        //       暫定 [1046,668,112,28]=右下 は 20:9 自己クロップ由来。
+        //     - logo_corner: operator がドラッグした全帯 [164,63,932,405] を、小テンプレ上限
+        //       (<=130px)・背景差耐性のため find_logo_corner_subfeature.rs で最高エネルギー
+        //       120x120 窓へ再クロップ (DEFER option b)。候補 [624,263,120,120] はロゴ
+        //       グリフ上の安定小特徴 (operator probe 2026-07-07)。
         assert_eq!(
             version_label.roi,
-            Some([712, 8, 121, 35]),
-            "version_label ROI must be the real-probe-measured value [712,8,121,35] \
-             (operator probe 2026-07-07, PC RAW 1258x708 space). The old Issue #13 \
-             provisional [1046,668,112,28]=bottom-right was a 20:9 self-crop artifact; \
-             the version label is actually at the top-right on the real PC title frame"
+            Some([8, 2, 138, 20]),
+            "version_label ROI must be the top-left ID label band [8,2,138,20] \
+             (Issue #182 live E2E run-180, PC RAW 1258x708 space; template regenerated \
+             138x20 stddev 53.1). The prior [712,8,121,35] top-right version band crop \
+             was structurally flat (stddev 3.76) and could never match; the even older \
+             Issue #13 provisional [1046,668,112,28]=bottom-right was a 20:9 self-crop \
+             artifact"
         );
         assert_eq!(
             logo_corner.roi,
@@ -3401,8 +3420,13 @@ mod tests {
         // (C) geometric corroboration (= 旧 retain-old-value ガードが待っていた実機裏付け):
         //     実測 ROI 帯の y-range 内で、x-range に重なる列分散 run が再現すること。
         //     これが「実測 ROI が実機プローブ上の実テクスチャ位置を指している」客観的証明。
-        //     ROI [712,8,121,35] を 1280x720 空間へスケールし、その帯で run を見る。
-        let vl = crate::scale::roi_to_normalized([712, 8, 121, 35], norm_w, norm_h);
+        //     roi は (A) で pin 済みの TOML 実測値をそのまま使い、1280x720 空間へスケール
+        //     して run を見る (リテラルの二重管理を避ける)。
+        //     なお title_pc_probe.png (2026-07-07) は ID 帯テンプレ (run-180 エンジン
+        //     キャプチャ由来) とは独立のキャプチャなので、ここでの run 一致は
+        //     cross-capture ロバスト性の一部として機能する (Issue #182)。
+        let vl_roi = version_label.roi.expect("(A) pinned version_label roi");
+        let vl = crate::scale::roi_to_normalized(vl_roi, norm_w, norm_h);
         let vl_runs = title_region_runs(
             &gray,
             vl[1],
@@ -3421,7 +3445,8 @@ mod tests {
         );
 
         // logo_corner: ROI [624,263,120,120] を同空間へスケールして run を見る。
-        let lc = crate::scale::roi_to_normalized([624, 263, 120, 120], norm_w, norm_h);
+        let lc_roi = logo_corner.roi.expect("(A) pinned logo_corner roi");
+        let lc = crate::scale::roi_to_normalized(lc_roi, norm_w, norm_h);
         let lc_runs = title_region_runs(
             &gray,
             lc[1],
@@ -3443,6 +3468,96 @@ mod tests {
         //     (PC 実機プローブ未整備 → 暫定値を値そのままで保持) は解消済み。プローブが
         //     tracked のまま万一失われた場合は上記 (B) で skip されるため、ここに到達するのは
         //     プローブが実在し実測 ROI が它のテクスチャ位置を指している時のみ (= 真の green)。
+    }
+
+    // ---- Issue #182 remediation: version_label 共有テンプレ対整合 + 無構造テンプレ回帰防止 ----
+    //
+    // templates/scenes/title_pc/version_label.png は 3 つの TOML
+    //   (pipelines/login/tap_title.toml, pipelines/nav_to_field_pc/tap_to_start.toml,
+    //    scenes/title_pc/version_label.toml)
+    // から共有参照される。PR #183 は login のみ対 (テンプレ再生成 138x20 + roi) で更新し、
+    // 残り 2 消費者は needle 幅 138 > roi 幅 121 で恒久 NoMatch になった (Release Review
+    // lane2/lane3 CONDITIONAL)。本テスト群はその再発を防ぐ:
+    //   t1: テンプレ PNG が構造を持つこと (輝度 stddev > 20.0)。旧テンプレは幾ら待っても
+    //       match しない無構造のほぼ白一色 (stddev 3.76) だった。
+    //   t2: 3 TOML の roi がすべて同じ [8,2,138,20] で、テンプレ寸法 (138x20) と一致する
+    //       こと (対更新の pin。テンプレ差し替えと ROI を片側だけ更新する回帰を弁別)。
+
+    /// t1: version_label.png の輝度 stddev が閾値を超えること (無構造テンプレの再発防止)。
+    /// 旧テンプレ (Issue #182 以前) は stddev 3.76 のほぼ白一色で、TM_CCOEFF_NORMED が
+    /// 原理的に match できず実機 65 iters 発火 0 だった。再生成品は stddev 53.1。
+    /// What(テスト対象): templates/scenes/title_pc/version_label.png の画像構造。
+    #[test]
+    fn pc_title_pc_version_label_template_has_structure_above_stddev_threshold() {
+        let path = title_pc_dir().join("version_label.png");
+        let img = image::open(&path).expect("version_label.png must open");
+        let gray = img.to_luma8();
+        let vals: Vec<f64> = gray.pixels().map(|p| p.0[0] as f64).collect();
+        let n = vals.len() as f64;
+        let mean = vals.iter().sum::<f64>() / n;
+        let var = vals.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
+        let stddev = var.sqrt();
+        assert!(
+            stddev > 20.0,
+            "version_label.png luminance stddev {stddev:.2} must exceed 20.0 — a \
+             near-uniform template (the pre-Issue-#182 one measured 3.76) can never match \
+             under TM_CCOEFF_NORMED (real-device evidence: 65 iterations, 0 fires)"
+        );
+    }
+
+    /// t2: version_label.png を共有参照する 3 TOML の roi がすべて [8,2,138,20] であり、
+    /// テンプレ PNG 寸法が roi の w/h (138x20) と一致すること。needle が roi 幅を超える
+    /// (旧 roi 幅 121 < テンプレ幅 138) と detect が恒久 NoMatch になるため、寸法一致まで
+    /// 含めて対更新を pin する。TOML は std::fs + toml パースで読む (repo TOML 実読)。
+    /// What(テスト対象): 3 消費者 TOML の roi と version_label.png 寸法の整合。
+    #[test]
+    fn pc_title_pc_version_label_consumers_share_matching_roi_and_template_dims() {
+        const EXPECTED_ROI: [u32; 4] = [8, 2, 138, 20];
+        let pipelines = workspace_templates_root().join("pipelines");
+        let consumers = [
+            (
+                "login/tap_title",
+                pipelines.join("login").join("tap_title.toml"),
+            ),
+            (
+                "nav_to_field_pc/tap_to_start",
+                pipelines.join("nav_to_field_pc").join("tap_to_start.toml"),
+            ),
+            (
+                "scenes/title_pc/version_label",
+                title_pc_dir().join("version_label.toml"),
+            ),
+        ];
+        for (label, path) in consumers {
+            let body = std::fs::read_to_string(&path)
+                .expect("consumer TOML must be readable (repo-tracked template bank)");
+            let def = toml::from_str::<TaskDef>(&body)
+                .unwrap_or_else(|e| panic!("{label}: TOML parse failed: {e}"));
+            assert_eq!(
+                def.roi,
+                Some(EXPECTED_ROI),
+                "{label}: version_label consumer roi must be [8,2,138,20] — the shared \
+                 needle is 138x20, so any narrower/misplaced roi (e.g. the pre-Issue-#182 \
+                 [65,7,121,35] / [712,8,121,35]) is a permanent NoMatch (needle wider \
+                 than roi) or points at the wrong band. Template swaps and roi updates \
+                 must land as a pair across all three consumers"
+            );
+        }
+
+        // テンプレ寸法 == roi の w/h。needle が roi を下回っていても一致検証は意味を失う
+        // (roi 内に needle が収まらない = 恒久 NoMatch) ので寸法まで等しいことを要求する。
+        let img = image::open(title_pc_dir().join("version_label.png"))
+            .expect("version_label.png must open");
+        assert_eq!(
+            (img.width(), img.height()),
+            (EXPECTED_ROI[2], EXPECTED_ROI[3]),
+            "version_label.png dims {}x{} must equal the shared roi w/h {}x{} \
+             (needle-wider-than-roi is a permanent NoMatch; Issue #182 remediation)",
+            img.width(),
+            img.height(),
+            EXPECTED_ROI[2],
+            EXPECTED_ROI[3]
+        );
     }
 
     // ---- pipeline.toml スキップ契約 ----

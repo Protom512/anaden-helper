@@ -32,5 +32,14 @@ template  = "version_label.png"
 # ↓ 実測値へ更新 (operator probe 2026-07-07, PC RAW 1258x708 space)。
 #   バージョン表示「ver 3.15.60 (985)」は実機では【右上】(旧暫定 [1046,668,112,28]=右下 は
 #   20:9 自己クロップ由来で不正確)。テンプレ version_label.png も 1258x708 空間へ再生成済み。
-roi       = [712, 8, 121, 35]
+# ↓↓ Issue #182 でアンカー再選択 (実機 E2E run-180-live-e2e, 2026-09)。
+#   上記 [712,8,121,35] 右上 version 帯から切り出した旧テンプレは無構造のほぼ白一色
+#   (輝度 stddev 3.76) で TM_CCOEFF_NORMED が原理的に match 不能だった (実機 65 iters 発火 0)。
+#   アンカーを【左上 ID 表示帯】へ変更し、実機エンジンキャプチャから 138x20 (stddev 53.1)
+#   でテンプレを再生成。version 番号はクライアント更新で文字列が変化しうる+低コントラスト
+#   のため不採用。ID 帯はログイン毎に変化しない固定テクスチャで点滅にも非依存。
+#   3 消費者 (login/tap_title, nav_to_field_pc/tap_to_start, 本 TOML) の roi は対で
+#   [8, 2, 138, 20] に統一 (needle 138x20 が roi 幅を超える恒久 NoMatch 回帰防止は
+#   pipeline.rs テストで pin 済み)。
+roi       = [8, 2, 138, 20]
 threshold = 0.80
