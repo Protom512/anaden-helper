@@ -15,6 +15,7 @@ pub mod app_ui_authoring;
 pub mod app_ui_batch;
 pub mod app_ui_body;
 pub mod app_ui_tasks;
+pub mod authoring_session;
 pub mod batch;
 pub mod canvas;
 pub mod childproc;
