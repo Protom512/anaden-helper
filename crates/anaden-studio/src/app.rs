@@ -413,7 +413,14 @@ impl StudioApp {
             method: self.engine_kind.method_str().to_string(),
         };
         match library::save_template(&self.save_dir, &spec, &crop) {
-            Ok(p) => self.status = format!("保存: {}", p.display()),
+            Ok(p) => {
+                // Issue #184: 無構造テンプレート (stddev < 閾値) の fail-visible 警告。
+                // 判定は anaden-vision の単一実装経由。保存自体はブロックしない。
+                self.status = match library::template_structure_warning(&crop) {
+                    Some(warning) => format!("保存: {} / {warning}", p.display()),
+                    None => format!("保存: {}", p.display()),
+                };
+            }
             Err(e) => self.status = format!("保存失敗: {e}"),
         }
     }
@@ -514,7 +521,12 @@ impl StudioApp {
         };
         match save_pipeline_task(&self.task_dir, &spec, &crop) {
             Ok(p) => {
-                self.status = format!("pipeline task 保存: {}", p.display());
+                // Issue #184: 無構造テンプレート (stddev < 閾値) の fail-visible 警告。
+                // 判定は anaden-vision の単一実装経由。保存自体はブロックしない。
+                self.status = match library::template_structure_warning(&crop) {
+                    Some(warning) => format!("pipeline task 保存: {} / {warning}", p.display()),
+                    None => format!("pipeline task 保存: {}", p.display()),
+                };
             }
             Err(e) => self.status = format!("pipeline task 保存失敗: {e}"),
         }
@@ -750,6 +762,114 @@ mod tests {
         app.save_current_pipeline_task();
         let tasks = anaden_vision::load_pipeline(dir.path()).unwrap();
         assert!((tasks[0].threshold - 0.9).abs() < 1e-4);
+    }
+
+    // ---- Issue #184: 無構造テンプレート保存時の fail-visible 警告 (3 保存経路) ----
+    //
+    // 保存経路 1 (テンプレ保存)・2 (pipeline task 保存) の検証。警告は status へ
+    // 出るが保存自体はブロックしない (ユーザーが意図的に単色テンプレを保存する
+    // ケースを拒否しない)。判定は anaden-vision の単一実装経由
+    // (library::template_structure_warning → anaden_vision::template_is_structured)。
+
+    /// 経路 1 (テンプレ保存): 無構造 (ほぼ単色) crop を保存すると警告が出て、
+    /// かつ PNG + sidecar TOML は書かれる (ブロックしない)。
+    #[test]
+    fn save_current_template_flat_crop_warns_but_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = StudioApp {
+            save_dir: dir.path().to_path_buf(),
+            ..StudioApp::default()
+        };
+        app.tpl_name = "flat_tpl".to_string();
+        app.screenshot = Some(Arc::new(DynamicImage::ImageLuma8(
+            image::GrayImage::from_pixel(200, 100, Luma([255])),
+        )));
+        app.roi.anchor = Some((10, 10));
+        app.roi.current = Some((110, 60));
+        app.save_current_template();
+
+        assert!(app.status.contains("保存"), "status: {}", app.status);
+        assert!(
+            app.status.contains("認識不能"),
+            "無構造テンプレート警告 (認識不能の恐れ) が出ること: {}",
+            app.status
+        );
+        // 保存はブロックしない → 実体が書かれている。
+        assert!(dir.path().join("title").join("flat_tpl.png").exists());
+        assert!(dir.path().join("title").join("flat_tpl.toml").exists());
+    }
+
+    /// 経路 1 (テンプレ保存): 構造あり crop は警告なしで保存できる (偽陽性ゼロ)。
+    #[test]
+    fn save_current_template_textured_crop_saves_without_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = StudioApp {
+            save_dir: dir.path().to_path_buf(),
+            ..StudioApp::default()
+        };
+        app.tpl_name = "ok_tpl".to_string();
+        app.screenshot = Some(Arc::new(luma_dyn(textured_needle(200, 100))));
+        app.roi.anchor = Some((10, 10));
+        app.roi.current = Some((110, 60));
+        app.save_current_template();
+
+        assert!(app.status.contains("保存"), "status: {}", app.status);
+        assert!(
+            !app.status.contains("警告"),
+            "構造ありテンプレートに警告を出さない (偽陽性ゼロ): {}",
+            app.status
+        );
+        assert!(dir.path().join("title").join("ok_tpl.png").exists());
+    }
+
+    /// 経路 2 (pipeline task 保存): 無構造 crop を保存すると警告が出て、かつ
+    /// TOML + PNG は書かれて load_pipeline で読める (ブロックしない)。
+    #[test]
+    fn save_current_pipeline_task_flat_crop_warns_but_saves() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = StudioApp {
+            task_dir: dir.path().to_path_buf(),
+            ..StudioApp::default()
+        };
+        app.tpl_name = "flat_task".to_string();
+        app.screenshot = Some(Arc::new(DynamicImage::ImageLuma8(
+            image::GrayImage::from_pixel(200, 100, Luma([255])),
+        )));
+        app.roi.anchor = Some((0, 0));
+        app.roi.current = Some((50, 50));
+        app.save_current_pipeline_task();
+
+        assert!(
+            app.status.contains("認識不能"),
+            "無構造テンプレート警告 (認識不能の恐れ) が出ること: {}",
+            app.status
+        );
+        // 保存はブロックしない → load_pipeline で読める。
+        let tasks = anaden_vision::load_pipeline(dir.path()).unwrap();
+        assert_eq!(tasks.len(), 1, "TOML+PNG が書かれている: {}", app.status);
+    }
+
+    /// 経路 2 (pipeline task 保存): 構造あり crop は警告なし (偽陽性ゼロ)。
+    #[test]
+    fn save_current_pipeline_task_textured_crop_saves_without_warning() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut app = StudioApp {
+            task_dir: dir.path().to_path_buf(),
+            ..StudioApp::default()
+        };
+        app.tpl_name = "ok_task".to_string();
+        app.screenshot = Some(Arc::new(luma_dyn(textured_needle(200, 100))));
+        app.roi.anchor = Some((0, 0));
+        app.roi.current = Some((100, 80));
+        app.save_current_pipeline_task();
+
+        assert!(app.status.contains("保存"), "status: {}", app.status);
+        assert!(
+            !app.status.contains("警告"),
+            "構造ありテンプレートに警告を出さない (偽陽性ゼロ): {}",
+            app.status
+        );
+        assert!(dir.path().join("ok_task.png").exists());
     }
 
     /// minor-7 (Issue #180): 既定候補名 (tpl_name の初期値・空欄時フォールバック)
