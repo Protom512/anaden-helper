@@ -32,6 +32,6 @@ pub use pipeline::{
 pub use scale::{BASE_HEIGHT, BASE_WIDTH, ScreenScaler, roi_to_normalized};
 pub use scene_detector::SceneDetector;
 pub use template_quality::{
-    TEMPLATE_MIN_LUMA_STDDEV, template_is_structured, template_luma_stddev,
+    TEMPLATE_MIN_LUMA_STDDEV, needle_fits_roi, template_is_structured, template_luma_stddev,
 };
 pub use template_store::{TemplateEntry, TemplateStore, TemplateStoreError};

@@ -120,6 +120,69 @@ pub(crate) fn unstructured_warning_for_path(path: &Path) -> Option<String> {
     ))
 }
 
+/// needle (テンプレート PNG) が TaskDef の ROI に収まるか (Issue #187)。
+///
+/// needle の幅/高さがそれぞれ ROI の幅/高さ以下であることがマッチの必要条件。
+/// [`crate::pipeline::TaskDef::detect`] は ROI と needle を同じ X/Y 比でスケールする
+/// ([`crate::scale::roi_to_normalized`] / `crate::scale::needle_to_normalized`) ため、
+/// 定義空間 (raw-1258 等) でのこの比較は正規化後も保たれる (両辺が同係数で
+/// 単調変換される)。needle が ROI より大きいと cropping 済み haystack 内に
+/// needle が置けず恒久 NoMatch になる (Issue #182: 再生成テンプレ 138px 幅 vs
+/// 旧 roi 幅 121 で発火しなかった実例)。
+///
+/// - `roi = None` は全面走査 ([`crate::pipeline::TaskDef::roi`]) のため常に `true`。
+/// - ROI の幅/高さが 0 の組み合わせも全面扱い (`true`) —
+///   `crate::pipeline::TaskDef::roi_to_region` が w/h 0 を `None` (全面) に
+///   正規化する挙動と揃える。
+///
+/// # Examples
+///
+/// ```
+/// use anaden_vision::needle_fits_roi;
+///
+/// // needle ≤ roi → 収まる (等辺も含む)。
+/// assert!(needle_fits_roi((100, 50), Some([10, 20, 100, 50])));
+/// // roi None = 全面 → 常に収まる。
+/// assert!(needle_fits_roi((4000, 2000), None));
+/// // needle 幅超過 → 恒久 NoMatch。
+/// assert!(!needle_fits_roi((138, 20), Some([8, 2, 121, 35])));
+/// ```
+#[must_use]
+pub fn needle_fits_roi(needle: (u32, u32), roi: Option<[u32; 4]>) -> bool {
+    let [_, _, rw, rh] = match roi {
+        None => return true,
+        Some(r) => r,
+    };
+    rw == 0 || rh == 0 || (needle.0 <= rw && needle.1 <= rh)
+}
+
+/// `path` のテンプレート画像が ROI に収まらない場合に loader 向け警告文を返す
+/// (Issue #187・[`needle_fits_roi`] のパス版)。
+///
+/// [`crate::pipeline::load_pipeline`] が TaskDef の `template` × `roi` 検証に呼ぶ。
+/// 画像寸法は [`image::image_dimensions`] (ヘッダのみ読む・デコードしない) で取得する。
+///
+/// - `Some(warning)`: ファイルが読め・かつ needle が roi に収まらない
+///   (= 恒久 NoMatch 想定)。呼出側は `tracing::warn!` で表示する。
+/// - `None`: 収まる、roi = 全面、ファイル不在、デコード失敗のいずれか。
+///   [`unstructured_warning_for_path`] と同じく load は失敗させない (fail-visible)。
+pub(crate) fn needle_exceeds_roi_warning_for_path(
+    path: &Path,
+    roi: Option<[u32; 4]>,
+) -> Option<String> {
+    let (nw, nh) = image::image_dimensions(path).ok()?;
+    let [_, _, rw, rh] = roi?;
+    if needle_fits_roi((nw, nh), roi) {
+        return None;
+    }
+    Some(format!(
+        "template {} is {nw}x{nh} but roi is {rw}x{rh}: the needle cannot fit inside the \
+         roi — permanent NoMatch expected (Issue #182: a regenerated 138px-wide needle \
+         against a 121px-wide roi never fired)",
+        path.display()
+    ))
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]
@@ -267,6 +330,97 @@ mod tests {
         assert!(
             unstructured_warning_for_path(&not_png).is_none(),
             "undecodable file must not be flagged"
+        );
+    }
+
+    // ---- Issue #187: needle/roi 幅検証 ----
+
+    /// needle ≤ roi は収まる。等辺 (needle 寸法 == roi 寸法) も収まる。
+    #[test]
+    fn needle_fits_roi_when_dims_do_not_exceed_roi() {
+        // needle が roi より小さい。
+        assert!(needle_fits_roi((80, 40), Some([820, 470, 200, 90])));
+        // 等辺 (crop == roi から作った needle の典型形)。
+        assert!(needle_fits_roi((100, 50), Some([10, 20, 100, 50])));
+        // 幅だけ等しい・高さだけ等しい。
+        assert!(needle_fits_roi((100, 40), Some([10, 20, 100, 50])));
+        assert!(needle_fits_roi((90, 50), Some([10, 20, 100, 50])));
+    }
+
+    /// roi None = 全面走査 → どんな needle でも収まる。
+    #[test]
+    fn needle_fits_roi_none_means_fullscreen() {
+        assert!(needle_fits_roi((4000, 2000), None));
+        assert!(needle_fits_roi((0, 0), None));
+    }
+
+    /// needle 幅 or 高さが roi を超えると収まらない (恒久 NoMatch)。
+    /// Issue #182 の実例 (再生成テンプレ 138x20 vs 旧 roi [8,2,121,35]) を pin。
+    #[test]
+    fn needle_exceeding_roi_does_not_fit() {
+        // 幅超過 (Issue #182 の 138 > 121)。
+        assert!(!needle_fits_roi((138, 20), Some([8, 2, 121, 35])));
+        // 高さ超過。
+        assert!(!needle_fits_roi((80, 91), Some([820, 470, 200, 90])));
+        // 幅・高さとも超過。
+        assert!(!needle_fits_roi((300, 200), Some([820, 470, 200, 90])));
+    }
+
+    /// roi の幅/高さ 0 は [`crate::pipeline::TaskDef::roi_to_region`] と同じく
+    /// 全面扱い (true) — 検出側の正規化挙動と揃える。
+    #[test]
+    fn needle_fits_roi_treats_zero_wh_as_fullscreen() {
+        assert!(needle_fits_roi((100, 50), Some([10, 20, 0, 90])));
+        assert!(needle_fits_roi((100, 50), Some([10, 20, 100, 0])));
+        assert!(needle_fits_roi((100, 50), Some([10, 20, 0, 0])));
+    }
+
+    /// loader 向けパス判定: needle 寸法 > roi 寸法の PNG は Some
+    /// (警告文に両寸法を含む)。
+    #[test]
+    fn needle_exceeds_roi_warning_for_path_flags_oversized_png() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("big.png");
+        // 138x20 の構造あり PNG (stddev warn には掛からないサイズ検証のみの対象)。
+        dyn_img(GrayImage::new(138, 20))
+            .save(&path)
+            .expect("save png");
+
+        let warn = needle_exceeds_roi_warning_for_path(&path, Some([8, 2, 121, 35]))
+            .expect("oversized needle must be flagged");
+        assert!(
+            warn.contains("138x20") && warn.contains("121x35"),
+            "warning should cite needle and roi dims: {warn}"
+        );
+        assert!(
+            warn.contains("permanent NoMatch"),
+            "warning should explain the permanent-NoMatch consequence: {warn}"
+        );
+    }
+
+    /// loader 向けパス判定: 収まる needle・roi None・ファイル不在は None
+    /// (偽陽性ゼロ・load を失敗させない)。
+    #[test]
+    fn needle_exceeds_roi_warning_for_path_passes_fitting_cases() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let path = tmp.path().join("fit.png");
+        dyn_img(GrayImage::new(100, 50))
+            .save(&path)
+            .expect("save png");
+
+        // 収まる (等辺含む)。
+        assert!(needle_exceeds_roi_warning_for_path(&path, Some([10, 20, 100, 50])).is_none());
+        assert!(needle_exceeds_roi_warning_for_path(&path, Some([10, 20, 200, 90])).is_none());
+        // roi None = 全面。
+        assert!(needle_exceeds_roi_warning_for_path(&path, None).is_none());
+        // ファイル不在。
+        assert!(
+            needle_exceeds_roi_warning_for_path(
+                Path::new("/nonexistent/no-such.png"),
+                Some([10, 20, 1, 1])
+            )
+            .is_none(),
+            "missing file must not be flagged"
         );
     }
 }

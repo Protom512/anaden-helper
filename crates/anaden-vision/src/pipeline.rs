@@ -19,7 +19,7 @@ use anaden_core::{MatchConfidence, ScreenRegion};
 use crate::ccoeff::CcoeffVisionEngine;
 use crate::engine::{SseVisionEngine, VisionEngine};
 use crate::matcher::{MatchResult, TemplateMatcher};
-use crate::template_quality::unstructured_warning_for_path;
+use crate::template_quality::{needle_exceeds_roi_warning_for_path, unstructured_warning_for_path};
 
 /// 認識アルゴリズム。TOML の `algorithm` 文字列（`sse`/`ccoeff`）から解決する。
 ///
@@ -446,6 +446,14 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
         // (問題のある資産を弾くのではなく、恒久 NoMatch 想定を operator へ可視化する。
         // 保存時点での同じ検証は GUI 側 (anaden-studio) が同じ anaden-vision 実装で行う)。
         if let Some(warning) = unstructured_warning_for_path(&def.template) {
+            warn!("task '{}': {warning}", def.name);
+        }
+
+        // Issue #187: needle (テンプレート PNG) が ROI に収まらない (幅 or 高さ超過) の
+        // fail-visible 通知。stddev warn と同じ位置づけ — load は成功させ恒久 NoMatch
+        // 想定を可視化するのみ (Issue #182: 再生成 needle 138px vs roi 幅 121px で
+        // 発火しなかった実例。検出条件自体は template_quality の単一実装)。
+        if let Some(warning) = needle_exceeds_roi_warning_for_path(&def.template, def.roi) {
             warn!("task '{}': {warning}", def.name);
         }
 
@@ -967,6 +975,50 @@ mod tests {
         assert!(
             defs[0].template.exists(),
             "flat template path must still resolve"
+        );
+    }
+
+    /// Issue #187: needle (テンプレ PNG) が roi より大きい pipeline dir を load しても、
+    /// load 自体は成功し TaskDef が返ること (stddev warn と同じ warn-only 契約)。
+    /// warn 発火条件自体 (寸法取得・roi との比較) は template_quality モジュールの
+    /// `needle_exceeds_roi_warning_for_path` テストで担保する。
+    /// 構成は Issue #182 の実例 (構造あり needle 138x20 vs roi 幅 121) を踏襲する。
+    #[test]
+    fn load_pipeline_succeeds_with_needle_exceeding_roi() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // 構造ありテンプレ PNG 138x20 (gradient → stddev warn には掛からない)。
+        let mut needle = GrayImage::new(138, 20);
+        for y in 0..20 {
+            for x in 0..138 {
+                let v = ((x * 2 + y * 3) % 200) as u8;
+                needle.put_pixel(x, y, Luma([v]));
+            }
+        }
+        needle
+            .save(tmp.path().join("wide.png"))
+            .expect("save wide png");
+        write_toml(
+            tmp.path(),
+            "wide.toml",
+            r#"
+            name      = "Wide"
+            state     = "Wide"
+            algorithm = "ccoeff"
+            template  = "wide.png"
+            roi       = [8, 2, 121, 35]
+            "#,
+        );
+
+        let defs = load_pipeline(tmp.path()).expect("load must succeed despite oversized needle");
+        assert_eq!(
+            defs.len(),
+            1,
+            "TaskDef is still loaded (warn-only, not rejected)"
+        );
+        assert_eq!(defs[0].roi, Some([8, 2, 121, 35]));
+        assert!(
+            defs[0].template.exists(),
+            "oversized template path must still resolve"
         );
     }
 

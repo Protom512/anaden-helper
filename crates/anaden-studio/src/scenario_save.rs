@@ -65,26 +65,29 @@ pub enum ScenarioSaveError {
     },
 }
 
-/// [`save_scenario_with_warnings`] の保存結果 (Issue #184)。
+/// [`save_scenario_with_warnings`] の保存結果 (Issue #184 / #187)。
 ///
-/// `warnings` は無構造テンプレートへの fail-visible 警告。保存自体は
-/// ブロックしていない (警告は保存成功後の付加情報)。
+/// `warnings` はテンプレート品質への fail-visible 警告 (無構造 + needle が ROI に
+/// 収まらない)。保存自体はブロックしていない (警告は保存成功後の付加情報)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScenarioSaveOutcome {
     /// 保存先 pipeline ディレクトリ。
     pub dir: PathBuf,
-    /// 無構造テンプレート (輝度 stddev < [`anaden_vision::TEMPLATE_MIN_LUMA_STDDEV`])
-    /// への警告文リスト (各要素は対象タスク名を接頭に持つ)。全テンプレートが
-    /// 構造ありなら空 (偽陽性ゼロ)。
+    /// テンプレート品質警告のリスト (各要素は対象タスク名を接頭に持つ):
+    /// - 無構造テンプレート (輝度 stddev < [`anaden_vision::TEMPLATE_MIN_LUMA_STDDEV`])
+    ///   — Issue #184。
+    /// - needle (テンプレ PNG) が ROI に収まらない (恒久 NoMatch) — Issue #187。
+    ///
+    /// 全テンプレートが健全なら空 (偽陽性ゼロ)。
     pub warnings: Vec<String>,
 }
 
 /// 検証済みシナリオを `<pipelines_root>/<シナリオ名>/` へ保存する (UC-1 保存経路)。
 ///
-/// [`save_scenario`] の警告付き版 (Issue #184): 書き出し構成・fail-closed 挙動は
-/// 同一で、加えて保存しようとしているテンプレート PNG のうち無構造
-/// (stddev < 閾値) のものへの警告を [`ScenarioSaveOutcome::warnings`] として返す
-/// (pending crop と UC-2 参照の両方)。
+/// [`save_scenario`] の警告付き版 (Issue #184 / #187): 書き出し構成・fail-closed 挙動は
+/// 同一で、加えて保存しようとしているテンプレート PNG への品質警告を
+/// [`ScenarioSaveOutcome::warnings`] として返す (pending crop と UC-2 参照の両方):
+/// 無構造 (stddev < 閾値) と needle が ROI に収まらない (恒久 NoMatch)。
 ///
 /// # Errors
 /// [`save_scenario`] と同一 (バリデーション不合格・所有権ガード・書き出し失敗。
@@ -124,9 +127,9 @@ pub fn save_scenario_with_warnings(
         anaden_vision::save_task_def(task, path)?;
     }
     sweep_removed_taskdefs(&dir, &out_paths);
-    // Issue #184: 無構造テンプレート警告 (fail-visible)。保存済みのためブロックは
-    // しない — 呼出側 (ScenarioPanel) が status へ表示する。
-    let warnings = unstructured_template_warnings(state, pngs, &dir);
+    // Issue #184/#187: テンプレート品質警告 (無構造 + needle/roi 収容)。保存済みの
+    // ためブロックはしない — 呼出側 (ScenarioPanel) が status へ表示する。
+    let warnings = template_quality_warnings(state, pngs, &dir);
     Ok(ScenarioSaveOutcome { dir, warnings })
 }
 
@@ -174,8 +177,8 @@ pub fn save_scenario(
     save_scenario_with_warnings(state, pngs, pipelines_root).map(|outcome| outcome.dir)
 }
 
-/// 保存対象タスクのテンプレート PNG のうち無構造 (stddev < 閾値) のものへの
-/// 警告リスト (Issue #184・fail-visible: 保存はブロックしない)。
+/// 保存対象タスクのテンプレート品質警告リスト (Issue #184 + #187・fail-visible:
+/// 保存はブロックしない)。
 ///
 /// 検証対象 (save 時点で検証可能な範囲):
 /// - `pngs`: ROI 追加タスクの crop (インメモリ画像)。名前空間に残るタスクのみ
@@ -184,9 +187,15 @@ pub fn save_scenario(
 ///   実在ファイルのみ検証する。参照先不在・デコード不能は本警告のスコープ外
 ///   (存在検証は実行時の detect が担う — 警告はあくまで認識品質の予見)。
 ///
-/// stddev 計算・閾値判定は [`crate::library::template_structure_warning`]
-/// (anaden-vision の単一実装経由) に委譲する。
-fn unstructured_template_warnings(
+/// 警告の種類:
+/// 1. 無構造テンプレート (stddev < 閾値 — Issue #184)。
+/// 2. needle (テンプレ PNG) が ROI に収まらない (Issue #187 — Issue #182 の
+///    「テンプレ差し替えと ROI 更新が片側だけ」回帰の予見)。
+///
+/// いずれの判定も anaden-vision の単一実装経由
+/// ([`crate::library::template_structure_warning`] /
+/// [`crate::library::needle_roi_warning`]) に委譲する。
+fn template_quality_warnings(
     state: &ScenarioEditorState,
     pngs: &[(String, DynamicImage)],
     dir: &Path,
@@ -196,6 +205,11 @@ fn unstructured_template_warnings(
         // ROI 追加タスク: 保存しようとしている crop 本体を検証する。
         if let Some((_, img)) = pngs.iter().find(|(name, _)| name == &task.name) {
             if let Some(warning) = crate::library::template_structure_warning(img) {
+                warnings.push(format!("{}: {warning}", task.name));
+            }
+            if let Some(warning) =
+                crate::library::needle_roi_warning((img.width(), img.height()), task.roi)
+            {
                 warnings.push(format!("{}: {warning}", task.name));
             }
             continue;
@@ -208,6 +222,12 @@ fn unstructured_template_warnings(
         };
         if !path.is_file() {
             continue;
+        }
+        // needle/roi 収容は寸法のみで判定 (ヘッダ読み — デコード不要)。
+        if let Ok((nw, nh)) = image::image_dimensions(&path)
+            && let Some(warning) = crate::library::needle_roi_warning((nw, nh), task.roi)
+        {
+            warnings.push(format!("{}: {warning}", task.name));
         }
         let Ok(img) = image::open(&path) else {
             continue;
@@ -663,5 +683,133 @@ mod tests {
         st.loaded_from = Some(outcome.dir.clone());
         let dir = save_scenario(&st, &[], &root).expect("wrapper save");
         assert_eq!(dir, root.join("warn_ghost"));
+    }
+
+    // ---- Issue #187: needle が ROI に収まらない警告 (保存経路・fail-visible) ----
+    //
+    // Issue #182 の実再発形態 (テンプレ差し替え 138x20 vs 旧 roi 幅 121) を保存時点で
+    // 予見する。判定は anaden-vision の単一実装経由 (library::needle_roi_warning →
+    // anaden_vision::needle_fits_roi)。保存自体はブロックしない。
+
+    /// pending PNG (ROI 追加 crop) がタスク ROI より大きい場合に警告 1 件
+    /// (寸法と恒久 NoMatch を明示)。crop は書かれる (ブロックしない)。
+    #[test]
+    fn save_scenario_with_warnings_flags_oversized_pending_png() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+
+        let mut st = ScenarioEditorState::new("warn_fit");
+        // ROI 追加後に roi を狭めた構成 (crop 100x50 > roi 60x40)。
+        let mut task = task_def("Big", Some(vec![]));
+        task.roi = Some([10, 20, 60, 40]);
+        st.add_task(task);
+        st.add_goal(loop_goal("g", 3));
+        let pngs = vec![("Big".to_string(), gradient_image(100, 50))];
+
+        let outcome = save_scenario_with_warnings(&st, &pngs, &root).expect("save must succeed");
+        assert_eq!(
+            outcome.warnings.len(),
+            1,
+            "オーバーサイズ needle に警告 1 件 (構造ありなので stddev 警告は無し): {:?}",
+            outcome.warnings
+        );
+        assert!(
+            outcome.warnings[0].contains("Big"),
+            "警告は対象タスク名を含む: {}",
+            outcome.warnings[0]
+        );
+        assert!(
+            outcome.warnings[0].contains("100x50") && outcome.warnings[0].contains("60x40"),
+            "警告は needle/roi 両寸法を含む: {}",
+            outcome.warnings[0]
+        );
+        assert!(
+            outcome.warnings[0].contains("恒久 NoMatch"),
+            "警告は恒久 NoMatch を明示: {}",
+            outcome.warnings[0]
+        );
+        // 保存はブロックしない → PNG 実体が書かれている。
+        assert!(outcome.dir.join("Big.png").exists());
+    }
+
+    /// pending PNG が ROI に収まる (等辺含む) 場合は needle/roi 警告なし
+    /// (偽陽性ゼロ — crop == roi の標準形が該当)。
+    #[test]
+    fn save_scenario_with_warnings_fitting_pending_png_has_no_roi_warning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+
+        let mut st = ScenarioEditorState::new("warn_fit_ok");
+        st.add_task(task_def("Fits", Some(vec![]))); // roi [10,20,100,50]
+        st.add_goal(loop_goal("g", 3));
+        let pngs = vec![("Fits".to_string(), gradient_image(100, 50))];
+
+        let outcome = save_scenario_with_warnings(&st, &pngs, &root).expect("save must succeed");
+        assert!(
+            outcome.warnings.is_empty(),
+            "収まる needle に警告を出さない: {:?}",
+            outcome.warnings
+        );
+    }
+
+    /// roi None (全面走査) のタスクは寸法に関わらず警告なし。
+    #[test]
+    fn save_scenario_with_warnings_fullscreen_roi_never_flags() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+
+        let mut st = ScenarioEditorState::new("warn_fit_full");
+        let mut task = task_def("Full", Some(vec![]));
+        task.roi = None;
+        st.add_task(task);
+        st.add_goal(loop_goal("g", 1));
+        let pngs = vec![("Full".to_string(), gradient_image(4000, 2000))];
+
+        let outcome = save_scenario_with_warnings(&st, &pngs, &root).expect("save must succeed");
+        assert!(
+            outcome.warnings.is_empty(),
+            "roi None (全面) は needle/roi 警告の対象外: {:?}",
+            outcome.warnings
+        );
+    }
+
+    /// UC-2 参照割当 (ライブラリ PNG ファイル参照) でも needle/roi 収容を検証する:
+    /// 参照 PNG がタスク ROI より大きければ警告 (Issue #182 の共用テンプレ差し替え
+    /// パターン — 参照先の差し替えで消費者 TOML の roi が取り残される形)。
+    #[test]
+    fn save_scenario_with_warnings_flags_oversized_uc2_reference_png() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+
+        // 参照先ライブラリ PNG: 構造あり 138x20 (Issue #182 再生成テンプレと同寸法)。
+        let lib_dir = tmp.path().join("lib");
+        fs::create_dir_all(&lib_dir).expect("mkdir lib");
+        let wide_ref = lib_dir.join("wide_ref.png");
+        gradient_image(138, 20)
+            .save(&wide_ref)
+            .expect("save wide ref");
+
+        let mut st = ScenarioEditorState::new("warn_uc2_fit");
+        let mut task = task_def("WideRef", Some(vec![]));
+        task.template = wide_ref;
+        // roi 幅 121 < needle 幅 138 (Issue #182 の旧 roi 値)。
+        task.roi = Some([8, 2, 121, 35]);
+        st.add_task(task);
+        st.add_goal(loop_goal("g", 1));
+
+        let outcome = save_scenario_with_warnings(&st, &[], &root).expect("save must succeed");
+        assert_eq!(
+            outcome.warnings.len(),
+            1,
+            "roi を超える参照 PNG に警告 1 件 (構造ありなので stddev 警告は無し): {:?}",
+            outcome.warnings
+        );
+        assert!(
+            outcome.warnings[0].contains("WideRef")
+                && outcome.warnings[0].contains("138x20")
+                && outcome.warnings[0].contains("121x35"),
+            "警告はタスク名と両寸法を含む: {}",
+            outcome.warnings[0]
+        );
     }
 }
