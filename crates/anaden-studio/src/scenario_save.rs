@@ -65,43 +65,35 @@ pub enum ScenarioSaveError {
     },
 }
 
+/// [`save_scenario_with_warnings`] の保存結果 (Issue #184)。
+///
+/// `warnings` は無構造テンプレートへの fail-visible 警告。保存自体は
+/// ブロックしていない (警告は保存成功後の付加情報)。
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScenarioSaveOutcome {
+    /// 保存先 pipeline ディレクトリ。
+    pub dir: PathBuf,
+    /// 無構造テンプレート (輝度 stddev < [`anaden_vision::TEMPLATE_MIN_LUMA_STDDEV`])
+    /// への警告文リスト (各要素は対象タスク名を接頭に持つ)。全テンプレートが
+    /// 構造ありなら空 (偽陽性ゼロ)。
+    pub warnings: Vec<String>,
+}
+
 /// 検証済みシナリオを `<pipelines_root>/<シナリオ名>/` へ保存する (UC-1 保存経路)。
 ///
-/// 書き出し構成 (既存 pipeline ディレクトリと完全互換):
-/// - `pipeline.toml` — manifest (start_task + goals)。[`anaden_vision::save_pipeline_manifest`]
-/// - `<task>.toml` — 各 TaskDef。[`anaden_vision::save_task_def`]
-/// - `<task>.png` — ROI から追加したタスクのテンプレート PNG 本体
-///
-/// `pngs` は「タスク追加時に確保した crop」のリストで、TaskDef 名前空間に残る
-/// タスクのみ書き出す (削除済みタスクの crop は無視)。ROI 追加タスクの
-/// `template` は追加時に `<name>.png` (pipeline dir 基準の裸相対) が設定済みの
-/// ため、保存 TOML の template 参照と PNG 実体が一致する。
-///
-/// UC-4 (Shard 5): [`crate::scenario_state::ScenarioEditorState::loaded_task_files`]
-/// に対応する (ロード済み) タスクは **元のファイル名 (stem)** へ書き戻す。既存
-/// pipeline は stem ≠ name (`tap_bottom.toml` ↔ `TapBottomStable`) のため、
-/// name で保存すると同一 TaskDef の重複ファイルができ再 load でタスクが倍化する。
-/// 対応エントリの無い新規タスクは `<name>.toml` へ保存される。また、削除・
-/// リネーム済みタスクの旧 TaskDef ファイルを保存成功後に掃除する
-/// (`sweep_removed_taskdefs`) — 残ると `load_pipeline` が再読込時に旧タスクを
-/// 復活させるため。
+/// [`save_scenario`] の警告付き版 (Issue #184): 書き出し構成・fail-closed 挙動は
+/// 同一で、加えて保存しようとしているテンプレート PNG のうち無構造
+/// (stddev < 閾値) のものへの警告を [`ScenarioSaveOutcome::warnings`] として返す
+/// (pending crop と UC-2 参照の両方)。
 ///
 /// # Errors
-/// - [`ScenarioSaveError::Invalid`]: バリデーション不合格 (1 バイトも書かない)。
-/// - それ以外: 各書き出し段階の失敗 ([`ScenarioSaveError::DirCreate`] /
-///   [`ScenarioSaveError::PngWrite`] / [`ScenarioSaveError::Vision`])。
-///
-/// 保存 → [`anaden_vision::load_pipeline`] / [`load_pipeline_manifest` 往復は
-/// `tests/scenario_editor_tests.rs` (AC-1) と
-/// `tests/scenario_uc4_roundtrip_tests.rs` (UC-4・既存 8 pipeline ロスレス往復)
-/// で機械保証されている。
-///
-/// [`load_pipeline_manifest`]: anaden_vision::load_pipeline_manifest
-pub fn save_scenario(
+/// [`save_scenario`] と同一 (バリデーション不合格・所有権ガード・書き出し失敗。
+/// いずれも 1 バイトも書かない / 部分状態で警告を返さない)。
+pub fn save_scenario_with_warnings(
     state: &ScenarioEditorState,
     pngs: &[(String, DynamicImage)],
     pipelines_root: &Path,
-) -> Result<PathBuf, ScenarioSaveError> {
+) -> Result<ScenarioSaveOutcome, ScenarioSaveError> {
     state.validate()?;
     let dir = pipelines_root.join(state.name.trim());
     // UC-4: ロード済みタスクは元ファイル (stem) へ、新規タスクは <name>.toml へ。
@@ -132,7 +124,99 @@ pub fn save_scenario(
         anaden_vision::save_task_def(task, path)?;
     }
     sweep_removed_taskdefs(&dir, &out_paths);
-    Ok(dir)
+    // Issue #184: 無構造テンプレート警告 (fail-visible)。保存済みのためブロックは
+    // しない — 呼出側 (ScenarioPanel) が status へ表示する。
+    let warnings = unstructured_template_warnings(state, pngs, &dir);
+    Ok(ScenarioSaveOutcome { dir, warnings })
+}
+
+/// 検証済みシナリオを `<pipelines_root>/<シナリオ名>/` へ保存する (UC-1 保存経路)。
+///
+/// 書き出し構成 (既存 pipeline ディレクトリと完全互換):
+/// - `pipeline.toml` — manifest (start_task + goals)。[`anaden_vision::save_pipeline_manifest`]
+/// - `<task>.toml` — 各 TaskDef。[`anaden_vision::save_task_def`]
+/// - `<task>.png` — ROI から追加したタスクのテンプレート PNG 本体
+///
+/// `pngs` は「タスク追加時に確保した crop」のリストで、TaskDef 名前空間に残る
+/// タスクのみ書き出す (削除済みタスクの crop は無視)。ROI 追加タスクの
+/// `template` は追加時に `<name>.png` (pipeline dir 基準の裸相対) が設定済みの
+/// ため、保存 TOML の template 参照と PNG 実体が一致する。
+///
+/// UC-4 (Shard 5): [`crate::scenario_state::ScenarioEditorState::loaded_task_files`]
+/// に対応する (ロード済み) タスクは **元のファイル名 (stem)** へ書き戻す。既存
+/// pipeline は stem ≠ name (`tap_bottom.toml` ↔ `TapBottomStable`) のため、
+/// name で保存すると同一 TaskDef の重複ファイルができ再 load でタスクが倍化する。
+/// 対応エントリの無い新規タスクは `<name>.toml` へ保存される。また、削除・
+/// リネーム済みタスクの旧 TaskDef ファイルを保存成功後に掃除する
+/// (`sweep_removed_taskdefs`) — 残ると `load_pipeline` が再読込時に旧タスクを
+/// 復活させるため。
+///
+/// 警告付き版 ([`save_scenario_with_warnings`]) の薄いラッパ (警告を破棄して
+/// 保存先 dir のみ返す。既存呼出側の互換維持)。GUI 保存経路は警告表示のため
+/// [`save_scenario_with_warnings`] を使う (Issue #184)。
+///
+/// # Errors
+/// - [`ScenarioSaveError::Invalid`]: バリデーション不合格 (1 バイトも書かない)。
+/// - それ以外: 各書き出し段階の失敗 ([`ScenarioSaveError::DirCreate`] /
+///   [`ScenarioSaveError::PngWrite`] / [`ScenarioSaveError::Vision`])。
+///
+/// 保存 → [`anaden_vision::load_pipeline`] / [`load_pipeline_manifest` 往復は
+/// `tests/scenario_editor_tests.rs` (AC-1) と
+/// `tests/scenario_uc4_roundtrip_tests.rs` (UC-4・既存 8 pipeline ロスレス往復)
+/// で機械保証されている。
+///
+/// [`load_pipeline_manifest`]: anaden_vision::load_pipeline_manifest
+pub fn save_scenario(
+    state: &ScenarioEditorState,
+    pngs: &[(String, DynamicImage)],
+    pipelines_root: &Path,
+) -> Result<PathBuf, ScenarioSaveError> {
+    save_scenario_with_warnings(state, pngs, pipelines_root).map(|outcome| outcome.dir)
+}
+
+/// 保存対象タスクのテンプレート PNG のうち無構造 (stddev < 閾値) のものへの
+/// 警告リスト (Issue #184・fail-visible: 保存はブロックしない)。
+///
+/// 検証対象 (save 時点で検証可能な範囲):
+/// - `pngs`: ROI 追加タスクの crop (インメモリ画像)。名前空間に残るタスクのみ
+///   (削除済みタスクの crop は保存されないため検証しない)。
+/// - 各タスクの `template` 参照 (UC-2 ライブラリ割当): `dir` 基準で解決し、
+///   実在ファイルのみ検証する。参照先不在・デコード不能は本警告のスコープ外
+///   (存在検証は実行時の detect が担う — 警告はあくまで認識品質の予見)。
+///
+/// stddev 計算・閾値判定は [`crate::library::template_structure_warning`]
+/// (anaden-vision の単一実装経由) に委譲する。
+fn unstructured_template_warnings(
+    state: &ScenarioEditorState,
+    pngs: &[(String, DynamicImage)],
+    dir: &Path,
+) -> Vec<String> {
+    let mut warnings = Vec::new();
+    for task in &state.tasks {
+        // ROI 追加タスク: 保存しようとしている crop 本体を検証する。
+        if let Some((_, img)) = pngs.iter().find(|(name, _)| name == &task.name) {
+            if let Some(warning) = crate::library::template_structure_warning(img) {
+                warnings.push(format!("{}: {warning}", task.name));
+            }
+            continue;
+        }
+        // UC-2 参照割当タスク: 参照先ファイルを実読みして検証する。
+        let path = if task.template.is_absolute() {
+            task.template.clone()
+        } else {
+            dir.join(&task.template)
+        };
+        if !path.is_file() {
+            continue;
+        }
+        let Ok(img) = image::open(&path) else {
+            continue;
+        };
+        if let Some(warning) = crate::library::template_structure_warning(&img) {
+            warnings.push(format!("{}: {warning}", task.name));
+        }
+    }
+    warnings
 }
 
 /// 各 TaskDef の書き出し先 `<dir>/<stem-or-name>.toml` を導出する (UC-4:
@@ -435,5 +519,149 @@ mod tests {
             !dir.join("Alpha.toml").exists(),
             "完全不一致の旧ファイルは sweep される"
         );
+    }
+
+    // ---- Issue #184: 無構造テンプレート警告 (保存経路 3・fail-visible) ----
+    //
+    // pending PNG (ROI 追加 crop) と UC-2 参照 PNG の両方を検証し、警告は
+    // ScenarioSaveOutcome::warnings として返る。保存自体はブロックしない。
+    // 判定は anaden-vision の単一実装経由 (library::template_structure_warning)。
+
+    /// 構造ありテンプレート用のグラデーション画像 (stddev 約 57 > 閾値 20)。
+    fn gradient_image(w: u32, h: u32) -> DynamicImage {
+        let mut img = image::GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 2 + y * 3) % 200) as u8;
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+        DynamicImage::ImageLuma8(img)
+    }
+
+    /// ほぼ単色画像 (stddev = 0 — Issue #182 の旧テンプレート相当)。
+    fn flat_image(w: u32, h: u32) -> DynamicImage {
+        DynamicImage::ImageLuma8(image::GrayImage::from_pixel(w, h, image::Luma([250u8])))
+    }
+
+    /// 無構造 pending PNG (ROI 追加 crop) を含む保存は成功し、警告 1 件
+    /// (対象タスク名 + 認識不能の恐れ) を返す。PNG 自体は書かれる (ブロックしない)。
+    #[test]
+    fn save_scenario_with_warnings_flags_flat_pending_png_but_saves() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+
+        let mut st = ScenarioEditorState::new("warn_flat");
+        st.add_task(task_def("Start", Some(vec![])));
+        st.add_goal(loop_goal("g", 3));
+        let pngs = vec![("Start".to_string(), flat_image(100, 50))];
+
+        let outcome = save_scenario_with_warnings(&st, &pngs, &root).expect("save must succeed");
+        assert_eq!(outcome.dir, root.join("warn_flat"));
+        assert_eq!(
+            outcome.warnings.len(),
+            1,
+            "無構造 pending PNG に警告 1 件: {:?}",
+            outcome.warnings
+        );
+        assert!(
+            outcome.warnings[0].contains("Start"),
+            "警告は対象タスク名を含む: {}",
+            outcome.warnings[0]
+        );
+        assert!(
+            outcome.warnings[0].contains("認識不能"),
+            "警告は認識不能の恐れを明示: {}",
+            outcome.warnings[0]
+        );
+        // 保存はブロックしない → PNG 実体が書かれている。
+        assert!(outcome.dir.join("Start.png").exists());
+    }
+
+    /// 構造あり pending PNG のみなら警告なし (偽陽性ゼロ)。
+    #[test]
+    fn save_scenario_with_warnings_structured_png_has_no_warning() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+
+        let mut st = ScenarioEditorState::new("warn_ok");
+        st.add_task(task_def("Start", Some(vec![])));
+        st.add_goal(loop_goal("g", 3));
+        let pngs = vec![("Start".to_string(), gradient_image(100, 50))];
+
+        let outcome = save_scenario_with_warnings(&st, &pngs, &root).expect("save must succeed");
+        assert!(
+            outcome.warnings.is_empty(),
+            "構造ありテンプレートに警告を出さない: {:?}",
+            outcome.warnings
+        );
+    }
+
+    /// UC-2 参照割当 (ライブラリ PNG ファイル参照) も検証される: 無構造参照は
+    /// 警告、構造あり参照は警告なし。絶対パス参照 (assign_template 後の保存状態)。
+    #[test]
+    fn save_scenario_with_warnings_flags_flat_uc2_reference_png() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+
+        // 参照先ライブラリ PNG (無構造 / 構造あり) を作る。
+        let lib_dir = tmp.path().join("lib");
+        fs::create_dir_all(&lib_dir).expect("mkdir lib");
+        let flat_ref = lib_dir.join("flat_ref.png");
+        flat_image(64, 32).save(&flat_ref).expect("save flat ref");
+        let structured_ref = lib_dir.join("structured_ref.png");
+        gradient_image(64, 32)
+            .save(&structured_ref)
+            .expect("save structured ref");
+
+        let mut st = ScenarioEditorState::new("warn_uc2");
+        let mut flat_task = task_def("FlatRef", Some(vec![]));
+        flat_task.template = flat_ref;
+        let mut ok_task = task_def("OkRef", Some(vec![]));
+        ok_task.template = structured_ref;
+        st.add_task(flat_task);
+        st.add_task(ok_task);
+        st.add_goal(loop_goal("g", 1));
+
+        let outcome = save_scenario_with_warnings(&st, &[], &root).expect("save must succeed");
+        assert_eq!(
+            outcome.warnings.len(),
+            1,
+            "無構造参照のみ警告 (構造あり参照は警告なし): {:?}",
+            outcome.warnings
+        );
+        assert!(
+            outcome.warnings[0].contains("FlatRef"),
+            "警告は対象タスク名を含む: {}",
+            outcome.warnings[0]
+        );
+    }
+
+    /// 参照先ファイルが存在しないタスクは警告なし (存在検証は detect の責務 —
+    /// 本警告は認識品質の予見のみ。fail-visible であり fail-closed ではない)。
+    /// 従来の save_scenario ラッパも引き続き dir のみ返す (互換)。
+    #[test]
+    fn save_scenario_with_warnings_skips_missing_reference_and_wrapper_keeps_dir() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+
+        let mut st = ScenarioEditorState::new("warn_ghost");
+        let mut ghost = task_def("Ghost", Some(vec![]));
+        ghost.template = PathBuf::from("does_not_exist.png");
+        st.add_task(ghost);
+        st.add_goal(loop_goal("g", 1));
+
+        let outcome = save_scenario_with_warnings(&st, &[], &root).expect("save must succeed");
+        assert!(
+            outcome.warnings.is_empty(),
+            "参照先不在は警告しない: {:?}",
+            outcome.warnings
+        );
+
+        // 従来ラッパ (save_scenario) は PathBuf を返すまま (呼出元互換)。
+        // 連続保存は panel と同様に loaded_from 所有権を設定してから。
+        st.loaded_from = Some(outcome.dir.clone());
+        let dir = save_scenario(&st, &[], &root).expect("wrapper save");
+        assert_eq!(dir, root.join("warn_ghost"));
     }
 }

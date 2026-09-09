@@ -12,13 +12,14 @@ use std::path::{Path, PathBuf};
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
-use tracing::debug;
+use tracing::{debug, warn};
 
 use anaden_core::{MatchConfidence, ScreenRegion};
 
 use crate::ccoeff::CcoeffVisionEngine;
 use crate::engine::{SseVisionEngine, VisionEngine};
 use crate::matcher::{MatchResult, TemplateMatcher};
+use crate::template_quality::unstructured_warning_for_path;
 
 /// 認識アルゴリズム。TOML の `algorithm` 文字列（`sse`/`ccoeff`）から解決する。
 ///
@@ -438,6 +439,14 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
         if !def.template.is_absolute() && path.parent().is_some() {
             let parent = path.parent().expect("parent exists");
             def.template = parent.join(&def.template);
+        }
+
+        // Issue #184: 無構造テンプレート (stddev < TEMPLATE_MIN_LUMA_STDDEV) の
+        // fail-visible 通知。load 自体は成功させる — 既存 pipeline 資産の後方互換
+        // (問題のある資産を弾くのではなく、恒久 NoMatch 想定を operator へ可視化する。
+        // 保存時点での同じ検証は GUI 側 (anaden-studio) が同じ anaden-vision 実装で行う)。
+        if let Some(warning) = unstructured_warning_for_path(&def.template) {
+            warn!("task '{}': {warning}", def.name);
         }
 
         debug!("Loaded pipeline task '{}' from {:?}", def.name, path);
@@ -922,6 +931,43 @@ mod tests {
         let defs = load_pipeline(tmp.path()).expect("load ok");
         assert_eq!(defs.len(), 1, "only *.toml picked up");
         assert_eq!(defs[0].name, "R");
+    }
+
+    // ---- Issue #184: 無構造テンプレートの loader warn (load は成功維持) ----
+
+    /// 無構造 (ほぼ単色) テンプレ PNG を含む pipeline dir を load しても、load 自体は
+    /// 成功し TaskDef が返ること (後方互換 — loader は既存資産を弾かず warn のみ)。
+    /// warn 発火条件自体 (stddev 計算・閾値・パス解決) は template_quality モジュールの
+    /// `unstructured_warning_for_path` テストで担保する (tracing 出力の直接捕捉は不要)。
+    #[test]
+    fn load_pipeline_succeeds_with_unstructured_template() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        // 無構造テンプレ PNG (全面同色 → stddev 0)。
+        GrayImage::from_pixel(40, 20, Luma([250u8]))
+            .save(tmp.path().join("flat.png"))
+            .expect("save flat png");
+        write_toml(
+            tmp.path(),
+            "flat.toml",
+            r#"
+            name      = "Flat"
+            state     = "Flat"
+            algorithm = "ccoeff"
+            template  = "flat.png"
+            "#,
+        );
+
+        let defs = load_pipeline(tmp.path()).expect("load must succeed despite flat template");
+        assert_eq!(
+            defs.len(),
+            1,
+            "TaskDef is still loaded (warn-only, not rejected)"
+        );
+        assert!(defs[0].template.is_absolute());
+        assert!(
+            defs[0].template.exists(),
+            "flat template path must still resolve"
+        );
     }
 
     // ---- テスト2: ROI指定 detect ----
@@ -3486,22 +3532,19 @@ mod tests {
     /// t1: version_label.png の輝度 stddev が閾値を超えること (無構造テンプレの再発防止)。
     /// 旧テンプレ (Issue #182 以前) は stddev 3.76 のほぼ白一色で、TM_CCOEFF_NORMED が
     /// 原理的に match できず実機 65 iters 発火 0 だった。再生成品は stddev 53.1。
+    /// stddev 計算は Issue #184 の共通実装 (template_quality) を使う (二重実装禁止)。
     /// What(テスト対象): templates/scenes/title_pc/version_label.png の画像構造。
     #[test]
     fn pc_title_pc_version_label_template_has_structure_above_stddev_threshold() {
         let path = title_pc_dir().join("version_label.png");
         let img = image::open(&path).expect("version_label.png must open");
-        let gray = img.to_luma8();
-        let vals: Vec<f64> = gray.pixels().map(|p| p.0[0] as f64).collect();
-        let n = vals.len() as f64;
-        let mean = vals.iter().sum::<f64>() / n;
-        let var = vals.iter().map(|v| (v - mean) * (v - mean)).sum::<f64>() / n;
-        let stddev = var.sqrt();
+        let stddev = crate::template_quality::template_luma_stddev(&img);
         assert!(
-            stddev > 20.0,
-            "version_label.png luminance stddev {stddev:.2} must exceed 20.0 — a \
+            crate::template_quality::template_is_structured(&img),
+            "version_label.png luminance stddev {stddev:.2} must be >= {:.1} — a \
              near-uniform template (the pre-Issue-#182 one measured 3.76) can never match \
-             under TM_CCOEFF_NORMED (real-device evidence: 65 iterations, 0 fires)"
+             under TM_CCOEFF_NORMED (real-device evidence: 65 iterations, 0 fires)",
+            crate::template_quality::TEMPLATE_MIN_LUMA_STDDEV
         );
     }
 

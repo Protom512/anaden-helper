@@ -3,7 +3,8 @@
 //! [`ScenarioPanel`] は Authoring ペイン埋め込みのシナリオ作成・保存・タスク登録
 //! UI。`strategy_ui::StrategyPanel` と同じ「純状態モデル + egui パネル」パターン
 //! で、保持する編集データは [`crate::scenario_editor::ScenarioEditorState`]、
-//! 保存は [`crate::scenario_editor::save_scenario`] へ委譲。描画は
+//! 保存は [`crate::scenario_editor::save_scenario_with_warnings`] へ委譲
+//! (Issue #184: 無構造テンプレート警告の受け取り)。描画は
 //! [`ScenarioPanel::ui`] を Authoring ペインの collapsing セクションから呼ぶ
 //! (app_ui.rs は配線のみ)。
 //!
@@ -17,7 +18,7 @@ use anaden_core::{Goal, StopCondition};
 use anaden_vision::TaskDef;
 use image::DynamicImage;
 
-use crate::scenario_editor::{ScenarioEditorState, goal_summary, save_scenario};
+use crate::scenario_editor::{ScenarioEditorState, goal_summary, save_scenario_with_warnings};
 
 /// ゴール追加フォームの停止条件種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -66,9 +67,10 @@ struct SavedScenario {
 /// Authoring ペイン埋め込みのシナリオ作成パネル (UC-1/UC-2)。
 ///
 /// `strategy_ui::StrategyPanel` と同じ「純状態モデル + egui パネル」パターン。
-/// 保持する編集データは [`ScenarioEditorState`]、保存は [`save_scenario`] へ
-/// 委譲。描画は [`Self::ui`] を Authoring ペインの collapsing セクションから
-/// 呼ぶ (app.rs は配線のみ)。
+/// 保持する編集データは [`ScenarioEditorState`]、保存は
+/// [`crate::scenario_editor::save_scenario_with_warnings`] へ委譲
+/// (Issue #184: 無構造テンプレート警告を status へ表示)。描画は [`Self::ui`] を
+/// Authoring ペインの collapsing セクションから呼ぶ (app.rs は配線のみ)。
 ///
 /// UC-3 (Shard 4): 保存済み pipeline をタスクへ登録・有効化するサブフローは
 /// [`Self::ui_task_link`] (ドメインは `scenario_task_link`)。
@@ -263,20 +265,26 @@ impl ScenarioPanel {
     /// UC-2 参照は最終 pipeline dir 基準で再相対化してから保存する。
     /// UC-3: 保存成功時は保存実体 (dir + start_task) を記録し、登録フォームの
     /// 既定値 (task id / title = シナリオ名) を同期する。
+    /// Issue #184: 無構造テンプレート (stddev < 閾値) への警告を status へ併記する
+    /// (fail-visible・保存はブロックしない)。
     pub fn save(&mut self, status: &mut String) {
         let dir = self.pipeline_dir();
         for (name, png) in self.assigned_pngs.clone() {
             self.state.assign_template(&name, &png, &dir);
         }
-        match save_scenario(&self.state, &self.pending_pngs, &self.pipelines_root) {
-            Ok(dir) => {
-                *status = format!("シナリオ保存: {}", dir.display());
+        match save_scenario_with_warnings(&self.state, &self.pending_pngs, &self.pipelines_root) {
+            Ok(outcome) => {
+                let mut msg = format!("シナリオ保存: {}", outcome.dir.display());
+                for warning in &outcome.warnings {
+                    msg.push_str(&format!(" / {warning}"));
+                }
+                *status = msg;
                 // 保存成功 = この編集状態は保存先 pipeline の所有者 (連続保存が
                 // PipelineDirAlreadyExists ガードを通るための所有権証明)。
-                self.state.loaded_from = Some(dir.clone());
+                self.state.loaded_from = Some(outcome.dir.clone());
                 self.saved = Some(SavedScenario {
                     start_task: self.state.start_task.clone(),
-                    dir,
+                    dir: outcome.dir,
                 });
                 let name = self.state.name.trim().to_string();
                 self.task_id_input = name.clone();
@@ -706,6 +714,71 @@ mod tests {
         );
         assert_eq!(panel.task_id_input, "fishing2");
         assert_eq!(panel.task_title_input, "fishing2");
+    }
+
+    // ---- Issue #184: 無構造テンプレート警告 (保存経路 3 の GUI 配線) ----
+
+    /// 構造ありテンプレート用グラデーション画像 (stddev 約 57 > 閾値 20)。
+    fn gradient_image(w: u32, h: u32) -> DynamicImage {
+        let mut img = image::GrayImage::new(w, h);
+        for y in 0..h {
+            for x in 0..w {
+                let v = ((x * 2 + y * 3) % 200) as u8;
+                img.put_pixel(x, y, image::Luma([v]));
+            }
+        }
+        DynamicImage::ImageLuma8(img)
+    }
+
+    /// 無構造 (ほぼ単色) の ROI 追加タスクを保存すると、status に「認識不能の
+    /// 恐れ」警告が併記され、保存自体は成功する (fail-visible・ブロックなし)。
+    #[test]
+    fn save_reports_warning_for_flat_pending_template() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+        let mut panel = ScenarioPanel::new(root.clone());
+        panel.state.name = "warn_scenario".to_string();
+        let flat =
+            DynamicImage::ImageLuma8(image::GrayImage::from_pixel(100, 50, image::Luma([255u8])));
+        panel
+            .add_candidate(task_def("Start", None), flat)
+            .expect("add candidate");
+        panel.state.add_goal(loop_goal("g", 3));
+
+        let mut status = String::new();
+        panel.save(&mut status);
+        assert!(status.contains("シナリオ保存"), "status: {status}");
+        assert!(
+            status.contains("認識不能"),
+            "無構造テンプレ警告が status へ出る: {status}"
+        );
+        // 保存はブロックされない。
+        assert!(panel.saved_pipeline().is_some(), "保存実体を記録: {status}");
+        assert!(
+            panel.saved_pipeline().unwrap().join("Start.png").exists(),
+            "PNG は書かれている"
+        );
+    }
+
+    /// 構造ありの ROI 追加タスクは警告なし (偽陽性ゼロ)。
+    #[test]
+    fn save_reports_no_warning_for_structured_pending_template() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let root = tmp.path().join("pipelines");
+        let mut panel = ScenarioPanel::new(root.clone());
+        panel.state.name = "ok_scenario".to_string();
+        panel
+            .add_candidate(task_def("Start", None), gradient_image(100, 50))
+            .expect("add candidate");
+        panel.state.add_goal(loop_goal("g", 3));
+
+        let mut status = String::new();
+        panel.save(&mut status);
+        assert!(status.contains("シナリオ保存"), "status: {status}");
+        assert!(
+            !status.contains("警告"),
+            "構造ありテンプレートに警告を出さない: {status}"
+        );
     }
 
     /// UC-4: open_existing でロード → 保存先がロード元 dir に固定され、

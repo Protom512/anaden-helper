@@ -45,6 +45,33 @@ pub fn save_template(
     Ok(png_path)
 }
 
+/// テンプレート画像が無構造 (ほぼ単色) の場合に GUI status 表示用の警告文を返す
+/// (Issue #184・fail-visible)。
+///
+/// stddev 計算・閾値判定は anaden-vision の単一実装
+/// ([`anaden_vision::template_is_structured`]) に委譲する — GUI 側での再実装は
+/// しない (Issue #184 受入基準「stddev 計算ロジックが単一実装」)。
+///
+/// - `Some(warning)`: stddev が [`anaden_vision::TEMPLATE_MIN_LUMA_STDDEV`] 未満。
+///   警告文は「認識不能 (恒久 NoMatch) の恐れ」を明示する
+///   (Issue #182: 無構造テンプレ実測 stddev 3.76 → 実機 65 iters 発火 0)。
+/// - `None`: 構造あり (警告なし = 偽陽性ゼロ)。
+///
+/// 呼出側 (テンプレート保存・pipeline task 保存・シナリオ保存) はこの警告を
+/// status へ表示するのみで、**保存自体はブロックしない** (ユーザーが意図的に
+/// 単色テンプレートを保存するケースを拒否しない方針)。
+pub(crate) fn template_structure_warning(image: &DynamicImage) -> Option<String> {
+    if anaden_vision::template_is_structured(image) {
+        return None;
+    }
+    let stddev = anaden_vision::template_luma_stddev(image);
+    Some(format!(
+        "警告: テンプレート画像がほぼ単色です (輝度 stddev {stddev:.1} < 閾値 {:.1}) — \
+         テンプレートマッチで認識不能 (恒久 NoMatch) の恐れがあります",
+        anaden_vision::TEMPLATE_MIN_LUMA_STDDEV
+    ))
+}
+
 /// ベースディレクトリ下の全 sidecar TOML を読み込み、仕様一覧を返す。
 /// PNG の存在は確認しない（TOML のみ基準）。
 #[allow(dead_code)] // M4 バッチ混同行列で使用

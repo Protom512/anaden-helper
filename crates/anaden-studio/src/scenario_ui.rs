@@ -1,7 +1,8 @@
 //! シナリオ編集 UI: scenario_editor / scenario_panel への facade (Issue #166)。
 //!
 //! - scenario_editor.rs: 純状態モデル (egui 非依存)。`ScenarioEditorState` /
-//!   `ScenarioValidationError` / `save_scenario` / `ScenarioSaveError` /
+//!   `ScenarioValidationError` / `save_scenario` / `save_scenario_with_warnings` /
+//!   `ScenarioSaveError` / `ScenarioSaveOutcome` /
 //!   `resolve_template_reference` / `goal_summary` / `sweep_removed_taskdefs` /
 //!   `SCREEN_WIDTH`/`SCREEN_HEIGHT`。
 //! - scenario_panel.rs: egui パネル層。`ScenarioPanel` (フォーム状態・描画・
@@ -12,7 +13,8 @@
 //! 参照できる (`app` facade と同一パターン・Issue #162)。
 
 pub use crate::scenario_editor::{
-    SCREEN_HEIGHT, SCREEN_WIDTH, ScenarioEditorState, ScenarioSaveError, ScenarioValidationError,
-    resolve_template_reference, save_scenario,
+    SCREEN_HEIGHT, SCREEN_WIDTH, ScenarioEditorState, ScenarioSaveError, ScenarioSaveOutcome,
+    ScenarioValidationError, resolve_template_reference, save_scenario,
+    save_scenario_with_warnings,
 };
 pub use crate::scenario_panel::ScenarioPanel;

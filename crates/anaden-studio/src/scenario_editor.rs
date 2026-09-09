@@ -14,13 +14,16 @@
 //!   [`resolve_template_reference`] + `goal_summary`)。
 //! - `scenario_validate`: バリデーション ([`ScenarioValidationError`] +
 //!   `validation_issues`/`validate` + [`SCREEN_WIDTH`]/[`SCREEN_HEIGHT`])。
-//! - `scenario_save`: 保存/IO ([`save_scenario`] + [`ScenarioSaveError`])。
+//! - `scenario_save`: 保存/IO ([`save_scenario`] / [`save_scenario_with_warnings`] +
+//!   [`ScenarioSaveError`] / [`ScenarioSaveOutcome`])。
 //!
 //! 依存方向は `scenario_save` → `scenario_validate` → `scenario_state` の
 //! 単一方向 (循環なし)。保存は `anaden_vision::save_task_def` /
 //! `save_pipeline_manifest` に委譲 (保存 -> load 往復はテストで機械保証)。
 
-pub use crate::scenario_save::{ScenarioSaveError, save_scenario};
+pub use crate::scenario_save::{
+    ScenarioSaveError, ScenarioSaveOutcome, save_scenario, save_scenario_with_warnings,
+};
 pub use crate::scenario_state::{ScenarioEditorState, resolve_template_reference};
 pub use crate::scenario_validate::{SCREEN_HEIGHT, SCREEN_WIDTH, ScenarioValidationError};
 
