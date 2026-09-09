@@ -9,12 +9,14 @@
 //! ```text
 //! cargo run --example resize_crop_template -p anaden-device -- \
 //!     probe_live5.png templates/scenes/title_pc/version_label.png \
-//!     --letterbox 10 --roi 65,7,121,35
+//!     --letterbox 10 --roi 8,2,138,20
 //! ```
 //!
 //! - 入力/出力パスはコマンドライン引数で指定 (相対パスはカレントディレクトリ基準)
 //! - `--letterbox N`: 左黒帯 N px を除去してからリサイズ (デフォルト 10)
-//! - `--roi x,y,w,h`: raw-1258 空間での ROI (デフォルト 65,7,121,35 = version_label)
+//! - `--roi x,y,w,h`: raw-1258 空間での ROI (デフォルト 8,2,138,20 = version_label
+//!   左上 ID 表示帯。Issue #182 でアンカー再選択 — 旧 version 帯 65,7,121,35 の
+//!   テンプレは無構造 stddev 3.76 で恒久 NoMatch だった)
 //! - `--size WxH`: リサイズ後サイズ (デフォルト 1258x708)
 
 use image::imageops::FilterType;
@@ -79,7 +81,7 @@ fn parse_args(argv: &[String]) -> Option<Args> {
     let letterbox: u32 =
         take_flag(&mut rest, "--letterbox").map_or(Some(10), |v| v.parse().ok())?;
     let size = take_flag(&mut rest, "--size").map_or(Some((1258, 708)), |v| parse_size(&v))?;
-    let roi = take_flag(&mut rest, "--roi").map_or(Some((65, 7, 121, 35)), |v| parse_roi(&v))?;
+    let roi = take_flag(&mut rest, "--roi").map_or(Some((8, 2, 138, 20)), |v| parse_roi(&v))?;
 
     if !rest.is_empty() {
         print_usage();
@@ -195,7 +197,7 @@ mod tests {
         let a = parse_args(&argv).expect("parse ok");
         assert_eq!(
             (a.letterbox, a.width, a.height, a.roi),
-            (10, 1258, 708, (65, 7, 121, 35))
+            (10, 1258, 708, (8, 2, 138, 20))
         );
     }
 
