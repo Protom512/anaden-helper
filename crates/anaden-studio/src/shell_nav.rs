@@ -48,6 +48,9 @@ impl UnifiedMode {
 pub enum ToolsSection {
     /// テンプレート作成（StudioApp に委譲）。
     Authoring,
+    /// 実演オーサリング (Issue #190: ライブビュー操作の記録 + 実機注入)。
+    /// StudioApp に委譲。
+    LiveAuthoring,
     /// バッチ評価（StudioApp に委譲）。
     Batch,
     /// 戦略選択（runner の戦略ペイン。Issue #125 shard 3）。
@@ -72,6 +75,7 @@ impl ToolsSection {
     pub fn label(self) -> &'static str {
         match self {
             Self::Authoring => "作成",
+            Self::LiveAuthoring => "実演オーサリング",
             Self::Batch => "バッチ評価",
             Self::Strategy => "戦略",
             Self::Run => "実行 (単発)",
@@ -80,9 +84,11 @@ impl ToolsSection {
         }
     }
 
-    /// 全セクションをサブバー表示順に返す（旧 modebar と同一順序）。
-    pub const ALL: [ToolsSection; 6] = [
+    /// 全セクションをサブバー表示順に返す（旧 modebar と同一順序 +
+    /// Issue #190 の実演オーサリング）。
+    pub const ALL: [ToolsSection; 7] = [
         ToolsSection::Authoring,
+        ToolsSection::LiveAuthoring,
         ToolsSection::Batch,
         ToolsSection::Strategy,
         ToolsSection::Run,
@@ -90,10 +96,11 @@ impl ToolsSection {
         ToolsSection::Settings,
     ];
 
-    /// 対応する StudioApp 側モード（Authoring/Batch 以外は None）。
+    /// 対応する StudioApp 側モード（Authoring/LiveAuthoring/Batch 以外は None）。
     pub fn studio_mode(self) -> Option<AppMode> {
         match self {
             Self::Authoring => Some(AppMode::Authoring),
+            Self::LiveAuthoring => Some(AppMode::LiveAuthoring),
             Self::Batch => Some(AppMode::Batch),
             Self::Strategy | Self::Run | Self::History | Self::Settings => None,
         }
@@ -101,7 +108,7 @@ impl ToolsSection {
 
     /// 対応する runner ペイン種別。
     ///
-    /// Studio 系セクション (Authoring/Batch) は [`active_pane`] が
+    /// Studio 系セクション (Authoring/LiveAuthoring/Batch) は [`active_pane`] が
     /// [`UnifiedPane::Studio`] を返すためこの結果は使われない
     /// （総関数として既定の Run を返す）。
     pub fn runner_pane(self) -> RunnerPane {
@@ -110,7 +117,7 @@ impl ToolsSection {
             Self::History => RunnerPane::History,
             Self::Strategy => RunnerPane::Strategy,
             Self::Settings => RunnerPane::Settings,
-            Self::Authoring | Self::Batch => RunnerPane::Run,
+            Self::Authoring | Self::LiveAuthoring | Self::Batch => RunnerPane::Run,
         }
     }
 }
@@ -165,10 +172,15 @@ mod tests {
 
     #[test]
     fn test_tools_sections_cover_all_legacy_panes() {
-        // Issue #157 機能喪失なし保証: 旧 6 タブ相当が全てツールから到達可能。
-        assert_eq!(ToolsSection::ALL.len(), 6);
-        // 作成/バッチ評価 → Studio ペイン。
-        for section in [ToolsSection::Authoring, ToolsSection::Batch] {
+        // Issue #157 機能喪失なし保証: 旧 6 タブ相当 + 実演オーサリング
+        // (Issue #190) が全てツールから到達可能。
+        assert_eq!(ToolsSection::ALL.len(), 7);
+        // 作成/実演オーサリング/バッチ評価 → Studio ペイン。
+        for section in [
+            ToolsSection::Authoring,
+            ToolsSection::LiveAuthoring,
+            ToolsSection::Batch,
+        ] {
             assert_eq!(
                 active_pane(UnifiedMode::Tools, section),
                 UnifiedPane::Studio
@@ -207,6 +219,10 @@ mod tests {
         assert_eq!(
             ToolsSection::Authoring.studio_mode(),
             Some(AppMode::Authoring)
+        );
+        assert_eq!(
+            ToolsSection::LiveAuthoring.studio_mode(),
+            Some(AppMode::LiveAuthoring)
         );
         assert_eq!(ToolsSection::Batch.studio_mode(), Some(AppMode::Batch));
         assert_eq!(ToolsSection::Run.studio_mode(), None);

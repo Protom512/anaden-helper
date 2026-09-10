@@ -29,6 +29,7 @@ impl StudioApp {
             .show_inside(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.selectable_value(&mut self.mode, AppMode::Authoring, "作成");
+                    ui.selectable_value(&mut self.mode, AppMode::LiveAuthoring, "実演オーサリング");
                     ui.selectable_value(&mut self.mode, AppMode::Batch, "バッチ評価");
                 });
             });
@@ -63,6 +64,8 @@ impl StudioApp {
 
         if matches!(self.mode, AppMode::Authoring) {
             self.render_authoring(ui);
+        } else if matches!(self.mode, AppMode::LiveAuthoring) {
+            self.render_live_authoring(ui);
         } else {
             self.batch_ui(ui);
         }
@@ -128,11 +131,26 @@ mod tests {
         let _ = ctx.end_pass();
     }
 
+    /// 実演オーサリングモード (Issue #190 Shard 2) の埋め込み描画が
+    /// パニックせず完了すること (セッション未開始 + スクリーンショット無しの
+    /// 初期状態。ライブビューのガイド表示へ到達する)。
+    #[test]
+    fn embed_render_live_authoring_mode_completes_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = StudioApp::default();
+        app.set_mode(AppMode::LiveAuthoring);
+        ctx.begin_pass(egui::RawInput::default());
+        app.render_modebar(&mut child_ui(&ctx));
+        app.render_body(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
+    }
+
     /// UI のボタンラベルに Unicode 絵文字が残っていないこと (豆腐排除・機械検証)。
     #[test]
     fn app_button_labels_contain_no_emoji() {
         let labels = [
             "作成",
+            "実演オーサリング",
             "バッチ評価",
             "スクリーンショットを開く",
             "正例フォルダ",
@@ -143,6 +161,9 @@ mod tests {
             "ROI候補を提案",
             "テンプレート保存",
             "保存先変更",
+            "記録開始",
+            "元に戻す",
+            "シナリオ保存",
             "実行",
         ];
         for l in labels {
