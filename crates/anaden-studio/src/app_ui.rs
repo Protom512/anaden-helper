@@ -8,6 +8,8 @@
 //! - [`crate::app_ui_tasks`] — Tasks ペイン (render_task_list / task_detail_ui /
 //!   task_log_ui)
 //! - [`crate::app_ui_batch`] — バッチ評価モード (batch_ui / run_batch)
+//! - [`crate::app_ui_live`] — 実演オーサリングモード本体 (Issue #190:
+//!   render_live_authoring)
 //!
 //! 描画 impl はすべて StudioApp のメソッドのため、呼び出し元 (app.rs /
 //! shell / shell_nav / tests) はメソッド呼び出しのまま無修正。

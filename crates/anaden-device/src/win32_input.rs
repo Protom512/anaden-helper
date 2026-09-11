@@ -107,6 +107,20 @@ impl Win32InputExecutor {
         }
     }
 
+    /// DPI アウェア化を行わずに生成するコンストラクタ。
+    ///
+    /// eframe/egui 等のホストプロセスが既に DPI アウェアな場合向け
+    /// ([`crate::Win32Capture::new_without_dpi`] と同一の提供理由: ホスト起動後に
+    /// アウェア化すると egui の pixels_per_point と乖離してテクスチャ描画が壊れる)。
+    /// 既定メソッド (SendInput) を使う。
+    #[must_use]
+    pub fn new_without_dpi(process: &str) -> Self {
+        Self {
+            process: process.to_string(),
+            method: InputMethod::default(),
+        }
+    }
+
     /// 現在の注入メソッドを返す。
     pub fn method(&self) -> InputMethod {
         self.method
@@ -134,6 +148,17 @@ impl Win32InputExecutor {
             .map_err(|e| AdbError::CommandFailed {
                 message: format!("入力ワーカがパニック/キャンセル: {e}"),
             })?
+    }
+
+    /// [`Win32InputExecutor::execute`](Self::execute) の同期版。
+    ///
+    /// tokio ランタイムを持たない std::thread ベースの呼出元
+    /// (anaden-studio の実演オーサリング GUI 等) 向け。内部手順は
+    /// [`Self::execute`] と同一の共通同期コア (`run_action_sync`) を直接呼ぶ
+    /// (spawn_blocking もランタイムも不要 = 二重実装なし)。
+    /// [`crate::Win32Capture::capture_blocking`] と同じ提供パターン。
+    pub fn execute_blocking(&self, action: &InputAction) -> Result<(), AdbError> {
+        run_action_sync(&self.process, self.method, action)
     }
 }
 
@@ -639,6 +664,24 @@ mod tests {
     #[test]
     fn default_method_is_sendinput() {
         assert_eq!(InputMethod::default(), InputMethod::SendInput);
+    }
+
+    /// `new_without_dpi`: DPI アウェア化を伴わない生成 (メソッドは既定 SendInput)。
+    #[test]
+    fn new_without_dpi_keeps_default_method() {
+        let executor = Win32InputExecutor::new_without_dpi("AnotherEden.exe");
+        assert_eq!(executor.method(), InputMethod::SendInput);
+    }
+
+    /// `execute_blocking`: Wait は FFI を伴わない (run_action_sync の Wait 分岐は
+    /// 即 Ok) ので、ランタイム無し・実機入力無しで同期経路の疎通だけ検証できる。
+    /// Tap 火球の実注入を伴うテストは書かない (実機 E2E は studio Shard 3)。
+    #[test]
+    fn execute_blocking_wait_returns_ok_without_runtime() {
+        let executor = Win32InputExecutor::new_without_dpi("AnotherEden.exe");
+        executor
+            .execute_blocking(&InputAction::Wait(Duration::from_millis(1)))
+            .unwrap();
     }
 
     /// ガード2: foreground_belongs_to の実機手動検証(#[ignore])。

@@ -53,6 +53,9 @@ pub(crate) const DEFAULT_TEMPLATE_NAME: &str = "MyFirstTapPc";
 pub enum AppMode {
     /// テンプレート作成（ROI選択＋識別力評価）。
     Authoring,
+    /// 実演オーサリング (Issue #190: ライブビューでタップ/領域を積み上げて
+    /// シナリオ化 + トグル制御の実機入力注入)。
+    LiveAuthoring,
     /// バッチ評価（混同行列）。
     Batch,
 }
@@ -152,6 +155,9 @@ pub struct StudioApp {
     /// シナリオ作成パネル (Issue #160 T3: UC-1/UC-2 Authoring 埋め込み)。
     /// ドメインは scenario_ui、ここは配線のみ。
     pub(crate) scenario: crate::scenario_ui::ScenarioPanel,
+    /// 実演オーサリングパネル (Issue #190 Shard 2/3)。ドメインは authoring_ui
+    /// (純モデル) + authoring_coords (座標変換)、描画は app_ui_live。
+    pub(crate) live_authoring: crate::authoring_ui::AuthoringPanel,
     /// MAA 型タスク一覧の定義リスト (Issue #144)。None = 未読込。
     pub(crate) task_defs: Option<crate::tasks::TaskListState>,
     /// チェック順逐次実行キューの状態機械 (Issue #154 Shard 1)。None = 未開始。
@@ -244,6 +250,7 @@ impl StudioApp {
             scenario: crate::scenario_ui::ScenarioPanel::new(
                 Self::workspace_root().join("templates/pipelines"),
             ),
+            live_authoring: crate::authoring_ui::AuthoringPanel::new(),
             task_defs: None,
             task_queue: None,
             task_child: ChildProcess::new(),
