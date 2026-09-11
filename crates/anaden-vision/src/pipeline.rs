@@ -3245,6 +3245,80 @@ mod tests {
         }
     }
 
+    /// E2E (Issue #192): nav_to_field_pc/LoadGamePc の検出 (needle title_logo_corner.png
+    /// 120x120 × roi) が title_pc_probe.png 上で threshold 以上の confidence でマッチする
+    /// ことを検証する。
+    ///
+    /// 旧 roi [140,60,60,60] は Issue #13 の 20:9 自己クロップ暫定値のコピーで、PR #47 が
+    /// needle を [624,263,120,120] の最高エネルギー窓へ再クロップした際に消費者側 roi を
+    /// 対更新しなかった (= #182 version_label と同種の片側更新バグ)。needle 120x120 が
+    /// roi 60x60 に収まらず ccoeff は恒久 NoMatch だった (PR #191 lane1 発見)。
+    /// scenes/title_pc 側の E2E ([`pc_title_pc_templates_match_real_capture_above_threshold`])
+    /// は TitlePcLogoCorner 定義のみを検証するため、消費者 (load_game.toml) 側の roi が
+    /// needle 再クロップ元の実位置を指すことを本テストで別途固定する。
+    ///
+    /// ゲート(R1 三値化): 他の pc_* E2E と同じくデフォルト(pc-e2e feature OFF)では
+    /// `#[ignore]`。`--features pc-e2e --run-ignored all` 起動でのみ実行し、プローブ不在時は
+    /// fail-loud で panic する (absence-skip しない)。
+    #[test]
+    #[cfg_attr(not(feature = "pc-e2e"), ignore)]
+    fn pc_nav_to_field_pc_load_game_matches_title_probe() {
+        let dir = workspace_templates_root()
+            .join("pipelines")
+            .join("nav_to_field_pc");
+        let defs = load_pipeline(&dir).expect("nav_to_field_pc must load");
+        let load = defs
+            .iter()
+            .find(|d| d.name == "LoadGamePc")
+            .expect("LoadGamePc must exist in nav_to_field_pc");
+
+        let probe_path = title_pc_probe_path().unwrap_or_else(|| {
+            panic!(
+                "title_pc_probe.png not found (neither templates/captures/ nor \
+                 workspace root). LoadGamePc must match the title probe (the logo \
+                 corner persists after Tap-to-Start) — run with `--features pc-e2e \
+                 --run-ignored all` only when the probe exists, as with the other \
+                 pc_* E2E tests"
+            )
+        });
+        let probe = image::open(&probe_path).expect("open title_pc_probe.png");
+
+        // 本番経路と同一の crop_to_content → normalize を適用 (pc_title_pc E2E と同一前提)。
+        let cropped = crate::crop_to_content(&probe);
+        let screenshot = crate::scale::ScreenScaler::new().normalize(&cropped);
+
+        let m = load
+            .detect(&screenshot, Path::new(""))
+            .unwrap_or_else(|e| panic!("LoadGamePc detect error: {e}"));
+        let m = m.unwrap_or_else(|| {
+            panic!(
+                "LoadGamePc: must match title_pc_probe.png at threshold {} (got None) — \
+                 roi {:?} must point at the needle re-crop origin [624,263,120,120] \
+                 (Issue #192)",
+                load.threshold, load.roi
+            )
+        });
+        assert!(
+            m.confidence.0 >= load.threshold,
+            "LoadGamePc: confidence {} below threshold {} on real PC title capture \
+             (roi/threshold may need re-derivation against the real probe)",
+            m.confidence.0,
+            load.threshold
+        );
+        println!(
+            "LoadGamePc: conf={:.4} region=[{},{},{},{}] (threshold {:.2}) on {}x{} \
+             normalized title probe",
+            m.confidence.0,
+            m.region.x,
+            m.region.y,
+            m.region.width,
+            m.region.height,
+            load.threshold,
+            screenshot.width(),
+            screenshot.height()
+        );
+    }
+
     /// Branch B (Issue #12 デバイス未接続フォールバック) の README 再開手順節が、
     /// コード事実(TOML ROI/threshold・R1 ゲート機構・テスト名)と整合していることを
     /// CI で固定する。手順 doc がコードから drift したら RED。
