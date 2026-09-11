@@ -11,8 +11,14 @@ algorithm = "ccoeff"
 #   Tap-to-Start 後も title ロゴは残留するため、これを load 画面到達検出に使う。
 #   version_label(TapToStartPc と同テンプレ) との重複検出を避け別テンプレを採用。
 template  = "../../scenes/title_pc/title_logo_corner.png"
-# 検出 ROI: title_logo_corner と同じ左上帯。
-roi       = [140, 60, 60, 60]
+# 検出 ROI: title_logo_corner の needle 再クロップ元と同一位置 (Issue #192)。
+#   needle (120x120) は operator probe 2026-07-07 の title_pc_probe.png (RAW 1258x708) から
+#   find_logo_corner_subfeature.rs で最高テクスチャエネルギーの 120x120 窓として
+#   [624,263,120,120] を選出・クロップされた (scenes/title_pc/title_logo_corner.toml 参照)。
+#   旧値 [140,60,60,60] は Issue #13 の 20:9 自己クロップ暫定値のコピーで、needle 120x120 が
+#   roi 60x60 に収まらず ccoeff が恒久 NoMatch だった (#182 version_label と同種の片側更新バグ:
+#   PR #47 が needle を再クロップした際に消費者側 roi を対更新しなかった)。
+roi       = [624, 263, 120, 120]
 threshold = 0.80
 # タップ位置: "Continue/Load" ボタン中央。
 #   legacy _title_load/load_game.toml の click_rect roi=[625,273,30,30] (1280x720 正規化) を
