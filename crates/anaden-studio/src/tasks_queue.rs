@@ -449,32 +449,22 @@ pub fn resolve_start_task(pipeline_dir: &Path) -> Option<String> {
 }
 
 /// [`TaskDefinition`] から `anaden` CLI サブコマンドの引数列を組み立てる純関数
-/// (app.rs 配線用・Issue #144 Task 3)。
+/// (app.rs 配線用・Issue #144 Task 3 / Issue #188 で --target・serial を廃止)。
 ///
-/// - [`TaskKind::LaunchSubcommand`] → `launch --target <target> [serial]`
-///   (android 時のみ serial を付与。Commands::Launch 実署名と突合済み)
-/// - [`TaskKind::PipelineRun`] → `run --target <target> <pipeline_dir> <start_task>`
+/// - [`TaskKind::LaunchSubcommand`] → `launch` (起動保証・引数なしで既定 wait)
+/// - [`TaskKind::PipelineRun`] → `run <pipeline_dir> <start_task>`
 ///   (start_task 未宣言時は `resolve_start_task` で解決。解決不能なら空 Vec)
+///
+/// `target` / `serial` は Issue #188 で CLI 側フラグが削除されたため使用しない
+/// (呼出元互換のため引数形式のみ残置)。
 pub fn spawn_args(
     def: &TaskDefinition,
-    target: &str,
-    serial: Option<&str>,
+    _target: &str,
+    _serial: Option<&str>,
     root: &Path,
 ) -> Vec<String> {
     match def.kind {
-        TaskKind::LaunchSubcommand => {
-            let mut args = vec![
-                "launch".to_string(),
-                "--target".to_string(),
-                target.to_string(),
-            ];
-            if target == "android"
-                && let Some(s) = serial.filter(|s| !s.trim().is_empty())
-            {
-                args.push(s.trim().to_string());
-            }
-            args
-        }
+        TaskKind::LaunchSubcommand => vec!["launch".to_string()],
         TaskKind::PipelineRun => {
             let Some(dir) = &def.pipeline_dir else {
                 return Vec::new();
@@ -483,13 +473,7 @@ pub fn spawn_args(
             let Some(start) = def.start_task.clone().or_else(|| resolve_start_task(&abs)) else {
                 return Vec::new();
             };
-            vec![
-                "run".to_string(),
-                "--target".to_string(),
-                target.to_string(),
-                abs.to_string_lossy().into_owned(),
-                start,
-            ]
+            vec!["run".to_string(), abs.to_string_lossy().into_owned(), start]
         }
     }
 }
@@ -573,24 +557,8 @@ mod tests {
     fn test_spawn_args_launch_subcommand_windows_no_serial() {
         let def = TaskDefinition::parse_toml(LAUNCH_TOML, Path::new("launch.toml")).unwrap();
         let args = spawn_args(&def, "windows", Some("ignored"), Path::new("/root"));
-        assert_eq!(args, vec!["launch", "--target", "windows"]);
-    }
-
-    #[test]
-    fn test_spawn_args_launch_subcommand_android_appends_serial() {
-        let def = TaskDefinition::parse_toml(LAUNCH_TOML, Path::new("launch.toml")).unwrap();
-        let args = spawn_args(&def, "android", Some("localhost:5555"), Path::new("/root"));
-        assert_eq!(
-            args,
-            vec!["launch", "--target", "android", "localhost:5555"]
-        );
-    }
-
-    #[test]
-    fn test_spawn_args_launch_android_empty_serial_omitted() {
-        let def = TaskDefinition::parse_toml(LAUNCH_TOML, Path::new("launch.toml")).unwrap();
-        let args = spawn_args(&def, "android", Some("  "), Path::new("/root"));
-        assert_eq!(args, vec!["launch", "--target", "android"]);
+        // Issue #188: --target / serial は CLI から削除済み — launch のみ。
+        assert_eq!(args, vec!["launch"]);
     }
 
     /// start_task 宣言済みタスク: 宣言値をそのまま使う。
@@ -601,15 +569,10 @@ mod tests {
         let args = spawn_args(&def, "windows", None, Path::new("/root"));
         // FIELD_LOOP_TOML は start_task = "start" を宣言 (実リポジトリ TOML の
         // "TapBottomStablePc" ではなくテスト定義の宣言値が使われること)。
+        // Issue #188: --target / serial は CLI から削除済み — run <dir> <task> のみ。
         assert_eq!(
             args,
-            vec![
-                "run",
-                "--target",
-                "windows",
-                "/root\\templates/pipelines/field_loop_pc",
-                "start",
-            ]
+            vec!["run", "/root\\templates/pipelines/field_loop_pc", "start"]
         );
     }
 
@@ -639,21 +602,15 @@ pipeline_dir = "templates/pipelines/nav_to_field_pc"
 "#;
         let def = TaskDefinition::parse_toml(src, Path::new("nav_to_field_pc.toml")).unwrap();
         let args = spawn_args(&def, "windows", None, &root);
-        assert_eq!(args.len(), 5);
-        assert_eq!(
-            &args[0..3],
-            &[
-                "run".to_string(),
-                "--target".to_string(),
-                "windows".to_string()
-            ]
-        );
+        // Issue #188: --target は CLI から削除済み — run <dir> <start> のみ。
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "run");
         assert!(
-            args[3].ends_with("templates\\pipelines\\nav_to_field_pc")
-                || args[3].ends_with("templates/pipelines/nav_to_field_pc")
+            args[1].ends_with("templates\\pipelines\\nav_to_field_pc")
+                || args[1].ends_with("templates/pipelines/nav_to_field_pc")
         );
         // 辞書順最初の TaskDef: field_hud_top
-        assert_eq!(args[4], "field_hud_top");
+        assert_eq!(args[2], "field_hud_top");
     }
 
     /// pipeline_dir が実在せず start_task も解決不能なら空 Vec (fail-closed)。

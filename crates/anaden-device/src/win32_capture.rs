@@ -34,7 +34,7 @@ use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetParent, GetWindowThreadProcessId, IsWindowVisible,
 };
 
-use crate::client::AdbError;
+use crate::error::DeviceError;
 
 /// PW_RENDERFULLCONTENT = 0x2 (Win8.1+)。GPU 描画含むフルコンテンツをレンダリング。
 const PW_RENDERFULLCONTENT: u32 = 0x2;
@@ -48,7 +48,7 @@ pub const DEFAULT_PROCESS_NAME: &str = "AnotherEden.exe";
 /// 特定して PrintWindow+GetDIBits でキャプチャする。HWND はキャッシュするが、
 /// 無効化(ウィンドウ再生成等)対策としてキャプチャ失敗時はキャッシュを破棄して再解決する。
 ///
-/// 既存 `ScreenshotCapture` と同じく `image::DynamicImage` を返し、
+/// `image::DynamicImage` を返し、
 /// `anaden-engine::pipeline_driver::Capture` trait を満たせるシグネチャとする。
 pub struct Win32Capture {
     /// 対象プロセスの exe 名(大文字小文字区別なしで比較)。
@@ -111,19 +111,19 @@ impl Win32Capture {
     /// 3. PrintWindow(PW_RENDERFULLCONTENT)+GetDIBits で RGBA ピクセル取得。
     /// 4. `ImageBuffer::from_raw` → `DynamicImage::ImageRgba8` へ変換。
     ///
-    /// 失敗時は全ステップを `AdbError::CommandFailed { message }` へ包む。
+    /// 失敗時は全ステップを `DeviceError::CommandFailed { message }` へ包む。
     /// HWND キャッシュが有効だったのにキャプチャ失敗した場合はキャッシュを破棄し、
     /// 次回 capture で再解決させる(ウィンドウ再生成対策)。
     ///
     /// GDI 同期処理は `tokio::task::spawn_blocking` へ逃し、async ランタイムをブロックしない。
-    pub async fn capture(&self) -> Result<DynamicImage, AdbError> {
+    pub async fn capture(&self) -> Result<DynamicImage, DeviceError> {
         let process = self.process.clone();
         // キャッシュは isize(HWND のポインタ値)で保持するため、そのままスレッド境界を越えられる。
         // 戻り値には HWND を含めない(画像のみ)。
         let cached_isize = self
             .cached_hwnd
             .lock()
-            .map_err(|e| AdbError::CommandFailed {
+            .map_err(|e| DeviceError::CommandFailed {
                 message: format!("HWND キャッシュロック失敗: {e}"),
             })?
             .take();
@@ -133,7 +133,7 @@ impl Win32Capture {
         let capture_result =
             tokio::task::spawn_blocking(move || resolve_and_capture(&process, cached_isize))
                 .await
-                .map_err(|e| AdbError::CommandFailed {
+                .map_err(|e| DeviceError::CommandFailed {
                     message: format!("capture spawn_blocking Join 失敗: {e}"),
                 })??;
 
@@ -141,7 +141,7 @@ impl Win32Capture {
         let mut guard = self
             .cached_hwnd
             .lock()
-            .map_err(|e| AdbError::CommandFailed {
+            .map_err(|e| DeviceError::CommandFailed {
                 message: format!("HWND キャッシュロック失敗: {e}"),
             })?;
         let (hwnd_isize, image) = capture_result;
@@ -158,12 +158,12 @@ impl Win32Capture {
     /// `anaden-studio` のような tokio を持たない std::thread ベースの呼び出し元向け。
     /// 内部手順は [`capture`](Self::capture) と同一(共通の `resolve_and_capture` を呼ぶ)。
     /// HWND キャッシュの扱い(HWND 解決→PrintWindow→GetDIBits、失敗時キャッシュ破棄)も同等。
-    pub fn capture_blocking(&self) -> Result<DynamicImage, AdbError> {
+    pub fn capture_blocking(&self) -> Result<DynamicImage, DeviceError> {
         let process = self.process.clone();
         let cached_isize = self
             .cached_hwnd
             .lock()
-            .map_err(|e| AdbError::CommandFailed {
+            .map_err(|e| DeviceError::CommandFailed {
                 message: format!("HWND キャッシュロック失敗: {e}"),
             })?
             .take();
@@ -173,7 +173,7 @@ impl Win32Capture {
         let mut guard = self
             .cached_hwnd
             .lock()
-            .map_err(|e| AdbError::CommandFailed {
+            .map_err(|e| DeviceError::CommandFailed {
                 message: format!("HWND キャッシュロック失敗: {e}"),
             })?;
         let (hwnd_isize, image) = capture_result;
@@ -198,7 +198,7 @@ impl Win32Capture {
 fn resolve_and_capture(
     process: &str,
     cached_isize: Option<isize>,
-) -> Result<(Option<isize>, DynamicImage), AdbError> {
+) -> Result<(Option<isize>, DynamicImage), DeviceError> {
     let hwnd = match cached_isize {
         Some(p) => {
             let hwnd = HWND(p as *mut core::ffi::c_void);
@@ -212,25 +212,25 @@ fn resolve_and_capture(
         None => resolve_hwnd(process)?,
     };
 
-    let (w, h) = client_size(hwnd).map_err(|code| AdbError::CommandFailed {
+    let (w, h) = client_size(hwnd).map_err(|code| DeviceError::CommandFailed {
         message: format!("GetClientRect 失敗 (GetLastError={code})"),
     })?;
     if w == 0 || h == 0 {
-        return Err(AdbError::CommandFailed {
+        return Err(DeviceError::CommandFailed {
             message: format!(
                 "クライアント領域が {w}x{h} です(ウィンドウが最小化されている可能性があります)"
             ),
         });
     }
 
-    let rgba = capture_via_printwindow(hwnd, w, h).map_err(|code| AdbError::CommandFailed {
+    let rgba = capture_via_printwindow(hwnd, w, h).map_err(|code| DeviceError::CommandFailed {
         message: format!(
             "PrintWindow/GetDIBits 失敗 (GetLastError={code})。HWND 破棄・権限不足・クライアント領域0x0 を疑ってください"
         ),
     })?;
 
     let img: RgbaImage =
-        ImageBuffer::from_raw(w, h, rgba).ok_or_else(|| AdbError::CommandFailed {
+        ImageBuffer::from_raw(w, h, rgba).ok_or_else(|| DeviceError::CommandFailed {
             message: format!("ImageBuffer::from_raw 失敗 (size mismatch w={w} h={h})"),
         })?;
 
@@ -257,13 +257,13 @@ struct HwndSearchState {
 }
 
 /// プロセス名 → PID → 可視 HWND を一括解決。失敗時は CommandFailed へ包む。
-fn resolve_hwnd(process: &str) -> Result<HWND, AdbError> {
-    let pid = super::win32_proc::find_pid_by_name(process).ok_or_else(|| AdbError::CommandFailed {
+fn resolve_hwnd(process: &str) -> Result<HWND, DeviceError> {
+    let pid = super::win32_proc::find_pid_by_name(process).ok_or_else(|| DeviceError::CommandFailed {
         message: format!(
             "プロセス \"{process}\" が見つかりません(タスクマネージャで exe 名を確認してください)"
         ),
     })?;
-    find_visible_hwnd_for_pid(pid).ok_or_else(|| AdbError::CommandFailed {
+    find_visible_hwnd_for_pid(pid).ok_or_else(|| DeviceError::CommandFailed {
         message: format!(
             "PID {pid} に紐づく可視トップレベルウィンドウが見つかりません(最小化/非表示の可能性)"
         ),

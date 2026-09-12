@@ -127,11 +127,8 @@ pub struct StudioApp {
     pub(crate) batch_threshold: f32,
     /// バッチ評価結果。
     pub(crate) batch_result: Option<ConfusionMatrix>,
-    /// ADB デバイスシリアル（ライブキャプチャ用）。
-    pub(crate) adb_serial: String,
-    /// ライブキャプチャの取得元バックエンド(android/windows)。
-    pub(crate) target: crate::source::Target,
     /// PC版(Windows)バックエンドの対象 exe 名。
+    /// (Issue #188 で取得元 target フィールドは Windows 固定化に伴い削除)
     pub(crate) win_exe: String,
     /// ライブキャプチャ（稼働中のみ）。
     pub(crate) live: Option<LiveCapture>,
@@ -183,7 +180,7 @@ pub struct StudioApp {
 
 impl Default for StudioApp {
     fn default() -> Self {
-        Self::with_initial_target(crate::source::Target::default(), None)
+        Self::with_initial_target(None)
     }
 }
 
@@ -204,9 +201,9 @@ fn default_win_exe() -> String {
 }
 
 impl StudioApp {
-    /// CLI 指定の target/exe を初期値として StudioApp を構築する。
-    /// target 未指定時(default) は android。exe 未指定時は既定 exe 名。
-    pub fn with_initial_target(target: crate::source::Target, exe: Option<String>) -> Self {
+    /// CLI 指定の exe を初期値として StudioApp を構築する。
+    /// (Issue #188 で target は Windows 固定化 — 引数は廃止。exe 未指定時は既定 exe 名)
+    pub fn with_initial_target(exe: Option<String>) -> Self {
         // engine は engine_kind（デフォルト CCOEFF）から構築。閾値0・ダウンスケール2。
         let default_kind = EngineKind::default();
         // Tasks ペイン専有のログチャネル (reader try_send / UI drain)。
@@ -235,8 +232,6 @@ impl StudioApp {
             test_dir: PathBuf::from("./templates/tests"),
             batch_threshold: 0.5,
             batch_result: None,
-            adb_serial: String::new(),
-            target,
             win_exe: exe.unwrap_or_else(default_win_exe),
             live: None,
             scaler: ScreenScaler::new(),

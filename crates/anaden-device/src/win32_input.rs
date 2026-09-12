@@ -2,11 +2,11 @@
 //!
 //! `anaden-core::InputAction::{Tap, Swipe, LongPress, Wait}` を Win32 のマウスイベントへ
 //! 翻訳して注入する。プローブ `examples/probe_windows_input.rs` で動作検証済みのロジック
-//! (SendInput でアンチチート wfsdrv を突破確認)をベースに、`InputExecutor` と対称な
-//! `Win32InputExecutor` を提供する。
+//! (SendInput でアンチチート wfsdrv を突破確認)をベースに、`Win32InputExecutor` を
+//! 提供する。
 //!
 //! # 座標系
-//! InputAction の (x, y) は `InputExecutor` と同様「画面左上原点の実ピクセル」
+//! InputAction の (x, y) は「画面左上原点の実ピクセル」
 //! (pipeline_driver の rescale 後 device_width 座標)。プローブ phase2 と同じく
 //! クライアント原点の画面座標 + (x,y) で SendInput 用画面絶対座標を作る。
 //!
@@ -43,13 +43,13 @@ use windows::core::BOOL;
 
 use anaden_core::InputAction;
 
-use crate::client::AdbError;
+use crate::error::DeviceError;
 
 // wParam 区分(PostMessage 用)。
 const MK_LBUTTON: usize = 0x0001;
 
-/// スワイプの MOVE イベント送出間隔(ミリ秒)。Android `input swipe` の連続 down/move/up
-/// を SendInput の MOVE 連打で近似するための刻み。小さすぎると SendInput 負荷上昇。
+/// スワイプの MOVE イベント送出間隔(ミリ秒)。down/move/up の連続イベント列を
+/// SendInput の MOVE 連打で近似するための刻み。小さすぎると SendInput 負荷上昇。
 const SWIPE_STEP_MS: u64 = 10;
 
 /// LongPress のデフォルト押下時間(action 側で明示指定がないときの安全弁)。
@@ -131,7 +131,7 @@ impl Win32InputExecutor {
     /// 座標は InputAction が持つ「画面左上原点の実ピクセル」(device_width 座標)。
     /// 内部でクライアント原点(client_origin = client_to_screen_abs(hwnd, 0, 0))を足して
     /// 画面絶対座標へ変換し、SendInput/PostMessage へ渡す(プローブ phase2 と同一方式)。
-    pub async fn execute(&self, action: &InputAction) -> Result<(), AdbError> {
+    pub async fn execute(&self, action: &InputAction) -> Result<(), DeviceError> {
         // Wait は IO を伴わない非同期待機なので runtime スレッドで直接 sleep。
         if let InputAction::Wait(d) = action {
             tokio::time::sleep(*d).await;
@@ -145,7 +145,7 @@ impl Win32InputExecutor {
         // spawn_blocking でワーカスレッドへ逃す(runtime 阻止回避)。
         tokio::task::spawn_blocking(move || run_action_sync(&process, method, &action))
             .await
-            .map_err(|e| AdbError::CommandFailed {
+            .map_err(|e| DeviceError::CommandFailed {
                 message: format!("入力ワーカがパニック/キャンセル: {e}"),
             })?
     }
@@ -157,7 +157,7 @@ impl Win32InputExecutor {
     /// [`Self::execute`] と同一の共通同期コア (`run_action_sync`) を直接呼ぶ
     /// (spawn_blocking もランタイムも不要 = 二重実装なし)。
     /// [`crate::Win32Capture::capture_blocking`] と同じ提供パターン。
-    pub fn execute_blocking(&self, action: &InputAction) -> Result<(), AdbError> {
+    pub fn execute_blocking(&self, action: &InputAction) -> Result<(), DeviceError> {
         run_action_sync(&self.process, self.method, action)
     }
 }
@@ -167,7 +167,7 @@ fn run_action_sync(
     process: &str,
     method: InputMethod,
     action: &InputAction,
-) -> Result<(), AdbError> {
+) -> Result<(), DeviceError> {
     match action {
         InputAction::Tap(point) => click(process, method, point.x as i32, point.y as i32, 60),
         InputAction::LongPress(point, hold_ms) => {
@@ -197,13 +197,19 @@ fn run_action_sync(
 }
 
 /// Tap / LongPress 共通: 指定クライアント座標で DOWN → hold_ms → UP を注入。
-fn click(process: &str, method: InputMethod, x: i32, y: i32, hold_ms: u64) -> Result<(), AdbError> {
+fn click(
+    process: &str,
+    method: InputMethod,
+    x: i32,
+    y: i32,
+    hold_ms: u64,
+) -> Result<(), DeviceError> {
     let (pid, hwnd) = resolve_pid_and_hwnd(process)?;
     match method {
         InputMethod::SendInput => {
             // SendInput は前景化が前提(物理マウス相当)。AttachThreadInput 併用で確実化。
             if !bring_to_foreground(hwnd) {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: format!(
                         "前景化失敗 (process={process})。別アプリがフォアを握るか SetForegroundWindow 拒否。"
                     ),
@@ -213,7 +219,7 @@ fn click(process: &str, method: InputMethod, x: i32, y: i32, hold_ms: u64) -> Re
             // ガード2: SendInput 直前に前景ウィンドウが対象プロセスのままか再検証。
             // settle 待ち中に別アプリへフォアを奪われていたら中止(誤クリック防止)。
             if !foreground_belongs_to(pid) {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: format!(
                         "SendInput 直前に前景が別ウィンドウへ奪われた (process={process})。誤クリック防止のため注入中止。"
                     ),
@@ -224,7 +230,7 @@ fn click(process: &str, method: InputMethod, x: i32, y: i32, hold_ms: u64) -> Re
             // 枠外なら別ウィンドウ/デスクトップへの誤クリックになるため注入中止。
             let (fire_x, fire_y) = (origin_x + x, origin_y + y);
             if !point_in_window_rect(hwnd, fire_x, fire_y) {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: format!(
                         "発火座標({fire_x},{fire_y})が対象ウィンドウ画面矩形外 (process={process})。誤クリック防止のため注入中止。"
                     ),
@@ -232,7 +238,7 @@ fn click(process: &str, method: InputMethod, x: i32, y: i32, hold_ms: u64) -> Re
             }
             let sent = sendinput_click(fire_x, fire_y, hold_ms);
             if sent != 2 {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: format!(
                         "SendInput 戻り値<2 (got={sent})。UIPI/デスクトップ分離/管理者権限不足でブロックの疑い。"
                     ),
@@ -244,7 +250,7 @@ fn click(process: &str, method: InputMethod, x: i32, y: i32, hold_ms: u64) -> Re
             // 背面送信。前景化不要。lParam はクライアント座標(x,y)。
             let (down_ok, up_ok) = postmessage_click(hwnd, x, y, hold_ms);
             if down_ok != 1 || up_ok != 1 {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: format!(
                         "PostMessageW が Err を返しました (down={down_ok}, up={up_ok})"
                     ),
@@ -265,13 +271,13 @@ fn swipe(
     x2: i32,
     y2: i32,
     duration_ms: u64,
-) -> Result<(), AdbError> {
+) -> Result<(), DeviceError> {
     let (pid, hwnd) = resolve_pid_and_hwnd(process)?;
     let steps = ((duration_ms / SWIPE_STEP_MS).max(1)) as i32;
     match method {
         InputMethod::SendInput => {
             if !bring_to_foreground(hwnd) {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: format!(
                         "前景化失敗 (process={process})。Swipe の SendInput には前景化が必須。"
                     ),
@@ -280,7 +286,7 @@ fn swipe(
             std::thread::sleep(Duration::from_millis(FOREGROUND_SETTLE_MS));
             // ガード2: Swipe も SendInput でシステム全体へ注入するため前景再検証。
             if !foreground_belongs_to(pid) {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: format!(
                         "SendInput 直前に前景が別ウィンドウへ奪われた (process={process})。Swipe 誤操作防止のため注入中止。"
                     ),
@@ -295,7 +301,7 @@ fn swipe(
             if !point_in_window_rect(hwnd, start_x, start_y)
                 || !point_in_window_rect(hwnd, end_x, end_y)
             {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: format!(
                         "Swipe 端点(start={start_x},{start_y} end={end_x},{end_y})が対象ウィンドウ画面矩形外 (process={process})。誤操作防止のため注入中止。"
                     ),
@@ -309,7 +315,7 @@ fn swipe(
             let (ax0, ay0) = to_absolute(origin_x + x1 - ox, origin_y + y1 - oy, vw, vh);
             let down = unsafe { send_mouse(ax0, ay0, base | MOUSEEVENTF_LEFTDOWN) };
             if down == 0 {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: "Swipe: SendInput(MOUSEEVENTF_LEFTDOWN) 挿入失敗".to_string(),
                 });
             }
@@ -328,7 +334,7 @@ fn swipe(
             let (ax1, ay1) = to_absolute(origin_x + x2 - ox, origin_y + y2 - oy, vw, vh);
             let up = unsafe { send_mouse(ax1, ay1, base | MOUSEEVENTF_LEFTUP) };
             if up == 0 {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: "Swipe: SendInput(MOUSEEVENTF_LEFTUP) 挿入失敗".to_string(),
                 });
             }
@@ -344,7 +350,7 @@ fn swipe(
                 let _ = PostMessageW(Some(hwnd), WM_MOUSEMOVE, WPARAM(0), lp1);
                 let down = PostMessageW(Some(hwnd), WM_LBUTTONDOWN, WPARAM(MK_LBUTTON), lp1);
                 if down.is_err() {
-                    return Err(AdbError::CommandFailed {
+                    return Err(DeviceError::CommandFailed {
                         message: "Swipe: PostMessage(WM_LBUTTONDOWN) 失敗".to_string(),
                     });
                 }
@@ -362,7 +368,7 @@ fn swipe(
                 }
                 let up = PostMessageW(Some(hwnd), WM_LBUTTONUP, WPARAM(MK_LBUTTON), lp2);
                 if up.is_err() {
-                    return Err(AdbError::CommandFailed {
+                    return Err(DeviceError::CommandFailed {
                         message: "Swipe: PostMessage(WM_LBUTTONUP) 失敗".to_string(),
                     });
                 }
@@ -427,13 +433,13 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
 ///
 /// ガード2(フォアグラウンド再検証)で PID が必要なため、HWND だけではなく PID も返す。
 /// 旧 `resolve_hwnd` を分割・発展させたもの。
-fn resolve_pid_and_hwnd(process: &str) -> Result<(u32, HWND), AdbError> {
-    let pid = find_pid_by_name(process).ok_or_else(|| AdbError::CommandFailed {
+fn resolve_pid_and_hwnd(process: &str) -> Result<(u32, HWND), DeviceError> {
+    let pid = find_pid_by_name(process).ok_or_else(|| DeviceError::CommandFailed {
         message: format!(
             "プロセスが見つかりません ({process})。ゲームを起動してから再実行してください。"
         ),
     })?;
-    let hwnd = find_main_window(pid).ok_or_else(|| AdbError::CommandFailed {
+    let hwnd = find_main_window(pid).ok_or_else(|| DeviceError::CommandFailed {
         message: format!("PID {pid} に紐づく可視ウィンドウが見つかりません ({process})。ウィンドウが最小化/非表示の可能性。"),
     })?;
     Ok((pid, hwnd))

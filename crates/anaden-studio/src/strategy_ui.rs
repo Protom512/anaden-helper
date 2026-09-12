@@ -262,17 +262,17 @@ mod tests {
     fn new_panel_has_defaults_and_no_strategy() {
         let panel = StrategyPanel::default();
         assert_eq!(panel.selection().strategy, None);
-        // 実在 6 パイプラインは ON/OFF オプションを持たないため空。
+        // 実在 2 パイプラインは ON/OFF オプションを持たないため空。
         assert!(panel.selection().options.is_empty());
     }
 
     #[test]
     fn select_strategy_updates_selection_and_selected_def() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("field_loop");
-        assert_eq!(panel.selection().strategy.as_deref(), Some("field_loop"));
+        panel.select_strategy("field_loop_pc");
+        assert_eq!(panel.selection().strategy.as_deref(), Some("field_loop_pc"));
         let def = panel.selected_def().expect("def");
-        assert_eq!(def.id, "field_loop");
+        assert_eq!(def.id, "field_loop_pc");
     }
 
     #[test]
@@ -293,13 +293,13 @@ mod tests {
     #[test]
     fn toggle_unknown_option_is_ignored() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("field_loop");
+        panel.select_strategy("field_loop_pc");
         panel.toggle_option("nonexistent", true);
         assert!(
             !panel
                 .selection()
                 .options
-                .contains_key("field_loop.nonexistent")
+                .contains_key("field_loop_pc.nonexistent")
         );
     }
 
@@ -315,14 +315,14 @@ mod tests {
     fn validate_ok_after_select_and_clear() {
         let mut panel = StrategyPanel::default();
         assert!(panel.validate().is_ok());
-        panel.select_strategy("field_loop");
+        panel.select_strategy("field_loop_pc");
         assert!(panel.validate().is_ok());
     }
 
     #[test]
     fn toml_roundtrip_preserves_selection() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("worldmap_loop");
+        panel.select_strategy("nav_to_field_pc");
 
         let toml_str = panel.to_toml().expect("serialize");
         let mut restored = StrategyPanel::default();
@@ -341,16 +341,16 @@ mod tests {
     #[test]
     fn summary_selected_lists_enabled_options() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("worldmap_loop");
-        // 実在 6 パイプラインは ON/OFF オプションを持たない。
-        assert_eq!(panel.summary(), "strategy=worldmap_loop (オプションなし)");
+        panel.select_strategy("nav_to_field_pc");
+        // 実在 2 パイプラインは ON/OFF オプションを持たない。
+        assert_eq!(panel.summary(), "strategy=nav_to_field_pc (オプションなし)");
     }
 
     #[test]
     fn summary_selected_all_off_shows_no_options() {
         let mut panel = StrategyPanel::default();
-        panel.select_strategy("field_loop");
-        assert_eq!(panel.summary(), "strategy=field_loop (オプションなし)");
+        panel.select_strategy("field_loop_pc");
+        assert_eq!(panel.summary(), "strategy=field_loop_pc (オプションなし)");
     }
 
     #[test]
@@ -376,8 +376,8 @@ mod tests {
     fn tab_summary_line_prefixes_selection() {
         assert_eq!(tab_summary_line("戦略未選択"), "選択: 戦略未選択");
         assert_eq!(
-            tab_summary_line("strategy=field_loop (オプションなし)"),
-            "選択: strategy=field_loop (オプションなし)"
+            tab_summary_line("strategy=field_loop_pc (オプションなし)"),
+            "選択: strategy=field_loop_pc (オプションなし)"
         );
     }
 }

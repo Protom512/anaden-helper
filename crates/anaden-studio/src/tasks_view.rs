@@ -201,21 +201,9 @@ pipeline_dir = "templates/pipelines/login"
         assert_eq!(view.kind, "launch_subcommand");
         assert_eq!(view.pipeline_dir, None);
         assert_eq!(view.start_task, None);
-        assert_eq!(view.args_preview(), "launch --target windows");
+        assert_eq!(view.args_preview(), "launch");
         assert!(!view.unimplemented);
         assert_eq!(view.unimplemented_reason, None);
-    }
-
-    /// 正常系: launch_subcommand (android) は serial 引数をプレビューに含む。
-    #[test]
-    fn test_detail_view_launch_android_serial_preview() {
-        let def = TaskDefinition::parse_toml(LAUNCH_TOML, Path::new("launch.toml")).unwrap();
-        let view = task_detail_view(&def, "android", Some("localhost:5555"), Path::new("/root"));
-        assert_eq!(
-            view.args_preview(),
-            "launch --target android localhost:5555"
-        );
-        assert!(!view.unimplemented);
     }
 
     /// 正常系: pipeline_run 宣言済み start_task の詳細ビュー
@@ -233,7 +221,8 @@ pipeline_dir = "templates/pipelines/login"
             "dir: {dir}"
         );
         assert_eq!(view.start_task.as_deref(), Some("start"));
-        assert_eq!(view.spawn_args.len(), 5);
+        // Issue #188: --target 廃止で run <dir> <start> の 3 トークン。
+        assert_eq!(view.spawn_args.len(), 3);
         assert_eq!(view.spawn_args.last().map(String::as_str), Some("start"));
         assert!(!view.unimplemented);
     }

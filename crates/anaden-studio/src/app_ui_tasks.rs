@@ -26,9 +26,10 @@ impl StudioApp {
                 self.load_task_list(&Self::workspace_root().join("templates/tasks"));
             }
         } else if let Some(list) = self.task_defs.clone() {
-            // UC-3: 詳細プレビューは実行と同じ引数解決条件 (target/serial/root)。
+            // UC-3: 詳細プレビューは実行と同じ引数解決条件 (target/root)。
+            // serial は Issue #188 の Android 削除で廃止 — 常に None。
             let target = self.cli_target();
-            let serial = Some(self.adb_serial.as_str());
+            let serial: Option<&str> = None;
             let root = Self::workspace_root();
             let selected = list.selected_ids().to_vec();
             let mut clicked: Option<String> = None;

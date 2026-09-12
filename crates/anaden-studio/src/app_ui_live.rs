@@ -16,7 +16,9 @@ use eframe::egui;
 
 use crate::app_state::StudioApp;
 use crate::authoring_coords::{self, ViewRect};
-use crate::authoring_ui::{AuthoringInputInjector, UnavailableAuthoringInjector};
+use crate::authoring_ui::AuthoringInputInjector;
+#[cfg(not(windows))]
+use crate::authoring_ui::UnavailableAuthoringInjector;
 use crate::source::LiveCapture;
 
 impl StudioApp {
@@ -50,19 +52,22 @@ impl StudioApp {
         });
     }
 
-    /// 実演オーサリング用の入力注入器を作る (取得元に応じた実装選択)。
+    /// 実演オーサリング用の入力注入器を作る。
     ///
-    /// Windows 取得元のみ実注入 (SendInput)。それ以外は常にエラーを返す
-    /// スタブ (fail-visible)。
+    /// Windows ビルドのみ実注入 (SendInput)。非 Windows ビルドは常にエラーを返す
+    /// スタブ (fail-visible)。Issue #188 で Android 取得元は削除済み。
     fn make_authoring_injector(&self) -> Box<dyn AuthoringInputInjector> {
-        match self.target {
-            #[cfg(windows)]
-            crate::source::Target::Windows => Box::new(
-                crate::authoring_ui::Win32AuthoringInjector::new(self.win_exe.trim()),
-            ),
-            _ => Box::new(UnavailableAuthoringInjector::new(
+        #[cfg(windows)]
+        {
+            Box::new(crate::authoring_ui::Win32AuthoringInjector::new(
+                self.win_exe.trim(),
+            ))
+        }
+        #[cfg(not(windows))]
+        {
+            Box::new(UnavailableAuthoringInjector::new(
                 "入力注入は Windows(PC版) キャプチャでのみ対応しています",
-            )),
+            ))
         }
     }
 
@@ -77,54 +82,23 @@ impl StudioApp {
         ui.heading("ライブキャプチャ");
         ui.horizontal(|ui| {
             ui.label("取得元:");
-            ui.selectable_value(
-                &mut self.target,
-                crate::source::Target::Android,
-                "Android(adb)",
-            );
-            #[cfg(windows)]
-            ui.selectable_value(
-                &mut self.target,
-                crate::source::Target::Windows,
-                "Windows(PC版)",
-            );
+            ui.label("Windows(PC版) — Win32Capture");
         });
-        match self.target {
-            crate::source::Target::Android => {
-                ui.horizontal(|ui| {
-                    ui.label("serial:");
-                    ui.add(egui::TextEdit::singleline(&mut self.adb_serial).desired_width(140.0));
-                });
-            }
-            #[cfg(windows)]
-            crate::source::Target::Windows => {
-                ui.horizontal(|ui| {
-                    ui.label("exe名:");
-                    ui.add(egui::TextEdit::singleline(&mut self.win_exe).desired_width(160.0));
-                });
-            }
-        }
+        ui.horizontal(|ui| {
+            ui.label("exe名:");
+            ui.add(egui::TextEdit::singleline(&mut self.win_exe).desired_width(160.0));
+        });
         if self.live.is_some() {
             if ui.button("停止（この画面で固定）").clicked() {
                 self.live = None;
                 self.status = "ライブ停止: 現在の画面で固定しました".to_string();
             }
         } else {
-            let can_start = match self.target {
-                crate::source::Target::Android => !self.adb_serial.trim().is_empty(),
-                #[cfg(windows)]
-                crate::source::Target::Windows => !self.win_exe.trim().is_empty(),
-            };
+            let can_start = !self.win_exe.trim().is_empty();
             ui.add_enabled_ui(can_start, |ui| {
                 if ui.button("ライブ開始").clicked() {
-                    let serial = self.adb_serial.trim().to_string();
-                    self.live = Some(LiveCapture::start(
-                        serial,
-                        800,
-                        self.target,
-                        self.win_exe.trim(),
-                    ));
-                    self.status = "ライブキャプチャ中…".to_string();
+                    self.live = Some(LiveCapture::start(800, self.win_exe.trim()));
+                    self.status = "PC版キャプチャ中…".to_string();
                 }
             });
         }

@@ -1,7 +1,8 @@
 //! Issue #160 UC-4 (Shard 5) 統合テスト — 既存 pipeline のエディタロード・
 //! 編集・保存のロスネス往復機械保証。
 //!
-//! リポジトリ実 8 pipeline (`templates/pipelines/*`) 全てについて:
+//! リポジトリ実 4 pipeline (`templates/pipelines/*`) 全てについて (Issue #188 で
+//! android 版 4 pipeline を削除し 8 → 4):
 //! load → `ScenarioEditorState` → (編集なし) save → 再 load の TaskDef ベクタ
 //! 意味比較 + manifest 比較 + 元ファイル名 (stem) 保全を検証する。
 //! リポジトリ実ファイルを書き換えないよう、TOML のみをテンポラリ dir へ
@@ -109,14 +110,14 @@ fn child_ui(ctx: &egui::Context) -> egui::Ui {
 /// 再 load が意味等価。TaskDef ベクタ・manifest・元ファイル名 (stem) が保全され、
 /// template 相対参照 (`../`・`../../`・サブディレクトリ) が元の形で書き戻る。
 #[test]
-fn all_eight_repo_pipelines_roundtrip_losslessly() {
+fn all_four_repo_pipelines_roundtrip_losslessly() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = copy_pipelines_tomls(tmp.path());
     let dirs = pipeline_dirs(&root);
     assert_eq!(
         dirs.len(),
-        8,
-        "既存 8 pipeline が前提: {:?}",
+        4,
+        "既存 4 pipeline が前提: {:?}",
         dirs.iter()
             .map(|d| d.display().to_string())
             .collect::<Vec<_>>()
@@ -201,12 +202,8 @@ fn all_eight_repo_pipelines_roundtrip_losslessly() {
         login.contains("template = \"../../scenes/title_pc/version_label.png\""),
         "../../ 参照が元の形で書き戻る:\n{login}"
     );
-    let worldmap = std::fs::read_to_string(root.join("worldmap_loop").join("tap_ancient_tab.toml"))
-        .expect("tap_ancient_tab.toml");
-    assert!(
-        worldmap.contains("template = \"ancient_tab.png\""),
-        "pipeline dir 内の裸相対が元の形で書き戻る:\n{worldmap}"
-    );
+    // (旧 worldmap_loop の裸相対 template 参照チェックは Issue #188 で android 版
+    //  pipeline を削除したため対象が消滅 — 現行 4 pipeline の参照は全て ../ 相対)。
 
     // manifest 付き pipeline の保存 TOML は手書き pipeline.toml と toml::Value 等価
     // (= 「保存済み TOML は人間可読・既存形式と互換」の構造的証明)。
@@ -226,31 +223,36 @@ fn all_eight_repo_pipelines_roundtrip_losslessly() {
     }
 }
 
-/// 正常系 2 (焦点): manifest 無し pipeline (_title_load) の load → save で
+/// 正常系 2 (焦点): manifest 無し pipeline (nav_to_field_pc) の load → save で
 /// pipeline.toml が新規生成され、start_task は resolve_start_task と同一規則
 /// (辞書順先頭 TOML stem) のファイルの **TaskDef name** になる (anaden CLI の
 /// `t.name == start_task` 実行契約と整合)。
+/// (旧 _title_load は Issue #188 で削除 — 現行 manifestless pipeline は
+///  nav_to_field_pc のみ)
 #[test]
 fn manifestless_save_creates_behavior_compatible_manifest() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = copy_pipelines_tomls(tmp.path());
-    let dir = root.join("_title_load");
+    let dir = root.join("nav_to_field_pc");
     assert!(!dir.join("pipeline.toml").exists(), "前提: manifest 無し");
 
     let state = load_scenario_from_dir(&dir).expect("load");
-    // _title_load の TaskDef TOML は load_game.toml (stem 辞書順先頭) のみで、
-    // その name は LoadGame。
+    // nav_to_field_pc の TaskDef TOML の stem 辞書順先頭は field_hud_top.toml で、
+    // その name は FieldHudTopPc。
     assert_eq!(
         anaden_studio::tasks::resolve_start_task(&dir).as_deref(),
-        Some("load_game"),
+        Some("field_hud_top"),
         "前提: 辞書順先頭 stem"
     );
-    assert_eq!(state.start_task, "LoadGame", "stem でなく TaskDef name");
+    assert_eq!(
+        state.start_task, "FieldHudTopPc",
+        "stem でなく TaskDef name"
+    );
     assert!(state.goals.is_empty());
 
     save_scenario(&state, &[], &root).expect("save");
     let manifest = load_pipeline_manifest(&dir).expect("新規生成 manifest");
-    assert_eq!(manifest.start_task, "LoadGame");
+    assert_eq!(manifest.start_task, "FieldHudTopPc");
     assert!(
         manifest.goals.is_empty(),
         "空 goals = goal 行自体に出ない (無限ループ後方互換)"

@@ -3,7 +3,7 @@
 //! 実行:
 //!   cargo run --release --example bench_match -p anaden-vision
 //!
-//! 実機 ADB キャプチャ（Pixel 7a: 2400x1080）を正規化（幅1280）し、
+//! 旧 Android 実機キャプチャ（2400x1080・Issue #188 で取得経路は削除済み）を正規化（幅1280）し、
 //! SseVisionEngine / CcoeffVisionEngine の match_template を各設定で30回計測、
 //! 中央値(ms)を表出力する。
 //!
