@@ -1,5 +1,11 @@
 # TASKS
 
+> **履歴資料について (2026-09-13)**: 本ドキュメントに含まれる Android / ADB / scrcpy /
+> minitouch 関連の記述は **Issue #188 (2026-09-10) で Android 端末サポートを削除する以前**の
+> 計画・実績の記録です（実機検証の結果、実用に耐えないと判断して drop）。現行仕様は
+> README・docs/anaden-helper.wiki を参照してください。
+
+
 ## 現在の作業（再開ポイント）
 
 ### 🔄 完全ループ(capture→認識→touch→効果)の end-to-end 実機検証（scrcpy）

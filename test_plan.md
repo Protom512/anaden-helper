@@ -1,5 +1,11 @@
 # Test Plan — anaden-helper
 
+> **履歴資料について (2026-09-13)**: 本ドキュメントに含まれる Android / ADB / scrcpy /
+> minitouch 関連の記述は **Issue #188 (2026-09-10) で Android 端末サポートを削除する以前**の
+> 計画・実績の記録です（実機検証の結果、実用に耐えないと判断して drop）。現行仕様は
+> README・docs/anaden-helper.wiki を参照してください。
+
+
 [canonical_feature_stories.md](canonical_feature_stories.md) の各 US に対応するテストケース。Tier 順に実行する。
 
 **最終実行**: 2026-06-24 | **Unit**: 208/208 PASS | **Offline**: field_loop_pc PASS
