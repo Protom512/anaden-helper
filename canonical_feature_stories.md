@@ -1,5 +1,11 @@
 # Canonical Feature Story Spreadsheet
 
+> **履歴資料について (2026-09-13)**: 本ドキュメントに含まれる Android / ADB / scrcpy /
+> minitouch 関連の記述は **Issue #188 (2026-09-10) で Android 端末サポートを削除する以前**の
+> 計画・実績の記録です（実機検証の結果、実用に耐えないと判断して drop）。現行仕様は
+> README・docs/anaden-helper.wiki を参照してください。
+
+
 Another Eden 自動操作ツール **anaden-helper** の単一正準ソース。コードから導出した期待動作・検証ステータス・欠陥 ID を追跡する。
 
 関連: [test_plan.md](test_plan.md) | [defects_log.md](defects_log.md)
