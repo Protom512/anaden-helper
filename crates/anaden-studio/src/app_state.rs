@@ -4,7 +4,7 @@
 //! - [`crate::app_state_core`]: StudioApp 本体 (構造体・構築) + AppMode +
 //!   EngineKind + 定数 (HEATMAP_DOWNSCALE / STATE_OPTIONS 等)。
 //! - [`crate::app_state_connection`]: 接続状態・チェック (ConnectionState /
-//!   ConnectionStatus / check_android_device / check_windows_process)。
+//!   ConnectionStatus / check_windows_process)。
 //! - [`crate::app_state_pipeline_task`]: pipeline task 構築・保存
 //!   (PipelineActionKind / pipeline_task_spec / save_pipeline_task)。
 //!
@@ -14,9 +14,7 @@
 //! API を再公開する facade で、呼び出し元 (app / app_ui 系・app.rs の
 //! re-export チェーン含む) は無修正。
 
-pub use crate::app_state_connection::{
-    ConnectionState, ConnectionStatus, check_android_device, check_windows_process,
-};
+pub use crate::app_state_connection::{ConnectionState, ConnectionStatus, check_windows_process};
 pub use crate::app_state_core::{AppMode, StudioApp};
 pub(crate) use crate::app_state_core::{
     DEFAULT_TEMPLATE_NAME, EngineKind, HEATMAP_DOWNSCALE, STATE_OPTIONS,

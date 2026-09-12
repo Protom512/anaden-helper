@@ -1,8 +1,8 @@
 //! テンプレートバンク一括監査 (Issue #187 提案 1・2 + Issue #192 幅 fit)。
 //!
 //! Issue #184 (PR #186) の Release Review lane3 がバンク内 PNG を一括スキャンし、
-//! `templates/pipelines/field_loop/bottom_stable.png` (輝度 stddev 2.89 — 監査実測
-//! 2.80) が無構造 (恒久 NoMatch) であることを発見した。#184 で導入した loader warn は
+//! 無構造 (恒久 NoMatch) テンプレート (android 版 bottom_stable.png — stddev 2.89。
+//! Issue #188 で資産ごと削除済み) を発見した。#184 で導入した loader warn は
 //! 実行時にしか火かないため、CI で常時実行される **監査テスト** として資産側の
 //! 品質を固定する:
 //!
@@ -21,10 +21,6 @@
 //! - 全件一覧 (パス・stddev) と統計 (件数・最小 stddev) を stdout へ出力し、
 //!   レポートを `target/template-bank-audit-report.txt` へ書き出す (コミットされない
 //!   ビルド産物置き場。実行の evidence は「テスト green + 本レポート」)。
-//!
-//! bottom_stable.png (field_loop/android) は実機再撮影が現状不可能 (ゲームは PC 版を
-//! 起動中・android 用 pipeline) のため allowlist 登録で経過観察する。再撮影手順は
-//! `templates/pipelines/field_loop/tap_bottom.toml` の doc comment に記載している。
 
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
@@ -43,26 +39,23 @@ fn templates_root() -> PathBuf {
 /// 既知の無構造テンプレート (監査 allowlist)。templates/ ルート相対・
 /// フォワードスラッシュ形式で指定する。
 ///
-/// 登録条件: (1) stddev < 閾値で恒久 NoMatch が確定済み、(2) 当面の再生成が不可能
-/// (実機再撮影が必要な android 向け資産で、現状ゲームは PC 版を起動中)。
+/// 登録条件: (1) stddev < 閾値で恒久 NoMatch が確定済み、(2) 当面の再生成が不可能。
 ///
-/// - `pipelines/field_loop/bottom_stable.png` (監査実測 stddev 2.80 — Issue #184 lane3
-///   報告 2.89 と同一資産。TapBottomStable が参照。Issue #182 version_label と同種の
-///   ccoeff 恒久 NoMatch)。
-///
-/// allowlist 登録テンプレートが再撮影で構造を取り戻したらこのリストから削除する
-/// (監査テストの stale 検出が削除を促す)。再撮影手順は tap_bottom.toml の doc 参照。
-const KNOWN_UNSTRUCTURED: &[&str] = &["pipelines/field_loop/bottom_stable.png"];
+/// 現在は空 — Issue #184 lane3 が発見した android 版 bottom_stable.png は Issue #188
+/// でテンプレート資産ごと削除した (allowlist からも除去。監査テストの stale 検出が
+/// 削除を強制した)。
+const KNOWN_UNSTRUCTURED: &[&str] = &[];
 
 /// 監査対象バンクの件数下限。参照抽出やパス解決のバグでスキャンが空になった場合の
 /// 偽 green (vacuous pass) を防ぐ fail-closed (pipeline-evidence-verification.md)。
-/// 現行バンクは 31 件 (2026-09 実測) — 大幅な減はバンク破壊を疑う。
-const MIN_AUDITED_TEMPLATES: usize = 30;
+/// 現行バンクは 26 件 (2026-09 実測 — Issue #188 で android 版資産を削除し 31 → 26)。
+/// 大幅な減はバンク破壊を疑う。
+const MIN_AUDITED_TEMPLATES: usize = 25;
 
 /// 幅 fit 監査の対象参照数下限 (Issue #192)。stddev 監査の件数下限と同じ fail-closed
-/// 目的。現行は 38 参照 (2026-09 実測 — 共有 PNG を参照単位に数える。PNG 単位の
-/// 31 件より多い)。
-const MIN_AUDITED_REFERENCES: usize = 37;
+/// 目的。現行は 33 参照 (2026-09 実測 — 共有 PNG を参照単位に数える。PNG 単位の
+/// 26 件より多い。Issue #188 で android 版 5 参照を削除し 38 → 33)。
+const MIN_AUDITED_REFERENCES: usize = 32;
 
 /// `dir` 以下の `*.toml` を再帰的に収集する (決定論的のためソート済みを返す)。
 fn collect_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
@@ -380,8 +373,7 @@ fn referenced_bank_has_no_unstructured_outside_allowlist() {
         unexpected.is_empty(),
         "unstructured templates (stddev < {:.1}) found outside the audit allowlist — \
          these can never match under TM_CCOEFF_NORMED (permanent NoMatch). Either \
-         regenerate them from a real capture (see templates/pipelines/field_loop/\
-         tap_bottom.toml for the procedure) or, if re-capture is impossible, register \
+         regenerate them from a real capture or, if re-capture is impossible, register \
          them in KNOWN_UNSTRUCTURED with a rationale: {:?}",
         TEMPLATE_MIN_LUMA_STDDEV,
         unexpected

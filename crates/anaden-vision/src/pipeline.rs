@@ -2507,39 +2507,8 @@ mod tests {
         );
     }
 
-    #[test]
-    fn pc_pipeline_namespace_does_not_collide_with_20x9_field_loop() {
-        // T7 の劣化検証が両者共存を前提とするため、PC 名前空間は 20:9 を上書きしない。
-        let pc = workspace_templates_root()
-            .join("pipelines")
-            .join("field_loop_pc");
-        let legacy = workspace_templates_root()
-            .join("pipelines")
-            .join("field_loop");
-        assert!(pc.exists(), "field_loop_pc namespace must exist");
-        assert!(
-            legacy.exists(),
-            "legacy field_loop must still exist (not clobbered)"
-        );
-
-        let pc_names: Vec<String> = load_pipeline(&pc)
-            .expect("pc load")
-            .into_iter()
-            .map(|d| d.name)
-            .collect();
-        let legacy_names: Vec<String> = load_pipeline(&legacy)
-            .expect("legacy load")
-            .into_iter()
-            .map(|d| d.name)
-            .collect();
-        // 名前空間が分離済み(同名タスクの衝突無し)。
-        for n in &pc_names {
-            assert!(
-                !legacy_names.contains(n),
-                "PC task '{n}' collides with legacy 20:9 namespace"
-            );
-        }
-    }
+    // (旧 pc_pipeline_namespace_does_not_collide_with_20x9_field_loop は Issue #188 で
+    //  20:9 側 (field_loop) を削除したため対象が消滅 — テストごと削除)
 
     // ---- PC版 field_pc シーンテンプレスライス (Task#3 / Issue#5) ----
     //
@@ -4673,9 +4642,10 @@ mod tests {
                 checked += 1;
             }
         }
+        // Issue #188 で android 版 pipeline を削除し 14 → 8 (fail-closed 下限)。
         assert!(
-            checked >= 14,
-            "expected all 14 handwritten TaskDefs, checked {checked}"
+            checked >= 8,
+            "expected all 8 handwritten TaskDefs, checked {checked}"
         );
     }
 

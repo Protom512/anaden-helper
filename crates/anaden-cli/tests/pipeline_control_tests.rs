@@ -2,19 +2,20 @@
 //!
 //! シャード2 (Issue #83): GUI(anaden-studio)から pipeline を開始/停止するための
 //! in-process 制御インターフェースの検証。デバイス I/O は行わない
-//! (mock capture/input + 実 pipeline TOML fixture)。
+//! (mock driver + 実 pipeline TOML fixture)。
 //!
 //! 孤立防止・二重起動防止は in-process 方式(shard1 決定)で担保する:
 //! - 二重起動防止: `PipelineController::try_start` は実行中 `Err(AlreadyRunning)`。
 //! - 孤立防止: pipeline は controller が spawn した tokio task として同じプロセス内で
 //!   動くため、GUI プロセスが落ちれば必ず道連れになる(子プロセス孤立は構造的に発生しない)。
+//!
+//! Issue #188: RunOptions から target/serial/capture/input (Android 経路) は削除済み
+//! (PC 版 Win32 固定)。旧 target/capture/input 系テストは削除した。
 
 use std::path::PathBuf;
 use std::time::Duration;
 
-use anaden_cli_contract::pipeline::{
-    CaptureMode, InputMode, PipelineController, RunOptions, RunState, RunTarget,
-};
+use anaden_cli_contract::pipeline::{PipelineController, RunOptions, RunState};
 use tokio_util::sync::CancellationToken;
 
 #[allow(clippy::unwrap_used)]
@@ -31,36 +32,11 @@ fn field_loop_pc_dir() -> PathBuf {
 // ---- RunOptions::validate (純粋・device-free) ----
 
 #[test]
-fn validate_rejects_unknown_target() {
-    let opts = RunOptions {
-        target: RunTarget::Android,
-        ..valid_opts()
-    };
-    assert!(opts.validate().is_ok(), "android is a valid target");
-}
-
-#[test]
 fn validate_rejects_empty_start_task() {
     let mut opts = valid_opts();
     opts.start_task = String::new();
     let err = format!("{}", opts.validate().unwrap_err());
     assert!(err.contains("start_task"), "got: {err}");
-}
-
-#[test]
-fn validate_rejects_unknown_capture_mode() {
-    // 文字列からの解決は RunOptions::from_str 的な経路ではなく resolve_* 純粋関数で弾く。
-    let err = anaden_cli_contract::pipeline::resolve_capture_mode("movie").unwrap_err();
-    assert!(
-        err.contains("screencap") && err.contains("scrcpy"),
-        "got: {err}"
-    );
-}
-
-#[test]
-fn validate_rejects_unknown_input_mode() {
-    let err = anaden_cli_contract::pipeline::resolve_input_mode("minitouch").unwrap_err();
-    assert!(err.contains("adb") && err.contains("scrcpy"), "got: {err}");
 }
 
 #[test]
@@ -83,45 +59,6 @@ fn validate_rejects_max_iters_zero() {
     opts.max_iters = 0;
     let err = format!("{}", opts.validate().unwrap_err());
     assert!(err.contains("max_iters"), "got: {err}");
-}
-
-#[test]
-fn validate_rejects_scrcpy_without_serial_on_android() {
-    // --input scrcpy / --capture scrcpy は ADB セッションを張るため serial 必須。
-    let mut opts = valid_opts();
-    opts.serial = None;
-    opts.capture = CaptureMode::Scrcpy;
-    let err = format!("{}", opts.validate().unwrap_err());
-    assert!(err.contains("serial"), "got: {err}");
-}
-
-#[test]
-fn validate_accepts_windows_without_serial() {
-    let mut opts = valid_opts();
-    opts.target = RunTarget::Windows;
-    opts.serial = None;
-    assert!(opts.validate().is_ok(), "windows target needs no serial");
-}
-
-#[test]
-fn validate_rejects_windows_with_serial() {
-    let mut opts = valid_opts();
-    opts.target = RunTarget::Windows;
-    // serial は既定 Some のまま → 「不要」と指定されているのでエラーにはしない(寛容)。
-    // 仕様: windows + serial 指定は無視されずエラー(打ち間違い検出)。
-    let err = format!("{}", opts.validate().unwrap_err());
-    assert!(err.contains("serial"), "got: {err}");
-}
-
-#[test]
-fn validate_rejects_scrcpy_on_windows() {
-    // Win32 バックエンドに scrcpy capture/input は存在しない。
-    let mut opts = valid_opts();
-    opts.target = RunTarget::Windows;
-    opts.serial = None;
-    opts.input = InputMode::Scrcpy;
-    let err = format!("{}", opts.validate().unwrap_err());
-    assert!(err.contains("scrcpy"), "got: {err}");
 }
 
 #[test]
@@ -153,8 +90,6 @@ fn validate_checks_start_task_exists_in_pipeline() {
 
 fn valid_opts() -> RunOptions {
     RunOptions {
-        target: RunTarget::Android,
-        serial: Some("localhost:5555".to_string()),
         pipeline_dir: field_loop_pc_dir(),
         // templates/pipelines/field_loop_pc/tap_bottom.toml の TaskDef name と一致
         // させること(validate は load_pipeline の TaskDef.name と照合する)。
@@ -167,9 +102,6 @@ fn valid_opts() -> RunOptions {
         ensure_open_wait_secs: 30,
         recover_launch: false,
         recover_nomatch_threshold: 5,
-        capture: CaptureMode::Screencap,
-        input: InputMode::Adb,
-        scrcpy_jar: "scrcpy-server".to_string(),
         verify_after_fire: true,
         goal: None,
     }

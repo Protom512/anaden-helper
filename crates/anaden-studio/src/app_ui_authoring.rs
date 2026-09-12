@@ -100,7 +100,7 @@ impl StudioApp {
                 });
                 ui.separator();
 
-                // ライブキャプチャ(android 実機 / PC版 Windows)
+                // ライブキャプチャ (PC版 Windows — Issue #188 で Android 経路は削除)
                 ui.heading("ライブキャプチャ");
                 // 接続状態サマリバッジ + チェックボタン + エラー理由パネル (Issue #139 T3)。
                 ui.colored_label(
@@ -111,71 +111,26 @@ impl StudioApp {
                     self.run_connection_check();
                 }
                 ui.label(self.connection.reason_line());
-                // バックエンド選択。Windows バックエンドは Windows ビルドでのみ選択可能。
                 ui.horizontal(|ui| {
                     ui.label("取得元:");
-                    ui.selectable_value(
-                        &mut self.target,
-                        crate::source::Target::Android,
-                        "Android(adb)",
-                    );
-                    #[cfg(windows)]
-                    ui.selectable_value(
-                        &mut self.target,
-                        crate::source::Target::Windows,
-                        "Windows(PC版)",
-                    );
+                    ui.label("Windows(PC版) — Win32Capture");
                 });
-                // android は serial、windows は exe 名を入力。
-                match self.target {
-                    crate::source::Target::Android => {
-                        ui.horizontal(|ui| {
-                            ui.label("serial:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.adb_serial)
-                                    .desired_width(140.0),
-                            );
-                        });
-                    }
-                    #[cfg(windows)]
-                    crate::source::Target::Windows => {
-                        ui.horizontal(|ui| {
-                            ui.label("exe名:");
-                            ui.add(
-                                egui::TextEdit::singleline(&mut self.win_exe).desired_width(160.0),
-                            );
-                        });
-                    }
-                }
+                ui.horizontal(|ui| {
+                    ui.label("exe名:");
+                    ui.add(egui::TextEdit::singleline(&mut self.win_exe).desired_width(160.0));
+                });
                 if self.live.is_some() {
                     if ui.button("停止（この画面で固定）").clicked() {
                         self.live = None;
                         self.status = "ライブ停止: 現在の画面で固定しました".to_string();
                     }
                 } else {
-                    // 開始可否: android は serial 必須、windows は exe 名必須。
-                    let can_start = match self.target {
-                        crate::source::Target::Android => !self.adb_serial.trim().is_empty(),
-                        #[cfg(windows)]
-                        crate::source::Target::Windows => !self.win_exe.trim().is_empty(),
-                    };
+                    // 開始可否: exe 名必須 (Win32 キャプチャは exe 名でプロセス解決)。
+                    let can_start = !self.win_exe.trim().is_empty();
                     ui.add_enabled_ui(can_start, |ui| {
                         if ui.button("ライブ開始").clicked() {
-                            // android は serial、windows は exe 名を渡してバックエンドを分岐。
-                            let serial = self.adb_serial.trim().to_string();
-                            self.live = Some(LiveCapture::start(
-                                serial,
-                                800,
-                                self.target,
-                                self.win_exe.trim(),
-                            ));
-                            self.status = match self.target {
-                                crate::source::Target::Android => "ライブキャプチャ中…".to_string(),
-                                #[cfg(windows)]
-                                crate::source::Target::Windows => {
-                                    format!("PC版キャプチャ中… ({})", self.win_exe.trim())
-                                }
-                            };
+                            self.live = Some(LiveCapture::start(800, self.win_exe.trim()));
+                            self.status = format!("PC版キャプチャ中… ({})", self.win_exe.trim());
                         }
                     });
                 }

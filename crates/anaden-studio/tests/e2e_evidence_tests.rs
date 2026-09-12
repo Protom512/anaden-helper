@@ -44,7 +44,6 @@ use anaden_studio::app::{PipelineActionKind, pipeline_task_spec};
 use anaden_studio::scenario_task_link::{TaskLinkContext, stub_options};
 use anaden_studio::scenario_ui::ScenarioPanel;
 use anaden_studio::shell::{ToolsSection, UnifiedMode, UnifiedPane, UnifiedShell};
-use anaden_studio::source::Target;
 use anaden_studio::tasks::TaskListState;
 use image::{DynamicImage, GrayImage, Luma, Rgba, RgbaImage};
 
@@ -423,7 +422,7 @@ fn home_view_evidence_png() {
         "未実装タスク (グレー表示対象) が実定義に含まれる必要がある"
     );
 
-    let mut shell = UnifiedShell::new(Target::default(), None);
+    let mut shell = UnifiedShell::new(None);
     assert_eq!(shell.mode(), UnifiedMode::Home, "既定はホーム");
     assert_eq!(shell.pane(), UnifiedPane::Tasks);
 
@@ -446,7 +445,7 @@ fn home_view_evidence_png() {
 
 #[test]
 fn tools_scenario_panel_evidence_png() {
-    let mut shell = UnifiedShell::new(Target::default(), None);
+    let mut shell = UnifiedShell::new(None);
     shell.set_mode(UnifiedMode::Tools);
     assert_eq!(shell.tools_section(), ToolsSection::Authoring);
     assert_eq!(shell.pane(), UnifiedPane::Studio);

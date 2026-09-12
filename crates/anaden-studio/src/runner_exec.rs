@@ -95,9 +95,9 @@ pub fn build_spawn_spec(program: &str, args: &[String]) -> SpawnSpec {
 ///
 /// Issue #139 T1 単一情報源化: 引数列はハードコード match ではなく
 /// `StrategyCatalog::builtin()` の [`anaden_strategies::StrategyDef::to_run_args`]
-/// （カタログ定義）から組み立てる。実在 6 パイプライン
-/// (field_loop / field_loop_pc / nav_to_field / nav_to_field_pc / worldmap_loop /
-/// _title_load) がカタログ経由で実行可能。
+/// （カタログ定義）から組み立てる。実在 PC 版 2 パイプライン
+/// (field_loop_pc / nav_to_field_pc) がカタログ経由で実行可能
+/// (Issue #188 で Android 版 4 パイプラインを削除)。
 ///
 /// - `--goal` / `--goal-file` は排他（CLI の `parse_goal_flag` 制約）のため、
 ///   本関数はいずれも出力しない（ゴール無し = 従来の max_iters 挙動）。
@@ -913,8 +913,8 @@ mod tests {
 
     /// UC-1 正常系: 実在パイプライン選択で run サブコマンド + --algorithm + 位置引数が組まれる。
     #[test]
-    fn test_build_run_args_field_loop_builds_run_subcommand() {
-        let args = build_run_args(&pipeline_selection("field_loop")).unwrap();
+    fn test_build_run_args_field_loop_pc_builds_run_subcommand() {
+        let args = build_run_args(&pipeline_selection("field_loop_pc")).unwrap();
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--algorithm".to_string()));
         // --algorithm の値は sse|ccoeff のみ受理される値であること。
@@ -931,8 +931,8 @@ mod tests {
 
     /// UC-1 正常系: pipeline_dir / start_task 位置引数が含まれる。
     #[test]
-    fn test_build_run_args_field_loop_includes_positional_args() {
-        let args = build_run_args(&pipeline_selection("field_loop")).unwrap();
+    fn test_build_run_args_field_loop_pc_includes_positional_args() {
+        let args = build_run_args(&pipeline_selection("field_loop_pc")).unwrap();
         // run の位置引数（フラグ以降の非フラグトークン）は pipeline_dir と start_task。
         let positional: Vec<&String> = args
             .iter()
@@ -941,35 +941,24 @@ mod tests {
             .map(|(_, a)| a)
             .collect();
         assert_eq!(positional.len(), 2, "args: {args:?}");
-        assert!(positional[0].contains("field_loop"));
-        assert_eq!(positional[1], "TapBottomStable");
+        assert!(positional[0].contains("field_loop_pc"));
+        assert_eq!(positional[1], "TapBottomStablePc");
     }
 
-    /// Issue #139 T1: PC 版パイプラインは --target windows がカタログから注入される。
+    /// Issue #188: CLI から --target フラグは削除済み (Win32 固定) — 引数列に含まれない。
     #[test]
-    fn test_build_run_args_pc_pipeline_injects_windows_target() {
+    fn test_build_run_args_pc_pipeline_emits_no_target_flag() {
         let args = build_run_args(&pipeline_selection("nav_to_field_pc")).unwrap();
         assert_eq!(args[0], "run");
-        let target_idx = args
-            .iter()
-            .position(|a| a == "--target")
-            .unwrap_or_else(|| panic!("--target not found in {args:?}"));
-        assert_eq!(args[target_idx + 1], "windows");
+        assert!(!args.contains(&"--target".to_string()), "args: {args:?}");
         assert!(args.contains(&"templates/pipelines/nav_to_field_pc".to_string()));
         assert!(args.contains(&"TapToStartPc".to_string()));
     }
 
-    /// Issue #139 T1: 実在 6 パイプラインすべてがカタログ経由で引数組み立て可能。
+    /// Issue #139 T1: 実在 PC 版 2 パイプラインすべてがカタログ経由で引数組み立て可能。
     #[test]
-    fn test_build_run_args_supports_all_six_real_pipelines() {
-        for id in [
-            "field_loop",
-            "field_loop_pc",
-            "nav_to_field",
-            "nav_to_field_pc",
-            "worldmap_loop",
-            "_title_load",
-        ] {
+    fn test_build_run_args_supports_all_two_real_pc_pipelines() {
+        for id in ["field_loop_pc", "nav_to_field_pc"] {
             let args =
                 build_run_args(&pipeline_selection(id)).unwrap_or_else(|e| panic!("{id}: {e}"));
             assert_eq!(args[0], "run", "{id}");
@@ -1023,7 +1012,7 @@ mod tests {
     /// build_run_args はいずれも出力しない。
     #[test]
     fn test_build_run_args_never_outputs_goal_flags() {
-        let args = build_run_args(&pipeline_selection("field_loop")).unwrap();
+        let args = build_run_args(&pipeline_selection("field_loop_pc")).unwrap();
         assert!(!args.contains(&"--goal".to_string()));
         assert!(!args.contains(&"--goal-file".to_string()));
     }
@@ -1115,19 +1104,12 @@ mod tests {
         assert_eq!(got[2], "windows");
     }
 
-    /// 実機workspace ルートでカタログ 6 パイプラインがすべて絶対解決される
+    /// 実機workspace ルートでカタログ 2 パイプラインがすべて絶対解決される
     /// （T1 カタログ定義からの引数経路が実ディレクトリに到達することの保証）。
     #[test]
-    fn test_resolve_pipeline_arg_supports_all_six_real_pipelines_on_real_root() {
+    fn test_resolve_pipeline_arg_supports_all_two_real_pipelines_on_real_root() {
         let root = workspace_root();
-        for id in [
-            "field_loop",
-            "field_loop_pc",
-            "nav_to_field",
-            "nav_to_field_pc",
-            "worldmap_loop",
-            "_title_load",
-        ] {
+        for id in ["field_loop_pc", "nav_to_field_pc"] {
             let sel = pipeline_selection(id);
             let args = build_run_args(&sel).unwrap_or_else(|e| panic!("{id}: {e}"));
             let got = resolve_pipeline_arg(&args, &root);
@@ -1185,7 +1167,7 @@ mod tests {
     #[test]
     fn test_start_with_selected_strategy_starts_child() {
         let mut app = PipelineRunnerApp::new(dummy_program());
-        app.strategy_panel.select_strategy("field_loop");
+        app.strategy_panel.select_strategy("field_loop_pc");
         app.start_pipeline_with_selection();
         if app.status() == RunnerStatus::Running {
             app.stop_pipeline();
@@ -1198,16 +1180,16 @@ mod tests {
     fn test_on_strategy_changed_refreshes_summary() {
         let mut app = PipelineRunnerApp::new(dummy_program());
         assert_eq!(app.strategy_summary(), "戦略未選択");
-        app.strategy_panel.select_strategy("field_loop");
+        app.strategy_panel.select_strategy("field_loop_pc");
         // changed=false（同一フレーム内の無操作）では更新されない。
         app.on_strategy_changed(false);
         assert_eq!(app.strategy_summary(), "戦略未選択");
         // changed=true で更新される。
         app.on_strategy_changed(true);
-        // 実在 6 パイプラインは ON/OFF オプションを持たないため「オプションなし」。
+        // 実在 2 パイプラインは ON/OFF オプションを持たないため「オプションなし」。
         assert_eq!(
             app.strategy_summary(),
-            "strategy=field_loop (オプションなし)"
+            "strategy=field_loop_pc (オプションなし)"
         );
     }
 
@@ -1231,7 +1213,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         app.settings_path = path.clone();
-        app.strategy_panel.select_strategy("field_loop");
+        app.strategy_panel.select_strategy("field_loop_pc");
         app.save_settings_to_path();
         assert!(path.is_file());
         assert!(matches!(
@@ -1247,7 +1229,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("settings.toml");
         app.settings_path = path.clone();
-        app.strategy_panel.select_strategy("field_loop");
+        app.strategy_panel.select_strategy("field_loop_pc");
         app.save_settings_to_path();
 
         let mut app2 = PipelineRunnerApp::new(dummy_program());
@@ -1255,7 +1237,7 @@ mod tests {
         assert_eq!(app2.strategy_summary(), "戦略未選択");
         app2.load_settings_from_path();
         assert!(app2.strategy_panel.selection().strategy.is_some());
-        assert!(app2.strategy_summary().contains("field_loop"));
+        assert!(app2.strategy_summary().contains("field_loop_pc"));
     }
 
     /// 読込: ファイル不在 (初回起動) はエラー扱いにしない (UC-2)。

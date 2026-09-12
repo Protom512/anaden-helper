@@ -5,8 +5,8 @@
 //! ウィンドウ画像を PrintWindow + GDI で取得し、GPU 描画が黒一色になっていないか
 //! (= 実際のゲーム画面が取れているか) を**輝度分散**で自動判定する。
 //!
-//! 最終目標は `anaden-engine/src/pipeline_driver.rs:60-64` の Capture trait
-//!   `async fn capture(&self) -> Result<DynamicImage, AdbError>`
+//! 最終目標は `anaden-engine/src/pipeline_driver.rs` の Capture trait
+//!   `async fn capture(&self) -> Result<DynamicImage, DeviceError>`
 //! へ Windows 実装バックエンド(WindowsCapture)を足せるかの実証。
 //!
 //! ## 主軸 API: PrintWindow(PW_RENDERFULLCONTENT=0x2) + GDI 連鎖
