@@ -34,7 +34,7 @@ fn main() -> eframe::Result {
             options,
             Box::new(move |cc| {
                 setup_japanese_fonts(&cc.egui_ctx);
-                Ok(Box::new(UnifiedShell::new(cli.target, cli.exe)))
+                Ok(Box::new(UnifiedShell::new(cli.exe)))
             }),
         ),
     }

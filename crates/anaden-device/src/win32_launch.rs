@@ -2,12 +2,11 @@
 //!
 //! 概要:
 //!   `Launcher.exe` を起動し、子プロセス `AnotherEden.exe` が 0xC0000005 等で即死せずに
-//!   安定起動・指定期間生存することを、ADB(`am start` / `dumpsys`)を使わずに
-//!   Win32 プロセス API 単独で判定する。`app_control.rs` の `AppController`(ADB 依存) を
-//!   Windows 実装で置き換えるためのプロセス起動・生存監視層。
+//!   安定起動・指定期間生存することを、Win32 プロセス API 単独で判定するプロセス
+//!   起動・生存監視層 (旧 Android 向け ADB 実装は Issue #188 で削除済み)。
 //!
 //!   動作検証済みプローブ `examples/probe_windows_launch.rs` のロジックをそのまま構造体化した
-//!   もので、プローブの exit code 判定を `Result<EnsureOutcome, AdbError>` へ読み替える。
+//!   もので、プローブの exit code 判定を `Result<EnsureOutcome, DeviceError>` へ読み替える。
 //!
 //! 使う Win32 API:
 //!   [1] プロセス起動: `std::process::Command`(内部で `CreateProcessW`)。
@@ -43,8 +42,8 @@ use windows::Win32::System::Threading::{
     CREATE_NEW_PROCESS_GROUP, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
 };
 
-use crate::app_control::EnsureOutcome;
-use crate::client::AdbError;
+use crate::ensure::EnsureOutcome;
+use crate::error::DeviceError;
 
 // ---- デフォルト定数 ----
 
@@ -100,17 +99,17 @@ impl Win32Launch {
     /// 既に子プロセスが存在する場合は `EnsureOutcome::AlreadyOpen`(起動スキップ)。
     /// 起動して `wait` 以内に子が出現・生存すれば `EnsureOutcome::Launched`。
     /// 子が出現しない、または即死した場合は `EnsureOutcome::Timeout`。
-    /// スポーン失敗や Win32 API エラーは `AdbError::CommandFailed` で包んで伝播する。
+    /// スポーン失敗や Win32 API エラーは `DeviceError::CommandFailed` で包んで伝播する。
     ///
     /// ブロッキングするプロセス列挙・`std::thread::sleep` ポーリングは `spawn_blocking` へ逃し、
     /// 呼び出し側の async ランタイムを止めない。
-    pub async fn ensure_open(&self, wait: Duration) -> Result<EnsureOutcome, AdbError> {
+    pub async fn ensure_open(&self, wait: Duration) -> Result<EnsureOutcome, DeviceError> {
         let launcher = self.launcher.clone();
         let workdir = self.workdir.clone();
         let child = self.child.clone();
         tokio::task::spawn_blocking(move || run_blocking(&launcher, &workdir, &child, wait))
             .await
-            .map_err(|e| AdbError::CommandFailed {
+            .map_err(|e| DeviceError::CommandFailed {
                 message: format!("ensure_open の blocking タスクがパニック/中止: {e}"),
             })?
     }
@@ -130,17 +129,17 @@ impl Win32Launch {
     /// 起動部分のみを行う。`ensure_open` の起動ステップ相当。
     ///
     /// リカバリフックから「強制再起動」のために呼ぶ。既存プロセスの有無は確認せず、
-    /// 無条件で `Launcher.exe` を spawn する。spawn 失敗は `AdbError::CommandFailed`。
+    /// 無条件で `Launcher.exe` を spawn する。spawn 失敗は `DeviceError::CommandFailed`。
     /// spawn は即座に帰る(Launcher は自身で子を起動して Exit 0 する設計)。
-    pub async fn launch_app(&self) -> Result<(), AdbError> {
+    pub async fn launch_app(&self) -> Result<(), DeviceError> {
         let launcher = self.launcher.clone();
         let workdir = self.workdir.clone();
         tokio::task::spawn_blocking(move || spawn_launcher(&launcher, &workdir).map(|_| ()))
             .await
-            .map_err(|e| AdbError::CommandFailed {
+            .map_err(|e| DeviceError::CommandFailed {
                 message: format!("launch_app の blocking タスクがパニック/中止: {e}"),
             })?
-            .map_err(|e| AdbError::CommandFailed { message: e })?;
+            .map_err(|e| DeviceError::CommandFailed { message: e })?;
         Ok(())
     }
 }
@@ -157,7 +156,7 @@ fn run_blocking(
     workdir: &str,
     child: &str,
     wait: Duration,
-) -> Result<EnsureOutcome, AdbError> {
+) -> Result<EnsureOutcome, DeviceError> {
     // [ステップ0] 事前ガード: 既に子が存在すれば AlreadyOpen。
     //   既存プロセスが残っていると後続の「子発見」が既存プロセスにヒットして偽成功になる。
     match snapshot_processes() {
@@ -168,7 +167,7 @@ fn run_blocking(
             }
         }
         Err(e) => {
-            return Err(AdbError::CommandFailed {
+            return Err(DeviceError::CommandFailed {
                 message: format!("Win32Launch: 事前スナップショット失敗: {e}"),
             });
         }
@@ -182,7 +181,7 @@ fn run_blocking(
             pid
         }
         Err(msg) => {
-            return Err(AdbError::CommandFailed { message: msg });
+            return Err(DeviceError::CommandFailed { message: msg });
         }
     };
 
@@ -231,7 +230,7 @@ fn run_blocking(
         }
         None => {
             if snapshot_failed {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message:
                         "Win32Launch: CreateToolhelp32Snapshot 呼び出し失敗により子を監視できなかった"
                             .to_string(),
@@ -270,7 +269,7 @@ fn run_blocking(
                     alive = false;
                     break;
                 } else {
-                    return Err(AdbError::CommandFailed {
+                    return Err(DeviceError::CommandFailed {
                         message: format!(
                             "Win32Launch: OpenProcess 呼び出し失敗(初回から不可): {e}"
                         ),
@@ -302,7 +301,7 @@ fn run_blocking(
 /// 書き込みがブロックし、親プロセスがフリーズする(プローブで実証済み)。
 /// `CREATE_NEW_PROCESS_GROUP`(0x00000200) でコンソール信号の親への伝播を切断する。
 ///
-/// エラーはメッセージ文字列へ包む(呼び出し側で `AdbError::CommandFailed` 化)。
+/// エラーはメッセージ文字列へ包む(呼び出し側で `DeviceError::CommandFailed` 化)。
 fn spawn_launcher(launcher: &str, workdir: &str) -> Result<u32, String> {
     let mut cmd = Command::new(launcher);
     cmd.current_dir(workdir)

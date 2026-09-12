@@ -24,41 +24,12 @@ use std::sync::Arc;
 use tokio::sync::Mutex;
 use tokio_util::sync::CancellationToken;
 
-/// 実行ターゲット(=` `--target` の解決結果)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum RunTarget {
-    /// ADB 実機(android)。serial 必須。
-    Android,
-    /// PC 版(Win32)。serial 不要。
-    Windows,
-}
-
-/// 画面キャプチャ方式(=` `--capture` の解決結果)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum CaptureMode {
-    /// adb exec-out screencap(既定)。
-    Screencap,
-    /// 常駐 scrcpy H.264 受信(`capture-scrcpy` feature 必須)。
-    Scrcpy,
-}
-
-/// 入力方式(=` `--input` の解決結果)。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum InputMode {
-    /// adb input tap(既定)。
-    Adb,
-    /// scrcpy control ソケット経由タッチ注入(`capture-scrcpy` feature 必須)。
-    Scrcpy,
-}
-
 /// pipeline 実行オプション。`anaden run` の CLI フラグ群と1:1 対応する
 /// GUI 由来の構造化版(GUI は clap を経由せずこれを直接組み立てる)。
+///
+/// 実行ターゲットは PC 版 (Win32) 固定(Android/ADB 経路は Issue #188 で削除済み)。
 #[derive(Debug, Clone)]
 pub struct RunOptions {
-    /// 実行ターゲット(android / windows)。
-    pub target: RunTarget,
-    /// ADB シリアル。`RunTarget::Android` 時必須、`RunTarget::Windows` 時不要。
-    pub serial: Option<String>,
     /// `*.toml` を格納したパイプラインディレクトリ。
     pub pipeline_dir: PathBuf,
     /// 開始タスク名(PipelineState の初期 current)。
@@ -79,50 +50,10 @@ pub struct RunOptions {
     pub recover_launch: bool,
     /// NoMatch 連続で再起動する閾値(回数)。
     pub recover_nomatch_threshold: u32,
-    /// 画面キャプチャ方式。
-    pub capture: CaptureMode,
-    /// 入力方式。
-    pub input: InputMode,
-    /// scrcpy サーバ jar のローカルパス(scrcpy 系モード時)。
-    pub scrcpy_jar: String,
     /// 発火後検証(誠実検証)を有効化。
     pub verify_after_fire: bool,
     /// 宣言的ゴール。None なら非ゴールモード。
     pub goal: Option<anaden_core::Goal>,
-}
-
-/// `--capture` 文字列を [`CaptureMode`] へ解決する純粋関数。
-pub fn resolve_capture_mode(value: &str) -> Result<CaptureMode, String> {
-    match value {
-        "screencap" => Ok(CaptureMode::Screencap),
-        "scrcpy" => Ok(CaptureMode::Scrcpy),
-        other => Err(format!(
-            "capture モードは `screencap` または `scrcpy` です(指定値: {other})"
-        )),
-    }
-}
-
-/// `--input` 文字列を [`InputMode`] へ解決する純粋関数。
-pub fn resolve_input_mode(value: &str) -> Result<InputMode, String> {
-    match value {
-        "adb" => Ok(InputMode::Adb),
-        "scrcpy" => Ok(InputMode::Scrcpy),
-        other => Err(format!(
-            "input モードは `adb` または `scrcpy` です(指定値: {other})"
-        )),
-    }
-}
-
-/// `--target` 文字列を [`RunTarget`] へ解決する純粋関数
-/// (既存 `ensure_open` 用 [`crate::resolve_target`] の run 系対応版)。
-pub fn resolve_run_target(value: &str) -> Result<RunTarget, String> {
-    match value {
-        "android" => Ok(RunTarget::Android),
-        "windows" => Ok(RunTarget::Windows),
-        other => Err(format!(
-            "target は `android` または `windows` です(指定値: {other})"
-        )),
-    }
 }
 
 /// `--algorithm` 文字列を vision の Algorithm へ解決する純粋関数
@@ -145,8 +76,6 @@ impl RunOptions {
     /// - `interval_secs >= 1` / `max_iters >= 1`
     /// - `pipeline_dir` が存在するディレクトリで、`start_task` がそこに定義されている
     /// - `algorithm` 指定時 `sse`/`ccoeff` に解決できる
-    /// - android 時 `serial` 必須 / windows 時 `serial` 指定はエラー(打ち間違い検出)
-    /// - scrcpy 系モードは android + serial のみ(windows バックエンドに scrcpy は無い)
     /// - `goal` 指定時 `Goal::validate` が通る
     pub fn validate(&self) -> Result<(), anyhow::Error> {
         if self.start_task.trim().is_empty() {
@@ -166,35 +95,6 @@ impl RunOptions {
         }
         if let Some(a) = &self.algorithm {
             resolve_algorithm(a).map_err(|e| anyhow::anyhow!(e))?;
-        }
-        match self.target {
-            RunTarget::Android => {
-                if self
-                    .serial
-                    .as_deref()
-                    .map(str::trim)
-                    .unwrap_or("")
-                    .is_empty()
-                {
-                    anyhow::bail!("android ターゲットでは serial が必須です");
-                }
-            }
-            RunTarget::Windows => {
-                if self.serial.is_some() {
-                    anyhow::bail!(
-                        "windows ターゲットでは serial を指定できません(ADB を使用しません)"
-                    );
-                }
-            }
-        }
-        let scrcpy_mode = self.capture == CaptureMode::Scrcpy || self.input == InputMode::Scrcpy;
-        if scrcpy_mode {
-            if self.target != RunTarget::Android {
-                anyhow::bail!("scrcpy capture/input は android ターゲットのみで使用できます");
-            }
-            if self.serial.is_none() {
-                anyhow::bail!("scrcpy モードでは serial が必須です");
-            }
         }
         crate::validate_goal(&self.goal)?;
         if !self.start_task_exists_in_pipeline()? {

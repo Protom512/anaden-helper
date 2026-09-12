@@ -1,8 +1,8 @@
 //! 接続状態・接続チェック (Issue #175: app_state.rs 分割)。
 //!
-//! 実機 (adb) / PC版プロセス検出の状態サマリ ([`ConnectionState`] /
-//! [`ConnectionStatus`]) とチェック関数 ([`check_android_device`] /
-//! [`check_windows_process`]) を定義する。StudioApp 本体は
+//! PC版プロセス検出の状態サマリ ([`ConnectionState`] / [`ConnectionStatus`]) と
+//! チェック関数 ([`check_windows_process`]) を定義する。Android (adb get-state)
+//! チェックは Issue #188 で削除した。StudioApp 本体は
 //! [`crate::app_state_core`]、呼び出し元互換の re-export は
 //! [`crate::app_state`] (facade)。
 
@@ -18,7 +18,7 @@ pub enum ConnectionState {
     Unknown,
     /// 確認中 (プローブ実行中)。
     Checking,
-    /// 接続済み (実機検出 / プロセス検出成功)。
+    /// 接続済み (プロセス検出成功)。
     Connected,
     /// 未接続 (検出失敗・理由あり)。
     Disconnected,
@@ -79,47 +79,6 @@ impl ConnectionStatus {
             ConnectionState::Disconnected => format!("理由: {}", self.detail),
             _ => self.detail.clone(),
         }
-    }
-}
-
-/// Android 実機 (adb) の接続チェック。
-/// `adb -s <serial> get-state` の終了コードと stdout で判定する。
-pub fn check_android_device(serial: &str) -> ConnectionStatus {
-    if serial.trim().is_empty() {
-        return ConnectionStatus {
-            state: ConnectionState::Disconnected,
-            detail: "adb serial が未入力".to_string(),
-        };
-    }
-    match std::process::Command::new("adb")
-        .args(["-s", serial.trim(), "get-state"])
-        .output()
-    {
-        Ok(out) if out.status.success() => {
-            let state = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if state == "device" {
-                ConnectionStatus {
-                    state: ConnectionState::Connected,
-                    detail: format!("adb {serial}: device"),
-                }
-            } else {
-                ConnectionStatus {
-                    state: ConnectionState::Disconnected,
-                    detail: format!("adb {serial}: 状態が device でない ({state})"),
-                }
-            }
-        }
-        Ok(out) => ConnectionStatus {
-            state: ConnectionState::Disconnected,
-            detail: format!(
-                "adb {serial}: get-state 失敗 ({})",
-                String::from_utf8_lossy(&out.stderr).trim()
-            ),
-        },
-        Err(e) => ConnectionStatus {
-            state: ConnectionState::Disconnected,
-            detail: format!("adb 起動失敗 (adb への PATH を確認): {e}"),
-        },
     }
 }
 
@@ -202,21 +161,14 @@ mod tests {
     fn connection_status_reason_line_prefixes_detail_when_disconnected() {
         let s = ConnectionStatus {
             state: ConnectionState::Disconnected,
-            detail: "adb が見つからない".to_string(),
+            detail: "プロセスが見つからない".to_string(),
         };
-        assert_eq!(s.reason_line(), "理由: adb が見つからない");
+        assert_eq!(s.reason_line(), "理由: プロセスが見つからない");
         let ok = ConnectionStatus {
             state: ConnectionState::Connected,
-            detail: "adb emulator-5554: device".to_string(),
+            detail: "AnotherEden.exe: プロセス検出済み".to_string(),
         };
-        assert_eq!(ok.reason_line(), "adb emulator-5554: device");
-    }
-
-    #[test]
-    fn check_android_empty_serial_is_disconnected() {
-        let s = check_android_device("");
-        assert_eq!(s.state, ConnectionState::Disconnected);
-        assert!(s.detail.contains("serial"));
+        assert_eq!(ok.reason_line(), "AnotherEden.exe: プロセス検出済み");
     }
 
     #[test]

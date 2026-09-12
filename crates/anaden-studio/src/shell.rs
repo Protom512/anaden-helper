@@ -21,7 +21,6 @@ use eframe::egui;
 
 use crate::app::StudioApp;
 use crate::runner::PipelineRunnerApp;
-use crate::source::Target;
 
 pub use crate::shell_nav::{ToolsSection, UnifiedMode, UnifiedPane, active_pane};
 
@@ -41,15 +40,16 @@ pub struct UnifiedShell {
 }
 
 impl UnifiedShell {
-    /// CLI 指定の target/exe を初期値として統合シェルを構築する。
+    /// CLI 指定の exe を初期値として統合シェルを構築する。
     ///
     /// Issue #123 (shard 2): `--pipeline` フラグは完全削除済みのため
     /// フラグ区別のコンストラクタは存在しない。
-    pub fn new(target: Target, exe: Option<String>) -> Self {
+    /// Issue #188: target 引数は Windows 固定化に伴い廃止。
+    pub fn new(exe: Option<String>) -> Self {
         Self {
             mode: UnifiedMode::default(),
             tools_section: ToolsSection::default(),
-            studio: StudioApp::with_initial_target(target, exe),
+            studio: StudioApp::with_initial_target(exe),
             runner: PipelineRunnerApp::with_resolved_anaden(),
         }
     }
@@ -173,7 +173,7 @@ mod tests {
 
     #[test]
     fn test_shell_default_state_uses_tasks_pane() {
-        let shell = UnifiedShell::new(Target::default(), None);
+        let shell = UnifiedShell::new(None);
         // 既定はホーム (タスク一覧ペイン) + ツール既定セクション (作成)。
         assert_eq!(shell.mode(), UnifiedMode::Home);
         assert_eq!(shell.pane(), UnifiedPane::Tasks);
@@ -182,7 +182,7 @@ mod tests {
 
     #[test]
     fn test_mode_transitions_switch_active_pane() {
-        let mut shell = UnifiedShell::new(Target::default(), None);
+        let mut shell = UnifiedShell::new(None);
         // 既定はホーム (Tasks ペイン)。
         assert_eq!(shell.pane(), UnifiedPane::Tasks);
 
@@ -209,7 +209,7 @@ mod tests {
     /// コンストラクタは存在せず、deprecated 警告バナーも表示されない。
     #[test]
     fn pipeline_deprecated_warning_fully_removed() {
-        let shell = UnifiedShell::new(Target::default(), None);
+        let shell = UnifiedShell::new(None);
         // new_with_flags / shows_deprecated_pipeline_warning は削除済み
         // (コンパイル時検証: この test が型チェックを通れば API は存在しない)。
         assert_eq!(shell.mode(), UnifiedMode::Home);
@@ -226,7 +226,7 @@ mod tests {
     /// ホーム↔ツール往復でツールセクション選択は保持される（状態リセットなし）。
     #[test]
     fn test_mode_roundtrip_preserves_tools_section() {
-        let mut shell = UnifiedShell::new(Target::default(), None);
+        let mut shell = UnifiedShell::new(None);
         shell.set_mode(UnifiedMode::Tools);
         shell.set_tools_section(ToolsSection::History);
         shell.set_mode(UnifiedMode::Home);
@@ -242,7 +242,7 @@ mod tests {
     /// セクション切替はトップレベルモードを変更しない（ツールの外には出ない）。
     #[test]
     fn test_section_switch_keeps_tools_mode() {
-        let mut shell = UnifiedShell::new(Target::default(), None);
+        let mut shell = UnifiedShell::new(None);
         shell.set_mode(UnifiedMode::Tools);
         for section in ToolsSection::ALL {
             shell.set_tools_section(section);
@@ -269,7 +269,7 @@ mod tests {
     #[test]
     fn render_home_and_all_tool_sections_complete_without_panic() {
         let ctx = egui::Context::default();
-        let mut shell = UnifiedShell::new(Target::default(), None);
+        let mut shell = UnifiedShell::new(None);
         // ホーム (既定): modebar 2 タブ + タスク一覧。
         shell.set_tools_section(ToolsSection::Settings);
         ctx.begin_pass(egui::RawInput::default());

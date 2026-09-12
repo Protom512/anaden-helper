@@ -38,9 +38,5 @@ imageproc = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-
-[features]
-default = []
-# 常駐 capture(scrcpy) を CLI から利用可能にする。
-# anaden-engine / anaden-device の capture-scrcpy feature を連鎖有効化する。
-capture-scrcpy = ["anaden-engine/capture-scrcpy", "anaden-device/capture-scrcpy"]
+# Issue #188: capture-scrcpy feature (Android 常駐 capture) は Android サポート削除に
+# 伴い廃止。PC (Windows) 専用のため feature 分岐は不要。

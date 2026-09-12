@@ -1,34 +1,19 @@
-//! T7: 20:9 → 16:9 テンプレ流用の劣化証明（cross-aspect-ratio 再利用不可の根拠）。
+//! PC (Windows 16:9) キャプチャの座標系契約テスト (旧 T7 改訂)。
 //!
 //! 【背景】
-//! 既存 field_loop/hud_tr テンプレ群は **20:9 実機(Pixel 7a 2400x1080 → 幅1280基準
-//! 正規化で 1280x576)** 向けに作られた。`tap_hud_tr.toml` の ROI `[1080,150,180,150]` と
-//! テンプレ PNG(hud_tr.png 96x96) はともに 1280 基準の正規化空間でオーサリングされている。
+//! Issue #188 で Android (20:9) テンプレート資産 (templates/pipelines/{field_loop,
+//! nav_to_field,worldmap_loop,_title_load}) を削除し PC 専用化した。本ファイルは
+//! PC 専用化後も意味を持つ契約のみを残す:
+//! - Win32Capture(PrintWindow) 実測フレーム寸法 1258x708 の固定化 (T1/T2 実測)。
+//! - `ScreenScaler::normalize` は常に 1280 幅基準へリサイズする (16:9 を保存し
+//!   1258x708 → 1280x720)。PC 版テンプレ/ROI は RAW 1258x708 空間でオーサリング
+//!   され、detect が roi_to_normalized/needle_to_normalized で 1280 空間へスケール
+//!   する設計と対をなす契約。
+//! - 1280 基準の x 座標が 1258 幅 RAW 空間をはみ出す具体例 (座標系混用の検知)。
 //!
-//! 【問題のメカニズム】
-//! PC版キャプチャ(1258x708, 16:9) は黒帯入り実測サイズ変動対応のため、`ScreenScaler::normalize`
-//! で常に1280幅基準へリサイズされ 1280x720 になる（早期 return 廃止、コミット3）。
-//! PC版テンプレ/ROI は引き続き raw-1258x708 空間で定義され、detect が
-//! roi_to_normalized/needle_to_normalized で1280空間へスケールする設計。
-//!
-//! 一方、20:9 実機向け hud_tr テンプレは 1280x576 空間でオーサリングされている。
-//! これを 16:9 の 1280x720 フレームへそのまま適用すると:
-//! 1. 縦横比そのものが異なる(20:9=1280x576 vs 16:9=1280x720)ため、ROI の縦位置が実態と合わない。
-//! 2. テンプレ PNG 自体が 20:9 正規化空間から crop された画素列であり、16:9 フレームの対応領域とは
-//!    縦横比・解像度特性が異なる → ccoeff 相関が大きく低下する。
-//!
-//! これらが合成し、20:9 実機では conf~0.99 だった hud_tr が PC版では非マッチ(conf 0.67 程度、
-//! 閾値 0.80 を下回り NoMatch)に劣化する。本テストは**実データ(本物の capture_probe.png と
-//! 本物の hud_tr.png/tap_hud_tr.toml)** を使ってこの劣化を記録し、テンプレをアスペクト比間で
-//! 流用できないことの決定的根拠とする。
-//!
-//! 【検証データ】
-//! - PC フレーム: `capture_probe.png` (1258x708, PrintWindow キャプチャ, T1/T2 実測)
-//! - 20:9 テンプレ: `templates/pipelines/field_loop/hud_tr.png` (96x96) + `tap_hud_tr.toml`
-//!
-//! 【scrcpy 代替パス確認】
-//! このテストが走ること自体、PC(Windows)キャプチャ + anaden-vision 認識が
-//! デバイス/推論サーバ無しで機能すること(= scrcpy ループの代替検証パス)を示す。
+//! 【旧 T7 の 20:9→16:9 劣化証明について】
+//! 20:9 テンプレ (旧 field_loop/hud_tr.png) を 16:9 フレームへ流用すると conf 0.99 →
+//! 0.67 程度に劣化する検証は、Issue #188 でテンプレ資産とともに削除した。
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::panic)]
@@ -36,8 +21,7 @@
 
 use std::path::PathBuf;
 
-use anaden_core::MatchConfidence;
-use anaden_vision::{CcoeffVisionEngine, ScreenScaler, VisionEngine};
+use anaden_vision::ScreenScaler;
 
 /// リポジトリルート(テストバイナリの CARGO_MANIFEST_DIR = crates/anaden-vision)。
 fn repo_root() -> PathBuf {
@@ -80,9 +64,8 @@ fn pc_capture_probe_has_measured_1258x708_dimensions() {
 
 #[test]
 fn screen_scaler_normalizes_pc_capture_to_1280_base() {
-    // メカニズム証明（改訂）: normalize は常に1280幅基準へリサイズする（早期 return 廃止）。
-    // PC キャプチャ 1258x708 → 1280x720（アスペクト比 16:9 を保存）。
-    // 20:9 実機テンプレ(1280x576 空間)との縦横比の違いが、この後の劣化証明の根本原因。
+    // normalize は常に1280幅基準へリサイズする(早期 return 廃止)。
+    // PC キャプチャ 1258x708 → 1280x720(16:9 を保存)。
     let probe = repo_root().join("templates/captures/field_pc_probe.png");
     let img = image::open(&probe).expect("capture_probe.png");
     let scaler = ScreenScaler::new();
@@ -95,73 +78,17 @@ fn screen_scaler_normalizes_pc_capture_to_1280_base() {
     assert_eq!(
         normalized.height(),
         720,
-        "高さは 708*(1280/1258)=720.4→720（16:9 を保存）"
+        "高さは 708*(1280/1258)=720.4→720(16:9 を保存)"
     );
 }
 
 #[test]
-fn hud_tr_20to9_template_degrades_to_nonmatch_on_pc_16to9_frame() {
-    // 主証明: 20:9 向け hud_tr テンプレ(ccoeff, 実機 conf~0.99)を PC 16:9 フレームへ
-    // そのまま適用した場合の信頼度劣化を計測する。閾値(0.80)を下回り非マッチになること、
-    // および到達可能信頼度が著しく低下すること(テンプレ流用不可の根拠)を検証する。
-    let root = repo_root();
-    let probe = root.join("templates/captures/field_pc_probe.png");
-    let hud_tr = root.join("templates/pipelines/field_loop/hud_tr.png");
-
-    let pc_frame = image::open(&probe)
-        .unwrap_or_else(|e| panic!("capture_probe.png 読込失敗({e}): T1/T2 PC フレームが未配置"));
-    let needle = image::open(&hud_tr)
-        .unwrap_or_else(|e| panic!("hud_tr.png 読込失敗({e}): 20:9 テンプレが未配置"));
-
-    // 実機パスと同じ前処理: pipeline_driver は capture → normalize → tick を経て
-    // TaskDef.detect へ渡す。PC フレーム(1258x708) は normalize で 1280x720 へリサイズされる
-    // （早期 return 廃止）。20:9 実機テンプレは 1280x576 空間なので縦横比が異なる。
-    let scaler = ScreenScaler::new();
-    let work = scaler.normalize(&pc_frame);
-    assert_eq!((work.width(), work.height()), (1280, 720));
-
-    // tap_hud_tr.toml の ROI [1080,150,180,150] を 1280 基準座標としてそのまま
-    // PC RAW フレーム(1258 幅)の画素座標で crop する(TOML ROI は正規化済み画面の
-    // 画素座標として直接 crop される = pipeline.rs::crop_imm の挙動)。
-    let roi = [1080u32, 150, 180, 150];
-    let cropped = crop(&work, roi);
-
-    // ccoeff でテンプレマッチ(閾値 0.0 で到達可能信頼度を取る)。
-    let engine = CcoeffVisionEngine::threshold_only(MatchConfidence::new(0.0));
-    let best = engine.match_template(&cropped, &needle);
-
-    let conf = match best {
-        Some(m) => m.confidence.0,
-        None => 0.0,
-    };
-
-    // 証明1: 閾値 0.80(tap_hud_tr.toml 指定)を下回り非マッチになること。
-    // 20:9 実機では conf~0.99 で安定マッチしていた同じテンプレが PC 16:9 では非マッチ。
-    assert!(
-        conf < 0.80,
-        "20:9 hud_tr テンプレは PC 16:9 フレームで閾値 0.80 を下回り非マッチになるはず: got {conf:.4}"
-    );
-
-    // 証明2: 到達可能信頼度が 0.99(実機) から大きく劣化すること(流用不可の量的根拠)。
-    // 実機 conf~0.99 → PC で conf が大きく低下することを記録する。
-    // ※ probe のゲーム状態により conf 絶対値は変動するため、厳密な閾値(0.70)で assert せず、
-    //    証明1(閾値0.80 未満 = 非マッチ = 流用不可)で本質を担保し、劣化の度合いは記録のみ。
-    //    (canonical probe tracked化で probe は固定されるが、ゲーム状態依存の絶対値は記録対象)
-    eprintln!(
-        "[T7] hud_tr 劣化度: 実機 conf~0.99 → PC conf={conf:.4} (0.80 未満で流用不可、証明1で担保)"
-    );
-
-    eprintln!(
-        "[T7] hud_tr 20:9→16:9 劣化: 実機 conf~0.99 → PC(1258x708) conf={conf:.4} (非マッチ, 閾値0.80 未満)"
-    );
-}
-
-#[test]
-fn roi_1080_x_partially_clips_on_1258_width_pc_frame() {
-    // 補助証明: ROI x=1080..1260 は 1258 幅フレームに対し右端が 2px はみ出す。
-    // pipeline.rs::crop_imm は clamp するため例外にはならないが、意図した 1280 基準の
-    // 右上 HUD 領域を正確に取得できていないことが分かる(スケールオフセット + クリッピング)。
-    // これが「1280 基準座標を 1258 RAW 空間へそのまま適用すると位置がずれる」具体例。
+fn x_1080_partially_clips_on_1258_width_pc_frame() {
+    // 座標系混用の検知: 1280 基準の ROI x=1080..1260 は 1258 幅 RAW フレームに対し
+    // 右端が 2px はみ出す。pipeline.rs::crop_imm は clamp するため例外にはならないが、
+    // 「1280 基準座標を 1258 RAW 空間へそのまま適用すると位置がずれる」具体例。
+    // (旧 android 版 tap_hud_tr.toml の ROI 由来 — Issue #188 で資産削除後も
+    //  座標系契約の回帰検知として固定化する)
     let probe = repo_root().join("templates/captures/field_pc_probe.png");
     let img = image::open(&probe).expect("capture_probe.png");
     assert_eq!(img.width(), PC_FRAME_W);
@@ -172,14 +99,4 @@ fn roi_1080_x_partially_clips_on_1258_width_pc_frame() {
         roi_x_end > img.width(),
         "ROI 右端({roi_x_end})は 1258 幅フレームをはみ出す = 1280 基準座標のまま 1258 空間へ適用されている証拠"
     );
-}
-
-/// pipeline.rs::crop_imm と同等の clamp 付き cropping ヘルパ(テスト内再現)。
-fn crop(img: &image::DynamicImage, r: [u32; 4]) -> image::DynamicImage {
-    let [x, y, w, h] = r;
-    let cx = x.min(img.width().saturating_sub(1));
-    let cy = y.min(img.height().saturating_sub(1));
-    let cw = w.min(img.width().saturating_sub(cx));
-    let ch = h.min(img.height().saturating_sub(cy));
-    img.crop_imm(cx, cy, cw, ch)
 }

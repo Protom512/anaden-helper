@@ -1,6 +1,6 @@
 [package]
 name = "anaden-device"
-description = "ADB device communication layer"
+description = "PC (Windows) device communication layer (capture/input/launch)"
 version.workspace = true
 edition.workspace = true
 
@@ -10,25 +10,8 @@ tokio = { workspace = true }
 image = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
-# 常駐 capture(scrcpy クライアント)での H.264 デコード。feature gate でオプション依存。
-# `source` feature で openh264 をソースビルドし、外部 DLL 不要で自己完結する。
-openh264 = { version = "0.8", default-features = false, features = ["source"], optional = true }
 
 # PC版 Windows API プローブ(入力/キャプチャ/起動)。features はルート [workspace.dependencies]
 # で一括定義。Windows 専用コードは cfg(windows) で囲む。Linux ビルドには依存しない。
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
-
-[features]
-default = []
-# scrcpy サーバ push + 常駐 H.264 受信 + openh264 デコードによる capture backend。
-# デフォルト OFF。`--features anaden-device/capture-scrcpy` で有効化。
-capture-scrcpy = ["dep:openh264"]
-
-[[example]]
-name = "scrcpy_session_probe"
-required-features = ["capture-scrcpy"]
-
-[[example]]
-name = "scrcpy_touch_probe"
-required-features = ["capture-scrcpy"]

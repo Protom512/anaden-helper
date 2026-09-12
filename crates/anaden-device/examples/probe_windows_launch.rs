@@ -2,11 +2,11 @@
 //!
 //! 目的:
 //!   Launcher.exe を起動し、子プロセス AnotherEden.exe が 0xC0000005 で即死せずに
-//!   安定起動・N秒生存することを、ADB の `am start` を使わずに Win32 プロセス API 単独で
-//!   判定する。これにより app_control.rs の AppController(ADB の am start + dumpsys 前景判定)
-//!   を Windows 実装で置き換え可能か、つまり pipeline_driver.rs の Capture/Input trait
-//!   (行60-71) に Windows バックエンドを被せる前段として「プロセス起動・生存監視」層が
-//!   確証を持てることを実証する。KB5094126(WoW64 クラッシュ) は解決済み前提。
+//!   安定起動・N秒生存することを Win32 プロセス API 単独で判定する。これにより
+//!   pipeline_driver.rs の Capture/Input trait に Windows バックエンドを被せる前段として
+//!   「プロセス起動・生存監視」層が確証を持てることを実証する。
+//!   KB5094126(WoW64 クラッシュ) は解決済み前提。
+//!   (旧 Android 向け ADB 実装は Issue #188 で削除済み。)
 //!
 //! 使う Win32 API (外部プロセス起動なし):
 //!   [1] プロセス起動: std::process::Command (内部で CreateProcessW)。

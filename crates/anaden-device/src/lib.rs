@@ -1,17 +1,14 @@
-//! ADB デバイス通信層。
+//! PC 版 (Windows) デバイス通信層。
 //!
-//! Android デバイスとの通信（スクリーンショット取得、入力コマンド送信）を担当する。
+//! Another Eden PC 版ウィンドウに対するキャプチャ (PrintWindow)・入力注入
+//! (SendInput / PostMessage)・起動 (プロセス起動・生存監視) を担当する。
 //! ゲームロジックは一切持たず、`anaden-core` の型のみを使用する。
+//!
+//! Issue #188 で Android (ADB / scrcpy / minitouch) 経路を削除し、
+//! PC (Windows) 専用化した。履歴は git 履歴を参照のこと。
 
-mod app_control;
-mod client;
-mod display;
-mod input;
-#[cfg(feature = "capture-scrcpy")]
-mod scrcpy;
-#[cfg(feature = "capture-scrcpy")]
-mod scrcpy_session;
-mod screenshot;
+mod ensure;
+mod error;
 // PC版(Windows) Win32 バックエンド。capture/input/launch の3モジュール。
 // 全体を cfg(windows) で gating し、Linux ではコンパイル対象外とする。
 #[cfg(windows)]
@@ -25,45 +22,15 @@ mod win32_launch;
 #[cfg(windows)]
 mod win32_proc;
 
-/// ゲームアプリの起動制御（Android）。
-///
-/// [`AppController`] によるアプリ起動・フォアグラウンド確認、
-/// [`build_launch_command`] / [`ensure_app_open_with`] / [`parse_foreground_package`]
-/// ヘルパ、[`GAME_PACKAGE`] / [`GAME_ACTIVITY`] 定数、
-/// [`EnsureOutcome`] 起動結果を再エクスポートする。
+/// ゲーム起動保証の成果物 enum ([`Win32Launch::ensure_open`] 等)。
 ///
 /// ```
-/// use anaden_device::{AppController, GAME_PACKAGE};
-/// assert!(GAME_PACKAGE.contains('.'));
+/// use anaden_device::EnsureOutcome;
+/// assert_ne!(EnsureOutcome::AlreadyOpen, EnsureOutcome::Timeout);
 /// ```
-pub use app_control::{
-    AppController, EnsureOutcome, GAME_ACTIVITY, GAME_PACKAGE, build_launch_command,
-    ensure_app_open_with, parse_foreground_package,
-};
-/// ADB クライアント（サブプロセス `adb` 実行ラッパ）と [`AdbError`]。
-///
-/// ```
-/// use anaden_device::AdbClient;
-/// let client = AdbClient::new("emulator-5554");
-/// ```
-pub use client::{AdbClient, AdbError};
-/// ディスプレイ解像度・DPI 情報の取得コントローラ。
-pub use display::DisplayController;
-/// `adb shell input` 系コマンドの送信 executor。
-pub use input::InputExecutor;
-/// 常駐 scrcpy プロセスからフレームを受信する高速キャプチャ（`capture-scrcpy` feature）。
-#[cfg(feature = "capture-scrcpy")]
-pub use scrcpy::{ScrcpyCapture, ScrcpyConfig};
-/// scrcpy 制御ソケット経由のタッチ注入セッション（`capture-scrcpy` feature）。
-///
-/// `adb input tap` がアンチチートで無視されるための代替経路。
-/// `ACTION_DOWN` / `ACTION_MOVE` / `ACTION_UP` と [`TouchAction`] を含む。
-#[cfg(feature = "capture-scrcpy")]
-pub use scrcpy_session::{
-    ACTION_DOWN, ACTION_MOVE, ACTION_UP, ScrcpySession, ScrcpySessionConfig, TouchAction,
-};
-/// `adb exec-out screencap` によるスクリーンショット取得。
-pub use screenshot::ScreenshotCapture;
+pub use ensure::EnsureOutcome;
+/// capture / input / launch 共通のデバイス操作エラー。
+pub use error::DeviceError;
 /// PC版(Windows) `PrintWindow` ベースのキャプチャ（`DEFAULT_PROCESS_NAME` = 対象プロセス名）。
 #[cfg(windows)]
 pub use win32_capture::{DEFAULT_PROCESS_NAME, Win32Capture};

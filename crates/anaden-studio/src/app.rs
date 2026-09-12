@@ -26,7 +26,7 @@ use crate::tasks::{self, QueueAction, QueueEntry, QueueExec, QueueState};
 
 pub use crate::app_state::{
     AppMode, ConnectionState, ConnectionStatus, PipelineActionKind, StudioApp,
-    check_android_device, check_windows_process, pipeline_task_spec, save_pipeline_task,
+    check_windows_process, pipeline_task_spec, save_pipeline_task,
 };
 use crate::app_state::{DEFAULT_TEMPLATE_NAME, EngineKind, HEATMAP_DOWNSCALE, STATE_OPTIONS};
 
@@ -154,12 +154,9 @@ impl StudioApp {
         Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
     }
 
-    /// CLI target 文字列 (source::Target → anaden CLI の `--target` 値)。
+    /// CLI target 文字列 (Issue #188 の PC 専用化で Windows 固定)。
     pub(crate) fn cli_target(&self) -> &'static str {
-        match self.target {
-            crate::source::Target::Android => "android",
-            crate::source::Target::Windows => "windows",
-        }
+        "windows"
     }
 
     /// 開始ボタン: 選択キューからチェック順エントリ列を組み立てて開始する
@@ -173,7 +170,7 @@ impl StudioApp {
         let entries = match list.queue_entries(
             &self.anaden_program,
             self.cli_target(),
-            Some(self.adb_serial.as_str()),
+            None,
             &Self::workspace_root(),
         ) {
             Ok(e) => e,
@@ -313,16 +310,10 @@ impl StudioApp {
 
     /// 接続チェックを実行して状態を更新する (Issue #139 T3)。
     ///
-    /// target に応じて Android (adb get-state) / Windows (プロセス検出) を使い分ける。
+    /// Issue #188 で Android 経路を削除 — Windows プロセス検出のみ。
     pub fn run_connection_check(&mut self) {
         self.connection.state = ConnectionState::Checking;
-        self.connection = match self.target {
-            crate::source::Target::Android => check_android_device(&self.adb_serial),
-            #[cfg(windows)]
-            crate::source::Target::Windows => check_windows_process(&self.win_exe),
-            #[cfg(not(windows))]
-            crate::source::Target::Windows => check_windows_process(&self.win_exe),
-        };
+        self.connection = check_windows_process(&self.win_exe);
     }
 
     /// エンジン種別を切替え、self.engine を再構築し、再評価を強制する。
@@ -690,7 +681,8 @@ mod tests {
     #[test]
     fn run_connection_check_updates_state() {
         let mut app = StudioApp::default();
-        // Android 既定 + serial 未入力 → チェック後に Disconnected (未入力理由)。
+        // PC 既定 (target=Windows) + exe 未入力 → チェック後に Disconnected (未入力理由)。
+        app.win_exe.clear();
         app.run_connection_check();
         assert_eq!(app.connection().state, ConnectionState::Disconnected);
         assert!(app.connection().reason_line().contains("理由"));

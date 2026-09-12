@@ -1,6 +1,6 @@
 [package]
 name = "anaden-engine"
-description = "Sense-Think-Act automation orchestrator"
+description = "Declarative pipeline automation engine (PC/Windows)"
 version.workspace = true
 edition.workspace = true
 
@@ -8,7 +8,6 @@ edition.workspace = true
 anaden-core = { workspace = true }
 anaden-device = { workspace = true }
 anaden-vision = { workspace = true }
-anaden-strategies = { workspace = true }
 image = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
@@ -22,9 +21,3 @@ async-trait = { workspace = true }
 [dev-dependencies]
 tempfile = { workspace = true }
 serde_json = { workspace = true }
-
-[features]
-default = []
-# anaden-device の常駐 capture backend(scrcpy) を PipelineDriver の Capture 候補に加える。
-# 有効化すると anaden-device 側の `capture-scrcpy` も連鎖して有効になる。
-capture-scrcpy = ["anaden-device/capture-scrcpy"]

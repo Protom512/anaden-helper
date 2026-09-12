@@ -1,11 +1,11 @@
 //! 宣言的パイプラインのデバイス発火＋ライブループ層。
 //!
 //! [`crate::pipeline_runner`] の純粋 tick([`PipelineState::tick`]) を消費し、
-//! 実 capture(`ScreenshotCapture`)/input(`InputExecutor`) に接続して async ループを回す
-//! 最終マイル層。orchestrator(命令型 Strategy ループ) とは独立し、`GameState`/Strategy/
-//! Recovery には依存しない。テンプレ画像は caller が `&[TaskDef]` として渡す。
+//! 実 capture(`Win32Capture`)/input(`Win32InputExecutor`) に接続して async ループを回す
+//! 最終マイル層。テンプレ画像は caller が `&[TaskDef]` として渡す。
+//! (旧 Android 実機バックエンド・命令型 Orchestrator は Issue #188 で削除済み。)
 //!
-//! 解像度モデル: device 側は生解像度(Pixel 7a なら 2400x1080 等 / PC版は黒帯込み生幅)。
+//! 解像度モデル: device 側は生解像度(PC版は黒帯込み生幅)。
 //! capture した画像を黒帯クロップ([`crop_to_content_with_info`]) →
 //! [`ScreenScaler::normalize`] で基準幅(1280)へ縮小して tick に食わせる。
 //! 発火座標は逆方向に [`rescale_command`] が [`CropInfo`]（黒帯オフセット情報）を使って
@@ -31,7 +31,7 @@ use tracing::{debug, info, warn};
 
 use anaden_core::InputAction;
 use anaden_core::ScreenRegion;
-use anaden_device::{AdbError, InputExecutor, ScreenshotCapture};
+use anaden_device::DeviceError;
 use anaden_vision::{BASE_WIDTH, CropInfo, ScreenScaler, TaskDef, crop_to_content_with_info};
 
 use crate::pipeline_runner::{InputCommand, PipelineState};
@@ -41,7 +41,7 @@ use crate::pipeline_runner::{InputCommand, PipelineState};
 /// NoMatch が `threshold` 回連続したときに呼ばれる。`Ok` ならリカバリ成功とみなし
 /// NoMatch 連続カウンタをリセットしてループを継続、`Err` なら IO エラーとして停止する。
 pub type RecoveryHook =
-    Box<dyn FnMut(u32) -> Pin<Box<dyn Future<Output = Result<(), AdbError>> + Send>> + Send>;
+    Box<dyn FnMut(u32) -> Pin<Box<dyn Future<Output = Result<(), DeviceError>> + Send>> + Send>;
 
 /// ゴール評価用の経過時間計測の抽象(Issue #37 T4)。
 ///
@@ -145,52 +145,18 @@ pub fn rescale_command(cmd: InputCommand, device_width: u32, crop_info: &CropInf
     }
 }
 
-/// 画面キャプチャ能力の抽象。本番 impl([`ScreenshotCapture`]) とテスト用 fake を差し替える。
+/// 画面キャプチャ能力の抽象。本番 impl([`anaden_device::Win32Capture`]) とテスト用 fake を差し替える。
 #[async_trait]
 pub trait Capture: Send + Sync {
     /// デバイスの画面をキャプチャして生解像度画像を返す。
-    async fn capture(&self) -> Result<DynamicImage, AdbError>;
+    async fn capture(&self) -> Result<DynamicImage, DeviceError>;
 }
 
-/// 入力発火能力の抽象。本番 impl([`InputExecutor`]) とテスト用 fake を差し替える。
+/// 入力発火能力の抽象。本番 impl([`anaden_device::Win32InputExecutor`]) とテスト用 fake を差し替える。
 #[async_trait]
 pub trait Input: Send + Sync {
     /// 入力アクションを実行する。
-    async fn execute(&self, action: &InputAction) -> Result<(), AdbError>;
-}
-
-// ---- 本番 impl: anaden-device の具象型を trait に被せる ----
-
-#[async_trait]
-impl Capture for ScreenshotCapture {
-    async fn capture(&self) -> Result<DynamicImage, AdbError> {
-        ScreenshotCapture::capture(self).await
-    }
-}
-
-#[cfg(feature = "capture-scrcpy")]
-#[async_trait]
-impl Capture for anaden_device::ScrcpyCapture {
-    async fn capture(&self) -> Result<DynamicImage, AdbError> {
-        anaden_device::ScrcpyCapture::capture(self).await
-    }
-}
-
-/// `ScrcpySession`(video+control 2ソケット) を Capture バックエンドとして使う impl。
-/// `--capture scrcpy --input scrcpy` 時、capture も入力も同一セッションを共有する。
-#[cfg(feature = "capture-scrcpy")]
-#[async_trait]
-impl Capture for std::sync::Arc<anaden_device::ScrcpySession> {
-    async fn capture(&self) -> Result<DynamicImage, AdbError> {
-        anaden_device::ScrcpySession::capture(self).await
-    }
-}
-
-#[async_trait]
-impl Input for InputExecutor {
-    async fn execute(&self, action: &InputAction) -> Result<(), AdbError> {
-        InputExecutor::execute(self, action).await
-    }
+    async fn execute(&self, action: &InputAction) -> Result<(), DeviceError>;
 }
 
 // ---- 本番 impl: PC版(Windows) Win32 バックエンド ----
@@ -201,7 +167,7 @@ impl Input for InputExecutor {
 #[cfg(windows)]
 #[async_trait]
 impl Capture for anaden_device::Win32Capture {
-    async fn capture(&self) -> Result<DynamicImage, AdbError> {
+    async fn capture(&self) -> Result<DynamicImage, DeviceError> {
         anaden_device::Win32Capture::capture(self).await
     }
 }
@@ -209,45 +175,8 @@ impl Capture for anaden_device::Win32Capture {
 #[cfg(windows)]
 #[async_trait]
 impl Input for anaden_device::Win32InputExecutor {
-    async fn execute(&self, action: &InputAction) -> Result<(), AdbError> {
+    async fn execute(&self, action: &InputAction) -> Result<(), DeviceError> {
         anaden_device::Win32InputExecutor::execute(self, action).await
-    }
-}
-
-// ---- scrcpy-touch 入力経路(capture-scrcpy feature 内) ----
-//
-// `ScrcpySession` は video+control 2ソケットを持ち、control ソケットへ
-// TYPE_INJECT_TOUCH_EVENT を送る(`send_touch`/`tap`/`swipe`)。`adb input tap` を
-// ゲーム(Another Eden)が無視する問題を、scrcpy 経由のタッチ注入で解決する経路。
-//
-// `ScrcpySession::tap_with`/`swipe_with` は内部で `std::thread::sleep` する同期 API なので、
-// async `Input::execute` からは `spawn_blocking` でワーカスレッドへ逃す(runtime 阻止回避)。
-// `ScrcpySession` は `Send + Sync`(Arc<Inner> + Mutex)なので `Arc::clone` して持ち出せる。
-#[cfg(feature = "capture-scrcpy")]
-#[async_trait]
-impl Input for std::sync::Arc<anaden_device::ScrcpySession> {
-    async fn execute(&self, action: &InputAction) -> Result<(), AdbError> {
-        let session = self.clone();
-        let action = action.clone();
-        tokio::task::spawn_blocking(move || match &action {
-            InputAction::Tap(p) => session.tap(p.x, p.y),
-            InputAction::Swipe {
-                from,
-                to,
-                duration_ms,
-            } => session.swipe(from.x, from.y, to.x, to.y, *duration_ms),
-            InputAction::LongPress(p, duration_ms) => session.long_press(p.x, p.y, *duration_ms),
-            InputAction::Wait(duration) => {
-                debug!("Waiting for {:?}", duration);
-                // spawn_blocking 上なので同期 sleep で OK。
-                std::thread::sleep(*duration);
-                Ok(())
-            }
-        })
-        .await
-        .map_err(|e| AdbError::CommandFailed {
-            message: format!("scrcpy-touch 入力タスク panic/中止: {e}"),
-        })?
     }
 }
 
@@ -573,7 +502,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     }
 
     /// [`InputCommand`] → [`InputAction`] 変換＋発火。Swipe に duration を注入する。
-    async fn execute_command(&self, cmd: &InputCommand) -> Result<(), AdbError> {
+    async fn execute_command(&self, cmd: &InputCommand) -> Result<(), DeviceError> {
         let action = match *cmd {
             InputCommand::Tap { x, y } => InputAction::tap(x, y),
             InputCommand::Swipe { from, to } => {
@@ -892,7 +821,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// `recover_nomatch_threshold > 0` かつ `recover` が [`Some`] のとき、
     /// NoMatch が `threshold` 回連続するごとに `recover(current_streak)` を呼ぶ。
     /// `Ok` なら連続カウンタをリセットしてループ継続。`Err` なら [`LoopStopReason::ExecuteError`]
-    /// で停止(re-launch の ADB 失敗等)。`threshold == 0` または `recover == None` なら
+    /// で停止(re-launch のプロセス起動失敗等)。`threshold == 0` または `recover == None` なら
     /// リカバリ無効(通常の [`Self::run_loop`] と等価)。
     ///
     /// 本メソッドは非ゴールモード([`Self::run_loop_with_goal`] へ `goal=None` を渡すのと等価)。
@@ -1638,9 +1567,9 @@ mod tests {
 
     #[async_trait]
     impl Capture for FakeCapture {
-        async fn capture(&self) -> Result<DynamicImage, AdbError> {
+        async fn capture(&self) -> Result<DynamicImage, DeviceError> {
             if self.fail {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: "fake capture failure".into(),
                 });
             }
@@ -1648,7 +1577,7 @@ mod tests {
                 .lock()
                 .expect("frames lock")
                 .pop_front()
-                .ok_or_else(|| AdbError::CommandFailed {
+                .ok_or_else(|| DeviceError::CommandFailed {
                     message: "no more frames".into(),
                 })
         }
@@ -1662,9 +1591,9 @@ mod tests {
 
     #[async_trait]
     impl Input for FakeInput {
-        async fn execute(&self, action: &InputAction) -> Result<(), AdbError> {
+        async fn execute(&self, action: &InputAction) -> Result<(), DeviceError> {
             if self.fail {
-                return Err(AdbError::CommandFailed {
+                return Err(DeviceError::CommandFailed {
                     message: "fake execute failure".into(),
                 });
             }
@@ -2145,7 +2074,7 @@ mod tests {
 
         let hook: RecoveryHook = Box::new(|_| {
             Box::pin(async {
-                Err(AdbError::CommandFailed {
+                Err(DeviceError::CommandFailed {
                     message: "launch failed".into(),
                 })
             })
@@ -3039,7 +2968,7 @@ mod tests {
 
         let hook: RecoveryHook = Box::new(|_| {
             Box::pin(async {
-                Err(AdbError::CommandFailed {
+                Err(DeviceError::CommandFailed {
                     message: "launch failed".into(),
                 })
             })

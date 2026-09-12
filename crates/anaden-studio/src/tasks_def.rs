@@ -430,7 +430,7 @@ implemented = true
         })
     }
 
-    /// タスク定義一覧 TOML (リポジトリ実ファイル 9 件) から全定義をパースできる。
+    /// タスク定義一覧 TOML (リポジトリ実ファイル 8 件) から全定義をパースできる。
     ///
     /// selectable 期待値は各ファイルの implemented 行の生走査 (独立オラクル) からの
     /// 辞書導出とする (Issue #160 T4): UC-3 有効化でファイルの implemented が
@@ -450,7 +450,6 @@ implemented = true
             "neko_nikki",
             "roguelike",
             "ticket_digest",
-            "worldmap_loop",
         ];
         let ids: Vec<&str> = defs.iter().map(|d| d.id.as_str()).collect();
         assert_eq!(ids, all_ids);
@@ -475,13 +474,7 @@ implemented = true
             );
         }
         // 既知 implemented セット (superset 不変 — 有効化で増えても壊れない)。
-        for known in [
-            "field_loop_pc",
-            "launch",
-            "login",
-            "nav_to_field_pc",
-            "worldmap_loop",
-        ] {
+        for known in ["field_loop_pc", "launch", "login", "nav_to_field_pc"] {
             assert!(selectable.contains(&known), "{known} must stay selectable");
         }
     }
@@ -742,7 +735,7 @@ implemented = true
         );
     }
 
-    /// 既存タスク TOML (リポジトリ実ファイル 9 件中 pipeline_run 8 件) は有効化の
+    /// 既存タスク TOML (リポジトリ実ファイル 8 件中 pipeline_run 7 件) は有効化の
     /// 書き戻し後も parse 可能・全コメント行が保全されていることの固定
     /// (設計制約: toml::to_string 全再生成はコメントを落とすため行編集を採る)。
     #[test]
@@ -758,7 +751,6 @@ implemented = true
             "neko_nikki",
             "roguelike",
             "ticket_digest",
-            "worldmap_loop",
         ];
         for id in pipeline_run_ids {
             let tmp = tempfile::tempdir().unwrap();

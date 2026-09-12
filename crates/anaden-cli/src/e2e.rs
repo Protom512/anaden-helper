@@ -210,7 +210,7 @@ impl<C: anaden_engine::Capture + Send + Sync> EvidenceCapture<C> {
 
 #[async_trait]
 impl<C: anaden_engine::Capture + Send + Sync> anaden_engine::Capture for EvidenceCapture<C> {
-    async fn capture(&self) -> Result<image::DynamicImage, anaden_device::AdbError> {
+    async fn capture(&self) -> Result<image::DynamicImage, anaden_device::DeviceError> {
         let img = self.inner.capture().await?;
         let n = self.cycle.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         match save_screenshot(&self.dir, &img) {
@@ -441,7 +441,7 @@ mod tests {
 
     #[async_trait]
     impl anaden_engine::Capture for FakeCapture {
-        async fn capture(&self) -> Result<image::DynamicImage, anaden_device::AdbError> {
+        async fn capture(&self) -> Result<image::DynamicImage, anaden_device::DeviceError> {
             Ok(image::DynamicImage::new_rgb8(2, 2))
         }
     }

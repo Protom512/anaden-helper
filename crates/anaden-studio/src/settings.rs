@@ -377,19 +377,13 @@ mod tests {
         assert_eq!(path, dir.path().join("anaden-studio").join(SETTINGS_FILE));
     }
 
-    // ---- T4: 実在 6 パイプラインの選択戦略 TOML roundtrip ----
+    // ---- T4: 実在 PC 版 2 パイプラインの選択戦略 TOML roundtrip ----
 
-    /// 実在 6 パイプラインのそれぞれで save → load が戦略 id を保存すること。
+    /// 実在 PC 版 2 パイプラインのそれぞれで save → load が戦略 id を保存すること
+    /// (Issue #188 で android 版 4 戦略を削除)。
     #[test]
-    fn roundtrip_preserves_each_of_six_real_pipeline_strategies() {
-        for id in [
-            "field_loop",
-            "field_loop_pc",
-            "nav_to_field",
-            "nav_to_field_pc",
-            "worldmap_loop",
-            "_title_load",
-        ] {
+    fn roundtrip_preserves_each_of_two_real_pc_pipeline_strategies() {
+        for id in ["field_loop_pc", "nav_to_field_pc"] {
             let dir = tempfile::tempdir().unwrap();
             let path = dir.path().join("settings.toml");
             let settings = StudioSettings {
@@ -424,7 +418,7 @@ mod tests {
         assert!(text.contains(r#"strategy = "nav_to_field_pc""#), "{text}");
     }
 
-    /// 選択戦略がカタログの実在 6 パイプラインのいずれかと整合する。
+    /// 選択戦略がカタログの実在 PC 版 2 パイプラインのいずれかと整合する。
     #[test]
     fn loaded_selection_validates_against_builtin_catalog() {
         let catalog = anaden_strategies::StrategyCatalog::builtin();
