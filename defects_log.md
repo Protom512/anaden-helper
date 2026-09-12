@@ -1,5 +1,9 @@
 # Defects Log — anaden-helper
 
+> **履歴資料について (2026-09-13)**: Android / ADB / scrcpy 関連の欠陥記録は Issue #188
+> (2026-09-10) で Android サポートを削除する以前のものです。現行は PC (Windows) 専用。
+
+
 `canonical_feature_stories.md` のユーザーストーリー検証（ループB）で発見した Logic / UX 欠陥を追跡する。
 
 | Defect ID | Affected US-ID | Test Case ID | Type | Description of Error | Steps to Reproduce | Severity | Status |
