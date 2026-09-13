@@ -31,6 +31,7 @@ pub mod log_process;
 pub mod log_status;
 pub mod log_view;
 pub mod proposals;
+pub mod routine_ui;
 pub mod runner;
 pub mod runner_exec;
 pub mod runner_ui;

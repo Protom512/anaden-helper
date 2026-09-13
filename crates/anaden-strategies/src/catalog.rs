@@ -264,16 +264,26 @@ mod tests {
         // カタログ定義がリポジトリ実体と乖離していないことの機械検証
         //（テスト実行は crate ルートから相対でない場合があるため env!("CARGO_MANIFEST_DIR")
         // からリポジトリルートを辿る）。
+        // is_dir() はフル実行時の大量プロセス起動中に AV/インデクサの
+        // 一時的なディレクトリハンドルロックで偽陰性を返す実績がある
+        // (#187/#191/#201 の各フルランで再発) ため 3 回リトライする。
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest_dir.ancestors().nth(2).unwrap();
         let catalog = StrategyCatalog::builtin();
         for s in catalog.strategies() {
             let dir = repo_root.join(&s.pipeline_dir);
+            let mut ok = dir.is_dir();
+            for _ in 0..3 {
+                if ok {
+                    break;
+                }
+                std::thread::sleep(std::time::Duration::from_millis(100));
+                ok = dir.is_dir();
+            }
             assert!(
-                dir.is_dir(),
+                ok,
                 "{}: pipeline_dir が実在しない: {}",
-                s.id,
-                s.pipeline_dir
+                s.id, s.pipeline_dir
             );
         }
     }

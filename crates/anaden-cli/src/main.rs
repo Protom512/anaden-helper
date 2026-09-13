@@ -1,8 +1,9 @@
 //! Another Eden 自動操作ツールの CLI エントリポイント (PC 版 Windows 専用)。
 //!
-//! 3つのサブコマンドを持つ:
+//! 4つのサブコマンドを持つ:
 //! - `run`: 宣言的パイプラインを PC 版 (Win32 キャプチャ/入力) でライブ実行する
 //!   (PipelineDriver 駆動)。
+//! - `routine`: 複数 pipeline を1日のルーチンとして連続実行する (Issue #199)。
 //! - `ensure-open`: 起動状態を確認し未起動なら起動する独立 CI gate(Issue #21)。
 //! - `launch`: 無条件起動(AlreadyOpen チェックなし、リカバリ用途)。
 //!
@@ -14,8 +15,12 @@ use std::time::Duration;
 // UC-2 実機 E2E 証跡ヘルパー (Issue #139 T6)。
 // evidence 採取 (生ログ・スクショ・tree hash の .omc/logs/{run-id}/ 永続化) の
 // 単一情報源。pipeline-evidence-verification.md 準拠。
-mod e2e;
+// routine サブコマンド (Issue #199) からも参照するため pub(crate)。
+pub(crate) mod e2e;
 use e2e::tree_hash_of_pipeline;
+
+// routine サブコマンド (Issue #199): 複数 pipeline の連続実行。
+mod routine;
 
 use anaden_cli_contract::{ensure_outcome_label, standalone_exit_code};
 use anyhow::Result;
@@ -102,6 +107,26 @@ enum Commands {
         #[arg(long)]
         evidence_run_id: Option<String>,
     },
+    /// 複数 pipeline を1日のルーチンとして連続実行する (Issue #199)。
+    ///
+    /// routine 定義 (`templates/routines/<name>.toml`) の steps を定義順に
+    /// PipelineDriver で実行し、ステップ別 + 全体サマリを表示する。
+    ///
+    /// **終了コード契約**:
+    /// - 0: 全ステップが失敗なく実行完了
+    /// - 2: 失敗ステップあり / 中断 (on_failure=stop・割り込み)
+    /// - 1: routine 読込・検証失敗等のハードエラー
+    Routine {
+        /// routine 定義 TOML ファイルパス (例: templates/routines/daily.toml)
+        routine_path: PathBuf,
+        /// 定義検証 + ステップ表示のみで実行しない (デバイスに触れない)
+        #[arg(long)]
+        dry_run: bool,
+        /// routine evidence (`routine-summary.txt` + `routine-metadata.json`) を
+        /// `.omc/logs/{run-id}/` へ永続化する。未指定時は採取なし。
+        #[arg(long)]
+        evidence_run_id: Option<String>,
+    },
     /// ゲームの起動状態を確認し、未起動なら起動して生存を確認する(Issue #21)。
     ///
     /// パイプライン実行なしで「起動確認＋起動」だけを行う独立 CI gate サブコマンド。
@@ -144,8 +169,9 @@ enum Commands {
 /// single source of truth for ensure behavior)。
 ///
 /// 非 Windows ビルドでは Win32 バックエンド(`wfsdrv` 依存)が存在しないため bail する。
+/// routine サブコマンド (Issue #199) からも参照するため pub(crate)。
 #[cfg(windows)]
-async fn ensure_open_outcome(wait: Duration) -> Result<anaden_device::EnsureOutcome> {
+pub(crate) async fn ensure_open_outcome(wait: Duration) -> Result<anaden_device::EnsureOutcome> {
     let launcher = anaden_device::Win32Launch::default_paths();
     launcher
         .ensure_open(wait)
@@ -155,7 +181,7 @@ async fn ensure_open_outcome(wait: Duration) -> Result<anaden_device::EnsureOutc
 
 /// `ensure_open_outcome` の非 Windows ビルド向けフォールバック(コンパイルエラー回避)。
 #[cfg(not(windows))]
-async fn ensure_open_outcome(_wait: Duration) -> Result<anaden_device::EnsureOutcome> {
+pub(crate) async fn ensure_open_outcome(_wait: Duration) -> Result<anaden_device::EnsureOutcome> {
     anyhow::bail!(
         "このバイナリは Windows 向けではないため PC 版 (Win32) バックエンドを使用できません"
     )
@@ -163,8 +189,9 @@ async fn ensure_open_outcome(_wait: Duration) -> Result<anaden_device::EnsureOut
 
 /// コンパイル時に確定する workspace ルート（anaden-cli manifest から
 /// 2 階層上昇 = リポジトリルート）。実行時 cwd に依存しない pipeline
-/// ディレクトリ解決の基準点（Issue #139 T2）。
-fn cli_workspace_root() -> PathBuf {
+/// ディレクトリ解決の基準点（Issue #139 T2）。routine サブコマンド
+/// (Issue #199) からも参照するため pub(crate)。
+pub(crate) fn cli_workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
@@ -793,6 +820,18 @@ async fn main() -> Result<()> {
         Commands::Launch { wait_secs } => {
             // launch: 無条件起動(AlreadyOpen チェックなし)。終了コード契約は ensure-open に同じ。
             exit_standalone(run_ensure_open_or_launch(wait_secs, true).await);
+        }
+        Commands::Routine {
+            routine_path,
+            dry_run,
+            evidence_run_id,
+        } => {
+            // routine: 複数 pipeline の連続実行 (Issue #199)。終了コードは
+            // run_routine_command の契約 (全完了=0 / 失敗・中断=2) に従う。
+            let code =
+                routine::run_routine_command(&routine_path, dry_run, evidence_run_id.as_deref())
+                    .await?;
+            std::process::exit(code);
         }
     }
 }
