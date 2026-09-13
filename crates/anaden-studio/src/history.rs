@@ -46,10 +46,17 @@ pub struct RunRecord {
     pub exit_code: Option<i32>,
     /// ログ末尾スナップショット (LOG_TAIL_MAX_LINES 行まで)。
     pub log_tail: Vec<String>,
+    /// evidence 採取 run-id (Issue #202 UC-1)。routine 実行で evidence 採取
+    /// チェック ON のとき `--evidence-run-id` に渡した値。証跡ディレクトリは
+    /// `.omc/logs/{run-id}/`。未採取 (通常の pipeline 実行) は None。
+    /// 旧履歴ファイル (本フィールド不存在行) は None で復元される。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub evidence_run_id: Option<String>,
 }
 
 impl RunRecord {
     /// 新規記録を生成する。`log_tail` は上限行数に切り詰められる。
+    /// evidence_run_id は None (必要なら [`RunRecord::with_evidence_run_id`] で付与)。
     pub fn new(
         started_at_unix: u64,
         strategy: impl Into<String>,
@@ -63,7 +70,15 @@ impl RunRecord {
             outcome,
             exit_code,
             log_tail: truncate_tail(log_tail),
+            evidence_run_id: None,
         }
+    }
+
+    /// evidence run-id を付与する (builder・routine 実行の履歴詳細用)。
+    #[must_use]
+    pub fn with_evidence_run_id(mut self, run_id: Option<String>) -> Self {
+        self.evidence_run_id = run_id;
+        self
     }
 }
 
@@ -292,6 +307,40 @@ mod tests {
         let json = serde_json::to_string(&r).unwrap();
         let back: RunRecord = serde_json::from_str(&json).unwrap();
         assert_eq!(back, r);
+    }
+
+    // --- evidence_run_id (Issue #202 UC-1) ---
+
+    /// 未採取 (None) の record は evidence_run_id を JSON に出力しない
+    /// (通常の pipeline 実行履歴の互換性: フィールド追加前と同一 JSON)。
+    #[test]
+    fn record_without_evidence_omits_field_in_json() {
+        let json = serde_json::to_string(&sample_record("fishing", 1)).unwrap();
+        assert!(!json.contains("evidence_run_id"), "{json}");
+    }
+
+    /// 付与した record は round-trip で run-id が復元される。
+    #[test]
+    fn record_with_evidence_round_trips_run_id() {
+        let r = sample_record("routine:daily", 2)
+            .with_evidence_run_id(Some("routine-20260914-013000".to_string()));
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            json.contains("\"evidence_run_id\":\"routine-20260914-013000\""),
+            "{json}"
+        );
+        let back: RunRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+    }
+
+    /// 本フィールド追加前の旧履歴ファイル行 (evidence_run_id なし) は
+    /// None で復元される (history.jsonl 後方互換)。
+    #[test]
+    fn legacy_record_without_field_deserializes_to_none() {
+        let legacy = r#"{"started_at_unix":1,"strategy":"fishing","outcome":"Success","exit_code":0,"log_tail":["l"]}"#;
+        let r: RunRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(r.evidence_run_id, None);
+        assert_eq!(r.strategy, "fishing");
     }
 
     // --- エッジケース ---

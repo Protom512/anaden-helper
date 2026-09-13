@@ -5,12 +5,14 @@
 //! Issue #199 で routine (複数 pipeline の連続実行) 系を追加した。
 
 mod diagnostics;
+mod pipeline_dir;
 mod pipeline_driver;
 mod pipeline_runner;
 mod routine;
 mod routine_runner;
 
 pub use diagnostics::{diag_report_dir, save_diagnose_report};
+pub use pipeline_dir::resolve_pipeline_dir;
 pub use pipeline_driver::{
     Capture, GoalClock, Input, LoopOutcome, LoopStopReason, PipelineDriver, ProgressReport,
     RecoveryHook, StepOutcome, SystemClock, TaskMatchCount, format_progress_report,
@@ -21,7 +23,7 @@ pub use pipeline_runner::{
 };
 pub use routine::{
     DEFAULT_STEP_INTERVAL_SECS, DEFAULT_STEP_MAX_ITERS, OnFailure, RoutineDef, RoutineError,
-    RoutineStep, load_routine, resolve_step_pipeline_dir,
+    RoutineStep, load_routine,
 };
 pub use routine_runner::{
     PipelineInvoker, RoutineStepResult, RoutineSummary, StepStatus, classify_reason,

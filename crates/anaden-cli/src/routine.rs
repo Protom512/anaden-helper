@@ -15,7 +15,7 @@ use tracing::{info, warn};
 
 use anaden_engine::{
     LoopOutcome, PipelineInvoker, RoutineDef, RoutineError, RoutineStep, RoutineSummary,
-    resolve_step_pipeline_dir, run_routine,
+    resolve_pipeline_dir, run_routine,
 };
 
 /// routine summary の evidence ファイル名。
@@ -225,7 +225,7 @@ impl PipelineInvoker for Win32RoutineInvoker {
 async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, RoutineError> {
     use anaden_engine::{PipelineDriver, PipelineState};
 
-    let dir = resolve_step_pipeline_dir(&step.pipeline_dir, root).ok_or_else(|| {
+    let dir = resolve_pipeline_dir(Path::new(&step.pipeline_dir), root).ok_or_else(|| {
         RoutineError::InvocationFailed {
             step: step.name.clone(),
             reason: format!("pipeline_dir が解決できません: {}", step.pipeline_dir),
