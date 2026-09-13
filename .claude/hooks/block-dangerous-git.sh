@@ -1,6 +1,21 @@
 #!/bin/bash
 # 危険な git 操作を PreToolUse でブロック（git-guardrails-claude-code スキール）。
 #
+# 2026-09-13 改訂 (Issue #197): trunk protection (§6.1/§6.2) を「push 対象 repo が
+#   メイン repo (anaden-helper) の場合にのみ」適用。ネスト wiki repo
+#   (docs/anaden-helper.wiki — GitHub Wiki は PR が存在せず master 直接 push が
+#   唯一の出版経路) の master push 誤爆を解消。
+#   - 対象 repo 解決: hook CWD (セグメント列の `cd <dir>` を先行トラック) +
+#     push セグメントの global flag `-C <dir>` (attached 形式含む) から
+#     `git rev-parse --show-toplevel` + `git remote get-url origin` で対象 origin
+#     URL を取得。メイン repo の origin は hook スクリプト自身の位置
+#     ($(dirname $0)/../..) から解決 (hook CWD に依存しない — ネスト repo CWD
+#     でも正しくメイン repo を特定)。
+#   - fail-closed: 解決のいずれかが失敗 (非 git dir・origin 未設定・cd/-C の
+#     解決不能要素 `cd -`・$() 展開・--git-dir 等) はメイン repo として扱い
+#     trunk protection を維持 (ガード弱化を構造的に排除)。
+#   - ALWAYS_BLOCK (§4) / §5 (lease strip) は repo に依存せず全 repo で維持
+#     (wiki repo でも reset --hard / clean -fd / push --force 等は BLOCK)。
 # 2026-09-04 改訂 (Issue #108): RAW 全文 grep スキャンを jq ベースの argv ライク
 #   構造解析 (jq-scoped matcher) へ置換し、heredoc 本体・# コメント・クォート内
 #   リテラル由来の false-positive BLOCK を廃止 (org-feedback 2026-07-04)。
@@ -140,6 +155,129 @@ current_branch() {  # _BRANCH_CACHE へ結果を設定 (stdout 返しではな�
   fi
 }
 
+# ── §6.0 repo スコープ判定 (Issue #197) ── trunk protection は push 対象 repo が
+#   メイン repo (anaden-helper) に解決される場合のみ適用する。ネスト repo
+#   (docs/anaden-helper.wiki 等) への push は §6.1/§6.2 をスキップ (GitHub Wiki は
+#   PR が存在せず master 直接 push が唯一の出版経路)。ALWAYS_BLOCK (§4) / §5 は
+#   このゲートの外側で全 repo に適用されるため緩まない。解決失敗は fail-closed
+#   (メイン repo 扱いで trunk protection 維持)。
+# セグメント列の `cd <dir>` トラッキング用の論理 CWD (hook 実行時 CWD から開始)。
+#   リテラルパスのみ追跡し、解決不能要素 (`cd -` / $() 展開 / 複数引数 / ~user /
+#   バックスラッシュ混入) は GUARD_DIR_UNRESOLVED=1 を立て以降の push を
+#   fail-closed 扱いにする (絶対パス cd で再解決されたらフラグを解除)。
+GUARD_CWD="$PWD"
+GUARD_DIR_UNRESOLVED=""
+track_cd() {  # $1: セグメントの full トークン列 — GUARD_CWD / GUARD_DIR_UNRESOLVED 更新
+  local -a t
+  local arg
+  t=($1)
+  [ "${t[0]}" = "cd" ] || return 0
+  if [ "${#t[@]}" -eq 1 ]; then  # `cd` 単独 = $HOME へ
+    if [ -n "${HOME:-}" ]; then GUARD_CWD="$HOME"; GUARD_DIR_UNRESOLVED=""; else GUARD_DIR_UNRESOLVED=1; fi
+    return 0
+  fi
+  if [ "${#t[@]}" -gt 2 ]; then GUARD_DIR_UNRESOLVED=1; return 0; fi
+  arg="${t[1]}"
+  case "$arg" in
+    -|*'$'*|*'`'*|*'\'*|~*) GUARD_DIR_UNRESOLVED=1 ;;  # OLDPWD / 展開 / ~user — 解決不能
+    /*|[A-Za-z]:/*) GUARD_CWD="$arg"; GUARD_DIR_UNRESOLVED="" ;;
+    ~/*)
+      if [ -n "${HOME:-}" ]; then GUARD_CWD="$HOME/${arg#~/}"; GUARD_DIR_UNRESOLVED=""; else GUARD_DIR_UNRESOLVED=1; fi ;;
+    *) GUARD_CWD="$GUARD_CWD/$arg"; GUARD_DIR_UNRESOLVED="" ;;
+  esac
+}
+
+# メイン repo の root / origin URL — hook スクリプト自身の位置から解決して
+#   キャッシュ (呼び出し毎 1 回)。root は自己検証 (その位置に本 hook ファイルが
+#   あること) を通過したもののみ採用し、失敗時は空のまま (= fail-closed 扱い)。
+_MAIN_ROOT=""
+_MAIN_ORIGIN=""
+main_repo_root() {
+  if [ -z "$_MAIN_ROOT" ]; then
+    local r
+    r=$(cd -- "$(dirname -- "$0")/../.." 2>/dev/null && pwd -P) || r=""
+    if [ -n "$r" ] && [ -f "$r/.claude/hooks/block-dangerous-git.sh" ]; then
+      _MAIN_ROOT="$r"
+      _MAIN_ORIGIN=$(git -C "$r" remote get-url origin 2>/dev/null || printf '')
+    fi
+  fi
+}
+
+# push セグメントの global flag `-C <dir>` (複数可・`-C<dir>` attached 形式含む) を
+#   GUARD_CWD に逐次適用した対象 dir を stdout へ。`git` の後 `push` の前のみ解釈。
+#   `--git-dir` / `--work-tree` や引数欠落 `-C` は rc 1 (解決不能 → fail-closed)。
+resolve_push_dir() {  # $1: push セグメントの full トークン列
+  local seg="$1" dir="$GUARD_CWD" w val i seen_git=0
+  local -a toks=($seg)
+  for ((i=0; i<${#toks[@]}; i++)); do
+    w="${toks[i]}"
+    if [ "$seen_git" = "0" ]; then
+      [ "$w" = "git" ] && seen_git=1
+      continue
+    fi
+    [ "$w" = "push" ] && break
+    case "$w" in
+      -C)
+        val="${toks[$((i+1))]:-}"
+        [ -n "$val" ] || return 1
+        case "$val" in
+          /*|[A-Za-z]:/*) dir="$val" ;;
+          *) dir="$dir/$val" ;;
+        esac
+        i=$((i+1)) ;;
+      -C?*)
+        val="${w#-C}"
+        case "$val" in
+          /*|[A-Za-z]:/*) dir="$val" ;;
+          *) dir="$dir/$val" ;;
+        esac ;;
+      --git-dir*|--work-tree*) return 1 ;;
+      *) ;;
+    esac
+  done
+  printf '%s' "$dir"
+}
+
+# 対象 dir の repo がメイン repo か。rc 0 = trunk protection 適用 (メイン repo、
+#   または解決失敗の fail-closed)。rc 1 = メイン repo 以外 → §6.1/§6.2 スキップ。
+#   判定は toplevel → origin URL 取得 → メイン origin との比較。同一 dir の結果は
+#   呼び出し内キャッシュ (push セグメント複数でも git 起動を抑制)。
+_RESCOPE_KEYS=()
+_RESCOPE_MAIN=()
+is_main_repo_dir() {  # $1: dir
+  local d="$1" i root origin main=0
+  for ((i=0; i<${#_RESCOPE_KEYS[@]}; i++)); do
+    if [ "${_RESCOPE_KEYS[i]}" = "$d" ]; then
+      [ "${_RESCOPE_MAIN[i]}" = "1" ] && return 0
+      return 1
+    fi
+  done
+  root=$(git -C "$d" rev-parse --show-toplevel 2>/dev/null)
+  main_repo_root
+  if [ -z "$root" ]; then
+    main=1  # 非 git dir 等 — fail-closed
+  elif [ -n "$_MAIN_ROOT" ] && [ "$root" = "$_MAIN_ROOT" ]; then
+    main=1  # 同一 repo (パス一致の高速経路)
+  else
+    origin=$(git -C "$root" remote get-url origin 2>/dev/null)
+    if [ -z "$origin" ] || [ -z "$_MAIN_ORIGIN" ] || [ "$origin" = "$_MAIN_ORIGIN" ]; then
+      main=1  # origin 不明は fail-closed / メイン origin と一致
+    fi
+  fi
+  _RESCOPE_KEYS+=("$d")
+  _RESCOPE_MAIN+=("$main")
+  [ "$main" = "1" ] && return 0
+  return 1
+}
+
+# §6 trunk protection 適用ゲート (§6.0)。rc 0 = 適用 (trunk_check を呼ぶ)。
+push_in_main_repo() {  # $1: push セグメントの full トークン列
+  local dir
+  [ "$GUARD_DIR_UNRESOLVED" = "1" ] && return 0   # cd 解決不能 → fail-closed
+  dir=$(resolve_push_dir "$1") || return 0        # -C 解決不能 → fail-closed
+  is_main_repo_dir "$dir"
+}
+
 trunk_check() {  # $1: 判定対象文字列
   local s="$1" w refspec="" skip=0 i cur
   # (1) refspec に master/main がスタンドアロントークンとして含まれる → BLOCK。
@@ -200,7 +338,9 @@ raw_fallback() {  # $1: 生テキスト (INPUT 全文)
     fi
   done
   if [[ $text =~ (^|[[:space:]])git[[:space:]]+push ]]; then
-    trunk_check "$text"
+    if push_in_main_repo "$text"; then
+      trunk_check "$text"
+    fi
   fi
   exit 0
 }
@@ -244,8 +384,12 @@ check_segment() {
         *) ;;
       esac
     done
-    # (C) §6 本線保護 (refspec 判定 + 裸 push 現在ブランチ解決)。
-    trunk_check "$full"
+    # (C) §6 本線保護 (refspec 判定 + 裸 push 現在ブランチ解決)。§6.0 repo スコープ
+    #     ゲート: 対象 repo がメイン repo (anaden-helper) に解決される場合のみ適用
+    #     (ネスト wiki repo 等はスキップ — Issue #197)。
+    if push_in_main_repo "$full"; then
+      trunk_check "$full"
+    fi
   fi
 }
 
@@ -425,6 +569,10 @@ if [ -z "$SEGS" ]; then
   DISPLAY="$INPUT"
   raw_fallback "$INPUT"
 fi
+# Windows native jq (text-mode stdout) は出力行末に \r を付加し、read -r はそれを
+#   保持する — セグメント最終トークン (refspec・§6.0 の cd/-C パス解釈) に \r が
+#   混入する。INPUT と同じく \r を解析前に strip する (§2.1 #7 と同一正規化)。
+SEGS=${SEGS//$'\r'/}
 
 # ── 3) セグメント毎照合 ──
 US=$(printf '\037')
@@ -434,6 +582,9 @@ while IFS= read -r seg; do
   rest="${seg#*"$US"}"
   qflag="${rest%%"$US"*}"
   full="${rest#*"$US"}"
+  # セグメント列を先行走査し `cd <dir>` で論理 CWD を更新 (§6.0 — cd && git push
+  #   形式でネスト repo への push も正しく対象 repo 解定できるように)。
+  track_cd "$full"
   check_segment "$plain" "$qflag" "$full"
 done <<< "$SEGS"
 

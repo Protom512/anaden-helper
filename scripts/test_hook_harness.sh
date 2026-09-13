@@ -337,6 +337,44 @@ expect BLOCK '[newcase-v] git branch -D feat (quoted-flag, sq)' "git branch '-D'
 #     Born-green at head; guards T2/T3 against regressing to raw-substring matching.
 expect ALLOW '[newcase-w] git commit -m quoted prose w/ danger words stays ALLOW' 'git commit -m "never run git reset --hard here"'
 
+# --- Issue #197 (repo-scoped trunk protection, §6.0) -------------------------------
+# Trunk protection (§6.1/§6.2) now applies ONLY when the push target repo resolves
+# to the MAIN repo (anaden-helper). Resolution: hook CWD (with `cd <dir>` tracked
+# across segments) plus the push segment's `-C <dir>` global flag, resolved via
+# `git rev-parse --show-toplevel` + `git remote get-url origin` and compared against
+# the main repo's own origin (derived from the hook script's location, NOT the CWD).
+# Unresolvable => fail-closed (treated as the main repo, protection kept).
+# ALWAYS_BLOCK (§4) is repo-independent and stays enforced in every repo.
+# Fixture: a throwaway repo whose origin is a DIFFERENT URL (wiki-repo stand-in).
+FIXTURE_DIR="$(mktemp -d)"
+trap 'rm -rf "$FIXTURE_DIR"' EXIT
+git -C "$FIXTURE_DIR" init -q
+git -C "$FIXTURE_DIR" remote add origin https://example.invalid/anaden-fixture.git
+
+# (x) Issue #197 reproduction: the hook process CWD sits INSIDE a non-main repo
+#     (persisted working directory, e.g. docs/anaden-helper.wiki) — `git push origin
+#     master` is the only publish path for a GitHub Wiki and must be ALLOWed.
+HOOK_STDERR=$(cd "$FIXTURE_DIR" && printf '%s\n' "$(build_payload 'git push origin master')" | bash "$HOOK" 2>&1 1>/dev/null)
+HOOK_RC=$?
+assert_result ALLOW '[newcase-x] non-main repo (hook CWD in fixture): git push origin master'
+
+# (x2) cd-tracking pin: a compound `cd <non-main dir> && git push origin master`
+#      issued from the MAIN repo CWD must also skip trunk protection (§6.0 tracks
+#      `cd` across segments). Born-green pin for the track_cd machinery.
+expect ALLOW '[newcase-x2] cd <fixture> && git push origin master (cd-tracking)' "cd $FIXTURE_DIR && git push origin master"
+
+# (y) ALWAYS_BLOCK regression pin in a non-main repo: an unconditional force push
+#     stays BLOCKed regardless of the target repo (§4 is repo-independent — the
+#     wiki exemption must never weaken it).
+HOOK_STDERR=$(cd "$FIXTURE_DIR" && printf '%s\n' "$(build_payload 'git push --force origin master')" | bash "$HOOK" 2>&1 1>/dev/null)
+HOOK_RC=$?
+assert_result BLOCK '[newcase-y] non-main repo: git push --force origin master stays BLOCK'
+
+# (z) main-repo regression pin via explicit -C: resolving the push dir through
+#     `git -C <main-repo-root>` (the §6.0 -C extraction path) must keep trunk
+#     protection ON — the repo-scoping change must not relax main-repo defense.
+expect BLOCK '[newcase-z] git -C <main repo> push origin master stays BLOCK' "git -C \"$REPO_ROOT\" push origin master"
+
 # --- Summary ----------------------------------------------------------------------
 echo ""
 echo "=== SUMMARY ==="

@@ -10,7 +10,10 @@ feature ブランチへの通常 push は許容する（single-point-of-failure 
   **#108（jq-scoped matcher 化 — §2 構造解析仕様・§2.2 DISABLE_GIT_GUARD・§7 Case ID 導入・§8 non-scope 回収。本改訂で実装後の契約へロックステップ更新済み）**,
   **#108 remediation（cycle-44 majors — AC-2 quoted-flag §2.1 #8・AC-3 監査証跡 §2.2・
   AC-4 インタプリタ再帰スキャン §2.1 #9・§4 quoted-token 注意・§8 closure。
-  本改訂で newcase-k/l/m の遡及反映を含む 45 ケースへ lockstep 更新・drift 解消）**
+  本改訂で newcase-k/l/m の遡及反映を含む 45 ケースへ lockstep 更新・drift 解消）**,
+  **#197（§6.0 repo スコープ判定 — trunk protection をメイン repo (anaden-helper)
+  への push のみに適用。ネスト wiki repo (docs/anaden-helper.wiki) の master push
+  誤爆解消。ALWAYS_BLOCK (§4)/§5 は全 repo で維持。§7 へ 4 ケース追加）**
 
 ---
 
@@ -68,7 +71,7 @@ COMMAND=$(echo "$INPUT" | jq -r '.tool_input.command')
 | 4 | コメント除外 | トークン先頭の `#` 以降はコメントとしてスキャン除外 | newcase-b |
 | 5 | `$()` は実行扱い | コマンド置換 `$(...)` の内容は（二重引用符内を含む）実際に実行されるためスキャン対象。旧式バッククォート置換は本契約の対象外（#108 仕様は `$()` のみ） | newcase-g |
 | 6 | fail-closed RAW fallback | jq による解析に失敗した場合（stdin が不正 JSON 等）は **従来の RAW 全文スキャンにフォールバック** し、危険パターンがあれば BLOCK。解析失敗を理由に黙って ALLOW しない（fail-closed） | newcase-j |
-| 7 | CRLF 正規化 | `\r` はコマンド抽出・構造解析の前に strip（Windows checkout・CRLF 混入対策）。CRLF 改行の混入で後段の危険セグメントが隠れない | newcase-l |
+| 7 | CRLF 正規化 | `\r` はコマンド抽出・構造解析の前に strip（Windows checkout・CRLF 混入対策）。CRLF 改行の混入で後段の危険セグメントが隠れない。**jq 出力（セグメント行）も同様に `\r` を strip する** — Windows native jq (text-mode stdout) が出力行末に付加する `\r` が `read -r` を透過しセグメント最終トークン（refspec・§6.0 の cd/-C パス）へ混入するのを防ぐ（#197 で発見） | newcase-l |
 | 8 | quoted-flag 合流（AC-2） | **git コマンドセグメント**（トークン列に standalone `git` を含む）では、**完全クォートかつ空白を含まない「単語」トークン**（`"--hard"` / `'-fd'` 等）をクォート剥がし後にフラグとして ALWAYS_BLOCK/§5 照合へ合流する（シェル展開後は同一トークンになるため）。**多語クォート文字列**（`"git reset --hard"` 全体・`commit -m "prose"` 等）はデータ除外を維持し誤爆ゼロ。非 git セグメントのクォート文字列は #2 どおり除外のまま | newcase-q/r/s/t/u/v（BLOCK pin）/ newcase-o/p（push 系 born-green pin）/ newcase-w（多語 ALLOW 境界 pin） |
 | 9 | インタプリタ heredoc 再帰スキャン（AC-4） | heredoc の受取コマンド語（basename 正規化: `/bin/bash` → `bash`）が bash/sh/ash/dash/zsh/ksh/csh/tcsh の場合、本文はインタプリタへ渡る **実行コード** のため再帰的にトークナイズしてスキャン対象セグメントへ合流する。cat 等への heredoc は #3 どおり本文除外のまま。再帰は同一 jq プロセス内で完結する（プロセス fan-out 不変）。未終端インタプリタ heredoc も蓄積済み本文を合流（fail-closed）。列挙外インタプリタは §8 の明示受諾 | newcase-n（BLOCK pin）/ newcase-a（cat 系 ALLOW 境界 pin） |
 
@@ -184,6 +187,8 @@ strip 後 COPY: git push  --force origin feat
 
 `git push` 系コマンドは feature ブランチへの push を許可しつつ、
 **master/main（本線）への直接 push のみブロック** する。
+本保護は **§6.0 の repo スコープ判定（Issue #197）を通過する場合 — すなわち push
+対象 repo がメイン repo (anaden-helper) に解決される場合 — のみ適用** される。
 
 > **Issue #108 改訂**: 以下の判定も §2.1 構造解析後の push セグメントに対して適用する。
 > heredoc 本体・コメント・文字列リテラル内の `git push` トークンは判定対象外。
@@ -191,6 +196,38 @@ strip 後 COPY: git push  --force origin feat
 > うえ含む）を用いるため、`git push origin "master"` のような refspec のクォートは
 > 回避にならない（pin: newcase-m）。
 > （下記の正規表現・抽出ロジックはセグメントテキストへの適用として読むこと）
+
+### 6.0 適用スコープ — push 対象 repo 解決（Issue #197）
+
+trunk protection（§6.1/§6.2）は **push 対象 repo がメイン repo (anaden-helper) に
+解決される場合のみ適用** する。ネスト repo（例: `docs/anaden-helper.wiki` — GitHub Wiki
+は PR が存在せず master 直接 push が唯一の出版経路）への push は §6.1/§6.2 を
+スキップする。**ALWAYS_BLOCK（§4）・§5（lease strip）はこのゲートの外側で全 repo に
+適用されるため緩まない**（wiki repo でも reset --hard / clean -fd / push --force 等は
+BLOCK — pin: newcase-y）。
+
+対象 repo の解決手順:
+
+1. **基準 dir** = フック実行時 CWD。セグメント列を先行走査し `cd <dir>` で論理 CWD を
+   トラックする（`cd <wiki> && git push origin master` 形式も対象 repo として解決 —
+   pin: newcase-x2）。追跡するのは **リテラルパスのみ**（相対・絶対・`~/`・`cd` 単独
+   =$HOME）。解決不能要素（`cd -`・`$()` 展開を含むパス・複数引数・`~user`・バックスラッシュ
+   混入）は以降の push を **fail-closed**（メイン repo 扱い）にする。絶対パス `cd` で
+   再解決されたらフラグを解除する。
+2. **push セグメント内の global flag** `-C <dir>`（複数可・`-C<dir>` attached 形式含む。
+   `git` の後 `push` の前に限る）を基準 dir に逐次適用する（pin: newcase-z）。
+   引数欠落の `-C`・`--git-dir` / `--work-tree` は解決不能 → fail-closed。
+3. 対象 dir について `git -C <dir> rev-parse --show-toplevel` →
+   `git -C <root> remote get-url origin` で対象 origin URL を取得する。
+4. **メイン repo の origin URL** はフックスクリプト自身の位置
+   （`$(dirname $0)/../..`・自己検証付き）から同手順で解決する — **フック CWD に依存
+   しない**ため、ネスト repo CWD で実行されても正しくメイン repo を特定する
+   （pin: newcase-x）。
+5. 対象 origin == メイン origin のときのみ §6.1/§6.2 を適用する。それ以外はスキップ。
+
+**fail-closed**: 手順 1〜4 のいずれかが失敗（非 git dir・origin 未設定・cd/-C の解決
+不能要素）した場合はメイン repo として扱い trunk protection を維持する（ガード弱化の
+構造的排除 — §2.1 #6・§2.2 と同一原則）。
 
 ### 6.1 refspec に master/main がスタンドアロントークンとして含まれる
 
@@ -259,7 +296,7 @@ fi
   機械的に突合可能にした（drift 検出要件、#108 AC-5）。
 - ハーネスは各ケースの期待値（BLOCK/ALLOW/stderr 監査）を **assertion** し、全ケース一致で
   `exit 0`、不一致で `exit 1`（report-only は不可 — #108 AC-6）。
-- 現行ケース数: **計 45 assertion — BLOCK 29 / ALLOW 14 / stderr 監査 2**。
+- 現行ケース数: **計 49 assertion — BLOCK 31 / ALLOW 16 / stderr 監査 2**。
   数値は §7 末尾の機械的導出コマンドの **実測値** から記載する（手編集禁止 —
   かつて doc 30 / 実測 33 の pin drift を生んだ運用の再発防止）。
   このうち canonical 20 ケース（BLOCK 11 / ALLOW 9）は #108 以前からの **契約不変**
@@ -269,8 +306,11 @@ fi
   pin drift を cycle-44 で遡及解消**）。`newcase-n`〜`newcase-w` の 10 exit-code ケースと
   `newcase-d2`/`newcase-i2` の stderr 監査 2 ケースが cycle-44 remediation 追加
   （AC-2 quoted-flag・AC-3 監査証跡・AC-4 インタプリタ bypass）。
+  `newcase-x`/`newcase-x2`/`newcase-y`/`newcase-z` の 4 exit-code ケースが
+  **Issue #197 追加**（§6.0 repo スコープ判定 — ネスト wiki repo 誤爆解消と
+  ALWAYS_BLOCK・メイン repo 保護の回帰 pin。x/y は一時 fixture repo を用いる）。
   なお canonical-A03/A04 の 2 ケースは §6.2 branch-dependent であり、master/main 上では
-  BLOCK に解決する（その場合の機械的導出値は BLOCK 31 / ALLOW 12 / stderr 監査 2）。
+  BLOCK に解決する（その場合の機械的導出値は BLOCK 33 / ALLOW 14 / stderr 監査 2）。
 
 ### SHOULD BLOCK — canonical 11 ケース（契約不変）
 
@@ -340,6 +380,21 @@ fi
 | newcase-d2 | stderr=present | ハッチ監査証跡（AC-3） | フック **プロセス環境変数** `DISABLE_GIT_GUARD=1` 設定下で `git push origin master` — **stderr に `GIT_GUARD_DISABLED` 監査行が出ること** | ハッチ使用は無言にしない（§2.2 監査証跡仕様）。newcase-d と同一呼び出しの stderr 検証 |
 | newcase-i2 | stderr=absent | 敵対的 env prefix に監査行なし（AC-3） | `DISABLE_GIT_GUARD=1 git push origin master`（本文 prefix・環境変数は **未設定**）→ BLOCK + **stderr に監査行が出ないこと** | 監査証跡は genuine なハッチ使用のみ（§2.2）。newcase-i と同一呼び出しの stderr 検証 |
 
+### Issue #197 追加ケース — 4 ケース（repo スコープ trunk protection、§6.0）
+
+> x / y は **一時 fixture repo**（`mktemp -d` + `git init` + 異なる origin URL を
+> `git remote add` で設定し、検証後に破棄）を用いる。x はフック CWD を fixture 内に
+> して起動（永続化 CWD で wiki dir 内から push した #197 発生形を再現）、x2 は
+> メイン repo CWD からの複合コマンド、y は ALWAYS_BLOCK 維持の回帰 pin、z は
+> `-C <メイン repo>` で repo 解決がメインに向く回帰 pin。
+
+| ID | 期待値 | ケース | コマンド | 根拠 |
+|----|--------|--------|---------|------|
+| newcase-x | ALLOW | 非メイン repo での master push（#197 発生形） | fixture repo（異なる origin URL）CWD で `git push origin master` | 対象 repo の origin ≠ メイン origin → §6.1/§6.2 スキップ（§6.0）。GitHub Wiki 等の直接 push 専用 repo の出版経路確保 |
+| newcase-x2 | ALLOW | `cd <非メイン dir>` 複合コマンド | `cd <fixture> && git push origin master`（メイン repo CWD から） | セグメント列の `cd` トラッキング（§6.0 手順 1）で対象 repo が正しく解決されることの pin |
+| newcase-y | BLOCK | 非メイン repo での無条件 force push | fixture repo CWD で `git push --force origin master` | ALWAYS_BLOCK（§4 #8）は repo スコープ ゲートの外側で全 repo に適用 — wiki 例外が §4 を緩めない回帰 pin |
+| newcase-z | BLOCK | `-C <メイン repo>` 経由の master push | `git -C <メイン repo root> push origin master` | push セグメントの `-C <dir>` 解決（§6.0 手順 2）がメイン repo に向く場合の trunk protection 維持 pin（canonical-B01 と異なる `-C` 経路） |
+
 ### 機械的突合（drift 検定 — #108 AC-5）
 
 本文書とハーネスのケース一致は以下で機械検証する（ハーネスは各ケースのラベルに
@@ -357,11 +412,11 @@ grep -oE '^\| (canonical-(B|A)[0-9]{2}|newcase-[a-z0-9]+) ' .claude/rules/git-gu
 # ハーネス出力の ID セット（FAILURES サマリが ID を重複出力するため -u で一意化）
 grep -oE '\[(canonical-(B|A)[0-9]{2}|newcase-[a-z0-9]+)\]' /tmp/harness-out.txt \
   | tr -d '[]' | sort -u > /tmp/harness-ids.txt
-# 両者が完全一致すること（差分ゼロ・45 ID）
+# 両者が完全一致すること（差分ゼロ・49 ID）
 diff /tmp/doc-ids.txt /tmp/harness-ids.txt && echo "IDs in sync ($(wc -l < /tmp/doc-ids.txt))"
 # ケース数の機械的導出 — §7 見出しの数値は必ずこの実測値から書く（手編集禁止）
-grep -c '^PASS expect=BLOCK' /tmp/harness-out.txt   # → 29（master/main 上は 31）
-grep -c '^PASS expect=ALLOW' /tmp/harness-out.txt   # → 14（master/main 上は 12）
+grep -c '^PASS expect=BLOCK' /tmp/harness-out.txt   # → 31（master/main 上は 33）
+grep -c '^PASS expect=ALLOW' /tmp/harness-out.txt   # → 16（master/main 上は 14）
 grep -c '^PASS stderr\['     /tmp/harness-out.txt   # → 2
 ```
 
@@ -397,6 +452,12 @@ grep -c '^PASS stderr\['     /tmp/harness-out.txt   # → 2
 - （回収記録 2）旧残存リスク「bash heredoc 経由のインタプリタ注入」は
   **cycle-44 remediation で回収済み**（§2.1 #9 の再帰スキャン + newcase-n pin。
   列挙外インタプリタは上記の明示受諾として分離）。
+- **制御構文内 `cd` のトラッキング — 明示受諾（Issue #197, §6.0）**: `if cd <dir>;
+  then git push ...; fi` 等、`cd` がセグメント先頭トークンとして現れない制御構文では
+  論理 CWD を追跡しない（§6.0 手順 1 はセグメント先頭 `cd` のみ）。この場合対象 repo は
+  フック CWD 基準で解決されるため、**fail-closed 方向の誤 BLOCK のみ** を生じ得る
+  （メイン repo 保護は弱まらない）。同様に `pushd`/`popd`・`--git-dir` 併用
+  （後者は明示的に解決不能 → fail-closed）も非対応。
 
 ---
 
@@ -411,4 +472,4 @@ grep -c '^PASS stderr\['     /tmp/harness-out.txt   # → 2
 - [ ] §7 見出しのケース数は機械的導出コマンドの **実測値** から記載した（手編集による 30 vs 33 drift の再発防止）
 - [ ] `bash scripts/test_hook_harness.sh` が期待どおり BLOCK/ALLOW/stderr 監査を assertion し `exit 0` で通過することを確認した
 - [ ] DISABLE_GIT_GUARD ハッチ使用時の stderr 監査証跡（`GIT_GUARD_DISABLED` 行）の出力（newcase-d2）と、敵対的 env prefix での非出力（newcase-i2）を確認した
-- [ ] 現行ケース数を突き合わせた（現行: **計 45 assertion — BLOCK 29 / ALLOW 14［うち §6.2 branch-dependent 2］+ stderr 監査 2**）
+- [ ] 現行ケース数を突き合わせた（現行: **計 49 assertion — BLOCK 31 / ALLOW 16［うち §6.2 branch-dependent 2］+ stderr 監査 2**）
