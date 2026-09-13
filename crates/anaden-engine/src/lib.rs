@@ -25,5 +25,5 @@ pub use routine::{
 };
 pub use routine_runner::{
     PipelineInvoker, RoutineStepResult, RoutineSummary, StepStatus, classify_reason,
-    format_dry_run, reason_label, run_routine, step_status_label,
+    format_dry_run, interrupted_summary, reason_label, run_routine, step_status_label,
 };

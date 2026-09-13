@@ -68,11 +68,20 @@ pub(crate) async fn run_routine_command(
         }
     });
 
-    // 起動保証は routine 冒頭で1回のみ (各ステップは AlreadyOpen 即返り)。
+    // 起動保証は routine 冒頭で1回のみ (各ステップは起動保証を呼ばない)。
     ensure_game_open().await;
 
     let invoker = Win32RoutineInvoker::new(root.clone());
-    let summary = run_routine(&def, &invoker).await;
+    // Ctrl+C 協調的キャンセル: シグナル受信で routine 全体を中止する
+    // (`run` の CancellationToken 配線と同旨。future を drop して driver ループを
+    // 中断するため、実行中ステップはその場で打ち切り・ゲーム側へ影響しない)。
+    let summary = tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            warn!("Ctrl+C 受信: routine を中止します");
+            anaden_engine::interrupted_summary(&def)
+        }
+        s = run_routine(&def, &invoker) => s,
+    };
     print!("{}", summary.format_text());
 
     let command = command_line(routine_path, dry_run);
@@ -269,7 +278,11 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
         tasks,
         device_width,
         300,
-    );
+    )
+    // 誠実検証は `run` サブコマンドの既定 (true) と同一にする
+    // (PR #201 lane2 C-1: driver 既定 false のままでは routine ステップだけ
+    //  発火後のテンプレ残存検証が無効になる未文書の減衰だった)。
+    .with_verify(true);
     Ok(driver
         .run_loop_with_recovery(
             std::time::Duration::from_secs(step.interval),

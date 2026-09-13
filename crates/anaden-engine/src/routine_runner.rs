@@ -267,6 +267,25 @@ fn summarize(def: &RoutineDef, results: Vec<RoutineStepResult>, aborted: bool) -
     }
 }
 
+/// Ctrl+C 等で routine 実行前に中断された場合のサマリ (CLI の select! 配線用)。
+///
+/// 全ステップを未実行 (skipped)・aborted として記録する。実行中ステップの
+/// 打ち切り詳細は残らない (future drop による中断のため) — 「中断された」事実
+/// と件数のみを誠実に報告する。
+#[must_use]
+pub fn interrupted_summary(def: &RoutineDef) -> RoutineSummary {
+    RoutineSummary {
+        routine: def.name.clone(),
+        results: Vec::new(),
+        total_iterations: 0,
+        total_fired: 0,
+        completed: 0,
+        failed: 0,
+        skipped: def.steps.len(),
+        aborted: true,
+    }
+}
+
 /// バリデーション済み routine の dry-run 表示テキスト (ステップ一覧)。
 ///
 /// `--dry-run` の CLI 表示・GUI プレビューの単一情報源。pipeline_dir は
@@ -531,6 +550,25 @@ mod tests {
         assert!(text.contains("[0] s1"), "{text}");
         assert!(text.contains("start=T"), "{text}");
         assert!(text.contains("on_failure=stop"), "{text}");
-        assert!(text.contains("on_failure=stop"), "{text}");
+    }
+
+    #[test]
+    fn interrupted_summary_marks_all_steps_skipped_and_aborted() {
+        let def = two_step_def(OnFailure::Stop);
+        let s = interrupted_summary(&def);
+        assert_eq!(s.routine, def.name);
+        assert!(s.results.is_empty());
+        assert_eq!(s.total_iterations, 0);
+        assert_eq!(s.total_fired, 0);
+        assert_eq!(s.completed, 0);
+        assert_eq!(s.failed, 0);
+        assert_eq!(s.skipped, 2);
+        assert!(s.aborted);
+        assert!(!s.all_ok());
+        assert!(
+            s.format_text().contains("aborted=true"),
+            "summary must report interruption: {}",
+            s.format_text()
+        );
     }
 }
