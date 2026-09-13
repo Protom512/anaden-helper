@@ -27,6 +27,15 @@ pub(crate) fn level_color(level: LogLevel) -> egui::Color32 {
     }
 }
 
+/// ルーチンセクションの状態行（実行中は routine 起動不可・純関数・Issue #199）。
+fn routine_status_line(running: bool) -> &'static str {
+    if running {
+        "状態: 実行中 (pipeline 実行のため routine 起動不可)"
+    } else {
+        "状態: 停止"
+    }
+}
+
 impl PipelineRunnerApp {
     /// ログビューア本体（シャード3前半: LogLevel 色分け・自動スクロール・クリア）。
     fn log_view_ui(&mut self, ui: &mut egui::Ui) {
@@ -172,10 +181,28 @@ impl PipelineRunnerApp {
     /// 描画本体は strategy_ui.rs の `render_tab_body` へ委譲（runner.rs は
     /// 500 行ルール超過のためロジックを持たない・estimate 承認条件）。
     /// パネルは runner が保持する単一インスタンスを実行ビューと共有する。
+    /// Issue #199: 末尾に routine 選択・実行セクションを追加
+    /// （子プロセス起動・履歴記録は既存 runner 経路を再利用）。
     fn render_strategy_body(&mut self, ui: &mut egui::Ui) {
         let running = self.status() == RunnerStatus::Running;
         let changed = self.strategy_panel.render_tab_body(ui, running);
         self.on_strategy_changed(changed);
+        self.render_routine_section(ui, running);
+    }
+
+    /// ルーチンセクション（Issue #199: routine 選択 + `anaden routine` 実行）。
+    fn render_routine_section(&mut self, ui: &mut egui::Ui, running: bool) {
+        ui.add_space(8.0);
+        ui.separator();
+        ui.heading("ルーチン（複数 pipeline の連続実行）");
+        ui.label(routine_status_line(running));
+        self.routine_panel.ui(ui);
+        ui.add_enabled_ui(!running, |ui| {
+            if ui.button("ルーチンを実行").clicked() {
+                self.start_routine();
+            }
+        });
+        ui.weak(format!("選択: {}", self.routine_panel.summary()));
     }
 
     /// 設定ビュー（Issue #125 shard 3: 設定保存/読込の独立タブ化）。
@@ -219,5 +246,12 @@ mod tests {
         assert_ne!(level_color(LogLevel::Error), level_color(LogLevel::Warn));
         assert_ne!(level_color(LogLevel::Warn), level_color(LogLevel::Info));
         assert_ne!(level_color(LogLevel::Error), level_color(LogLevel::Info));
+    }
+
+    /// ルーチンセクションの状態行 (Issue #199: 実行中は起動不可の注記)。
+    #[test]
+    fn test_routine_status_line_reflects_running_state() {
+        assert!(routine_status_line(true).contains("実行中"));
+        assert_eq!(routine_status_line(false), "状態: 停止");
     }
 }

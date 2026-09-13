@@ -233,6 +233,11 @@ pub struct PipelineRunnerApp {
     /// 戦略選択パネル(シャード3スコープ、runner に統合)。
     /// runner_ui.rs の戦略ビュー描画からの参照のため pub(crate)。
     pub(crate) strategy_panel: crate::strategy_ui::StrategyPanel,
+    /// routine 選択パネル (Issue #199: 複数 pipeline の連続実行)。
+    /// runner_ui.rs のルーチンセクション描画からの参照のため pub(crate)。
+    pub(crate) routine_panel: crate::routine_ui::RoutinePanel,
+    /// 現在実行の履歴ラベル (strategy id または "routine:\<name\>")。
+    run_label: Option<String>,
     /// 選択サマリのキャッシュ（ui() の changed フラグで再計算・UC-4 前提の表示）。
     /// runner_ui.rs の描画からの参照のため pub(crate)。
     pub(crate) strategy_summary: String,
@@ -301,6 +306,8 @@ impl PipelineRunnerApp {
             log_revision: 0,
             auto_scroll: true,
             strategy_panel: crate::strategy_ui::StrategyPanel::default(),
+            routine_panel: crate::routine_ui::RoutinePanel::default(),
+            run_label: None,
             strategy_summary: "戦略未選択".to_string(),
             last_spawn: None,
             history: RunHistory::open_default(),
@@ -366,6 +373,13 @@ impl PipelineRunnerApp {
     /// UI 表示用に保持されるとともにログへ ERROR 行として記録される
     /// （UC-3: 起動失敗時にエラー行がログに表示される）。
     pub fn start_pipeline(&mut self, args: &[String]) {
+        // 通常 (strategy) 実行: 履歴ラベルは strategy 選択から採る。
+        self.run_label = None;
+        self.start_pipeline_inner(args);
+    }
+
+    /// `start_pipeline` の本体 (run_label は呼出側で設定済みのまま消費しない)。
+    fn start_pipeline_inner(&mut self, args: &[String]) {
         self.last_error = None;
         if let Some(e) = self.resolution_error.clone() {
             self.record_error_line(&e);
@@ -375,9 +389,35 @@ impl PipelineRunnerApp {
         self.start_spec(spec);
     }
 
+    /// ルーチン実行ボタンのハンドラ (Issue #199)。
+    ///
+    /// 選択中の routine を `anaden routine <path>` 子プロセスとして起動する
+    /// (引数列は [`crate::routine_ui::build_routine_args`] の単一実装)。
+    /// 履歴ラベルは `routine:\<name\>` (strategy 実行と区別)。
+    /// 未選択時は起動せずエラーを記録する (UC-4 と同じ事前拒否パターン)。
+    pub fn start_routine(&mut self) {
+        self.last_error = None;
+        let Some(path) = self.routine_panel.selected_path().map(Path::to_path_buf) else {
+            self.record_error_line(
+                "ルーチンが選択されていません（ルーチン選択で routine を指定してください）",
+            );
+            return;
+        };
+        let name = self
+            .routine_panel
+            .selected_name()
+            .unwrap_or("-")
+            .to_string();
+        self.run_label = Some(format!("routine:{name}"));
+        let args = crate::routine_ui::build_routine_args(&path);
+        self.start_pipeline_inner(&args);
+    }
+
     /// SpawnSpec を起動し、成功時に再実行用・履歴用の状態を記録する。
     fn start_spec(&mut self, spec: SpawnSpec) {
         self.reset_run_tracking();
+        // run_label は reset で消さずここで消費する (routine 実行のラベル)。
+        let label = self.run_label.take();
         if let Err(e) = self.child.start(&spec, self.log_tx.clone()) {
             self.record_error_line(&e.to_string());
             return;
@@ -389,10 +429,18 @@ impl PipelineRunnerApp {
                 .map(|d| d.as_secs())
                 .unwrap_or(0),
         );
-        self.run_strategy = self.strategy_panel.selection().strategy.clone();
+        self.run_strategy = label.or_else(|| self.strategy_panel.selection().strategy.clone());
+    }
+
+    /// 現在実行 (または直近実行) の履歴ラベル。
+    /// strategy 実行は strategy id、routine 実行は `routine:\<name\>`。
+    #[allow(dead_code)]
+    pub fn current_run_label(&self) -> Option<&str> {
+        self.run_strategy.as_deref()
     }
 
     /// 実行追跡状態をリセット（次実行に備える）。
+    /// `run_label` はリセット対象外 (start_spec が起動成否に関わらず消費する)。
     fn reset_run_tracking(&mut self) {
         self.run_started_at = None;
         self.run_strategy = None;

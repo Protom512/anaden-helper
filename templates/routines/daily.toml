@@ -1,0 +1,36 @@
+# デイリールーチン定義 (Issue #199 / UC-1)。
+# `anaden routine templates/routines/daily.toml` で順次実行。
+# dry-run 検証: `anaden routine templates/routines/daily.toml --dry-run`
+#
+# スキーマ (anaden-engine/src/routine.rs):
+#   name                  : routine 名 (evidence・履歴の識別子)
+#   [[steps]]             : 順次実行する pipeline 列
+#     name                : ステップ表示名
+#     pipeline_dir        : pipeline ディレクトリ (workspace ルート相対 or bare name)
+#     start_task          : 開始タスク名 (TaskDef TOML の `name` と一致必須)
+#     max_iters           : 最大サイクル数 (既定 100)
+#     interval            : ループ間隔秒 (既定 1)
+#     on_failure          : "stop" (既定・残り中止) | "skip" (次ステップへ継続)
+
+name = "daily"
+
+# 1) ログイン: title の Tap-to-Start → Field HUD 検出で完了。
+#    Field 到達はテンプレ一致待ちのため interval 2s・max_iters 150 (≈5 分安全弁)。
+[[steps]]
+name        = "login"
+pipeline_dir = "templates/pipelines/login"
+start_task  = "LoginTapTitlePc"
+max_iters   = 150
+interval    = 2
+on_failure  = "stop"
+
+# 2) フィールドへ遷移: コールドスタート用 nav (TapToStartPc → LoadGamePc → FieldHudTopPc)。
+#    login 直後は既に Field にいる可能性が高い → FieldHudTopPc が即マッチして終了する。
+#    前段失敗時は継続しても画面が不定のため stop に統一している。
+[[steps]]
+name        = "nav_to_field"
+pipeline_dir = "templates/pipelines/nav_to_field_pc"
+start_task  = "TapToStartPc"
+max_iters   = 60
+interval    = 2
+on_failure  = "stop"
