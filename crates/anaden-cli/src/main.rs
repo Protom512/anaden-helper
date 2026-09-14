@@ -199,47 +199,13 @@ pub(crate) fn cli_workspace_root() -> PathBuf {
 
 /// pipeline_dir 位置引数を決定的に解決する（Issue #139 T2）。
 ///
-/// 従来 `run` は pipeline_dir を cwd 相対で `load_pipeline` に渡していたため、
-/// 起動 workdir 次第で「パイプライン読込失敗」になっていた（GUI 子プロセス
-/// 起動で顕在化）。本関数は manifest 基準の workspace ルートを用いて
-/// workdir 非依存の解決を行う:
-///
-/// 候補順（最初に実在するディレクトリを採用）:
-/// 1. 与えられたパス自体（相対・絶対を問わず cwd 解決）
-/// 2. `<workspace_root>/<与えられた相対パス>`（例: `templates/pipelines/field_loop_pc`）
-/// 3. `<workspace_root>/templates/pipelines/<basename>`
-///
-/// いずれも実在しない場合は元のパスをそのまま返し、下流 `load_pipeline` の
-/// fail-closed エラーに委譲する（偽のパスを捏造しない）。
+/// 解決ロジック自体は [`anaden_engine::resolve_pipeline_dir`] の単一実装
+/// （Issue #202 UC-3 で routine 側 `resolve_step_pipeline_dir` と統一・
+/// 候補順の詳細はそちら）への委譲。CLI `run` 固有の契約として、
+/// いずれの候補でも実在しない場合は元のパスをそのまま返し、下流
+/// `load_pipeline` の fail-closed エラーに委譲する（偽のパスを捏造しない）。
 fn resolve_pipeline_dir(input: &Path, root: &Path) -> PathBuf {
-    if input.is_dir() {
-        return input.to_path_buf();
-    }
-    let rel = if input.is_absolute() {
-        // 絶対パスで非実在の場合は候補 3 の basename のみ試す。
-        PathBuf::from(
-            input
-                .file_name()
-                .map(|n| n.to_string_lossy().into_owned())
-                .unwrap_or_default(),
-        )
-    } else {
-        input.to_path_buf()
-    };
-    if !rel.as_os_str().is_empty() {
-        let joined = root.join(&rel);
-        if joined.is_dir() {
-            return joined;
-        }
-        // bare name（`field_loop_pc` 等）は templates/pipelines 基準で解決。
-        if !rel.components().any(|c| c.as_os_str() == "templates") {
-            let pipelined = root.join("templates").join("pipelines").join(&rel);
-            if pipelined.is_dir() {
-                return pipelined;
-            }
-        }
-    }
-    input.to_path_buf()
+    anaden_engine::resolve_pipeline_dir(input, root).unwrap_or_else(|| input.to_path_buf())
 }
 
 /// `--algorithm` 文字列を Algorithm へ解決する。

@@ -174,40 +174,6 @@ pub fn load_routine(path: &Path) -> Result<RoutineDef, RoutineError> {
     })
 }
 
-/// ステップの pipeline_dir を決定的に解決する (CLI `resolve_pipeline_dir` と同一規約)。
-///
-/// 候補順 (最初に実在するディレクトリ):
-/// 1. 与えられたパス自体 (絶対 or cwd 相対)
-/// 2. `<root>/<相対パス>` (例: `templates/pipelines/login`)
-/// 3. `<root>/templates/pipelines/<basename>` (bare name)
-///
-/// いずれも実在しなければ [`None`] (fail-closed: 偽パスを捏造しない)。
-#[must_use]
-pub fn resolve_step_pipeline_dir(input: &str, root: &Path) -> Option<PathBuf> {
-    let as_path = Path::new(input);
-    if as_path.is_dir() {
-        return Some(as_path.to_path_buf());
-    }
-    if as_path.is_absolute() {
-        // 絶対パスで非実在の場合は候補 3 の basename のみ試す。
-        let base = as_path.file_name()?.to_string_lossy().into_owned();
-        let pipelined = root.join("templates").join("pipelines").join(base);
-        return pipelined.is_dir().then_some(pipelined);
-    }
-    let joined = root.join(input);
-    if joined.is_dir() {
-        return Some(joined);
-    }
-    // bare name (`login` 等) は templates/pipelines 基準で解決。
-    if !input.contains('/') && !input.contains('\\') && !input.starts_with("templates") {
-        let pipelined = root.join("templates").join("pipelines").join(input);
-        if pipelined.is_dir() {
-            return Some(pipelined);
-        }
-    }
-    None
-}
-
 impl RoutineDef {
     /// 定義を fail-closed 検証する。
     ///
@@ -256,13 +222,12 @@ impl RoutineDef {
 
 /// 1ステップ分の pipeline 参照整合性を検証する (`validate` の内部実装)。
 fn validate_step(step: &RoutineStep, root: &Path) -> Result<(), RoutineError> {
-    let dir = resolve_step_pipeline_dir(&step.pipeline_dir, root).ok_or_else(|| {
-        RoutineError::PipelineDirNotFound {
+    let dir = crate::pipeline_dir::resolve_pipeline_dir(Path::new(&step.pipeline_dir), root)
+        .ok_or_else(|| RoutineError::PipelineDirNotFound {
             step: step.name.clone(),
             dir: step.pipeline_dir.clone(),
             root: root.to_path_buf(),
-        }
-    })?;
+        })?;
     let tasks =
         anaden_vision::load_pipeline(&dir).map_err(|e| RoutineError::PipelineLoadFailed {
             step: step.name.clone(),

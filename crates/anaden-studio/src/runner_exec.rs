@@ -238,6 +238,11 @@ pub struct PipelineRunnerApp {
     pub(crate) routine_panel: crate::routine_ui::RoutinePanel,
     /// 現在実行の履歴ラベル (strategy id または "routine:\<name\>")。
     run_label: Option<String>,
+    /// 現在実行の evidence run-id (routine 実行で --evidence-run-id 付与時のみ。
+    /// Issue #202 UC-1: 履歴詳細から `.omc/logs/{run-id}/` を追跡可能にする)。
+    /// `run_label` と同じく reset_run_tracking の対象外 (start_spec が消費せず
+    /// append_history_record が take するまで保持する)。
+    pending_evidence_run_id: Option<String>,
     /// 選択サマリのキャッシュ（ui() の changed フラグで再計算・UC-4 前提の表示）。
     /// runner_ui.rs の描画からの参照のため pub(crate)。
     pub(crate) strategy_summary: String,
@@ -269,7 +274,6 @@ pub struct PipelineRunnerApp {
 
 impl PipelineRunnerApp {
     /// プログラム名を指定して生成する（テスト・明示指定用）。
-    #[allow(dead_code)]
     pub fn new(program: impl Into<String>) -> Self {
         Self::with_channel(program, None)
     }
@@ -282,7 +286,7 @@ impl PipelineRunnerApp {
     }
 
     /// テスト用: 解決失敗状態をシミュレートする（起動を試みると即エラー）。
-    #[allow(dead_code)]
+    #[cfg(test)]
     fn unresolved(message: &str) -> Self {
         Self::with_channel(
             "anaden",
@@ -308,6 +312,7 @@ impl PipelineRunnerApp {
             strategy_panel: crate::strategy_ui::StrategyPanel::default(),
             routine_panel: crate::routine_ui::RoutinePanel::default(),
             run_label: None,
+            pending_evidence_run_id: None,
             strategy_summary: "戦略未選択".to_string(),
             last_spawn: None,
             history: RunHistory::open_default(),
@@ -332,7 +337,6 @@ impl PipelineRunnerApp {
     }
 
     /// 選択サマリのキャッシュ（UI 表示用・テストから参照）。
-    #[allow(dead_code)]
     pub fn strategy_summary(&self) -> &str {
         &self.strategy_summary
     }
@@ -374,7 +378,9 @@ impl PipelineRunnerApp {
     /// （UC-3: 起動失敗時にエラー行がログに表示される）。
     pub fn start_pipeline(&mut self, args: &[String]) {
         // 通常 (strategy) 実行: 履歴ラベルは strategy 選択から採る。
+        // routine 専用の evidence run-id も清算する (混入防止)。
         self.run_label = None;
+        self.pending_evidence_run_id = None;
         self.start_pipeline_inner(args);
     }
 
@@ -394,6 +400,9 @@ impl PipelineRunnerApp {
     /// 選択中の routine を `anaden routine <path>` 子プロセスとして起動する
     /// (引数列は [`crate::routine_ui::build_routine_args`] の単一実装)。
     /// 履歴ラベルは `routine:\<name\>` (strategy 実行と区別)。
+    /// evidence 採取チェック ON (既定・Issue #202 UC-1) のとき
+    /// `--evidence-run-id routine-<timestamp>` を付与し、run-id を履歴詳細に
+    /// 残す (`.omc/logs/{run-id}/` の証跡を追跡可能にする)。
     /// 未選択時は起動せずエラーを記録する (UC-4 と同じ事前拒否パターン)。
     pub fn start_routine(&mut self) {
         self.last_error = None;
@@ -409,7 +418,9 @@ impl PipelineRunnerApp {
             .unwrap_or("-")
             .to_string();
         self.run_label = Some(format!("routine:{name}"));
-        let args = crate::routine_ui::build_routine_args(&path);
+        let evidence_run_id = self.routine_panel.evidence_run_id_for_spawn();
+        let args = crate::routine_ui::build_routine_args(&path, evidence_run_id.as_deref());
+        self.pending_evidence_run_id = evidence_run_id;
         self.start_pipeline_inner(&args);
     }
 
@@ -432,15 +443,9 @@ impl PipelineRunnerApp {
         self.run_strategy = label.or_else(|| self.strategy_panel.selection().strategy.clone());
     }
 
-    /// 現在実行 (または直近実行) の履歴ラベル。
-    /// strategy 実行は strategy id、routine 実行は `routine:\<name\>`。
-    #[allow(dead_code)]
-    pub fn current_run_label(&self) -> Option<&str> {
-        self.run_strategy.as_deref()
-    }
-
     /// 実行追跡状態をリセット（次実行に備える）。
     /// `run_label` はリセット対象外 (start_spec が起動成否に関わらず消費する)。
+    /// `pending_evidence_run_id` も対象外 (append_history_record が take する)。
     fn reset_run_tracking(&mut self) {
         self.run_started_at = None;
         self.run_strategy = None;
@@ -551,6 +556,7 @@ impl PipelineRunnerApp {
     }
 
     /// 履歴へ RunRecord を追記する（委譲: history.rs）。
+    /// routine 実行の evidence run-id を保持していたら record へ付与する。
     fn append_history_record(&mut self, outcome: RunOutcome, exit_code: Option<i32>) {
         let log_tail = self.log_snapshot.iter().map(|e| e.line.clone()).collect();
         let record = RunRecord::new(
@@ -559,7 +565,8 @@ impl PipelineRunnerApp {
             outcome,
             exit_code,
             log_tail,
-        );
+        )
+        .with_evidence_run_id(self.pending_evidence_run_id.take());
         if let Err(e) = self.history.append(record) {
             self.record_error_line(&format!("履歴の保存に失敗しました: {e}"));
         }
@@ -593,7 +600,6 @@ impl PipelineRunnerApp {
     }
 
     /// 現在のログスナップショット（昇順・UI 描画とテストで使用）。
-    #[allow(dead_code)]
     pub fn log_snapshot(&self) -> &[LogEntry] {
         &self.log_snapshot
     }
@@ -1328,5 +1334,90 @@ mod tests {
             app.stop_pipeline();
         }
         // ping が環境に無い場合は start が失敗するためスキップ相当。
+    }
+
+    // ---- routine 実行の evidence 採取 (Issue #202 UC-1) ----
+
+    /// 終了 (Exit イベント) が drain されるまで待つヘルパ
+    /// (integration tests の wait_for_exit_and_drain と同パターン)。
+    fn wait_stopped_and_drained(app: &mut PipelineRunnerApp) {
+        for _ in 0..300 {
+            if app.status() == RunnerStatus::Stopped {
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(100));
+        }
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.drain_logs();
+            if app
+                .log_snapshot()
+                .iter()
+                .any(|e| e.line.contains("プロセス終了"))
+            {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "Exit イベントが drain されない: {:?}",
+                app.log_snapshot().last().map(|e| e.line.clone())
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// 履歴ストアを tempdir へ差し替える (実環境の history.jsonl を汚さない)。
+    /// 戻り値の TempDir はスコープ終了まで保持すること (自動削除は drop 時)。
+    fn isolate_history(app: &mut PipelineRunnerApp) -> tempfile::TempDir {
+        let dir = tempfile::tempdir().unwrap();
+        app.history = crate::history::RunHistory::open(
+            dir.path().join("history.jsonl"),
+            crate::history::DEFAULT_MAX_RECORDS,
+        );
+        dir
+    }
+
+    /// routine 実行 (evidence 既定 ON) の履歴レコードに evidence run-id と
+    /// `routine:<name>` ラベルが記録される (ping 引数違いの即時終了を利用)。
+    #[test]
+    fn routine_run_records_evidence_run_id_in_history() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        app.routine_panel.select("daily");
+        assert!(app.routine_panel.evidence_enabled(), "default must be ON");
+        app.start_routine();
+        if app.status() != RunnerStatus::Running {
+            // ping が環境に無い場合は start が失敗するためスキップ相当。
+            return;
+        }
+        wait_stopped_and_drained(&mut app);
+
+        let records = app.history.records();
+        let record = records.first().expect("history record appended");
+        assert_eq!(record.strategy, "routine:daily");
+        let run_id = record
+            .evidence_run_id
+            .as_ref()
+            .expect("evidence run-id must be recorded");
+        assert!(run_id.starts_with("routine-"), "{run_id}");
+    }
+
+    /// evidence チェック OFF では run-id が記録されない (None)。
+    #[test]
+    fn routine_run_without_evidence_records_no_run_id() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        app.routine_panel.select("daily");
+        app.routine_panel.set_evidence_enabled(false);
+        app.start_routine();
+        if app.status() != RunnerStatus::Running {
+            return;
+        }
+        wait_stopped_and_drained(&mut app);
+
+        let records = app.history.records();
+        let record = records.first().expect("history record appended");
+        assert_eq!(record.strategy, "routine:daily");
+        assert_eq!(record.evidence_run_id, None);
     }
 }

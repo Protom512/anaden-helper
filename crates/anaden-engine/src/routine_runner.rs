@@ -8,8 +8,8 @@
 
 use async_trait::async_trait;
 
-use crate::routine::{OnFailure, RoutineDef, RoutineError, RoutineStep, resolve_step_pipeline_dir};
-use crate::{LoopOutcome, LoopStopReason};
+use crate::routine::{OnFailure, RoutineDef, RoutineError, RoutineStep};
+use crate::{LoopOutcome, LoopStopReason, resolve_pipeline_dir};
 
 /// 1ステップ (= pipeline 1実行) の起動抽象。
 ///
@@ -298,7 +298,7 @@ pub fn format_dry_run(def: &RoutineDef, root: &std::path::Path) -> String {
         def.steps.len()
     );
     for (i, step) in def.steps.iter().enumerate() {
-        let resolved = resolve_step_pipeline_dir(&step.pipeline_dir, root);
+        let resolved = resolve_pipeline_dir(std::path::Path::new(&step.pipeline_dir), root);
         out.push_str(&format!(
             "  [{i}] {} pipeline={} start={} max_iters={} interval={}s on_failure={}\n",
             step.name,

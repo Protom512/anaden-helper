@@ -204,6 +204,12 @@ impl HistoryPanel {
 
         // 選択中の実行のログ末尾プレビュー (UC-1)。
         if let Some(entry) = self.selected() {
+            // evidence 採取 run-id (Issue #202 UC-1・routine 実行のみ)。
+            // ログ概要に run-id を含め、`.omc/logs/{run-id}/` の証跡を
+            // 履歴詳細から追跡可能にする (ログ末尾切詰めで消えない独立行)。
+            if let Some(run_id) = &entry.evidence_run_id {
+                ui.label(format!("evidence: .omc/logs/{run_id}/"));
+            }
             ui.label(format!("「{}」のログ末尾:", entry.strategy));
             egui::ScrollArea::vertical()
                 .max_height(160.0)
