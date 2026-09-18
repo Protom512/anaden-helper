@@ -88,13 +88,6 @@ impl RoutinePanel {
         self.evidence_enabled = enabled;
     }
 
-    /// チェック状態から spawn 時の evidence run-id を生成する
-    /// (ON: 現在時刻ベースの run-id / OFF: None = フラグなし)。
-    #[must_use]
-    pub fn evidence_run_id_for_spawn(&self) -> Option<String> {
-        self.evidence_enabled.then(new_evidence_run_id)
-    }
-
     /// パネルを描画する。戻り値は「選択状態が変化した」フラグ。
     pub fn ui(&mut self, ui: &mut Ui) -> bool {
         let mut changed = false;
@@ -379,21 +372,16 @@ mod tests {
     }
 
     /// パネルの evidence チェックは既定 ON・set_evidence_enabled で切替可能。
+    /// (Issue #204 以降、run-id の発行は runner_exec::RunRequest::build_spawn に
+    /// 集約されているため、パネルはチェック状態の保持のみ担う。)
     #[test]
     fn panel_evidence_check_defaults_on_and_toggles() {
         let mut panel = RoutinePanel::default();
         assert!(panel.evidence_enabled(), "default must be ON");
         panel.set_evidence_enabled(false);
         assert!(!panel.evidence_enabled());
-        assert!(
-            panel.evidence_run_id_for_spawn().is_none(),
-            "OFF must not generate run-id"
-        );
         panel.set_evidence_enabled(true);
-        let run_id = panel
-            .evidence_run_id_for_spawn()
-            .expect("ON must generate run-id");
-        assert!(run_id.starts_with("routine-"), "{run_id}");
+        assert!(panel.evidence_enabled());
     }
 
     /// compact_utc_timestamp の既知値検証 (civil-from-days 手書き変換の保証)。
