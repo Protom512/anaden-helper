@@ -1,15 +1,16 @@
 {
-  "hooks": {
-    "PreToolUse": [
-      {
-        "matcher": "Bash",
-        "hooks": [
-          {
-            "type": "command",
-            "command": "\"$CLAUDE_PROJECT_DIR\"/.claude/hooks/block-dangerous-git.sh"
-          }
-        ]
-      }
+  "permissions": {
+    "deny": [
+      "Bash(git reset --hard*)",
+      "Bash(reset --hard*)",
+      "Bash(git clean -f*)",
+      "Bash(git branch -D*)",
+      "Bash(git checkout .*)",
+      "Bash(git restore .*)",
+      "Bash(git push --force*)",
+      "Bash(git push -f*)",
+      "Bash(git push --all*)",
+      "Bash(git push --mirror*)"
     ]
   },
   "enabledPlugins": {
