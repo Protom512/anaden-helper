@@ -205,6 +205,68 @@ pub enum RunnerStatus {
 /// 読み取りスレッド → UI 間の bounded channel 容量。
 const LOG_CHANNEL_CAPACITY: usize = 1024;
 
+/// 起動要求 (Issue #204)。再実行 (`rerun_pipeline`) で引数列を組み立て直す
+/// ため、run-id 込みの SpawnSpec ではなく再生成に必要な入力を保持する。
+///
+/// routine 実行は spawn のたびに新しい evidence run-id を発行する
+/// (初回起動・再実行の両方)。旧実装は run-id 込みの SpawnSpec をそのまま
+/// 再 spawn し、2 回目の evidence が同一 `.omc/logs/<run-id>/` へ上書き
+/// されていた (Issue #204 本体)。
+#[derive(Clone)]
+enum RunRequest {
+    /// strategy 実行 (`start_pipeline_with_selection` 経由)。
+    /// 引数列は固定 (evidence run-id を含まない)。
+    Strategy {
+        /// `anaden run` の引数列 (pipeline ディレクトリ解決済み)。
+        args: Vec<String>,
+    },
+    /// routine 実行 (`start_routine` 経由)。
+    Routine {
+        /// routine ファイルの絶対パス。
+        path: PathBuf,
+        /// 履歴ラベル用の routine 名。
+        name: String,
+        /// evidence 採取チェックの起動時スナップショット
+        /// (再実行も同一設定で再現する)。
+        evidence_enabled: bool,
+    },
+}
+
+impl RunRequest {
+    /// 要求から (spawn spec, 履歴ラベル, 発行した evidence run-id) を組む。
+    ///
+    /// evidence run-id はこの関数が spawn のたびに新規発行する
+    /// (呼出側で使い回さない — Issue #204)。strategy 実行はラベル・run-id
+    /// とも None (履歴ラベルは strategy 選択から採る)。
+    fn build_spawn(
+        &self,
+        program: &str,
+        run_id_gen: fn() -> String,
+    ) -> (SpawnSpec, Option<String>, Option<String>) {
+        match self {
+            Self::Strategy { args } => (build_spawn_spec(program, args), None, None),
+            Self::Routine {
+                path,
+                name,
+                evidence_enabled,
+            } => {
+                let run_id = evidence_enabled.then(run_id_gen);
+                let args = crate::routine_ui::build_routine_args(path, run_id.as_deref());
+                let label = Some(format!("routine:{name}"));
+                (build_spawn_spec(program, &args), label, run_id)
+            }
+        }
+    }
+}
+
+/// 現在時刻 (UNIX epoch 秒・取得失敗時は 0)。
+fn unix_now_secs() -> u64 {
+    std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_secs())
+        .unwrap_or(0)
+}
+
 /// pipeline ランナーアプリ。
 pub struct PipelineRunnerApp {
     /// 子プロセス管理。
@@ -236,18 +298,24 @@ pub struct PipelineRunnerApp {
     /// routine 選択パネル (Issue #199: 複数 pipeline の連続実行)。
     /// runner_ui.rs のルーチンセクション描画からの参照のため pub(crate)。
     pub(crate) routine_panel: crate::routine_ui::RoutinePanel,
-    /// 現在実行の履歴ラベル (strategy id または "routine:\<name\>")。
-    run_label: Option<String>,
     /// 現在実行の evidence run-id (routine 実行で --evidence-run-id 付与時のみ。
     /// Issue #202 UC-1: 履歴詳細から `.omc/logs/{run-id}/` を追跡可能にする)。
-    /// `run_label` と同じく reset_run_tracking の対象外 (start_spec が消費せず
-    /// append_history_record が take するまで保持する)。
+    /// `start_request` が spawn 成功時に発行した値のみを保持する
+    /// (Issue #204: spawn 失敗時の残存 = stale 保持を構造的に排除)。
+    /// reset_run_tracking の対象外 (append_history_record が take するまで保持)。
     pending_evidence_run_id: Option<String>,
+    /// evidence run-id 生成関数。テストで決定的なタイムスタンプを注入して
+    /// 差し替えられる (Issue #204)。既定は実運用用の
+    /// [`crate::routine_ui::new_evidence_run_id`]。
+    run_id_gen: fn() -> String,
     /// 選択サマリのキャッシュ（ui() の changed フラグで再計算・UC-4 前提の表示）。
     /// runner_ui.rs の描画からの参照のため pub(crate)。
     pub(crate) strategy_summary: String,
-    /// 直近の起動 SpawnSpec（再実行ボタンで同一 spec を再 start するため保持）。
-    last_spawn: Option<SpawnSpec>,
+    /// 直近成功起動の要求 (再実行ボタンで再 spawn するため保持)。run-id 込みの
+    /// SpawnSpec ではなく [`RunRequest`] を保持し、再実行時に routine なら
+    /// evidence run-id を新規発行する (Issue #204: 同一 `.omc/logs/<run-id>/`
+    /// への証跡上書きと履歴への run-id 未記録を解消)。
+    last_run: Option<RunRequest>,
     /// 実行履歴ストア（委譲: 追加ロジックは history.rs）。
     /// runner_ui.rs の履歴セクション描画からの参照のため pub(crate)。
     pub(crate) history: RunHistory,
@@ -311,10 +379,10 @@ impl PipelineRunnerApp {
             auto_scroll: true,
             strategy_panel: crate::strategy_ui::StrategyPanel::default(),
             routine_panel: crate::routine_ui::RoutinePanel::default(),
-            run_label: None,
             pending_evidence_run_id: None,
+            run_id_gen: crate::routine_ui::new_evidence_run_id,
             strategy_summary: "戦略未選択".to_string(),
-            last_spawn: None,
+            last_run: None,
             history: RunHistory::open_default(),
             run_started_at: None,
             run_strategy: None,
@@ -377,22 +445,11 @@ impl PipelineRunnerApp {
     /// UI 表示用に保持されるとともにログへ ERROR 行として記録される
     /// （UC-3: 起動失敗時にエラー行がログに表示される）。
     pub fn start_pipeline(&mut self, args: &[String]) {
-        // 通常 (strategy) 実行: 履歴ラベルは strategy 選択から採る。
-        // routine 専用の evidence run-id も清算する (混入防止)。
-        self.run_label = None;
-        self.pending_evidence_run_id = None;
-        self.start_pipeline_inner(args);
-    }
-
-    /// `start_pipeline` の本体 (run_label は呼出側で設定済みのまま消費しない)。
-    fn start_pipeline_inner(&mut self, args: &[String]) {
-        self.last_error = None;
-        if let Some(e) = self.resolution_error.clone() {
-            self.record_error_line(&e);
-            return;
-        }
-        let spec = build_spawn_spec(&self.program, args);
-        self.start_spec(spec);
+        // 通常 (strategy) 実行: evidence run-id は発行しない
+        // (Issue #204: ラベル・run-id の発行は start_request に集約)。
+        self.start_request(RunRequest::Strategy {
+            args: args.to_vec(),
+        });
     }
 
     /// ルーチン実行ボタンのハンドラ (Issue #199)。
@@ -417,35 +474,46 @@ impl PipelineRunnerApp {
             .selected_name()
             .unwrap_or("-")
             .to_string();
-        self.run_label = Some(format!("routine:{name}"));
-        let evidence_run_id = self.routine_panel.evidence_run_id_for_spawn();
-        let args = crate::routine_ui::build_routine_args(&path, evidence_run_id.as_deref());
-        self.pending_evidence_run_id = evidence_run_id;
-        self.start_pipeline_inner(&args);
+        self.start_request(RunRequest::Routine {
+            path,
+            name,
+            evidence_enabled: self.routine_panel.evidence_enabled(),
+        });
     }
 
-    /// SpawnSpec を起動し、成功時に再実行用・履歴用の状態を記録する。
-    fn start_spec(&mut self, spec: SpawnSpec) {
+    /// 起動要求を spawn し、成功時に再実行用・履歴用の状態を記録する
+    /// (start_pipeline / start_routine / rerun_pipeline の単一経路 — Issue #204)。
+    ///
+    /// - evidence run-id は `RunRequest::build_spawn` が spawn のたびに新規発行し、
+    ///   成功時にのみ `pending_evidence_run_id` へ保持する (spawn 失敗時の残存
+    ///   = stale 付与を構造的に排除。再実行も本経路を通るため旧 run-id の
+    ///   使い回しがない)。
+    /// - 履歴ラベルは routine 実行のみ `routine:\<name\>`、それ以外は
+    ///   strategy 選択から採る。
+    fn start_request(&mut self, request: RunRequest) {
+        self.last_error = None;
+        if let Some(e) = self.resolution_error.clone() {
+            self.record_error_line(&e);
+            return;
+        }
         self.reset_run_tracking();
-        // run_label は reset で消さずここで消費する (routine 実行のラベル)。
-        let label = self.run_label.take();
+        // 前回実行の清算 (履歴へ take されなかった pending の掃き出し —
+        // Issue #204: rerun が清算点をバイパスしない単一経路化の要)。
+        self.pending_evidence_run_id = None;
+        let (spec, label, evidence_run_id) = request.build_spawn(&self.program, self.run_id_gen);
         if let Err(e) = self.child.start(&spec, self.log_tx.clone()) {
             self.record_error_line(&e.to_string());
             return;
         }
-        self.last_spawn = Some(spec);
-        self.run_started_at = Some(
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.as_secs())
-                .unwrap_or(0),
-        );
+        self.last_run = Some(request);
+        self.pending_evidence_run_id = evidence_run_id;
+        self.run_started_at = Some(unix_now_secs());
         self.run_strategy = label.or_else(|| self.strategy_panel.selection().strategy.clone());
     }
 
     /// 実行追跡状態をリセット（次実行に備える）。
-    /// `run_label` はリセット対象外 (start_spec が起動成否に関わらず消費する)。
-    /// `pending_evidence_run_id` も対象外 (append_history_record が take する)。
+    /// `pending_evidence_run_id` は対象外 (start_request が清算し
+    /// append_history_record が take する)。
     fn reset_run_tracking(&mut self) {
         self.run_started_at = None;
         self.run_strategy = None;
@@ -454,22 +522,25 @@ impl PipelineRunnerApp {
         self.failure_summary = None;
     }
 
-    /// 再実行ボタンのハンドラ（UC-1: 停止待ち → 同一 SpawnSpec で再 start）。
+    /// 再実行ボタンのハンドラ（UC-1: 停止待ち → 同一起動要求で再 spawn）。
     ///
-    /// 実行中は何もせずエラーを記録。直前の起動 spec が無い場合もエラー。
+    /// 実行中は何もせずエラーを記録。直前の起動要求が無い場合もエラー。
+    /// routine 実行の再実行は `RunRequest::build_spawn` 経由で新しい evidence
+    /// run-id を発行する (Issue #204: 旧 run-id の `.omc/logs/<run-id>/` 上書き
+    /// と再実行分履歴への run-id 未記録を解消)。
     pub fn rerun_pipeline(&mut self) {
         self.last_error = None;
         if self.child.is_running() {
             self.record_error_line("再実行には停止待ちが必要です（実行中は再実行できません）");
             return;
         }
-        let Some(spec) = self.last_spawn.clone() else {
+        let Some(request) = self.last_run.clone() else {
             self.record_error_line("再実行可能な実行履歴がありません（先に開始してください）");
             return;
         };
         // 終了済み子の後始末（Exit drain 前でも stop は Ok を返す契約）。
         let _ = self.child.stop();
-        self.start_spec(spec);
+        self.start_request(request);
     }
 
     /// 停止ボタンのハンドラ。エラーは UI 表示用に保持するとともにログへ記録。
@@ -1419,5 +1490,158 @@ mod tests {
         let record = records.first().expect("history record appended");
         assert_eq!(record.strategy, "routine:daily");
         assert_eq!(record.evidence_run_id, None);
+    }
+
+    // ---- Issue #204: routine 再実行の evidence run-id 再生成 + 清算 ----
+
+    /// テスト用の決定的 run-id 生成器 (呼出ごとに異なる id を返す。
+    /// `evidence_run_id` へのタイムスタンプ注入で実運用と同一形式)。
+    fn injected_run_id() -> String {
+        static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+        let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        crate::routine_ui::evidence_run_id(&format!("20260914-0130{n:02}"))
+    }
+
+    /// 履歴レコードが `want` 件になるまで drain を続けるヘルパ (Issue #204:
+    /// 再実行テストではログに前回実行の「プロセス終了」行も残るため、
+    /// 終了行ではなく履歴件数で待つ)。
+    fn wait_history_len(app: &mut PipelineRunnerApp, want: usize) {
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
+        loop {
+            app.drain_logs();
+            if app.history.records().len() >= want {
+                return;
+            }
+            assert!(
+                std::time::Instant::now() < deadline,
+                "履歴が {want} 件にならない: 最終ログ行 {:?}",
+                app.log_snapshot().last().map(|e| e.line.clone())
+            );
+            std::thread::sleep(std::time::Duration::from_millis(50));
+        }
+    }
+
+    /// AC-1/AC-2: routine 再実行で新しい evidence run-id が発行され、
+    /// 再実行分の履歴レコードにもその run-id が記録される
+    /// (旧実装は run-id 込み SpawnSpec の再利用で同一 `.omc/logs/<run-id>/`
+    /// への上書き + 再実行分履歴の run-id 未記録)。
+    #[test]
+    fn routine_rerun_issues_fresh_evidence_run_id_and_records_it() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        app.run_id_gen = injected_run_id;
+        app.routine_panel.select("daily");
+        app.start_routine();
+        if app.status() != RunnerStatus::Running {
+            // ping が環境に無い場合は start が失敗するためスキップ相当。
+            return;
+        }
+        wait_history_len(&mut app, 1);
+        let first = app.history.records()[0]
+            .evidence_run_id
+            .clone()
+            .expect("first run records run-id");
+        assert!(first.starts_with("routine-"), "{first}");
+
+        app.rerun_pipeline();
+        if app.status() != RunnerStatus::Running {
+            return;
+        }
+        wait_history_len(&mut app, 2);
+        let records = app.history.records();
+        let rerun_id = records[0]
+            .evidence_run_id
+            .as_ref()
+            .expect("rerun must record its own run-id");
+        assert_ne!(rerun_id, &first, "rerun must issue a fresh run-id");
+        assert!(rerun_id.starts_with("routine-"), "{rerun_id}");
+        // 両レコードとも routine ラベル・初回レコードの run-id は不変。
+        assert_eq!(records[0].strategy, "routine:daily");
+        assert_eq!(records[1].strategy, "routine:daily");
+        assert_eq!(records[1].evidence_run_id.as_deref(), Some(first.as_str()));
+    }
+
+    /// AC-3: strategy 実行の再実行で stale な pending run-id が履歴へ
+    /// 付与されない (旧実装の rerun は start_pipeline の清算点をバイパス)。
+    #[test]
+    fn strategy_rerun_does_not_attach_stale_evidence_run_id() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        app.strategy_panel.select_strategy("field_loop_pc");
+        app.start_pipeline_with_selection();
+        if app.status() != RunnerStatus::Running {
+            return;
+        }
+        wait_history_len(&mut app, 1);
+        assert_eq!(app.history.records()[0].evidence_run_id, None);
+
+        // 旧実装で spawn 失敗時に残存し得た stale pending を直接注入し、
+        // 再実行経由でも履歴へ付与されないことを検証する。
+        app.pending_evidence_run_id = Some("routine-stale".to_string());
+        app.rerun_pipeline();
+        if app.status() != RunnerStatus::Running {
+            return;
+        }
+        wait_history_len(&mut app, 2);
+        assert_eq!(
+            app.history.records()[0].evidence_run_id,
+            None,
+            "strategy rerun must not attach stale run-id"
+        );
+    }
+
+    /// AC-3 (routine 経路): 再実行時に pending に残っていた stale run-id は
+    /// 履歴へ付与されず、新規発行の run-id に置き換えられる。
+    #[test]
+    fn routine_rerun_replaces_stale_pending_run_id_with_fresh_one() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        app.run_id_gen = injected_run_id;
+        app.routine_panel.select("daily");
+        app.start_routine();
+        if app.status() != RunnerStatus::Running {
+            return;
+        }
+        wait_history_len(&mut app, 1);
+
+        app.pending_evidence_run_id = Some("routine-stale".to_string());
+        app.rerun_pipeline();
+        if app.status() != RunnerStatus::Running {
+            return;
+        }
+        wait_history_len(&mut app, 2);
+        let rerun_id = app.history.records()[0]
+            .evidence_run_id
+            .as_ref()
+            .expect("rerun must record fresh run-id");
+        assert_ne!(rerun_id, "routine-stale", "stale must be cleared");
+        assert!(rerun_id.starts_with("routine-"), "{rerun_id}");
+    }
+
+    /// evidence OFF で開始した routine の再実行も run-id なしで再現される
+    /// (起動時スナップショットの再現・run-id が勝手に付与されない)。
+    #[test]
+    fn routine_rerun_respects_evidence_disabled_snapshot() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        app.routine_panel.select("daily");
+        app.routine_panel.set_evidence_enabled(false);
+        app.start_routine();
+        if app.status() != RunnerStatus::Running {
+            return;
+        }
+        wait_history_len(&mut app, 1);
+        assert_eq!(app.history.records()[0].evidence_run_id, None);
+
+        app.rerun_pipeline();
+        if app.status() != RunnerStatus::Running {
+            return;
+        }
+        wait_history_len(&mut app, 2);
+        assert_eq!(
+            app.history.records()[0].evidence_run_id,
+            None,
+            "rerun must preserve the evidence-disabled request"
+        );
     }
 }
