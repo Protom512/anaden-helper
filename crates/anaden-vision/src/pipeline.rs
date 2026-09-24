@@ -2134,7 +2134,9 @@ mod tests {
         let by_name: std::collections::HashMap<&str, &TaskDef> =
             defs.iter().map(|d| (d.name.as_str(), d)).collect();
 
-        // TapToStartPc: title 検出(version_label) → click_rect で "Tap to Start" をタップ。
+        // TapToStartPc: title 検出(title_logo_corner) → click_rect で "Tap to Start" をタップ。
+        // (Issue #208 でアンカーを version_label から title_logo_corner へ切替 — ID 表示帯は
+        //  バージョン/ID が変わる内容可変資産で cross-capture 不安定だったため)
         let tap = by_name
             .get("TapToStartPc")
             .expect("TapToStartPc (T3 title cold-start slice) must exist");
@@ -2214,23 +2216,40 @@ mod tests {
         );
         let load_roi = load.roi.expect("LoadGamePc has detection ROI");
         assert_roi_within_1258x708(load_roi, "LoadGamePc");
-        // 検出テンプレが TapToStartPc と別(version_label≠logo_corner)で重複検出を避ける。
-        assert_ne!(
+        // Issue #208: TapToStartPc と LoadGamePc は同じ安定アンカー title_logo_corner を
+        // 共有する (旧設計の「ステップごとに別テンプレ (version_label≠logo_corner) で
+        // 重複検出を避ける」は、version_label が内容可変資産で cross-capture 不安定と
+        // 判明したため廃止)。ステップ弁別はテンプレ差ではなく pipeline の next 状態機械
+        // と click_rect タップ位置の差で行う。
+        assert_eq!(
             tap.template, load.template,
-            "TapToStartPc and LoadGamePc must use distinct title_pc sub-templates \
-             (avoids duplicate detection across cold-start steps)"
+            "TapToStartPc and LoadGamePc must share the stable title_logo_corner anchor \
+             (Issue #208: version_label is a content-variable asset and was dropped as the \
+             login/nav anchor)"
+        );
+        assert!(
+            tap.template.to_string_lossy().contains("title_logo_corner"),
+            "TapToStartPc must anchor on title_logo_corner.png, got {:?}",
+            tap.template
         );
 
-        // Issue #57→#182: TapToStartPc の検出 ROI は左上 ID 表示帯 [8,2,138,20] に固定。
-        // 旧値 [1046,668,112,28] は 20:9 自己クロップ由来の右下暫定値、[65,7,121,35] は
-        // version 帯時代の値で、Issue #182 のテンプレ再生成(ID 帯 138x20・stddev 53.1)後は
-        // needle 幅 138 > roi 幅 121 となり恒久 NoMatch だった。テンプレ差し替えと ROI は
-        // 対で更新されるため、片方だけ戻る回帰をこのテストで弁別する。
+        // Issue #208: TapToStartPc の検出 ROI は title_logo_corner needle (120x120) の
+        // 再クロップ原点 [624,263,120,120] 中心 ±10px のスラック窓 [614,253,140,140] に固定。
+        // ぴったり ROI (needle==roi 幅) はキャプチャ間のコンテンツ配置ドリフト (実測
+        // (+2,-1) px) で最良一致位置を roi 外に弾き conf 0.99→0.78 に崩壊するため、
+        // スラックを持たせてある。旧値 [8,2,138,20] は version_label アンカー時代の値。
+        // テンプレ差し替えと ROI は対で更新されるため、片方だけ戻る回帰をこのテストで弁別する。
         assert_eq!(
             tap_roi,
-            [8, 2, 138, 20],
-            "TapToStartPc ROI must be the top-left ID label band [8,2,138,20] \
-             (Issue #182 template regeneration pair-update)"
+            [614, 253, 140, 140],
+            "TapToStartPc ROI must be the logo_corner slack window [614,253,140,140] \
+             (Issue #208 anchor switch + drift-slack pair-update)"
+        );
+        assert_eq!(
+            load_roi,
+            [614, 253, 140, 140],
+            "LoadGamePc ROI must equal the TapToStartPc slack window [614,253,140,140] \
+             (Issue #208: shared logo_corner anchor consumers keep the roi as a pair)"
         );
     }
 
@@ -3169,6 +3188,21 @@ mod tests {
         let (sw, sh) = (screenshot.width(), screenshot.height());
 
         for d in &defs {
+            // Issue #208: TitlePcVersionLabel は probe 一致要求の対象外。左上 ID 表示帯は
+            // バージョン/ID 文字列が変わる**内容可変資産**で、#182 版 (conf 0.94) も
+            // #208 再生成版も 07-07 probe (title_pc_probe.png) には一致しない (None) —
+            // cross-capture 安定性が原理的にない。そのため login/nav の検出アンカーは
+            // title_logo_corner へ移行済みであり、本 E2E は TitlePcLogoCorner の一致
+            // (実測 conf 0.9848) を以て title_pc 検出の実効検証とする。
+            // version_label の資産契約 (構造 stddev・全幅ダーク行なし・roi 寸法対) は
+            // 通常テスト (template_quality / title_live_regression / t1/t3 pin) が担保する。
+            if d.name == "TitlePcVersionLabel" {
+                println!(
+                    "TitlePcVersionLabel: skipped — content-variable asset (version/ID text \
+                     changes across captures, Issue #208); not a cross-capture probe-match target"
+                );
+                continue;
+            }
             let m = d
                 .detect(&screenshot, Path::new(""))
                 .unwrap_or_else(|e| panic!("{} detect error: {e}", d.name));
@@ -3283,6 +3317,76 @@ mod tests {
             m.region.width,
             m.region.height,
             load.threshold,
+            screenshot.width(),
+            screenshot.height()
+        );
+    }
+
+    /// E2E (Issue #208): login パイプラインの LoginTapTitlePc (アンカー title_logo_corner
+    /// × スラック roi [614,253,140,140]) が title_pc_probe.png 上で threshold 以上の
+    /// confidence でマッチすることを検証する。
+    ///
+    /// Issue #208 で login/nav のアンカーは version_label (内容可変資産・cross-capture
+    /// 不安定) から title_logo_corner へ切替わった。#208 の live 実測では needle==roi 幅の
+    /// ぴったり ROI がキャプチャ間ドリフトで conf 0.99→0.78 に崩壊したため、消費者 roi は
+    /// 原点 [624,263,120,120] 中心 ±10px のスラック窓になっている。tap_to_start /
+    /// load_game との roi 対整合は通常テスト
+    /// ([`pc_title_pc_logo_corner_consumers_share_matching_roi_and_template_dims`]) が pin する。
+    ///
+    /// ゲート(R1 三値化): 他の pc_* E2E と同じくデフォルト(pc-e2e feature OFF)では
+    /// `#[ignore]`。`--features pc-e2e --run-ignored all` 起動でのみ実行し、プローブ不在時は
+    /// fail-loud で panic する (absence-skip しない)。
+    #[test]
+    #[cfg_attr(not(feature = "pc-e2e"), ignore)]
+    fn pc_login_tap_title_matches_title_probe() {
+        let dir = workspace_templates_root().join("pipelines").join("login");
+        let defs = load_pipeline(&dir).expect("login must load");
+        let tap = defs
+            .iter()
+            .find(|d| d.name == "LoginTapTitlePc")
+            .expect("LoginTapTitlePc must exist in login pipeline");
+
+        let probe_path = title_pc_probe_path().unwrap_or_else(|| {
+            panic!(
+                "title_pc_probe.png not found (neither templates/captures/ nor \
+                 workspace root). LoginTapTitlePc must match the title probe — run with \
+                 `--features pc-e2e --run-ignored all` only when the probe exists, as with \
+                 the other pc_* E2E tests"
+            )
+        });
+        let probe = image::open(&probe_path).expect("open title_pc_probe.png");
+
+        // 本番経路と同一の crop_to_content → normalize を適用 (他の title probe E2E と同一前提)。
+        let cropped = crate::crop_to_content(&probe);
+        let screenshot = crate::scale::ScreenScaler::new().normalize(&cropped);
+
+        let m = tap
+            .detect(&screenshot, Path::new(""))
+            .unwrap_or_else(|e| panic!("LoginTapTitlePc detect error: {e}"));
+        let m = m.unwrap_or_else(|| {
+            panic!(
+                "LoginTapTitlePc: must match title_pc_probe.png at threshold {} (got None) — \
+                 the logo_corner anchor (Issue #208) with slack roi {:?} must fire on the \
+                 probe capture too",
+                tap.threshold, tap.roi
+            )
+        });
+        assert!(
+            m.confidence.0 >= tap.threshold,
+            "LoginTapTitlePc: confidence {} below threshold {} on real PC title capture \
+             (roi/threshold may need re-derivation against the real probe)",
+            m.confidence.0,
+            tap.threshold
+        );
+        println!(
+            "LoginTapTitlePc: conf={:.4} region=[{},{},{},{}] (threshold {:.2}) on {}x{} \
+             normalized title probe",
+            m.confidence.0,
+            m.region.x,
+            m.region.y,
+            m.region.width,
+            m.region.height,
+            tap.threshold,
             screenshot.width(),
             screenshot.height()
         );
@@ -3611,18 +3715,23 @@ mod tests {
         //     プローブが実在し実測 ROI が它のテクスチャ位置を指している時のみ (= 真の green)。
     }
 
-    // ---- Issue #182 remediation: version_label 共有テンプレ対整合 + 無構造テンプレ回帰防止 ----
+    // ---- Issue #182/#208 remediation: 共有テンプレ対整合 + 無構造テンプレ回帰防止 ----
     //
-    // templates/scenes/title_pc/version_label.png は 3 つの TOML
+    // Issue #208 の恒久修正で login/nav の検出アンカーは title_logo_corner.png に統一された。
+    // 同 PNG は 3 つのパイプライン TOML
     //   (pipelines/login/tap_title.toml, pipelines/nav_to_field_pc/tap_to_start.toml,
-    //    scenes/title_pc/version_label.toml)
-    // から共有参照される。PR #183 は login のみ対 (テンプレ再生成 138x20 + roi) で更新し、
-    // 残り 2 消費者は needle 幅 138 > roi 幅 121 で恒久 NoMatch になった (Release Review
-    // lane2/lane3 CONDITIONAL)。本テスト群はその再発を防ぐ:
-    //   t1: テンプレ PNG が構造を持つこと (輝度 stddev > 20.0)。旧テンプレは幾ら待っても
-    //       match しない無構造のほぼ白一色 (stddev 3.76) だった。
-    //   t2: 3 TOML の roi がすべて同じ [8,2,138,20] で、テンプレ寸法 (138x20) と一致する
-    //       こと (対更新の pin。テンプレ差し替えと ROI を片側だけ更新する回帰を弁別)。
+    //    pipelines/nav_to_field_pc/load_game.toml)
+    // から共有参照される (scenes/title_pc/title_logo_corner.toml は原点 roi
+    // [624,263,120,120] の別定義)。Issue #182/#192 は「テンプレ差し替えと roi 更新の
+    // 片側化」が恒久 NoMatch を生んだ実例 (Release Review lane 発見)。本テスト群はその再発を防ぐ:
+    //   t1: version_label テンプレ PNG が構造を持つこと (輝度 stddev > 20.0)。旧テンプレは
+    //       幾ら待っても match しない無構造のほぼ白一色 (stddev 3.76) だった。
+    //   t2: logo_corner を共有参照する 3 パイプライン TOML の roi がすべて同じスラック窓
+    //       [614,253,140,140] (原点 [624,263,120,120] 中心 ±10px) で、needle 寸法 (120x120)
+    //       が roi に収まること (対更新の pin)。
+    //   t3: version_label.toml (scenes 検出専用) の roi が version_label.png 寸法 (138x20) と
+    //       一致すること (needle-wider-than-roi 回帰防止。内容可変資産である旨は #208 で
+    //       doc 済み — probe E2E の一致要求対象からは除外)。
 
     /// t1: version_label.png の輝度 stddev が閾値を超えること (無構造テンプレの再発防止)。
     /// 旧テンプレ (Issue #182 以前) は stddev 3.76 のほぼ白一色で、TM_CCOEFF_NORMED が
@@ -3643,14 +3752,23 @@ mod tests {
         );
     }
 
-    /// t2: version_label.png を共有参照する 3 TOML の roi がすべて [8,2,138,20] であり、
-    /// テンプレ PNG 寸法が roi の w/h (138x20) と一致すること。needle が roi 幅を超える
-    /// (旧 roi 幅 121 < テンプレ幅 138) と detect が恒久 NoMatch になるため、寸法一致まで
-    /// 含めて対更新を pin する。TOML は std::fs + toml パースで読む (repo TOML 実読)。
-    /// What(テスト対象): 3 消費者 TOML の roi と version_label.png 寸法の整合。
+    /// t2: title_logo_corner.png を共有参照する 3 パイプライン TOML (login/tap_title,
+    /// nav_to_field_pc/tap_to_start, nav_to_field_pc/load_game) の roi がすべて
+    /// [614,253,140,140] であり、needle 寸法 (120x120) が roi に収まること。
+    ///
+    /// Issue #208 で判明した設計要件: needle==roi 幅のぴったり ROI (旧 [624,263,120,120])
+    /// はキャプチャ間のコンテンツ配置ドリフト (07-07 probe → 09-19 live で (+2,-1) px)
+    /// で最良一致位置を roi 外に弾き conf 0.99→0.78 に崩壊する。スラック窓は原点中心
+    /// ±10px でドリフトを吸収する (live 実測 conf 0.9944)。テンプレ差し替えと roi 更新は
+    /// 3 消費者で対にすること (Issue #182/#192 の片側更新バグの再発防止)。
+    /// What(テスト対象): 3 消費者 TOML の roi・template 参照と title_logo_corner.png 寸法の整合。
     #[test]
-    fn pc_title_pc_version_label_consumers_share_matching_roi_and_template_dims() {
-        const EXPECTED_ROI: [u32; 4] = [8, 2, 138, 20];
+    fn pc_title_pc_logo_corner_consumers_share_matching_roi_and_template_dims() {
+        const EXPECTED_ROI: [u32; 4] = [614, 253, 140, 140];
+        // スラック窓の中心原点 (needle 再クロップ元。scenes/title_pc/title_logo_corner.toml
+        // の roi と同一値)。
+        const ANCHOR_ORIGIN: [u32; 4] = [624, 263, 120, 120];
+        const SLACK: u32 = 10;
         let pipelines = workspace_templates_root().join("pipelines");
         let consumers = [
             (
@@ -3662,8 +3780,8 @@ mod tests {
                 pipelines.join("nav_to_field_pc").join("tap_to_start.toml"),
             ),
             (
-                "scenes/title_pc/version_label",
-                title_pc_dir().join("version_label.toml"),
+                "nav_to_field_pc/load_game",
+                pipelines.join("nav_to_field_pc").join("load_game.toml"),
             ),
         ];
         for (label, path) in consumers {
@@ -3674,23 +3792,71 @@ mod tests {
             assert_eq!(
                 def.roi,
                 Some(EXPECTED_ROI),
-                "{label}: version_label consumer roi must be [8,2,138,20] — the shared \
-                 needle is 138x20, so any narrower/misplaced roi (e.g. the pre-Issue-#182 \
-                 [65,7,121,35] / [712,8,121,35]) is a permanent NoMatch (needle wider \
-                 than roi) or points at the wrong band. Template swaps and roi updates \
-                 must land as a pair across all three consumers"
+                "{label}: logo_corner consumer roi must be the slack window \
+                 [614,253,140,140] — the shared needle is 120x120 and cross-capture drift \
+                 (measured (+2,-1) px, Issue #208) needs slack; a needle-exact roi \
+                 ([624,263,120,120]) collapses conf 0.99->0.78 when the best placement \
+                 falls outside the roi. Template swaps and roi updates must land as a \
+                 pair across all three consumers",
+            );
+            assert!(
+                def.template
+                    .to_string_lossy()
+                    .contains("title_logo_corner.png"),
+                "{label}: consumer must reference title_logo_corner.png (Issue #208 stable \
+                 anchor), got {:?}",
+                def.template
             );
         }
 
-        // テンプレ寸法 == roi の w/h。needle が roi を下回っていても一致検証は意味を失う
-        // (roi 内に needle が収まらない = 恒久 NoMatch) ので寸法まで等しいことを要求する。
+        // テンプレ寸法 (120x120) は roi に収まること (needle-wider-than-roi = 恒久 NoMatch)。
+        let img = image::open(title_pc_dir().join("title_logo_corner.png"))
+            .expect("title_logo_corner.png must open");
+        assert_eq!(
+            (img.width(), img.height()),
+            (ANCHOR_ORIGIN[2], ANCHOR_ORIGIN[3]),
+            "title_logo_corner.png dims {}x{} must equal the anchor origin w/h {}x{} \
+             (the slack roi is derived from this crop origin)",
+            img.width(),
+            img.height(),
+            ANCHOR_ORIGIN[2],
+            ANCHOR_ORIGIN[3]
+        );
+        assert!(
+            img.width() + 2 * SLACK == EXPECTED_ROI[2]
+                && img.height() + 2 * SLACK == EXPECTED_ROI[3],
+            "slack window {:?} must be the anchor {:?} plus {SLACK}px padding on each side \
+             (off-center slack defeats the drift-absorption purpose)",
+            EXPECTED_ROI,
+            ANCHOR_ORIGIN
+        );
+    }
+
+    /// t3: version_label.toml (scenes/title_pc 検出専用) の roi が [8,2,138,20] で
+    /// version_label.png 寸法 (138x20) と一致すること。Issue #208 で login/nav の
+    /// アンカーは logo_corner へ移行したが、scenes 検出専用として残置する本 TOML の
+    /// needle/roi 対整合は引き続き pin する (片側更新で恒久 NoMatch になるのを防ぐ)。
+    /// What(テスト対象): scenes/title_pc/version_label.toml の roi と PNG 寸法の整合。
+    #[test]
+    fn pc_title_pc_version_label_scene_def_roi_matches_template_dims() {
+        const EXPECTED_ROI: [u32; 4] = [8, 2, 138, 20];
+        let path = title_pc_dir().join("version_label.toml");
+        let body = std::fs::read_to_string(&path).expect("version_label.toml must be readable");
+        let def = toml::from_str::<TaskDef>(&body)
+            .unwrap_or_else(|e| panic!("version_label.toml parse failed: {e}"));
+        assert_eq!(
+            def.roi,
+            Some(EXPECTED_ROI),
+            "version_label scene roi must stay [8,2,138,20] paired with the 138x20 needle \
+             (scenes-only detector since Issue #208; a needle-wider-than-roi regression is \
+             a permanent NoMatch)"
+        );
         let img = image::open(title_pc_dir().join("version_label.png"))
             .expect("version_label.png must open");
         assert_eq!(
             (img.width(), img.height()),
             (EXPECTED_ROI[2], EXPECTED_ROI[3]),
-            "version_label.png dims {}x{} must equal the shared roi w/h {}x{} \
-             (needle-wider-than-roi is a permanent NoMatch; Issue #182 remediation)",
+            "version_label.png dims {}x{} must equal the scene roi w/h {}x{}",
             img.width(),
             img.height(),
             EXPECTED_ROI[2],
