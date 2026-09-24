@@ -15,12 +15,14 @@ algorithm = "ccoeff"
 #   ID 帯はバージョン/ID 文字列が変わる内容可変資産で cross-capture 安定性が原理的に
 #   ない (#182 版 conf 0.94 → #208 再生成版も 07-07 probe には一致せず None)。
 #   logo_corner は probe 実測 conf 0.9848 (pc-e2e) の安定テクスチャ特徴
-#   (find_logo_corner_subfeature.rs で選出)。roi は needle 再クロップ原点
-#   [624,263,120,120] を中心に ±10px のスラック窓 [614,253,140,140] (キャプチャ間の
-#   コンテンツ配置ドリフトを実測 (+2,-1) px 吸収。ぴったり ROI は最良一致位置を
+#   (find_logo_corner_subfeature.rs で選出)。roi は needle を囲むスラック窓
+#   (キャプチャ間のコンテンツ配置ドリフト吸収。ぴったり ROI は最良一致位置を
 #   roi 外に弾き conf 0.99→0.78 に崩壊するため、login/tap_title と同一の対)。
+#   Issue #210 実機検証 (2026-09-24): live「ロードゲーム」タイトルで needle 最良位置が
+#   (625,243) と約 20px 上方へドリフトし旧窓 [614,253,140,140] の上端を超過したため、
+#   観測 envelope を ±20px で囲む [604,223,160,180] へ拡張 (旧窓の厳密スーパーセット)。
 template  = "../../scenes/title_pc/title_logo_corner.png"
-roi       = [614, 253, 140, 140]
+roi       = [604, 223, 160, 180]
 threshold = 0.80
 # タップ位置: "Tap to Start" 正規化座標 (930,488)。
 #   1280x720 正規化 → RAW 1258x708 換算(比率維持): x≈914, y≈480。

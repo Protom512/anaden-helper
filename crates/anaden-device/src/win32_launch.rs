@@ -40,6 +40,7 @@ use tracing::{info, warn};
 use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
 use windows::Win32::System::Threading::{
     CREATE_NEW_PROCESS_GROUP, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
+    PROCESS_TERMINATE, TerminateProcess,
 };
 
 use crate::ensure::EnsureOutcome;
@@ -131,6 +132,10 @@ impl Win32Launch {
     /// リカバリフックから「強制再起動」のために呼ぶ。既存プロセスの有無は確認せず、
     /// 無条件で `Launcher.exe` を spawn する。spawn 失敗は `DeviceError::CommandFailed`。
     /// spawn は即座に帰る(Launcher は自身で子を起動して Exit 0 する設計)。
+    ///
+    /// **再起動 (リカバリ) 用には [`Self::restart_app`] を使うこと**: 本メソッドは
+    /// 既存プロセスの終了を待たないため、起動途中のゲームが残っている状態で
+    /// spawn するとランチャー二重起動になる (Issue #210 の再起動ストームの一因)。
     pub async fn launch_app(&self) -> Result<(), DeviceError> {
         let launcher = self.launcher.clone();
         let workdir = self.workdir.clone();
@@ -141,6 +146,85 @@ impl Win32Launch {
             })?
             .map_err(|e| DeviceError::CommandFailed { message: e })?;
         Ok(())
+    }
+
+    /// 既存の子プロセスを終了させてからランチャーを起動する (再起動・Issue #210)。
+    ///
+    /// 手順 (二重起動防止の構造保証):
+    /// 1. 子プロセス (`child`) が残っていれば全インスタンスを `TerminateProcess` で
+    ///    終了し、`exit_wait` 以内にプロセス一覧から消失するまでポーリングする。
+    ///    初回時点で存在しなければ何もせず素通りする (kill 不要の冪等再起動)。
+    /// 2. 消失を確認した後で `Launcher.exe` を 1 回だけ spawn する
+    ///    ([`Self::launch_app`] 相当)。起動完了 (タイトル到達) の待ちは呼出側の
+    ///    起動猶予 (engine の `with_recovery_grace`) が担う — 本メソッドは戻り値で
+    ///    「再 spawn してよい状態」になったことのみを保証する。
+    ///
+    /// `exit_wait` を経過しても子が残存する場合 (終了要求が拒否された等) は
+    /// `Err` を返す (spawn しない = 二重起動より fail-closed)。
+    pub async fn restart_app(&self, exit_wait: Duration) -> Result<(), DeviceError> {
+        let child = self.child.clone();
+        // (1) 既存子プロセスの終了 + 消失確認 (blocking: プロセス列挙 + sleep ポーリング)。
+        tokio::task::spawn_blocking(move || terminate_child_blocking(&child, exit_wait))
+            .await
+            .map_err(|e| DeviceError::CommandFailed {
+                message: format!("restart_app の blocking タスクがパニック/中止: {e}"),
+            })??;
+        // (2) 消失確認後にランチャーを 1 回だけ spawn。
+        self.launch_app().await
+    }
+}
+
+/// `restart_app` の (1) 終了待ち本体 (blocking)。
+///
+/// ループ毎にプロセス一覧から `child` (大文字小文字無視) を探し、残っていれば
+/// 全 PID へ `TerminateProcess` を発行して `POLL_INTERVAL` 待つ。すべて消失した時点で
+/// `Ok(())`。`exit_wait` の deadline を過ぎても残存すれば `Err` (fail-closed)。
+/// 個別 PID への終了要求エラー (権限等) は warn のみで再試行し、最終的な消失判定で
+/// 成否を決める (一時的エラーで再起動を諦めすぎない)。
+fn terminate_child_blocking(child: &str, exit_wait: Duration) -> Result<(), DeviceError> {
+    let deadline = Instant::now() + exit_wait;
+    loop {
+        let pids: Vec<u32> = match snapshot_processes() {
+            Ok(entries) => entries
+                .iter()
+                .filter(|e| e.name.eq_ignore_ascii_case(child))
+                .map(|e| e.pid)
+                .collect(),
+            Err(e) => {
+                return Err(DeviceError::CommandFailed {
+                    message: format!("Win32Launch: 再起動前スナップショット失敗: {e}"),
+                });
+            }
+        };
+        if pids.is_empty() {
+            info!("Win32Launch: 再起動前処理完了 — {child} は存在しない (二重起動なし)");
+            return Ok(());
+        }
+        info!("Win32Launch: 再起動のため既存 {child} を終了します (pids={pids:?}) — Issue #210");
+        for pid in pids {
+            if let Err(e) = terminate_pid(pid) {
+                warn!("Win32Launch: TerminateProcess({pid}) 失敗 (再試行): {e}");
+            }
+        }
+        if Instant::now() >= deadline {
+            return Err(DeviceError::CommandFailed {
+                message: format!(
+                    "Win32Launch: 再起動前の {child} 終了待ちが {exit_wait:?} でタイムアウト \
+                     (プロセス残存 = 二重起動防止のため spawn 中止)"
+                ),
+            });
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+}
+
+/// 指定 PID へ終了要求 (`TerminateProcess`・exit code 1) を出す。
+fn terminate_pid(pid: u32) -> windows::core::Result<()> {
+    unsafe {
+        let handle = OpenProcess(PROCESS_TERMINATE, false, pid)?;
+        let result = TerminateProcess(handle, 1);
+        let _ = CloseHandle(handle);
+        result
     }
 }
 
@@ -349,5 +433,99 @@ fn query_exit_code(pid: u32) -> windows::core::Result<u32> {
         let r = GetExitCodeProcess(handle, &mut code);
         let _ = CloseHandle(handle);
         r.map(|_| code)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::os::windows::process::CommandExt;
+
+    /// `restart_app` が「既存プロセス終了 → 消失確認 → launcher spawn 1 回」の順に
+    /// 動くことを実プロセスで検証する (Issue #210: 二重起動防止)。
+    ///
+    /// 手順: `ping.exe` を固有名 (`anaden_t210_child_<pid>.exe`) へコピーして
+    /// 約 60 秒生存するダミー子プロセスを起動する。`restart_app` は (1) このプロセスを
+    /// `TerminateProcess` で終了させ消失を確認してから (2) launcher (ping コピー・
+    /// 引数なしなので即終了) を spawn する。検証事項:
+    /// - `restart_app` が `Ok` を返すこと (子の終了待ちが deadline 内に完了)。
+    /// - ダミー子がプロセス一覧から消失していること (= spawn より前に終了確認済み)。
+    ///
+    /// 生存確認のためにプロセス名の衝突を避ける固有名を使うため、並列実行にも安全。
+    #[tokio::test]
+    async fn restart_app_terminates_existing_child_before_spawn() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let uniq = std::process::id();
+        let child_name = format!("anaden_t210_child_{uniq}.exe");
+        let launcher_name = format!("anaden_t210_launcher_{uniq}.exe");
+        let system_root = std::env::var_os("SystemRoot").expect("SystemRoot");
+        let ping = std::path::Path::new(&system_root)
+            .join("System32")
+            .join("ping.exe");
+        let child_exe = tmp.path().join(&child_name);
+        let launcher_exe = tmp.path().join(&launcher_name);
+        std::fs::copy(&ping, &child_exe).expect("copy ping as dummy child");
+        std::fs::copy(&ping, &launcher_exe).expect("copy ping as dummy launcher");
+
+        // ダミー子プロセス起動 (61 回 ping = 約 60 秒生存・stdio null で出力破棄)。
+        let mut spawned = Command::new(&child_exe)
+            .args(["-n", "61", "127.0.0.1"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .creation_flags(CREATE_NEW_PROCESS_GROUP.0)
+            .spawn()
+            .expect("spawn dummy child");
+        // 子がプロセス一覧へ出現するまで待つ (最大 10 秒)。
+        let appear_deadline = Instant::now() + Duration::from_secs(10);
+        while !child_exists(&child_name) {
+            assert!(
+                Instant::now() < appear_deadline,
+                "dummy child did not appear in process list"
+            );
+            std::thread::sleep(Duration::from_millis(100));
+        }
+
+        let launch = Win32Launch::new(
+            launcher_exe.to_str().expect("launcher path utf8"),
+            tmp.path().to_str().expect("tempdir path utf8"),
+            &child_name,
+        );
+        launch
+            .restart_app(Duration::from_secs(15))
+            .await
+            .expect("restart_app must terminate child then spawn launcher");
+
+        // ダミー子は終了済み (= launcher spawn より前に終了確認が完了した証拠)。
+        assert!(
+            !child_exists(&child_name),
+            "existing child must be terminated (and confirmed gone) before spawn"
+        );
+        // std::process::Child も終了を観測できる (kill されていれば即座に返る)。
+        let _ = spawned.wait();
+
+        // launcher コピー (引数なし ping = 即終了) の残存を掃除する (fail-safe)。
+        let gone_deadline = Instant::now() + Duration::from_secs(10);
+        while child_exists(&launcher_name) {
+            if Instant::now() >= gone_deadline {
+                if let Ok(entries) = snapshot_processes() {
+                    for e in entries
+                        .into_iter()
+                        .filter(|e| e.name.eq_ignore_ascii_case(&launcher_name))
+                    {
+                        let _ = terminate_pid(e.pid);
+                    }
+                }
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(100));
+        }
+        assert!(
+            !child_exists(&launcher_name),
+            "dummy launcher must not linger"
+        );
     }
 }

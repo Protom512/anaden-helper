@@ -21,9 +21,12 @@ template  = "../../scenes/title_pc/title_logo_corner.png"
 #   roi 60x60 に収まらず ccoeff が恒久 NoMatch だった (#182 version_label と同種の片側更新バグ:
 #   PR #47 が needle を再クロップした際に消費者側 roi を対更新しなかった)。
 #   Issue #208: needle==roi 幅のぴったり指定はキャプチャ間ドリフト (実測 (+2,-1) px) で
-#   conf 0.99→0.78 に崩壊するため、原点 [624,263,120,120] 中心 ±10px のスラック窓へ拡張
+#   conf 0.99→0.78 に崩壊するため、原点 [624,263,120,120] 中心のスラック窓へ拡張
 #   (login/tap_title・nav_to_field_pc/tap_to_start と同一の対更新)。
-roi       = [614, 253, 140, 140]
+#   Issue #210 実機検証 (2026-09-24): live「ロードゲーム」タイトルで needle 最良位置が
+#   (625,243) と約 20px 上方へドリフトしたため、観測 envelope を ±20px で囲む
+#   [604,223,160,180] へ再拡張 (旧窓 [614,253,140,140] の厳密スーパーセット)。
+roi       = [604, 223, 160, 180]
 threshold = 0.80
 # タップ位置: "Continue/Load" ボタン中央。
 #   legacy _title_load/load_game.toml の click_rect roi=[625,273,30,30] (1280x720 正規化) を
