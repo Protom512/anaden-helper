@@ -29,10 +29,18 @@ pub trait PipelineInvoker: Send + Sync {
 /// ステップの実行結果分類。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepStatus {
-    /// 正常完了 (Stop/TerminalTask/GoalReached/MaxIterations 到達)。
+    /// 正常完了 (Stop/TerminalTask/GoalReached、または成果物のある MaxIterations 到達)。
     Completed(LoopStopReason),
     /// 失敗 (CaptureError/ExecuteError/GoalTimeout または invoker エラー)。
     Failed(LoopStopReason),
+    /// MaxIterations 到達かつ一度も発火していない (no_fire・Issue #210)。
+    ///
+    /// 「サイクルを使い切ったが何も起こせなかった」= 完了ではなく失敗扱いにする
+    /// 明示的な終端。従来は MaxIterations が無条件で Completed になり、
+    /// routine 全 NoMatch・fired=0 でも exit 0「完了」と報告されていた誤解を解消する。
+    /// [`StepStatus::Failed`] と同じく失敗系 ([`Self::is_failure`] = true) で
+    /// on_failure ポリシーの対象。
+    NoFire(LoopStopReason),
     /// Ctrl+C 等の割り込みで中断 (on_failure ポリシーの対象外 = 常に中止)。
     Interrupted,
     /// 実行しなかった (前方ステップ失敗 + on_failure=Stop、または割り込み後の残ステップ)。
@@ -42,10 +50,13 @@ pub enum StepStatus {
 }
 
 impl StepStatus {
-    /// 失敗系 (Failed/InvokerError) かどうか。
+    /// 失敗系 (Failed/NoFire/InvokerError) かどうか。
     #[must_use]
     pub fn is_failure(&self) -> bool {
-        matches!(self, Self::Failed(_) | Self::InvokerError(_))
+        matches!(
+            self,
+            Self::Failed(_) | Self::NoFire(_) | Self::InvokerError(_)
+        )
     }
 }
 
@@ -133,6 +144,8 @@ impl RoutineSummary {
 /// [`LoopStopReason`] を routine ステップの成否へ分類する。
 ///
 /// - Completed: Stop / TerminalTask / GoalReached / MaxIterations
+///   (MaxIterations は成果物 (fired) の有無で [`StepStatus::NoFire`] へ切り替わる。
+///   判定は内部の step_result が発火数を併せて行う。本純関数は理由のみの射影)
 /// - Failed:    CaptureError / ExecuteError / GoalTimeout
 /// - Interrupted: 割り込み (ユーザー中止 = on_failure に関わらず routine 中止)
 #[must_use]
@@ -155,6 +168,7 @@ pub fn step_status_label(status: &StepStatus) -> String {
     match status {
         StepStatus::Completed(reason) => format!("完了 ({})", reason_label(reason)),
         StepStatus::Failed(reason) => format!("失敗 ({})", reason_label(reason)),
+        StepStatus::NoFire(reason) => format!("失敗 ({}・発火なし)", reason_label(reason)),
         StepStatus::Interrupted => "割り込み".to_string(),
         StepStatus::Skipped => "スキップ".to_string(),
         StepStatus::InvokerError(e) => format!("失敗 (invoker: {e})"),
@@ -180,8 +194,8 @@ pub fn reason_label(reason: &LoopStopReason) -> &'static str {
 ///
 /// 事前に [`RoutineDef::validate`] 済みの定義を渡すこと (本関数は再検証しない)。
 /// - 各ステップを定義順に [`PipelineInvoker::invoke`] で実行し、
-///   [`classify_reason`] で成否を分類する。
-/// - 失敗 (Failed/InvokerError) 時: `on_failure == Stop` なら残りを
+///   内部の step_result (理由 + 発火数) で成否を分類する。
+/// - 失敗 (Failed/NoFire/InvokerError) 時: `on_failure == Stop` なら残りを
 ///   [`StepStatus::Skipped`] として中止。`Skip` なら次ステップへ継続。
 /// - 割り込み (Interrupted): ポリシーに関わらず残りを Skipped として中止。
 ///
@@ -219,11 +233,22 @@ pub async fn run_routine(def: &RoutineDef, invoker: &dyn PipelineInvoker) -> Rou
 }
 
 /// [`LoopOutcome`] からステップ記録を組み立てる。
+///
+/// MaxIterations 到達かつ一度も発火していない (fired=0) 場合は [`StepStatus::NoFire`]
+/// (失敗扱い・Issue #210)。サイクルを使い切って何も起こせなかったステップを
+/// 「完了」と報告する従来の誤解を解消する。fired >= 1 の MaxIterations は
+/// 従来どおり Completed (成果物のある打切り)。
 fn step_result(step: &RoutineStep, outcome: LoopOutcome) -> RoutineStepResult {
+    let status =
+        if outcome.reason == LoopStopReason::MaxIterations && outcome.fired_commands.is_empty() {
+            StepStatus::NoFire(outcome.reason)
+        } else {
+            classify_reason(&outcome.reason)
+        };
     RoutineStepResult {
         step: step.name.clone(),
         pipeline_dir: step.pipeline_dir.clone(),
-        status: classify_reason(&outcome.reason),
+        status,
         iterations: outcome.iterations,
         fired_count: outcome.fired_commands.len(),
         terminal: outcome.terminal,
@@ -436,9 +461,10 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn max_iterations_counts_as_completed() {
+    async fn max_iterations_with_fired_counts_as_completed() {
+        // 成果物 (fired >= 1) がある MaxIterations は従来どおり完了扱い。
         let invoker =
-            RecordingInvoker::new(vec![Ok(outcome(LoopStopReason::MaxIterations, 10, 0))]);
+            RecordingInvoker::new(vec![Ok(outcome(LoopStopReason::MaxIterations, 10, 1))]);
         let def = RoutineDef {
             name: "r".to_string(),
             steps: vec![step("s1", OnFailure::Stop)],
@@ -446,6 +472,54 @@ mod tests {
         let summary = run_routine(&def, &invoker).await;
         assert_eq!(summary.completed, 1);
         assert!(summary.all_ok());
+    }
+
+    // ---- Issue #210: MaxIterations + fired=0 は no_fire 失敗扱い ----
+
+    /// サイクルを使い切って一度も発火していないステップは NoFire (= 失敗) に分類され、
+    /// routine 全体も all_ok=false (exit 2) になること。
+    #[tokio::test]
+    async fn max_iterations_zero_fired_is_nofire_failure() {
+        let invoker =
+            RecordingInvoker::new(vec![Ok(outcome(LoopStopReason::MaxIterations, 10, 0))]);
+        let def = RoutineDef {
+            name: "r".to_string(),
+            steps: vec![step("s1", OnFailure::Stop)],
+        };
+        let summary = run_routine(&def, &invoker).await;
+        assert_eq!(
+            summary.completed, 0,
+            "fired=0 の MaxIterations は完了扱いにしない"
+        );
+        assert_eq!(summary.failed, 1);
+        assert!(matches!(
+            summary.results[0].status,
+            StepStatus::NoFire(LoopStopReason::MaxIterations)
+        ));
+        assert!(
+            !summary.all_ok(),
+            "no_fire ステップがある routine は exit 2 相当"
+        );
+        // ラベルに「発火なし」が明示されること (サマリの誠実表示)。
+        let label = step_status_label(&summary.results[0].status);
+        assert!(label.contains("発火なし"), "label: {label}");
+        assert!(label.contains("失敗"), "label: {label}");
+    }
+
+    /// no_fire も on_failure ポリシーの対象: stop なら残りステップをスキップして中止。
+    #[tokio::test]
+    async fn nofire_failure_follows_on_failure_policy() {
+        let invoker = RecordingInvoker::new(vec![
+            Ok(outcome(LoopStopReason::MaxIterations, 10, 0)), // no_fire
+            Ok(outcome(LoopStopReason::Stop, 9, 9)),           // 呼ばれない
+        ]);
+        let def = two_step_def(OnFailure::Stop);
+        let summary = run_routine(&def, &invoker).await;
+        assert_eq!(invoker.recorded(), vec!["s1"], "s2 must not run");
+        assert_eq!(summary.failed, 1);
+        assert_eq!(summary.skipped, 1);
+        assert!(summary.aborted);
+        assert_eq!(summary.results[1].status, StepStatus::Skipped);
     }
 
     // ---- on_failure ポリシー ----

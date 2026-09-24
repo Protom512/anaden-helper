@@ -43,6 +43,124 @@ use crate::pipeline_runner::{InputCommand, PipelineState};
 pub type RecoveryHook =
     Box<dyn FnMut(u32) -> Pin<Box<dyn Future<Output = Result<(), DeviceError>> + Send>> + Send>;
 
+/// リカバリ後の起動猶予 (boot-wait) 判定に使う経過時間の供給抽象 (Issue #210)。
+///
+/// `run_loop_with_recovery` / `run_loop_with_goal` はリカバリフック成功後に
+/// [`PipelineDriver::with_recovery_grace`] で設定した猶予期間だけ NoMatch streak の
+/// 蓄積を止める (ゲーム再起動 → タイトル到達には分単位かかるため、起動途中の
+/// プロセスを再び殺す「再起動ストーム」を構造的に防ぐ)。猶予判定に必要なのは
+/// 「ループ開始からの経過時間」のみのため、本 trait は [`GoalClock`] と同じ設計方針
+/// (本番は `Instant` 計測・テストは決定論的ステップ、`tokio::time::pause` をドライバへ
+/// 導入しない) で時間を注入可能にする。`&mut self` はテスト impl が「呼出毎に時間を
+/// 進める」副作用を持てるようにするため。
+///
+/// `Send + Sync` はドライバ構造体のフィールドとして保持される (`Box<dyn …>` を
+/// await 点を跨いだ `&self` メソッドで使う) ために必要。
+pub trait RecoveryClock: Send + Sync {
+    /// ループ開始からの経過時間を返す。
+    fn elapsed(&mut self) -> Duration;
+}
+
+/// [`RecoveryClock`] の本番実装。`Instant::now()` 差分で実時間を計測する。
+pub struct SystemRecoveryClock {
+    started: Instant,
+}
+
+impl SystemRecoveryClock {
+    /// 現在時刻を起点に計測を開始する。
+    pub fn new() -> Self {
+        Self {
+            started: Instant::now(),
+        }
+    }
+}
+
+impl Default for SystemRecoveryClock {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl RecoveryClock for SystemRecoveryClock {
+    fn elapsed(&mut self) -> Duration {
+        self.started.elapsed()
+    }
+}
+
+/// NoMatch streak + リカバリ後起動猶予 (boot-wait) の純粋状態機械 (Issue #210)。
+///
+/// 時間 (`now`: ループ開始からの経過時間) を全メソッドの引数で外部注入する
+/// (内部時計を持たない = 単体テストが決定論的)。状態遷移:
+///
+/// - `record_miss(now)`: NoMatch / FiredUnverified 1 回分。猶予中 (`in_grace`) は
+///   streak を増やさず [`false`] を返す (capture は継続し、マッチすれば即通常動作)。
+///   猶予外なら streak +1 し、閾値到達で [`true`] (リカバリフックを呼ぶべき) を返す。
+/// - `record_match()`: Fired / NoFire (テンプレートマッチ成功)。streak をリセットし、
+///   猶予タイマーも解除する (画面が認識できた = 起動完了なので boot-wait は不要)。
+/// - `recovered(now)`: リカバリフック成功直後。streak をリセットし、猶予タイマーを
+///   `now` から `grace` 間だけ開始する。
+///
+/// `grace == Duration::ZERO` のとき `in_grace` は常に [`false`] = 猶予なしの従来挙動
+/// (猶予導入前のテスト契約を 1 ビットも変えない)。
+struct RecoveryGuard {
+    /// NoMatch 連続でリカバリを発火する閾値。0 はリカバリ無効。
+    threshold: u32,
+    /// リカバリ成功後の起動猶予期間。
+    grace: Duration,
+    /// 現在の NoMatch 連続回数。
+    streak: u32,
+    /// 直近のリカバリ成功時刻 (ループ開始からの経過時間)。未実施なら [`None`]。
+    recovered_at: Option<Duration>,
+}
+
+impl RecoveryGuard {
+    fn new(threshold: u32, grace: Duration) -> Self {
+        Self {
+            threshold,
+            grace,
+            streak: 0,
+            recovered_at: None,
+        }
+    }
+
+    /// 現在の NoMatch 連続回数。
+    fn streak(&self) -> u32 {
+        self.streak
+    }
+
+    /// 起動猶予 (boot-wait) 中か。リカバリ未実施、または `grace` 経過済みなら [`false`]。
+    fn in_grace(&self, now: Duration) -> bool {
+        match self.recovered_at {
+            Some(t) => now.saturating_sub(t) < self.grace,
+            None => false,
+        }
+    }
+
+    /// NoMatch / FiredUnverified を 1 回記録する。猶予中はカウントせず [`false`]。
+    /// 猶予外で streak が `threshold` に達したら [`true`] (リカバリ発火)。
+    /// `threshold == 0` (リカバリ無効) では常に [`false`]。
+    fn record_miss(&mut self, now: Duration) -> bool {
+        if self.in_grace(now) {
+            return false;
+        }
+        self.streak = self.streak.saturating_add(1);
+        self.threshold > 0 && self.streak >= self.threshold
+    }
+
+    /// テンプレートマッチ成功 (Fired / NoFire) を記録する。
+    /// streak をリセットし、起動猶予も解除する (画面認識 = 起動完了)。
+    fn record_match(&mut self) {
+        self.streak = 0;
+        self.recovered_at = None;
+    }
+
+    /// リカバリフック成功を記録する。streak をリセットし、`now` から猶予タイマーを開始。
+    fn recovered(&mut self, now: Duration) {
+        self.streak = 0;
+        self.recovered_at = Some(now);
+    }
+}
+
 /// ゴール評価用の経過時間計測の抽象(Issue #37 T4)。
 ///
 /// [`anaden_core::goal::evaluate`] は `elapsed_secs` を純粋パラメータとして受け取るため、
@@ -246,6 +364,13 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// 診断レポート保存の連番(Issue #71)。ANADEN_DIAG_REPORT 設定時に
     /// NoMatch 発生でインクリメントしてファイル名へ埋める。
     diag_counter: u64,
+    /// リカバリ (ゲーム再起動) 後の起動猶予 (boot-wait) 期間 (Issue #210)。
+    /// 既定 [`Duration::ZERO`] (猶予なし = 従来挙動・後方互換)。
+    /// [`Self::with_recovery_grace`] で設定する。
+    recovery_grace: Duration,
+    /// 猶予判定用の経過時間供給 (Issue #210)。本番は [`SystemRecoveryClock`]、
+    /// テストは [`Self::with_recovery_clock`] で決定論的クロックへ差し替える。
+    recovery_clock: Box<dyn RecoveryClock>,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -275,6 +400,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             cancel: None,
             snapshot_counter: 0,
             diag_counter: 0,
+            recovery_grace: Duration::ZERO,
+            recovery_clock: Box::new(SystemRecoveryClock::new()),
         }
     }
 
@@ -301,6 +428,28 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// [`tokio::select!`] で cancel 通知を即時受け取るようになる。
     pub fn with_cancel(mut self, token: CancellationToken) -> Self {
         self.cancel = Some(token);
+        self
+    }
+
+    /// リカバリ (ゲーム再起動) 後の起動猶予 (boot-wait) 期間を設定する (Issue #210)。
+    ///
+    /// 呼ばない場合の既定は [`Duration::ZERO`] (猶予なし = 従来挙動・後方互換)。
+    /// 正の値を設定すると、リカバリフック成功から `grace` 経過までは NoMatch /
+    /// FiredUnverified が streak を増やさない (再起動ストーム防止)。capture は
+    /// 継続され、猶予中にテンプレートがマッチすれば即座に通常動作へ復帰する
+    /// (マッチ自体が「起動完了 = ready」のシグナルになるため、猶予を待つより早い)。
+    pub fn with_recovery_grace(mut self, grace: Duration) -> Self {
+        self.recovery_grace = grace;
+        self
+    }
+
+    /// 猶予判定用のクロックを差し替える (主にテスト用・Issue #210)。
+    ///
+    /// 呼ばない場合の既定は [`SystemRecoveryClock`] (実時間計測)。テストは
+    /// 決定論的に時間を進める [`RecoveryClock`] impl を注入できる
+    /// ([`GoalClock`] の FakeClock と同じ方針 — `tokio::time::pause` 非導入)。
+    pub fn with_recovery_clock(mut self, clock: Box<dyn RecoveryClock>) -> Self {
+        self.recovery_clock = clock;
         self
     }
 
@@ -824,6 +973,16 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// で停止(re-launch のプロセス起動失敗等)。`threshold == 0` または `recover == None` なら
     /// リカバリ無効(通常の [`Self::run_loop`] と等価)。
     ///
+    /// # 起動猶予 (boot-wait・Issue #210)
+    ///
+    /// [`Self::with_recovery_grace`] で正の猶予を設定した場合、リカバリフック成功から
+    /// 猶予期間が経過するまで NoMatch / FiredUnverified を streak に加算しない
+    /// (ゲーム再起動 → タイトル到達に分単位かかるため、起動途中の再発火
+    /// = 再起動ストームを構造的に防ぐ)。capture は継続し、猶予中にテンプレートが
+    /// マッチすれば即座に通常動作へ復帰する(マッチ = 起動完了のシグナル)。
+    /// 猶予明け後は streak が 0 から再開し、閾値再到達で次のリカバリが発火する。
+    /// 既定 (`Duration::ZERO`) は猶予なし = 従来挙動(後方互換)。
+    ///
     /// 本メソッドは非ゴールモード([`Self::run_loop_with_goal`] へ `goal=None` を渡すのと等価)。
     /// 宣言的ゴールで停止するには [`Self::run_loop_with_goal`] を使うこと。
     pub async fn run_loop_with_recovery(
@@ -838,7 +997,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         // コストが高い+実装上の理由がない)。ゴール評価付きは run_loop_with_goal を直接呼ぶこと。
         let mut iterations = 0u64;
         let mut fired: Vec<InputCommand> = Vec::new();
-        let mut nomatch_streak: u32 = 0;
+        let mut guard = RecoveryGuard::new(recover_nomatch_threshold, self.recovery_grace);
         let recovery_enabled = recover_nomatch_threshold > 0 && recover.is_some();
         let started = Instant::now();
         let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
@@ -876,7 +1035,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     next_current,
                     fired: just_fired,
                 } => {
-                    nomatch_streak = 0;
+                    guard.record_match();
                     bump_task_match(&current_before, &mut per_task_matches);
                     if let Some(c) = just_fired {
                         fired.push(c);
@@ -896,7 +1055,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     }
                 }
                 StepOutcome::NoFire { next_current } => {
-                    nomatch_streak = 0;
+                    guard.record_match();
                     bump_task_match(&current_before, &mut per_task_matches);
                     match next_current {
                         None => {
@@ -913,17 +1072,23 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     }
                 }
                 StepOutcome::NoMatch => {
-                    nomatch_streak = nomatch_streak.saturating_add(1);
-                    if recovery_enabled && nomatch_streak >= recover_nomatch_threshold {
+                    let now = self.recovery_clock.elapsed();
+                    if recovery_enabled && guard.record_miss(now) {
                         info!(
                             "NoMatch streak {} >= threshold {}; invoking recovery hook",
-                            nomatch_streak, recover_nomatch_threshold
+                            guard.streak(),
+                            recover_nomatch_threshold
                         );
                         if let Some(hook) = recover.as_mut() {
-                            match hook(nomatch_streak).await {
+                            match hook(guard.streak()).await {
                                 Ok(()) => {
-                                    info!("recovery hook succeeded; resetting NoMatch streak");
-                                    nomatch_streak = 0;
+                                    let recovered_at = self.recovery_clock.elapsed();
+                                    info!(
+                                        "recovery hook succeeded; resetting NoMatch streak \
+                                         + boot grace {:?} (Issue #210)",
+                                        self.recovery_grace
+                                    );
+                                    guard.recovered(recovered_at);
                                 }
                                 Err(e) => {
                                     warn!("recovery hook failed: {e}");
@@ -948,17 +1113,23 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     if let Some(c) = just_fired {
                         fired.push(c);
                     }
-                    nomatch_streak = nomatch_streak.saturating_add(1);
-                    if recovery_enabled && nomatch_streak >= recover_nomatch_threshold {
+                    let now = self.recovery_clock.elapsed();
+                    if recovery_enabled && guard.record_miss(now) {
                         info!(
                             "FiredUnverified streak {} >= threshold {}; invoking recovery hook",
-                            nomatch_streak, recover_nomatch_threshold
+                            guard.streak(),
+                            recover_nomatch_threshold
                         );
                         if let Some(hook) = recover.as_mut() {
-                            match hook(nomatch_streak).await {
+                            match hook(guard.streak()).await {
                                 Ok(()) => {
-                                    info!("recovery hook succeeded; resetting streak");
-                                    nomatch_streak = 0;
+                                    let recovered_at = self.recovery_clock.elapsed();
+                                    info!(
+                                        "recovery hook succeeded; resetting streak \
+                                         + boot grace {:?} (Issue #210)",
+                                        self.recovery_grace
+                                    );
+                                    guard.recovered(recovered_at);
                                 }
                                 Err(e) => {
                                     warn!("recovery hook failed: {e}");
@@ -976,19 +1147,66 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     }
                 }
                 StepOutcome::Error(msg) => {
-                    let reason = if msg.starts_with("capture") {
-                        LoopStopReason::CaptureError
+                    // Issue #210: 起動猶予 (boot-wait) 中の capture エラーはゲーム再起動
+                    // 直後の一過状態 (プロセス/ウィンドウ未存在 → GetClientRect 失敗等) と
+                    // して許容し、ループを継続する (grace 中は streak 加算も抑制済み)。
+                    // 猶予外の capture エラーも、recovery hook が有効なら「ゲームが死んで
+                    // いる」(初回起動前・クラッシュ直後) 可能性が高いため recovery を呼んで
+                    // grace へ入る (issue210-verify で初回起動前 io_error 即死した事例)。
+                    // recovery 無効・失敗時と execute エラーは従来どおり即停止 (fail-closed)。
+                    if msg.starts_with("capture") {
+                        let now = self.recovery_clock.elapsed();
+                        if guard.in_grace(now) {
+                            warn!(
+                                "pipeline capture error during boot grace (game restarting): {msg}"
+                            );
+                        } else if recovery_enabled {
+                            info!(
+                                "capture error outside grace; invoking recovery hook (game presumed dead): {msg}"
+                            );
+                            if let Some(hook) = recover.as_mut() {
+                                match hook(guard.streak()).await {
+                                    Ok(()) => {
+                                        let recovered_at = self.recovery_clock.elapsed();
+                                        info!(
+                                            "recovery hook succeeded; entering boot grace {:?} (Issue #210)",
+                                            self.recovery_grace
+                                        );
+                                        guard.recovered(recovered_at);
+                                    }
+                                    Err(e) => {
+                                        warn!("recovery hook failed: {e}");
+                                        return self.build_outcome(
+                                            iterations - 1,
+                                            fired,
+                                            LoopStopReason::ExecuteError,
+                                            "recovery_failed",
+                                            per_task_matches,
+                                            started,
+                                        );
+                                    }
+                                }
+                            }
+                        } else {
+                            return self.build_outcome(
+                                iterations - 1,
+                                fired,
+                                LoopStopReason::CaptureError,
+                                "io_error",
+                                per_task_matches,
+                                started,
+                            );
+                        }
                     } else {
-                        LoopStopReason::ExecuteError
-                    };
-                    return self.build_outcome(
-                        iterations - 1,
-                        fired,
-                        reason,
-                        "io_error",
-                        per_task_matches,
-                        started,
-                    );
+                        return self.build_outcome(
+                            iterations - 1,
+                            fired,
+                            LoopStopReason::ExecuteError,
+                            "io_error",
+                            per_task_matches,
+                            started,
+                        );
+                    }
                 }
             }
             // interval 待ちを cancel 通知で即時抜けられるように select! 化。
@@ -1043,7 +1261,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         //  既存テスト(MaxIterations 等)へ一切影響を与えないため。)
         let mut iterations = 0u64;
         let mut fired: Vec<InputCommand> = Vec::new();
-        let mut nomatch_streak: u32 = 0;
+        let mut guard = RecoveryGuard::new(recover_nomatch_threshold, self.recovery_grace);
         let recovery_enabled = recover_nomatch_threshold > 0 && recover.is_some();
         let started = Instant::now();
         let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
@@ -1092,7 +1310,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     next_current,
                     fired: just_fired,
                 } => {
-                    nomatch_streak = 0;
+                    guard.record_match();
                     bump_task_match(&current_before, &mut per_task_matches);
                     if let Some(c) = just_fired {
                         fired.push(c);
@@ -1128,7 +1346,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     }
                 }
                 StepOutcome::NoFire { next_current } => {
-                    nomatch_streak = 0;
+                    guard.record_match();
                     bump_task_match(&current_before, &mut per_task_matches);
                     goal_ctx.tick(match_info);
                     let elapsed = clock.elapsed_secs();
@@ -1160,7 +1378,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     }
                 }
                 StepOutcome::NoMatch => {
-                    nomatch_streak = nomatch_streak.saturating_add(1);
+                    let now = self.recovery_clock.elapsed();
+                    let due = recovery_enabled && guard.record_miss(now);
                     goal_ctx.tick(match_info);
                     let elapsed = clock.elapsed_secs();
                     if let Some(stop) = self.evaluate_goal(
@@ -1176,16 +1395,22 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     ) {
                         return stop;
                     }
-                    if recovery_enabled && nomatch_streak >= recover_nomatch_threshold {
+                    if due {
                         info!(
                             "NoMatch streak {} >= threshold {}; invoking recovery hook",
-                            nomatch_streak, recover_nomatch_threshold
+                            guard.streak(),
+                            recover_nomatch_threshold
                         );
                         if let Some(hook) = recover.as_mut() {
-                            match hook(nomatch_streak).await {
+                            match hook(guard.streak()).await {
                                 Ok(()) => {
-                                    info!("recovery hook succeeded; resetting NoMatch streak");
-                                    nomatch_streak = 0;
+                                    let recovered_at = self.recovery_clock.elapsed();
+                                    info!(
+                                        "recovery hook succeeded; resetting NoMatch streak \
+                                         + boot grace {:?} (Issue #210)",
+                                        self.recovery_grace
+                                    );
+                                    guard.recovered(recovered_at);
                                 }
                                 Err(e) => {
                                     warn!("recovery hook failed: {e}");
@@ -1210,7 +1435,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     if let Some(c) = just_fired {
                         fired.push(c);
                     }
-                    nomatch_streak = nomatch_streak.saturating_add(1);
+                    let now = self.recovery_clock.elapsed();
+                    let due = recovery_enabled && guard.record_miss(now);
                     goal_ctx.tick(match_info);
                     let elapsed = clock.elapsed_secs();
                     if let Some(stop) = self.evaluate_goal(
@@ -1226,16 +1452,22 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     ) {
                         return stop;
                     }
-                    if recovery_enabled && nomatch_streak >= recover_nomatch_threshold {
+                    if due {
                         info!(
                             "FiredUnverified streak {} >= threshold {}; invoking recovery hook",
-                            nomatch_streak, recover_nomatch_threshold
+                            guard.streak(),
+                            recover_nomatch_threshold
                         );
                         if let Some(hook) = recover.as_mut() {
-                            match hook(nomatch_streak).await {
+                            match hook(guard.streak()).await {
                                 Ok(()) => {
-                                    info!("recovery hook succeeded; resetting streak");
-                                    nomatch_streak = 0;
+                                    let recovered_at = self.recovery_clock.elapsed();
+                                    info!(
+                                        "recovery hook succeeded; resetting streak \
+                                         + boot grace {:?} (Issue #210)",
+                                        self.recovery_grace
+                                    );
+                                    guard.recovered(recovered_at);
                                 }
                                 Err(e) => {
                                     warn!("recovery hook failed: {e}");
@@ -1253,19 +1485,25 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     }
                 }
                 StepOutcome::Error(msg) => {
-                    let reason = if msg.starts_with("capture") {
-                        LoopStopReason::CaptureError
+                    // Issue #210: 起動猶予中の capture エラーは一過状態として許容
+                    // (run_loop_with_recovery と同一契約の詳細はそちらのコメント参照)。
+                    if msg.starts_with("capture") && guard.in_grace(self.recovery_clock.elapsed()) {
+                        warn!("pipeline capture error during boot grace (game restarting): {msg}");
                     } else {
-                        LoopStopReason::ExecuteError
-                    };
-                    return self.build_outcome(
-                        iterations - 1,
-                        fired,
-                        reason,
-                        "io_error",
-                        per_task_matches,
-                        started,
-                    );
+                        let reason = if msg.starts_with("capture") {
+                            LoopStopReason::CaptureError
+                        } else {
+                            LoopStopReason::ExecuteError
+                        };
+                        return self.build_outcome(
+                            iterations - 1,
+                            fired,
+                            reason,
+                            "io_error",
+                            per_task_matches,
+                            started,
+                        );
+                    }
                 }
             }
             // interval 待ちを cancel 通知で即時抜けられるように select! 化。
@@ -2085,6 +2323,275 @@ mod tests {
             .await;
         assert_eq!(outcome.reason, LoopStopReason::ExecuteError);
         assert_eq!(outcome.terminal, "recovery_failed");
+    }
+
+    // ---- (5b) Issue #210: リカバリ後の起動猶予 (boot-wait) ----
+    //
+    // 再起動ストーム (recovery は spawn-only 3ms で起動完了を待たない vs ゲームの
+    // タイトル到達は分単位 → 起動途中のゲームを殺し続ける) を構造的に防ぐ猶予の検証。
+    // 時間は SteppingRecoveryClock (呼出毎に一定量進む fake) で決定論的に注入する
+    // (GoalClock/FakeClock と同じ方針 — tokio::time::pause 非導入)。
+
+    /// 呼出毎に `step` ずつ時間が進むテスト用 [`RecoveryClock`]。
+    struct SteppingRecoveryClock {
+        next: Duration,
+        step: Duration,
+    }
+
+    impl SteppingRecoveryClock {
+        fn new(step: Duration) -> Self {
+            Self {
+                next: Duration::ZERO,
+                step,
+            }
+        }
+    }
+
+    impl RecoveryClock for SteppingRecoveryClock {
+        fn elapsed(&mut self) -> Duration {
+            let now = self.next;
+            self.next += self.step;
+            now
+        }
+    }
+
+    /// 猶予 + fake クロックを備えた NoMatch driver を構築するヘルパ。
+    fn build_grace_driver(
+        frames: Arc<Mutex<VecDeque<DynamicImage>>>,
+        grace: Duration,
+        clock: Box<dyn RecoveryClock>,
+    ) -> PipelineDriver<FakeCapture, FakeInput> {
+        PipelineDriver::new(
+            FakeCapture {
+                frames,
+                fail: false,
+            },
+            FakeInput {
+                fired: new_fired(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        )
+        .with_recovery_grace(grace)
+        .with_recovery_clock(clock)
+    }
+
+    /// 呼出回数を数える recovery hook。
+    fn counting_hook() -> (Arc<AtomicU32>, RecoveryHook) {
+        let calls = Arc::new(AtomicU32::new(0));
+        let calls_clone = calls.clone();
+        let hook: RecoveryHook = Box::new(move |_streak| {
+            let c = calls_clone.clone();
+            Box::pin(async move {
+                c.fetch_add(1, Ordering::SeqCst);
+                Ok(())
+            })
+        });
+        (calls, hook)
+    }
+
+    /// `RecoveryGuard` 純粋状態機械の遷移 (猶予中加算なし・猶予明け再開・match 解除)。
+    #[test]
+    fn recovery_guard_grace_and_streak_transitions() {
+        let mut g = RecoveryGuard::new(3, Duration::from_secs(90));
+        // 閾値未満では発火しない (streak は加算)。
+        assert!(!g.record_miss(Duration::from_secs(0)));
+        assert!(!g.record_miss(Duration::from_secs(1)));
+        assert_eq!(g.streak(), 2);
+        // 閾値到達で発火指示。
+        assert!(g.record_miss(Duration::from_secs(2)));
+        assert_eq!(g.streak(), 3);
+        // リカバリ成功: streak リセット + 猶予タイマー開始 (t=3 から 90s)。
+        g.recovered(Duration::from_secs(3));
+        assert_eq!(g.streak(), 0);
+        assert!(g.in_grace(Duration::from_secs(92)), "89s 経過では猶予中");
+        // 猶予中は streak 加算なし・発火なし。
+        assert!(!g.record_miss(Duration::from_secs(92)));
+        assert_eq!(g.streak(), 0, "grace 中は streak 加算なし");
+        // 猶予明け (90s 経過) は streak 再開。
+        assert!(!g.record_miss(Duration::from_secs(93)));
+        assert_eq!(g.streak(), 1);
+        // マッチは streak リセット + 猶予解除 (即カウント再開)。
+        g.record_match();
+        assert_eq!(g.streak(), 0);
+        assert!(!g.record_miss(Duration::from_secs(94)));
+        assert_eq!(g.streak(), 1, "match 後は猶予解除で即カウント");
+        // threshold=0 (リカバリ無効) は常に非発火。
+        let mut z = RecoveryGuard::new(0, Duration::ZERO);
+        assert!(!z.record_miss(Duration::ZERO));
+        assert!(!z.record_miss(Duration::ZERO));
+    }
+
+    /// 猶予期間中は streak が増えない → 再起動ストームが構造的に起きない。
+    /// grace=90s を clock step=5s で消費: 3 回目で hook#1 → 以降 10 サイクル全て
+    /// 猶予中 → hook は 1 回のみ (従来挙動なら 3,6,9 回目の 3 回)。
+    #[tokio::test]
+    async fn recovery_boot_grace_suppresses_restorm_during_grace() {
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let many: Vec<DynamicImage> = (0..30).map(|_| blank.clone()).collect();
+        let mut driver = build_grace_driver(
+            frames_of(many),
+            Duration::from_secs(90),
+            Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))),
+        );
+        let (calls, hook) = counting_hook();
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 10, 3, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "猶予 (90s) 中は再発火しない — ストーム防止"
+        );
+    }
+
+    /// 猶予明け後は streak が 0 から再開し、閾値再到達で次のリカバリが発火する。
+    /// grace=90s・step=30s: c3 で hook#1 (recovered t=90, 猶予は t=180 まで) →
+    /// c6-c8 (t=180,210,240) で streak 1..3 → hook#2。10 サイクルで計 2 回。
+    #[tokio::test]
+    async fn recovery_boot_grace_expires_then_streak_resumes() {
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let many: Vec<DynamicImage> = (0..30).map(|_| blank.clone()).collect();
+        let mut driver = build_grace_driver(
+            frames_of(many),
+            Duration::from_secs(90),
+            Box::new(SteppingRecoveryClock::new(Duration::from_secs(30))),
+        );
+        let (calls, hook) = counting_hook();
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 10, 3, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(outcome.iterations, 10);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "猶予明け後に streak 再開 → 2 回目のリカバリが発火する"
+        );
+    }
+
+    /// 猶予中でもマッチすれば即座に通常動作へ復帰し、猶予は解除される。
+    /// c3 で hook#1 (猶予 t=180 まで) → c4 の matched フレームで発火 (猶予中の即復帰) +
+    /// 猶予解除 → c5-c7 の NoMatch 3 回 (t=120,150,180) で streak 1..3 → hook#2。
+    /// 猶予が残っていれば c5/c6 (t<180) は加算されず hook#2 は出ない — この対照が本テスト。
+    /// max_iters=7 で hook#2 の直後に打ち切り (以降の猶予サイクルは
+    /// recovery_boot_grace_expires_then_streak_resumes が担う)。
+    #[tokio::test]
+    async fn recovery_grace_clears_on_match_and_resumes_immediately() {
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let (matched, _tpl) = matched_frame();
+        // c1-c3: blank (hook#1) / c4: matched (Fired・猶予解除) / c5-c7: blank (hook#2)。
+        let mut seq: Vec<DynamicImage> = vec![blank.clone(), blank.clone(), blank.clone(), matched];
+        for _ in 0..10 {
+            seq.push(blank.clone());
+        }
+        let mut driver = build_grace_driver(
+            frames_of(seq),
+            Duration::from_secs(90),
+            Box::new(SteppingRecoveryClock::new(Duration::from_secs(30))),
+        );
+        let (calls, hook) = counting_hook();
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 7, 3, Some(hook))
+            .await;
+        assert_eq!(
+            outcome.fired_commands.len(),
+            1,
+            "猶予中のマッチで即座に発火 (capture は継続している)"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            2,
+            "match で猶予解除 → 以降の NoMatch は猶予なしで即カウント"
+        );
+    }
+
+    /// 既定 (猶予 ZERO) は従来挙動: 閾値到達ごとに毎回 hook が発火する。
+    /// builder を呼ばない driver で threshold=3, max=10 → 3,6,9 回目の 3 回。
+    #[tokio::test]
+    async fn recovery_default_zero_grace_fires_every_threshold_multiple() {
+        let (mut driver, _fired) = build_nomatch_driver();
+        let (calls, hook) = counting_hook();
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 10, 3, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            3,
+            "猶予なし既定では 3,6,9 回目の 3 回発火 (従来挙動・後方互換)"
+        );
+    }
+
+    /// ゴール評価付きループ (`run_loop_with_goal`) でも起動猶予が効く。
+    /// goal=LoopCount(未到達) + grace=90s + step=5s → hook は 1 回のみ。
+    #[tokio::test]
+    async fn recovery_boot_grace_applies_on_goal_path() {
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let many: Vec<DynamicImage> = (0..30).map(|_| blank.clone()).collect();
+        let mut driver = build_grace_driver(
+            frames_of(many),
+            Duration::from_secs(90),
+            Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))),
+        );
+        let (calls, hook) = counting_hook();
+
+        let goal = anaden_core::Goal {
+            name: "g210".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 100 },
+        };
+        let clock = FakeClock::starting_at(0);
+        let outcome = driver
+            .run_loop_with_goal(Duration::ZERO, 10, 3, Some(hook), Some(&goal), clock)
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "goal path でも猶予が streak 蓄積を抑制する"
+        );
+    }
+
+    /// 起動猶予中の capture エラー (再起動直後はゲームウィンドウ未存在 →
+    /// GetClientRect 失敗等) は即停止せずループを継続する (Issue #210 実機検証で発見)。
+    /// c3 で hook#1 → grace 開始 → c4 以降フレーム枯渇で capture エラーになるが許容され、
+    /// MaxIterations まで到達 (CaptureError 停止しない)。猶予なしの既定では
+    /// `run_loop_capture_error_stops_immediately` が従来どおり即停止を担保。
+    #[tokio::test]
+    async fn capture_error_during_boot_grace_is_tolerated() {
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        // 3 枚のみ: c1-c3 で消費し c4 から "no more frames" = capture エラー。
+        let frames = frames_of(vec![blank.clone(), blank.clone(), blank]);
+        let mut driver = build_grace_driver(
+            frames,
+            Duration::from_secs(90),
+            Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))),
+        );
+        let (calls, hook) = counting_hook();
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 8, 3, Some(hook))
+            .await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "猶予中の capture エラーは致命扱いにしない (ゲーム再起動の一過状態)"
+        );
+        assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
     // ---- (6) run_once_verified: アクション後検証 ----
