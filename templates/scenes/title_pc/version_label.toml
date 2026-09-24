@@ -41,5 +41,19 @@ template  = "version_label.png"
 #   3 消費者 (login/tap_title, nav_to_field_pc/tap_to_start, 本 TOML) の roi は対で
 #   [8, 2, 138, 20] に統一 (needle 138x20 が roi 幅を超える恒久 NoMatch 回帰防止は
 #   pipeline.rs テストで pin 済み)。
+# ↓↓ Issue #208 でテンプレを再々生成 (2026-09-19)。#182 版の生成元フレームは
+#   タイトル画面ではなく区切り線つきオーバーレイ画面 (「プレイヤー情報を検索」) で、
+#   テンプレ下端 2 行に全幅ダーク区切り線を含んでいた。純タイトル画面には区切り線が
+#   なく、TM_CCOEFF_NORMED の conf が 0.94 → 0.47 に崩壊し live 12/12 NoMatch
+#   (evidence: .omc/logs/routine-e2e-0918c/)。実タイトルキャプチャ (1952x1098) から
+#   resize_crop_template (letterbox 10 → raw-1258 → roi [8,2,138,20]) で再生成。
+#   roi/threshold は全消費者で不変。「全幅ダーク行を含まない」資産契約は
+#   tests/title_live_regression.rs が pin する。
+# ↓↓ Issue #208 の恒久修正で login/nav の検出アンカーは title_logo_corner へ移行。
+#   再々生成テンプレも 07-07 probe (title_pc_probe.png) には一致しない (None) — ID 表示帯は
+#   バージョン/ID が変わる**内容可変資産**で cross-capture 安定性が原理的にないため。
+#   よって本 TOML は scenes/title_pc 検出専用に残置 (内容可変である旨を踏まえ probe
+#   E2E の一致要求対象からも除外)。login/tap_title・nav_to_field_pc/tap_to_start の
+#   アンカーは title_logo_corner.toml 参照。
 roi       = [8, 2, 138, 20]
 threshold = 0.80

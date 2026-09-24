@@ -32,5 +32,12 @@ template  = "title_logo_corner.png"
 #   これで小テンプレ上限を満たしつつ version_label とは別の固定テクスチャで二重検出。
 #   ⚠ 既知限界: 現状 conf=1.0 は自己クロッププローブ(title_pc_probe.png)由来の自己一致。
 #   cross-capture ロバスト性は実機の独立 title フレーム取得後に再検証が必要(README 参照)。
+# ↓↓ Issue #208 (2026-09) で login/nav の検出アンカーが本テンプレへ統一された。
+#   旧アンカー version_label (左上 ID 表示帯) はバージョン/ID 文字列が変わる内容可変
+#   資産で cross-capture 安定性が原理的になく (#182 版 conf 0.94 → live 12/12 NoMatch、
+#   #208 再生成版も 07-07 probe に一致せず None)、恒久修正として 4 消費者
+#   (pipelines/login/tap_title, pipelines/nav_to_field_pc/tap_to_start,
+#    pipelines/nav_to_field_pc/load_game, 本 TOML) が roi [624,263,120,120] を共有する。
+#   probe 実測 conf 0.9848 (pc-e2e: pc_title_pc_templates_match_real_capture_above_threshold)。
 roi       = [624, 263, 120, 120]
 threshold = 0.80

@@ -199,7 +199,7 @@ fn all_four_repo_pipelines_roundtrip_losslessly() {
     let login =
         std::fs::read_to_string(root.join("login").join("tap_title.toml")).expect("tap_title.toml");
     assert!(
-        login.contains("template = \"../../scenes/title_pc/version_label.png\""),
+        login.contains("template = \"../../scenes/title_pc/title_logo_corner.png\""),
         "../../ 参照が元の形で書き戻る:\n{login}"
     );
     // (旧 worldmap_loop の裸相対 template 参照チェックは Issue #188 で android 版

@@ -2,13 +2,24 @@ name      = "LoginTapTitlePc"
 state     = "title_pc"
 algorithm = "ccoeff"
 # ログインパイプライン slice 1/2 (Issue #146 / UC-2 / T4)。最小構成。
-# title 画面の version_label (固定テクスチャ・点滅非依存) で title 画面到達を検出し、
+# title 画面の title_logo_corner (ロゴ固定小特徴・点滅非依存) で title 画面到達を検出し、
 # click_rect で Tap-to-Start をタップする。認識手法は nav_to_field_pc/tap_to_start.toml
 # と同一パターン (検出テンプレ ≠ タップ対象)。
 #
+# Issue #208 で検出アンカーを version_label (左上 ID 表示帯) から title_logo_corner へ
+# 切替。ID 表示帯はバージョン/ID 文字列が変わる**内容可変資産**で cross-capture 安定性が
+# 原理的にない (#182 版 conf 0.94 → #208 再生成版も 07-07 probe には一致せず None)。
+# title_logo_corner は probe 実測 conf 0.9848 (pc-e2e) の安定テクスチャ特徴
+# (find_logo_corner_subfeature 由来)。version_label は scenes/title_pc 検出専用として残置。
+#
 # 座標系: RAW 1258x708 ピクセル空間 (PC版 GetClientRect 実測)。nav_to_field_pc と同一。
-template  = "../../scenes/title_pc/version_label.png"
-roi       = [8, 2, 138, 20]
+template  = "../../scenes/title_pc/title_logo_corner.png"
+# 検出 ROI: logo_corner needle (120x120) の再クロップ原点 [624,263,120,120] を中心に
+# ±10px のスラック窓 [614,253,140,140]。キャプチャごとにコンテンツ配置が数 px
+# ドリフトする (実測: 07-07 probe → 09-19 live で (+2,-1) px。needle==roi 幅の
+# ぴったり ROI は最良一致位置 (637,268) を roi 外に弾き conf 0.99→0.78 に崩壊)。
+# スラックにより needle が roi 内をスライドでき、live 実測 conf 0.9944 が立つ。
+roi       = [614, 253, 140, 140]
 threshold = 0.80
 # タップ位置: "Tap to Start" (nav_to_field_pc/tap_to_start.toml と同座標)。
 action    = { type = "click_rect", roi = [900, 466, 30, 30] }
