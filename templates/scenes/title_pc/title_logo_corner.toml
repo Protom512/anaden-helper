@@ -37,7 +37,11 @@ template  = "title_logo_corner.png"
 #   資産で cross-capture 安定性が原理的になく (#182 版 conf 0.94 → live 12/12 NoMatch、
 #   #208 再生成版も 07-07 probe に一致せず None)、恒久修正として 4 消費者
 #   (pipelines/login/tap_title, pipelines/nav_to_field_pc/tap_to_start,
-#    pipelines/nav_to_field_pc/load_game, 本 TOML) が roi [624,263,120,120] を共有する。
+#    pipelines/nav_to_field_pc/load_game, 本 TOML) が同一アンカーを共有する。
 #   probe 実測 conf 0.9848 (pc-e2e: pc_title_pc_templates_match_real_capture_above_threshold)。
-roi       = [624, 263, 120, 120]
+# ↓↓ Issue #210 実機検証 (2026-09-24): live「ロードゲーム」タイトルで needle 最良位置が
+#   (625,243) と needle 再クロップ原点 [624,263,120,120] から約 20px 上方へドリフトし、
+#   needle==roi のぴったり指定では恒久 NoMatch になるため、4 消費者共通のスラック窓
+#   [604,223,160,180] (観測 envelope ±20px) へ拡張した (pipeline 側と同一の対更新)。
+roi       = [604, 223, 160, 180]
 threshold = 0.80

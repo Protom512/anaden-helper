@@ -30,6 +30,10 @@ use tracing::{info, warn};
 
 use anaden_core::Goal;
 
+/// リカバリ (ゲーム再起動) 前の既存プロセス終了待ち上限秒 (Issue #210: 二重起動防止)。
+/// `routine` サブコマンド側 (routine.rs) の RECOVERY_EXIT_WAIT_SECS と同じ値。
+const RECOVERY_EXIT_WAIT_SECS: u64 = 15;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "anaden",
@@ -76,6 +80,11 @@ enum Commands {
         /// NoMatch が連続してこの回数に達したらゲームを再起動する。
         #[arg(long, default_value_t = 5)]
         recover_nomatch_threshold: u32,
+        /// リカバリ (ゲーム再起動) 後の起動猶予 (boot-wait) 秒数 (Issue #210)。
+        /// この期間は NoMatch streak を数えない (再起動ストーム防止)。テンプレートが
+        /// マッチすれば即座に通常動作へ復帰する。
+        #[arg(long, default_value_t = 180)]
+        recover_grace_secs: u64,
         /// 発火後検証(誠実検証)を有効化する(デフォルト true)。
         ///
         /// 有効時、発火成功後にもう1回 capture して同タスクのテンプレがまだマッチするか検証し、
@@ -299,6 +308,7 @@ async fn run_pipeline_live(
     ensure_open_wait_secs: u64,
     recover_launch: bool,
     recover_nomatch_threshold: u32,
+    recover_grace_secs: u64,
     verify_after_fire: bool,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
@@ -331,6 +341,7 @@ async fn run_pipeline_live(
         ensure_open_wait_secs,
         recover_launch,
         recover_nomatch_threshold,
+        recover_grace_secs,
         verify_after_fire,
         goal,
         cancel_token,
@@ -358,6 +369,7 @@ async fn run_with_windows(
     ensure_open_wait_secs: u64,
     recover_launch: bool,
     recover_nomatch_threshold: u32,
+    recover_grace_secs: u64,
     verify_after_fire: bool,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
@@ -437,19 +449,37 @@ async fn run_with_windows(
         }
     };
 
-    // ---- (5) NoMatch リカバリフック(Win32Launch::launch_app) ----
+    // ---- (5) NoMatch リカバリフック(Win32Launch::restart_app + 起動猶予・Issue #210) ----
+    // 再起動ストーム対策: 従来の launch_app (spawn-only 3ms) は起動途中のゲームを
+    // 残したまま再 spawn するため ≈18 秒周期でゲームを殺し続けた。restart_app は
+    // 既存プロセスを終了待ちしてから spawn し (二重起動防止)、with_recovery_grace で
+    // 再起動後 recover_grace_secs 秒は NoMatch streak を数えない (タイトル到達待ち)。
+    // エスカレーション型 recovery (Issue #210・routine と同一方式): 1 回目は
+    // launch_app (kill なし・起動中のゲームを殺さない)、2 回目以降は
+    // restart_app (kill+終了待ち→spawn・ハングゲームの本気回復)。
+    // 実測 (issue210-verify2): 毎回 kill は タイトル到達 (~2分) 前のゲームを
+    // 殺し続ける。カウントは run 実行内で単調増加。
     let recovery: Option<anaden_engine::RecoveryHook> = if recover_launch {
         let launcher = launcher.clone();
+        let recoveries = std::sync::atomic::AtomicU32::new(0);
         Some(Box::new(move |_streak| {
             let l = launcher.clone();
+            let n = recoveries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
             Box::pin(async move {
-                info!("NoMatch 継続(PC版): ゲームを再起動します");
-                l.launch_app().await
+                if n == 1 {
+                    info!("NoMatch 継続(PC版): ゲームを起動します (初回・kill なし・Issue #210)");
+                    l.launch_app().await
+                } else {
+                    info!("NoMatch 継続(PC版): ゲームを kill+再起動します ({n} 回目・Issue #210)");
+                    l.restart_app(Duration::from_secs(RECOVERY_EXIT_WAIT_SECS))
+                        .await
+                }
             })
         }))
     } else {
         None
     };
+    let recovery_grace = Duration::from_secs(recover_grace_secs);
 
     let interval_dur = Duration::from_secs(interval);
 
@@ -467,7 +497,8 @@ async fn run_with_windows(
                 300,
             )
             .with_verify(verify_after_fire)
-            .with_cancel(cancel_token),
+            .with_cancel(cancel_token)
+            .with_recovery_grace(recovery_grace),
             interval_dur,
             max_iters,
             recover_nomatch_threshold,
@@ -486,7 +517,8 @@ async fn run_with_windows(
                 300,
             )
             .with_verify(verify_after_fire)
-            .with_cancel(cancel_token),
+            .with_cancel(cancel_token)
+            .with_recovery_grace(recovery_grace),
             interval_dur,
             max_iters,
             recover_nomatch_threshold,
@@ -511,6 +543,7 @@ async fn run_with_windows(
     _ensure_open_wait_secs: u64,
     _recover_launch: bool,
     _recover_nomatch_threshold: u32,
+    _recover_grace_secs: u64,
     _verify_after_fire: bool,
     _goal: Option<Goal>,
     _cancel_token: CancellationToken,
@@ -700,6 +733,7 @@ async fn main() -> Result<()> {
             ensure_open_wait_secs,
             recover_launch,
             recover_nomatch_threshold,
+            recover_grace_secs,
             verify_after_fire,
             goal,
             goal_file,
@@ -750,6 +784,7 @@ async fn main() -> Result<()> {
                 ensure_open_wait_secs,
                 recover_launch,
                 recover_nomatch_threshold,
+                recover_grace_secs,
                 verify_after_fire,
                 parsed_goal,
                 cancel_token,

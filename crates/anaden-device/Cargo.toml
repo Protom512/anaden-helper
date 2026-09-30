@@ -15,3 +15,6 @@ tracing = { workspace = true }
 # で一括定義。Windows 専用コードは cfg(windows) で囲む。Linux ビルドには依存しない。
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }

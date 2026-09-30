@@ -2233,22 +2233,24 @@ mod tests {
             tap.template
         );
 
-        // Issue #208: TapToStartPc の検出 ROI は title_logo_corner needle (120x120) の
-        // 再クロップ原点 [624,263,120,120] 中心 ±10px のスラック窓 [614,253,140,140] に固定。
-        // ぴったり ROI (needle==roi 幅) はキャプチャ間のコンテンツ配置ドリフト (実測
-        // (+2,-1) px) で最良一致位置を roi 外に弾き conf 0.99→0.78 に崩壊するため、
+        // Issue #208: TapToStartPc の検出 ROI は title_logo_corner needle (120x120) を
+        // 囲むスラック窓。ぴったり ROI (needle==roi 幅) はキャプチャ間のコンテンツ配置
+        // ドリフトで最良一致位置を roi 外に弾き conf 0.99→0.78 に崩壊するため、
         // スラックを持たせてある。旧値 [8,2,138,20] は version_label アンカー時代の値。
+        // Issue #210 (2026-09-24): live「ロードゲーム」タイトルで needle 最良位置が
+        // (625,243) と約 20px 上方へドリフトし旧窓 [614,253,140,140] の上端を超過した
+        // ため、観測 envelope ±20px の [604,223,160,180] へ拡張 (旧窓の厳密スーパーセット)。
         // テンプレ差し替えと ROI は対で更新されるため、片方だけ戻る回帰をこのテストで弁別する。
         assert_eq!(
             tap_roi,
-            [614, 253, 140, 140],
-            "TapToStartPc ROI must be the logo_corner slack window [614,253,140,140] \
-             (Issue #208 anchor switch + drift-slack pair-update)"
+            [604, 223, 160, 180],
+            "TapToStartPc ROI must be the logo_corner slack window [604,223,160,180] \
+             (Issue #208 anchor switch + drift-slack pair-update, Issue #210 widened)"
         );
         assert_eq!(
             load_roi,
-            [614, 253, 140, 140],
-            "LoadGamePc ROI must equal the TapToStartPc slack window [614,253,140,140] \
+            [604, 223, 160, 180],
+            "LoadGamePc ROI must equal the TapToStartPc slack window [604,223,160,180] \
              (Issue #208: shared logo_corner anchor consumers keep the roi as a pair)"
         );
     }
@@ -3079,11 +3081,13 @@ mod tests {
             assert_roi_within_1258x708(roi, &d.name);
             // 小テンプレ要件(TASKS.md: 小テンプレ化): 各辺 50..=120 程度。
             // 大型(title_center 800x300 相当)だと背景差に弱くなるため寸法上限で縛る。
-            // 上限は 140 (Issue #182): version_label アンカーは左上 ID 表示帯 138x20 で、
+            // 上限は 180 (Issue #208/#210): 検出アンカーのスラック窓 (ドリフト吸収) は
+            // 縦方向ヘッドレーンを多く取り 160x180 まで到達。巨大テンプレの背景差脆弱性
+            // 懸念は live/probe の cross-capture conf pin が代替担保する。
             // 旧上限 130 を 8px 超える。ID 帯の全文幅を保つ必要があるため上限を拡張した。
             assert!(
-                roi[2] <= 140 && roi[3] <= 140,
-                "{}: sub-template ROI {:?} exceeds small-template ceiling (~140px) \
+                roi[2] <= 180 && roi[3] <= 180,
+                "{}: sub-template ROI {:?} exceeds small-template ceiling (~180px) \
                  (large templates are background-diff sensitive per TASKS.md:30-33)",
                 d.name,
                 roi
@@ -3323,13 +3327,14 @@ mod tests {
     }
 
     /// E2E (Issue #208): login パイプラインの LoginTapTitlePc (アンカー title_logo_corner
-    /// × スラック roi [614,253,140,140]) が title_pc_probe.png 上で threshold 以上の
+    /// × スラック roi [604,223,160,180]) が title_pc_probe.png 上で threshold 以上の
     /// confidence でマッチすることを検証する。
     ///
     /// Issue #208 で login/nav のアンカーは version_label (内容可変資産・cross-capture
     /// 不安定) から title_logo_corner へ切替わった。#208 の live 実測では needle==roi 幅の
     /// ぴったり ROI がキャプチャ間ドリフトで conf 0.99→0.78 に崩壊したため、消費者 roi は
-    /// 原点 [624,263,120,120] 中心 ±10px のスラック窓になっている。tap_to_start /
+    /// needle を囲むスラック窓になっている (Issue #210 で live ドリフト (~20px 上方) を
+    /// 吸収するため [604,223,160,180] へ拡張)。tap_to_start /
     /// load_game との roi 対整合は通常テスト
     /// ([`pc_title_pc_logo_corner_consumers_share_matching_roi_and_template_dims`]) が pin する。
     ///
@@ -3615,8 +3620,9 @@ mod tests {
         );
         assert_eq!(
             logo_corner.roi,
-            Some([624, 263, 120, 120]),
-            "title_logo_corner ROI must be the small-feature value [624,263,120,120] \
+            Some([604, 223, 160, 180]),
+            "title_logo_corner ROI must be the drift-absorbing slack window [604,223,160,180] (Issue #210)
+             around the small-feature anchor [624,263,120,120] \
              (selected by find_logo_corner_subfeature.rs as the highest-energy 120x120 \
              window inside the operator-dragged band [164,63,932,405] on title_pc_probe.png \
              2026-07-07, PC RAW 1258x708 space). The full 932x405 band exceeded the \
@@ -3754,21 +3760,30 @@ mod tests {
 
     /// t2: title_logo_corner.png を共有参照する 3 パイプライン TOML (login/tap_title,
     /// nav_to_field_pc/tap_to_start, nav_to_field_pc/load_game) の roi がすべて
-    /// [614,253,140,140] であり、needle 寸法 (120x120) が roi に収まること。
+    /// [604,223,160,180] であり、needle 寸法 (120x120) が roi に収まること。
     ///
     /// Issue #208 で判明した設計要件: needle==roi 幅のぴったり ROI (旧 [624,263,120,120])
     /// はキャプチャ間のコンテンツ配置ドリフト (07-07 probe → 09-19 live で (+2,-1) px)
-    /// で最良一致位置を roi 外に弾き conf 0.99→0.78 に崩壊する。スラック窓は原点中心
-    /// ±10px でドリフトを吸収する (live 実測 conf 0.9944)。テンプレ差し替えと roi 更新は
-    /// 3 消費者で対にすること (Issue #182/#192 の片側更新バグの再発防止)。
+    /// で最良一致位置を roi 外に弾き conf 0.99→0.78 に崩壊するため、needle を囲む
+    /// スラック窓でドリフトを吸収する。Issue #210 実機検証 (2026-09-24) では live
+    /// 「ロードゲーム」タイトルで needle 最良位置が (625,243) と原点から約 20px 上方へ
+    /// ドリフトし旧窓 [614,253,140,140] の上端を超過したため、anchor 原点を四辺
+    /// ≥20px の余白で囲む窓 (上辺のみ上方ドリフト吸収のため 40px) へ拡張した。
+    /// テンプレ差し替えと roi 更新は 3 消費者で対にすること
+    /// (Issue #182/#192 の片側更新バグの再発防止)。
     /// What(テスト対象): 3 消費者 TOML の roi・template 参照と title_logo_corner.png 寸法の整合。
     #[test]
     fn pc_title_pc_logo_corner_consumers_share_matching_roi_and_template_dims() {
-        const EXPECTED_ROI: [u32; 4] = [614, 253, 140, 140];
-        // スラック窓の中心原点 (needle 再クロップ元。scenes/title_pc/title_logo_corner.toml
-        // の roi と同一値)。
+        const EXPECTED_ROI: [u32; 4] = [604, 223, 160, 180];
+        // スラック窓の基準原点 (needle 再クロップ元)。
         const ANCHOR_ORIGIN: [u32; 4] = [624, 263, 120, 120];
-        const SLACK: u32 = 10;
+        /// 窓の各辺が anchor 原点から確保する最小余白 (Issue #210 で 10→20px へ拡大)。
+        /// スラック窓のパディング (非対称)。#208 実測 (+2,−1)px に加え #210 live
+        /// 検証で ~20px **上方**ドリフトを観測したため、上方向のヘッドレーンを
+        /// 多く取る (横 20 / 縦 下+20 上-40)。
+        const SLACK_X: u32 = 20;
+        const SLACK_DOWN: u32 = 20;
+        const SLACK_UP: u32 = 40;
         let pipelines = workspace_templates_root().join("pipelines");
         let consumers = [
             (
@@ -3793,11 +3808,12 @@ mod tests {
                 def.roi,
                 Some(EXPECTED_ROI),
                 "{label}: logo_corner consumer roi must be the slack window \
-                 [614,253,140,140] — the shared needle is 120x120 and cross-capture drift \
-                 (measured (+2,-1) px, Issue #208) needs slack; a needle-exact roi \
-                 ([624,263,120,120]) collapses conf 0.99->0.78 when the best placement \
-                 falls outside the roi. Template swaps and roi updates must land as a \
-                 pair across all three consumers",
+                 [604,223,160,180] — the shared needle is 120x120 and cross-capture drift \
+                 (measured (+2,-1) px at #208, then ~20px upward at Issue #210 live \
+                 verification) needs slack; a needle-exact roi ([624,263,120,120]) \
+                 collapses conf 0.99->0.78 when the best placement falls outside the roi. \
+                 Template swaps and roi updates must land as a pair across all three \
+                 consumers",
             );
             assert!(
                 def.template
@@ -3822,13 +3838,20 @@ mod tests {
             ANCHOR_ORIGIN[2],
             ANCHOR_ORIGIN[3]
         );
-        assert!(
-            img.width() + 2 * SLACK == EXPECTED_ROI[2]
-                && img.height() + 2 * SLACK == EXPECTED_ROI[3],
-            "slack window {:?} must be the anchor {:?} plus {SLACK}px padding on each side \
-             (off-center slack defeats the drift-absorption purpose)",
-            EXPECTED_ROI,
-            ANCHOR_ORIGIN
+        assert_eq!(
+            (
+                ANCHOR_ORIGIN[0] - SLACK_X,
+                ANCHOR_ORIGIN[1] - SLACK_UP,
+                ANCHOR_ORIGIN[2] + 2 * SLACK_X,
+                ANCHOR_ORIGIN[3] + SLACK_UP + SLACK_DOWN,
+            ),
+            (
+                EXPECTED_ROI[0],
+                EXPECTED_ROI[1],
+                EXPECTED_ROI[2],
+                EXPECTED_ROI[3]
+            ),
+            "slack window must be anchor padded x+/-{SLACK_X} / up-{SLACK_UP} down+{SLACK_DOWN} \n             (#210 live upward ~20px drift measured; top headlane is wider)",
         );
     }
 
