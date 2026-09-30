@@ -3184,11 +3184,13 @@ mod tests {
         let defs = load_pipeline(&dir).expect("title_pc load");
         let probe = image::open(&probe_path).expect("open title_pc_probe.png");
 
-        // 本番経路（PipelineDriver）と同一の crop_to_content → normalize を適用してから
-        // detect に渡す。旧 Issue #12 の明示 resize_exact(1258x708) ハックは廃止: detect が
+        // 本番経路（PipelineDriver）と同一の normalize_capture (黒帯クロップ [アスペクト
+        // 保護付き] → normalize・Issue #212) を適用してから detect に渡す。
+        // 旧 Issue #12 の明示 resize_exact(1258x708) ハックは廃止: detect が
         // normalize 後寸法へ ROI/needle を動的スケールするため、サイズ・黒帯へ自動対応する。
-        let cropped = crate::crop_to_content(&probe);
-        let screenshot = crate::scale::ScreenScaler::new().normalize(&cropped);
+        let screenshot = crate::scale::ScreenScaler::new()
+            .normalize_capture(&probe)
+            .0;
         let (sw, sh) = (screenshot.width(), screenshot.height());
 
         for d in &defs {
@@ -3290,9 +3292,10 @@ mod tests {
         });
         let probe = image::open(&probe_path).expect("open title_pc_probe.png");
 
-        // 本番経路と同一の crop_to_content → normalize を適用 (pc_title_pc E2E と同一前提)。
-        let cropped = crate::crop_to_content(&probe);
-        let screenshot = crate::scale::ScreenScaler::new().normalize(&cropped);
+        // 本番経路と同一の normalize_capture を適用 (pc_title_pc E2E と同一前提)。
+        let screenshot = crate::scale::ScreenScaler::new()
+            .normalize_capture(&probe)
+            .0;
 
         let m = load
             .detect(&screenshot, Path::new(""))
@@ -3361,9 +3364,10 @@ mod tests {
         });
         let probe = image::open(&probe_path).expect("open title_pc_probe.png");
 
-        // 本番経路と同一の crop_to_content → normalize を適用 (他の title probe E2E と同一前提)。
-        let cropped = crate::crop_to_content(&probe);
-        let screenshot = crate::scale::ScreenScaler::new().normalize(&cropped);
+        // 本番経路と同一の normalize_capture を適用 (他の title probe E2E と同一前提)。
+        let screenshot = crate::scale::ScreenScaler::new()
+            .normalize_capture(&probe)
+            .0;
 
         let m = tap
             .detect(&screenshot, Path::new(""))
@@ -3658,12 +3662,13 @@ mod tests {
              re-validated."
         );
 
-        // 本番経路と同一の正規化（crop_to_content → normalize → 1280x720）を適用。
+        // 本番経路と同一の正規化（normalize_capture → 1280x720）を適用。
         // 旧インライン resize_exact(1258x708) ハックは廃止: 本番は黒帯クロップ後に normalize する
         // ため、幾何学的検証も同経路を通す。ROI は raw-1258 空間で定義されるので、
         // roi_to_normalized で 1280x720 空間へ変換して run を見る。
-        let cropped = crate::crop_to_content(&probe);
-        let normalized = crate::scale::ScreenScaler::new().normalize(&cropped);
+        let normalized = crate::scale::ScreenScaler::new()
+            .normalize_capture(&probe)
+            .0;
         let gray = normalized.to_luma8();
         let norm_w = normalized.width();
         let norm_h = normalized.height();
