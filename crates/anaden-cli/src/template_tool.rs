@@ -283,8 +283,10 @@ fn run_detect(
 /// `run-pipeline` サブコマンド: 宣言的パイプラインを1ステップ実行。
 ///
 /// 範囲: 1ステップのみ。`tick` は1回呼んで結果を表示して終了（ライブループ・発火しない）。
-/// screenshot は `ScreenScaler` で幅1280へ正規化してから tick に渡す
-/// （`TaskDef::detect` は roi を 720p基準座標の画素座標として直接 crop する前提のため）。
+/// screenshot は engine live 経路 (`PipelineDriver::run_once`) と同一の本番前処理
+/// `ScreenScaler::normalize_capture` (黒帯クロップ [キャンバス アスペクト保護付き] →
+/// 幅1280正規化) を通してから tick に渡す (Issue #212: 前処理の単一化。
+/// `TaskDef::detect` は roi を正規化後画面の画素座標として crop する前提のため)。
 fn run_pipeline(
     screenshot_path: &PathBuf,
     pipeline_dir: &PathBuf,
@@ -301,18 +303,25 @@ fn run_pipeline(
         None => None,
     };
 
-    // 1. スクリーンショット読込 + 正規化
+    // 1. スクリーンショット読込 + 本番前処理 (engine live 経路と同一・Issue #212)
     let raw = image::open(screenshot_path)
         .map_err(|e| anyhow::anyhow!("スクリーンショット読込失敗 {:?}: {e}", screenshot_path))?;
     let (orig_w, orig_h) = (raw.width(), raw.height());
     let scaler = anaden_vision::ScreenScaler::new();
-    let screenshot = scaler.normalize(&raw);
+    let (screenshot, crop_info) = scaler.normalize_capture(&raw);
     let (norm_w, norm_h) = (screenshot.width(), screenshot.height());
 
     println!("📷 Screenshot: {}x{} {:?}", orig_w, orig_h, screenshot_path);
     println!(
-        "📐 正規化: {}x{} → {}x{} (720p基準/幅1280)",
-        orig_w, orig_h, norm_w, norm_h,
+        "📐 正規化: {}x{} → content {}x{} (offset {},{}) → {}x{} (720p基準/幅1280)",
+        orig_w,
+        orig_h,
+        crop_info.width,
+        crop_info.height,
+        crop_info.offset_x,
+        crop_info.offset_y,
+        norm_w,
+        norm_h,
     );
 
     // 2. パイプライン読込
