@@ -298,6 +298,33 @@ impl Input for anaden_device::Win32InputExecutor {
     }
 }
 
+/// ステップ IO エラーの発生源分類。
+///
+/// [`StepOutcome::Error`] の構造化キー。従来は message 文字列の prefix 一致
+/// (`starts_with("capture")`) でリカバリ可否を判定しており、`verify_capture:` が
+/// 「capture 系」として拾えない・文言変更に脆い問題があった (F3)。分類はこの enum で
+/// 機械的に行い、message 文字列は e2e 出力契約 (人間可読ログ) 専用と分離する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepErrorKind {
+    /// サイクル冒頭の画面取得 ([`PipelineDriver::run_once`] の capture) の IO エラー。
+    Capture,
+    /// 入力発火 (execute) の IO エラー。
+    Execute,
+    /// 発火後検証の再 capture ([`PipelineDriver::run_once_verified`]) の IO エラー。
+    VerifyCapture,
+}
+
+/// 画面取得系 IO エラー (capture / verify_capture) = リカバリ対象か。
+///
+/// 画面が取れないのは「ゲームが死んでいる/起動途中」可能性が高い一過状態なので、
+/// `run_loop_with_recovery` / `run_loop_with_goal` の両ループがこの判定を共有して
+/// recovery hook 起動 + 起動猶予 (boot-wait) 継続へ分類する (Issue #210 と同一契約)。
+/// 入力発火系 ([`StepErrorKind::Execute`]) はハードウェア/権限系の恒常故障を含むため
+/// 従来どおり即停止 (fail-closed)。
+pub fn is_recoverable_io_error(kind: StepErrorKind) -> bool {
+    matches!(kind, StepErrorKind::Capture | StepErrorKind::VerifyCapture)
+}
+
 /// 1 サイクルの実行結果。caller([`PipelineDriver::run_loop`]) が継続判定に使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -312,8 +339,14 @@ pub enum StepOutcome {
     NoFire { next_current: Option<String> },
     /// マッチせず(tick が [`None`])。current 不変。リトライ候補。
     NoMatch,
-    /// capture/execute の IO エラー。
-    Error(String),
+    /// capture/execute/verify_capture の IO エラー。
+    /// `kind` でリカバリ可否を機械分類し ([`is_recoverable_io_error`])、`message` は
+    /// `"capture: ..."` / `"execute: ..."` / `"verify_capture: ..."` の従来文言を維持
+    /// (e2e 出力契約保持)。
+    Error {
+        kind: StepErrorKind,
+        message: String,
+    },
     /// 発火はしたが事後検証で**対象が残存**した(テンプレがまだ高 conf でマッチ)。
     /// アクションが効果を発揮していない疑いが強い「誤成功」状態。
     /// `next_current` は tick 結果の next(検証失敗時は current を巻き戻すので基本 [`None`])。
@@ -472,7 +505,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             Ok(img) => img,
             Err(e) => {
                 warn!("pipeline capture error: {e}");
-                return StepOutcome::Error(format!("capture: {e}"));
+                return StepOutcome::Error {
+                    kind: StepErrorKind::Capture,
+                    message: format!("capture: {e}"),
+                };
             }
         };
         let capture_ms = t_cap.elapsed().as_secs_f64() * 1000.0;
@@ -537,7 +573,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             let device_cmd = rescale_command(cmd, self.device_width, &self.last_crop_info);
             if let Err(e) = self.execute_command(&device_cmd).await {
                 warn!("pipeline execute error: {e}");
-                return StepOutcome::Error(format!("execute: {e}"));
+                return StepOutcome::Error {
+                    kind: StepErrorKind::Execute,
+                    message: format!("execute: {e}"),
+                };
             }
             debug!("fired: {:?}", device_cmd);
             debug!(
@@ -585,7 +624,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// - 発火した → 事後検証を実施:
     ///   - テンプレ消失/変化 → [`StepOutcome::Fired`]
     ///   - テンプレ残存(高 conf で再マッチ) → [`StepOutcome::FiredUnverified`](current 巻き戻し済み)
-    ///   - 事後 capture IO エラー → [`StepOutcome::Error`](`"verify_capture: ..."`)
+    ///   - 事後 capture IO エラー → [`StepOutcome::Error`] { kind: [`StepErrorKind::VerifyCapture`], message: `"verify_capture: ..."` }
     pub async fn run_once_verified(&mut self) -> StepOutcome {
         let pre_task = self.state.current().to_string();
         let fired = self.run_once().await;
@@ -623,7 +662,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             Ok(img) => img,
             Err(e) => {
                 warn!("verify capture error: {e}");
-                return StepOutcome::Error(format!("verify_capture: {e}"));
+                return StepOutcome::Error {
+                    kind: StepErrorKind::VerifyCapture,
+                    message: format!("verify_capture: {e}"),
+                };
             }
         };
         // run_once と同じ本番前処理 (normalize_capture・検証も描画領域空間で行う)。
@@ -1146,7 +1188,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                         }
                     }
                 }
-                StepOutcome::Error(msg) => {
+                StepOutcome::Error { kind, message: msg } => {
                     // Issue #210: 起動猶予 (boot-wait) 中の capture エラーはゲーム再起動
                     // 直後の一過状態 (プロセス/ウィンドウ未存在 → GetClientRect 失敗等) と
                     // して許容し、ループを継続する (grace 中は streak 加算も抑制済み)。
@@ -1154,7 +1196,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     // いる」(初回起動前・クラッシュ直後) 可能性が高いため recovery を呼んで
                     // grace へ入る (issue210-verify で初回起動前 io_error 即死した事例)。
                     // recovery 無効・失敗時と execute エラーは従来どおり即停止 (fail-closed)。
-                    if msg.starts_with("capture") {
+                    // 分類は message 文字列でなく [`is_recoverable_io_error`] (enum 機械判定)
+                    // で行う — verify_capture (発火後検証の再 capture) も画面取得系として
+                    // 同一契約に含める (F1: リカバリ漏れ解消)。
+                    if is_recoverable_io_error(kind) {
                         let now = self.recovery_clock.elapsed();
                         if guard.in_grace(now) {
                             warn!(
@@ -1484,21 +1529,61 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                         }
                     }
                 }
-                StepOutcome::Error(msg) => {
-                    // Issue #210: 起動猶予中の capture エラーは一過状態として許容
-                    // (run_loop_with_recovery と同一契約の詳細はそちらのコメント参照)。
-                    if msg.starts_with("capture") && guard.in_grace(self.recovery_clock.elapsed()) {
-                        warn!("pipeline capture error during boot grace (game restarting): {msg}");
-                    } else {
-                        let reason = if msg.starts_with("capture") {
-                            LoopStopReason::CaptureError
+                StepOutcome::Error { kind, message: msg } => {
+                    // Issue #210: 起動猶予 (boot-wait) 中の capture エラーは一過状態として
+                    // 許容し、猶予外でも recovery_enabled なら hook 起動後に再開する —
+                    // run_loop_with_recovery と**実際に同一の契約** (分類も message 文字列
+                    // でなく [`is_recoverable_io_error`] を共有。F2: 従来は grace 中 warn の
+                    // みで、grace 外 + recovery 有効でも CaptureError 即停止する弱体化が
+                    // あった。recovery 無効時と execute エラーは即停止 fail-closed)。
+                    if is_recoverable_io_error(kind) {
+                        let now = self.recovery_clock.elapsed();
+                        if guard.in_grace(now) {
+                            warn!(
+                                "pipeline capture error during boot grace (game restarting): {msg}"
+                            );
+                        } else if recovery_enabled {
+                            info!(
+                                "capture error outside grace; invoking recovery hook (game presumed dead): {msg}"
+                            );
+                            if let Some(hook) = recover.as_mut() {
+                                match hook(guard.streak()).await {
+                                    Ok(()) => {
+                                        let recovered_at = self.recovery_clock.elapsed();
+                                        info!(
+                                            "recovery hook succeeded; entering boot grace {:?} (Issue #210)",
+                                            self.recovery_grace
+                                        );
+                                        guard.recovered(recovered_at);
+                                    }
+                                    Err(e) => {
+                                        warn!("recovery hook failed: {e}");
+                                        return self.build_outcome(
+                                            iterations - 1,
+                                            fired,
+                                            LoopStopReason::ExecuteError,
+                                            "recovery_failed",
+                                            per_task_matches,
+                                            started,
+                                        );
+                                    }
+                                }
+                            }
                         } else {
-                            LoopStopReason::ExecuteError
-                        };
+                            return self.build_outcome(
+                                iterations - 1,
+                                fired,
+                                LoopStopReason::CaptureError,
+                                "io_error",
+                                per_task_matches,
+                                started,
+                            );
+                        }
+                    } else {
                         return self.build_outcome(
                             iterations - 1,
                             fired,
-                            reason,
+                            LoopStopReason::ExecuteError,
                             "io_error",
                             per_task_matches,
                             started,
@@ -2009,7 +2094,10 @@ mod tests {
         );
 
         match driver.run_once().await {
-            StepOutcome::Error(msg) => assert!(msg.starts_with("capture")),
+            StepOutcome::Error { kind, message } => {
+                assert_eq!(kind, StepErrorKind::Capture);
+                assert!(message.starts_with("capture"));
+            }
             other => panic!("expected Error, got {other:?}"),
         }
         assert!(fired.lock().expect("fired lock").is_empty());
@@ -2725,6 +2813,114 @@ mod tests {
         assert_eq!(calls.load(Ordering::SeqCst), 1);
     }
 
+    // ---- (5c) StepOutcome エラーの enum 構造化: 2 ループ間リカバリ契約の統一 ----
+    //
+    // F1 (verify_capture リカバリ漏れ): `run_once_verified` の事後 capture エラーは
+    // message が "verify_capture: ..." で始まるため `starts_with("capture")` が false に
+    // なり、recovery 有効でも ExecuteError 即停止していた。capture と同じ「画面取得系
+    // IO エラー = ゲーム死/起動中の可能性が高い」に分類し、リカバリ契約へ乗せる。
+    //
+    // F2 (--goal 弱体化): `run_loop_with_goal` の Error ブランチは grace 中の warn 継続
+    // しか持たず、grace 外 + recovery_enabled でも hook を起動せず CaptureError 即停止
+    // していた (`run_loop_with_recovery` とコメント上は「同一契約」を宣言しつつ挙動が
+    // 乖離)。両ループで同一の分類・リカバリ契約を保証する。
+
+    /// verify_capture エラー (1 枚目 capture 成功 → fire → 事後 capture が IO Err) が
+    /// recovery_enabled なら recovery hook 起動後にループを継続することを検証 (ループ単位)。
+    /// 既存 `verify_capture_error_returns_error` は run_once 単位の挙動 pin なので、
+    /// ここでループへの伝播を pin する。
+    #[tokio::test]
+    async fn test_verify_capture_error_enters_recovery_path() {
+        let (matched, _tpl) = matched_frame();
+        // 1 枚のみ: c1 の run_once は成功(fire)するが verify capture が "no more frames"。
+        // c2 以降は run_once の capture 自体が失敗する (hook 後の grace 中は warn 継続)。
+        let mut driver = build_grace_driver(
+            frames_of(vec![matched]),
+            Duration::from_secs(90),
+            Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))),
+        )
+        .with_verify(true);
+        let (calls, hook) = counting_hook();
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 8, 2, Some(hook))
+            .await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "verify_capture エラーは recovery 経路へ分類される (ExecuteError 即停止しない)"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "verify_capture エラーが recovery hook を起動する (以降の capture エラーは grace 中)"
+        );
+    }
+
+    /// kind 分類の表駆動単体テスト (F3: 文字列 prefix 一致の解消)。
+    /// 画面取得系 (Capture / VerifyCapture) はリカバリ対象、入力発火系 (Execute) は
+    /// fail-closed。この契約が両ループの Error 分岐を決定する。
+    #[test]
+    fn test_step_error_kind_classification() {
+        let cases = [
+            (StepErrorKind::Capture, true),
+            (StepErrorKind::VerifyCapture, true),
+            (StepErrorKind::Execute, false),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(is_recoverable_io_error(kind), expected, "kind={kind:?}");
+        }
+    }
+
+    /// grace 外 capture エラー + recovery_enabled で `run_loop_with_goal` が
+    /// CaptureError 即停止ではなく recovery hook 起動後に再開することを検証
+    /// (`run_loop_with_recovery` の L1157-1198 契約と同一期待)。
+    #[tokio::test]
+    async fn test_goal_loop_capture_error_matches_recovery_contract() {
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_of(vec![]),
+                fail: true,
+            },
+            FakeInput {
+                fired: new_fired(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![],
+            2400,
+            300,
+        )
+        .with_recovery_grace(Duration::from_secs(90))
+        .with_recovery_clock(Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))));
+        let (calls, hook) = counting_hook();
+        let goal = anaden_core::Goal {
+            name: "g-capture-recovery".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 100 },
+        };
+
+        let outcome = driver
+            .run_loop_with_goal(
+                Duration::ZERO,
+                6,
+                1,
+                Some(hook),
+                Some(&goal),
+                FakeClock::starting_at(0),
+            )
+            .await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "goal loop の grace 外 capture エラーは recovery hook 経路へ分類される (CaptureError 即停止しない)"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "grace 外 capture エラーが recovery hook を起動する (hook 後は grace 中 warn 継続)"
+        );
+    }
+
     // ---- (6) run_once_verified: アクション後検証 ----
 
     #[tokio::test]
@@ -2897,8 +3093,9 @@ mod tests {
         );
 
         match driver.run_once_verified().await {
-            StepOutcome::Error(msg) => {
-                assert!(msg.starts_with("verify_capture"), "got: {msg}");
+            StepOutcome::Error { kind, message } => {
+                assert_eq!(kind, StepErrorKind::VerifyCapture);
+                assert!(message.starts_with("verify_capture"), "got: {message}");
             }
             other => panic!("expected Error(verify_capture), got {other:?}"),
         }
