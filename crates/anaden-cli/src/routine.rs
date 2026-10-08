@@ -31,8 +31,9 @@ const RECOVER_NOMATCH_THRESHOLD: u32 = 5;
 /// 実測 (issue210-verify2): grace 90s では タイトル到達 (~2分) に間に合わず
 /// 起動中のゲームが再 kill され続けたため 180s へ拡大。
 const RECOVERY_BOOT_GRACE_SECS: u64 = 180;
-/// 再起動前の既存ゲームプロセス終了待ち上限 (Issue #210: 二重起動防止)。
-const RECOVERY_EXIT_WAIT_SECS: u64 = 15;
+// 再起動前の既存ゲームプロセス終了待ち上限 (Issue #210: 二重起動防止) は
+// main.rs の RECOVERY_EXIT_WAIT_SECS (run と同値) を crate::escalation_recovery_hook
+// 経由で共有する — routine 側には定義を残さない (単一情報源)。
 
 /// `routine` サブコマンド本体。終了コードを返す (呼出元が exit する)。
 ///
@@ -268,39 +269,19 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
         step.name
     );
 
-    // NoMatch リカバリ (ゲーム再起動) — `run` の既定と同じ構成 + Issue #210 対策:
-    // - エスカレーション型 recovery (Issue #210): 1 回目は起動のみ (launch_app =
-    //   kill しない・起動中のゲームを殺さない)、2 回目以降は kill+再起動
-    //   (restart_app = 終了待ち→spawn・ハングゲームの本気回復)。実測
-    //   (issue210-verify2) で「毎回 kill」はタイトル到達前のゲームを殺し続ける
-    //  ことが判明したため、まず起動を待ち、それでも NoMatch が続く時だけ
-    //   kill する。カウントはステップ実行内で単調増加 (マッチで streak は
-    //   リセットされるがカウントは保持 — ハングゲームの反復回復に備える)。
+    // NoMatch リカバリ (ゲーム再起動) — `run` の既定と同じ構成:
+    // - エスカレーション型 recovery は crate::escalation_recovery_hook (run と
+    //   routine の単一実装・Issue #210) を使う。試行番号は engine (RecoveryGuard)
+    //   が供給し、健全サイクル (テンプレートマッチ) で 1 からやり直す
+    //   (02-recovery-budget F4: 単調カウンタによる「即 kill+restart」強化の解消)。
     // - with_recovery_grace: 再起動後の猶予は NoMatch streak を数えない
-    //   (起動猶予・マッチすれば即復帰) → 再起動ストーム防止
+    //   (起動猶予・マッチすれば即復帰) → 再起動ストーム防止。
+    // - with_max_recovery_attempts: 健全サイクルを挟まず連続で再起動しても
+    //   復帰しなければ RecoveryExhausted で打ち切る (run の既定と同値 —
+    //   routine ステップだけ永久再起動し続ける減衰を残さない)。
     let launcher = anaden_device::Win32Launch::default_paths();
-    let recovery: Option<anaden_engine::RecoveryHook> = {
-        let launcher = launcher.clone();
-        let recoveries = std::sync::atomic::AtomicU32::new(0);
-        Some(Box::new(move |_streak| {
-            let l = launcher.clone();
-            let n = recoveries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            Box::pin(async move {
-                if n == 1 {
-                    info!(
-                        "NoMatch 継続(routine): ゲームを起動します (初回・kill なし・Issue #210)"
-                    );
-                    l.launch_app().await
-                } else {
-                    info!(
-                        "NoMatch 継続(routine): ゲームを kill+再起動します ({n} 回目・Issue #210)"
-                    );
-                    l.restart_app(std::time::Duration::from_secs(RECOVERY_EXIT_WAIT_SECS))
-                        .await
-                }
-            })
-        }))
-    };
+    let recovery: Option<anaden_engine::RecoveryHook> =
+        Some(crate::escalation_recovery_hook(launcher, "routine"));
 
     let mut driver = PipelineDriver::new(
         capture,
@@ -314,7 +295,8 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
     // (PR #201 lane2 C-1: driver 既定 false のままでは routine ステップだけ
     //  発火後のテンプレ残存検証が無効になる未文書の減衰だった)。
     .with_verify(true)
-    .with_recovery_grace(std::time::Duration::from_secs(RECOVERY_BOOT_GRACE_SECS));
+    .with_recovery_grace(std::time::Duration::from_secs(RECOVERY_BOOT_GRACE_SECS))
+    .with_max_recovery_attempts(crate::DEFAULT_MAX_RECOVERY_ATTEMPTS);
     Ok(driver
         .run_loop_with_recovery(
             std::time::Duration::from_secs(step.interval),

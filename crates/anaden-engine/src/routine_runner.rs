@@ -146,7 +146,8 @@ impl RoutineSummary {
 /// - Completed: Stop / TerminalTask / GoalReached / MaxIterations
 ///   (MaxIterations は成果物 (fired) の有無で [`StepStatus::NoFire`] へ切り替わる。
 ///   判定は内部の step_result が発火数を併せて行う。本純関数は理由のみの射影)
-/// - Failed:    CaptureError / ExecuteError / GoalTimeout
+/// - Failed:    CaptureError / ExecuteError / GoalTimeout / RecoveryExhausted
+///   (RecoveryExhausted は環境故障で進行不能 = ハードエラー系。02-recovery-budget)
 /// - Interrupted: 割り込み (ユーザー中止 = on_failure に関わらず routine 中止)
 #[must_use]
 pub fn classify_reason(reason: &LoopStopReason) -> StepStatus {
@@ -157,7 +158,8 @@ pub fn classify_reason(reason: &LoopStopReason) -> StepStatus {
         | LoopStopReason::MaxIterations => StepStatus::Completed(reason.clone()),
         LoopStopReason::CaptureError
         | LoopStopReason::ExecuteError
-        | LoopStopReason::GoalTimeout => StepStatus::Failed(reason.clone()),
+        | LoopStopReason::GoalTimeout
+        | LoopStopReason::RecoveryExhausted => StepStatus::Failed(reason.clone()),
         LoopStopReason::Interrupted => StepStatus::Interrupted,
     }
 }
@@ -187,6 +189,7 @@ pub fn reason_label(reason: &LoopStopReason) -> &'static str {
         LoopStopReason::Interrupted => "Ctrl+C/SIGINT で中断",
         LoopStopReason::CaptureError => "キャプチャエラー",
         LoopStopReason::ExecuteError => "発火エラー",
+        LoopStopReason::RecoveryExhausted => "リカバリ試行上限到達 (環境故障で進行不能)",
     }
 }
 
@@ -407,6 +410,8 @@ mod tests {
                 elapsed_ms: 0,
                 terminal_task: None,
                 reached_goal: None,
+                recovery_attempts: 0,
+                max_consecutive_recovery: 0,
             },
         }
     }

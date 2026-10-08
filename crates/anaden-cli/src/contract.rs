@@ -107,6 +107,7 @@ pub const EXIT_RUN_TIMEOUT: i32 = EXIT_TIMEOUT;
 /// | `GoalTimeout`           | 2 (timeout) | ゴール未到達だが進捗あり = soft failure(Issue #37) |
 /// | `CaptureError`          | 1 (hard)    | capture IO 失敗 = ハードエラー |
 /// | `ExecuteError`          | 1 (hard)    | execute IO 失敗 = ハードエラー |
+/// | `RecoveryExhausted`     | 1 (hard)    | リカバリ試行上限到達 = 環境故障で進行不能 (02-recovery-budget)。soft timeout(2) と区別 — 成果は出ておらず進行も不能 |
 ///
 /// # 設計意図(pre-T5 決定ゲート: org-feedback estimate approval)
 ///
@@ -140,6 +141,10 @@ pub fn run_exit_code(reason: &anaden_engine::LoopStopReason) -> i32 {
         // IO 系ハードエラー = exit 1。
         anaden_engine::LoopStopReason::CaptureError => EXIT_RUN_HARDCERROR,
         anaden_engine::LoopStopReason::ExecuteError => EXIT_RUN_HARDCERROR,
+        // リカバリ試行上限到達 (健全サイクル無しでゲーム再起動を試み尽くした =
+        // 環境故障で進行不能) = IO 系ハードエラーと同じ exit 1 (02-recovery-budget)。
+        // soft timeout(2) ではない — timeout は「成果物は出た」が、こちらは進行不能。
+        anaden_engine::LoopStopReason::RecoveryExhausted => EXIT_RUN_HARDCERROR,
     }
 }
 
@@ -311,10 +316,27 @@ mod tests {
     }
 
     #[test]
+    fn run_exit_code_recovery_exhausted_is_hard_error() {
+        // 02-recovery-budget: リカバリ試行上限到達 = 恒久 NoMatch で進行不能。
+        // recovery hook 失敗 (ExecuteError) と同じハードエラー(1)へ射影する。
+        let code = run_exit_code(&anaden_engine::LoopStopReason::RecoveryExhausted);
+        assert_eq!(
+            code, EXIT_RUN_HARDCERROR,
+            "RecoveryExhausted must map to hard-error exit 1"
+        );
+        assert_ne!(code, EXIT_RUN_SUCCESS, "RecoveryExhausted is not success");
+        assert_ne!(
+            code, EXIT_RUN_TIMEOUT,
+            "RecoveryExhausted is not a soft timeout (環境故障で進行不能)"
+        );
+    }
+
+    #[test]
     fn run_exit_code_covers_all_variants() {
         // LoopStopReason へ新バリアントが追加された際、このテストが未対応を検出する。
         // GoalReached / GoalTimeout は Issue #37 で追加済み(T3)。
         // Interrupted は Ctrl+C/SIGINT 中断(ガード1)。
+        // RecoveryExhausted はリカバリ試行上限到達 (02-recovery-budget)。
         let variants = [
             anaden_engine::LoopStopReason::Stop,
             anaden_engine::LoopStopReason::TerminalTask,
@@ -324,6 +346,7 @@ mod tests {
             anaden_engine::LoopStopReason::Interrupted,
             anaden_engine::LoopStopReason::CaptureError,
             anaden_engine::LoopStopReason::ExecuteError,
+            anaden_engine::LoopStopReason::RecoveryExhausted,
         ];
         for v in &variants {
             // 各バリアントが success(0) / timeout(2) / hard-error(1) のいずれかへ解決されること。
@@ -473,6 +496,8 @@ mod tests {
                 elapsed_ms: 3000,
                 terminal_task: None,
                 reached_goal: Some("timeout=3".to_string()),
+                recovery_attempts: 0,
+                max_consecutive_recovery: 0,
             },
         };
         // 1行の統合 assert: ループ産出 reason → run_exit_code → EXIT_RUN_TIMEOUT(2)。

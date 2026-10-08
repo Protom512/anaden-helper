@@ -34,6 +34,14 @@ use anaden_core::Goal;
 /// `routine` サブコマンド側 (routine.rs) の RECOVERY_EXIT_WAIT_SECS と同じ値。
 const RECOVERY_EXIT_WAIT_SECS: u64 = 15;
 
+/// リカバリ試行の予算上限 既定値 (02-recovery-budget: circuit breaker)。
+///
+/// 健全サイクル (テンプレートマッチ成功) を挟まずに連続したリカバリ試行がこの回数に
+/// 達すると `LoopStopReason::RecoveryExhausted` (exit 1) で停止する。永久 NoMatch
+/// (ゲームが起動できない環境故障) での再起動無限ループを構造的に止める。
+/// `routine` サブコマンド側 (routine.rs) も同じ値を使う (run と routine の契約統一)。
+const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 5;
+
 #[derive(Parser, Debug)]
 #[command(
     name = "anaden",
@@ -85,6 +93,17 @@ enum Commands {
         /// マッチすれば即座に通常動作へ復帰する。
         #[arg(long, default_value_t = 180)]
         recover_grace_secs: u64,
+        /// リカバリ試行の予算上限 (02-recovery-budget: circuit breaker)。
+        ///
+        /// 健全サイクル (テンプレートマッチ成功) を挟まずに連続したリカバリ試行が
+        /// この回数に達すると、それ以上の再起動を打ち切り exit 1
+        /// (RecoveryExhausted = 環境故障で進行不能) で停止する。永久 NoMatch 状態で
+        /// ゲーム再起動を無限に繰り返すのを構造的に防ぐ。マッチ成功を挟むごとに
+        /// 試行番号は 1 からやり直し (毎エピソード「初回 = kill なし起動」から
+        /// エスカレーションし直す)。0 にすると初回発火時に即上限到達となるため
+        /// 実質的に `--recover-launch false` と同じ意味になる。
+        #[arg(long, default_value_t = DEFAULT_MAX_RECOVERY_ATTEMPTS)]
+        max_recovery_attempts: u32,
         /// 発火後検証(誠実検証)を有効化する(デフォルト true)。
         ///
         /// 有効時、発火成功後にもう1回 capture して同タスクのテンプレがまだマッチするか検証し、
@@ -288,6 +307,47 @@ fn parse_goal_flag(
     }
 }
 
+/// NoMatch リカバリのエスカレーション hook (`run` / `routine` 共通の単一実装)。
+///
+/// [`anaden_engine::RecoveryContext::attempt`] (健全サイクルで 1 へ戻る試行番号)
+/// で段階分けする (Issue #210 のエスカレーション方針を踏襲):
+/// - attempt 1 : `launch_app` (kill なし・起動中のゲームを殺さない)
+/// - attempt 2+: `restart_app` (kill + 終了待ち → spawn・ハングゲームの本気回復)
+///
+/// 従来は run/routine 各々がクロージャ内で AtomicU32 の単調カウンタを回して試行
+/// 番号を数えていたため、健全サイクルを挟んでも「2 回目以降 = 即 kill+restart」の
+/// 強いエスカレーションが続いた (02-recovery-budget F4)。試行番号の管理は engine
+/// (`RecoveryGuard`) へ移譲し、本関数は attempt → 起動方式 の射影のみを担う
+/// (エスカレーション判定の単一情報源化)。
+///
+/// `label` はログの呼出元識別 ("PC版" / "routine")。
+#[cfg(windows)]
+pub(crate) fn escalation_recovery_hook(
+    launcher: anaden_device::Win32Launch,
+    label: &'static str,
+) -> anaden_engine::RecoveryHook {
+    Box::new(move |ctx: anaden_engine::RecoveryContext| {
+        let l = launcher.clone();
+        Box::pin(async move {
+            if ctx.attempt == 1 {
+                info!(
+                    "NoMatch 継続({label}): ゲームを起動します \
+                     (attempt 1・kill なし・Issue #210)"
+                );
+                l.launch_app().await
+            } else {
+                info!(
+                    "NoMatch 継続({label}): ゲームを kill+再起動します \
+                     (attempt {}・Issue #210)",
+                    ctx.attempt
+                );
+                l.restart_app(Duration::from_secs(RECOVERY_EXIT_WAIT_SECS))
+                    .await
+            }
+        })
+    })
+}
+
 /// `run` サブコマンド: 宣言的パイプラインを PC 版 (Win32) でライブ実行する。
 ///
 /// フロー:
@@ -309,6 +369,7 @@ async fn run_pipeline_live(
     recover_launch: bool,
     recover_nomatch_threshold: u32,
     recover_grace_secs: u64,
+    max_recovery_attempts: u32,
     verify_after_fire: bool,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
@@ -342,6 +403,7 @@ async fn run_pipeline_live(
         recover_launch,
         recover_nomatch_threshold,
         recover_grace_secs,
+        max_recovery_attempts,
         verify_after_fire,
         goal,
         cancel_token,
@@ -370,6 +432,7 @@ async fn run_with_windows(
     recover_launch: bool,
     recover_nomatch_threshold: u32,
     recover_grace_secs: u64,
+    max_recovery_attempts: u32,
     verify_after_fire: bool,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
@@ -449,33 +512,19 @@ async fn run_with_windows(
         }
     };
 
-    // ---- (5) NoMatch リカバリフック(Win32Launch::restart_app + 起動猶予・Issue #210) ----
-    // 再起動ストーム対策: 従来の launch_app (spawn-only 3ms) は起動途中のゲームを
-    // 残したまま再 spawn するため ≈18 秒周期でゲームを殺し続けた。restart_app は
-    // 既存プロセスを終了待ちしてから spawn し (二重起動防止)、with_recovery_grace で
-    // 再起動後 recover_grace_secs 秒は NoMatch streak を数えない (タイトル到達待ち)。
-    // エスカレーション型 recovery (Issue #210・routine と同一方式): 1 回目は
-    // launch_app (kill なし・起動中のゲームを殺さない)、2 回目以降は
-    // restart_app (kill+終了待ち→spawn・ハングゲームの本気回復)。
-    // 実測 (issue210-verify2): 毎回 kill は タイトル到達 (~2分) 前のゲームを
-    // 殺し続ける。カウントは run 実行内で単調増加。
+    // ---- (5) NoMatch リカバリフック(Win32Launch + 起動猶予 + 試行予算・Issue #210 / 02-recovery-budget) ----
+    // 再起動ストーム対策 (Issue #210): エスカレーション型 recovery は
+    // [`escalation_recovery_hook`] (run / routine 共通の単一実装) へ集約した。
+    // - 1 回目は launch_app (kill なし・起動中のゲームを殺さない)、2 回目以降は
+    //   restart_app (kill+終了待ち→spawn・ハングゲームの本気回復)。
+    //   試行番号は engine (RecoveryGuard) が供給し、健全サイクルで 1 からやり直す。
+    // - with_recovery_grace: 再起動後 recover_grace_secs 秒は NoMatch streak を
+    //   数えない (タイトル到達待ち)。
+    // - with_max_recovery_attempts (02-recovery-budget): 健全サイクルを挟まず
+    //   max_recovery_attempts 回連続で再起動しても復帰しなければ
+    //   RecoveryExhausted (exit 1) で打ち切る (永久 NoMatch での無限再起動防止)。
     let recovery: Option<anaden_engine::RecoveryHook> = if recover_launch {
-        let launcher = launcher.clone();
-        let recoveries = std::sync::atomic::AtomicU32::new(0);
-        Some(Box::new(move |_streak| {
-            let l = launcher.clone();
-            let n = recoveries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            Box::pin(async move {
-                if n == 1 {
-                    info!("NoMatch 継続(PC版): ゲームを起動します (初回・kill なし・Issue #210)");
-                    l.launch_app().await
-                } else {
-                    info!("NoMatch 継続(PC版): ゲームを kill+再起動します ({n} 回目・Issue #210)");
-                    l.restart_app(Duration::from_secs(RECOVERY_EXIT_WAIT_SECS))
-                        .await
-                }
-            })
-        }))
+        Some(escalation_recovery_hook(launcher.clone(), "PC版"))
     } else {
         None
     };
@@ -498,7 +547,8 @@ async fn run_with_windows(
             )
             .with_verify(verify_after_fire)
             .with_cancel(cancel_token)
-            .with_recovery_grace(recovery_grace),
+            .with_recovery_grace(recovery_grace)
+            .with_max_recovery_attempts(max_recovery_attempts),
             interval_dur,
             max_iters,
             recover_nomatch_threshold,
@@ -518,7 +568,8 @@ async fn run_with_windows(
             )
             .with_verify(verify_after_fire)
             .with_cancel(cancel_token)
-            .with_recovery_grace(recovery_grace),
+            .with_recovery_grace(recovery_grace)
+            .with_max_recovery_attempts(max_recovery_attempts),
             interval_dur,
             max_iters,
             recover_nomatch_threshold,
@@ -544,6 +595,7 @@ async fn run_with_windows(
     _recover_launch: bool,
     _recover_nomatch_threshold: u32,
     _recover_grace_secs: u64,
+    _max_recovery_attempts: u32,
     _verify_after_fire: bool,
     _goal: Option<Goal>,
     _cancel_token: CancellationToken,
@@ -616,6 +668,9 @@ where
             anaden_engine::LoopStopReason::Interrupted => "Ctrl+C/SIGINT で中断",
             anaden_engine::LoopStopReason::CaptureError => "キャプチャエラーで停止",
             anaden_engine::LoopStopReason::ExecuteError => "発火エラーで停止",
+            anaden_engine::LoopStopReason::RecoveryExhausted => {
+                "リカバリ試行上限到達で停止 (環境故障で進行不能・02-recovery-budget)"
+            }
         }
     );
     for (i, c) in outcome.fired_commands.iter().enumerate() {
@@ -734,6 +789,7 @@ async fn main() -> Result<()> {
             recover_launch,
             recover_nomatch_threshold,
             recover_grace_secs,
+            max_recovery_attempts,
             verify_after_fire,
             goal,
             goal_file,
@@ -785,6 +841,7 @@ async fn main() -> Result<()> {
                 recover_launch,
                 recover_nomatch_threshold,
                 recover_grace_secs,
+                max_recovery_attempts,
                 verify_after_fire,
                 parsed_goal,
                 cancel_token,
