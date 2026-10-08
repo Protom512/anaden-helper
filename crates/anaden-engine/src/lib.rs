@@ -17,7 +17,7 @@ pub use pipeline_driver::{
     Capture, GoalClock, Input, LoopOutcome, LoopStopReason, PipelineDriver, ProgressReport,
     RecoveryClock, RecoveryContext, RecoveryHook, StepErrorKind, StepOutcome, SystemClock,
     SystemRecoveryClock, TaskMatchCount, format_progress_report, is_recoverable_io_error,
-    rescale_command,
+    rescale_command, stop_reason_label,
 };
 pub use pipeline_runner::{
     InputCommand, PipelineState, TickResult, action_to_command, advance_next,

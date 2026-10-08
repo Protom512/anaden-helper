@@ -22,6 +22,10 @@ use e2e::tree_hash_of_pipeline;
 // routine サブコマンド (Issue #199): 複数 pipeline の連続実行。
 mod routine;
 
+// 03-report-channel: run 成果物 (report.json + run.log) の永続化。
+mod run_report;
+use run_report::RunArtifacts;
+
 use anaden_cli_contract::{ensure_outcome_label, standalone_exit_code};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -134,6 +138,17 @@ enum Commands {
         /// 未指定時は証跡採取なし (通常実行)。
         #[arg(long)]
         evidence_run_id: Option<String>,
+        /// run 成果物レポート (report.json) の書込先 (03-report-channel)。
+        ///
+        /// run 終了時に `ProgressReport` (サイクル数・発火数・停止理由等の
+        /// 機械可読サマリ) を JSON で書き込む。未指定時は既定場所
+        /// `<pipeline_dir>/.anaden-run/<timestamp>/report.json` へ永続化する。
+        #[arg(long)]
+        report_file: Option<PathBuf>,
+        /// 既定の成果物永続化 (report.json + run.log) を無効化する
+        /// (03-report-channel)。`--report-file` の明示指定には影響しない。
+        #[arg(long)]
+        no_persist: bool,
     },
     /// 複数 pipeline を1日のルーチンとして連続実行する (Issue #199)。
     ///
@@ -374,6 +389,7 @@ async fn run_pipeline_live(
     goal: Option<Goal>,
     cancel_token: CancellationToken,
     evidence_dir: Option<&Path>,
+    artifacts: &RunArtifacts,
 ) -> Result<()> {
     // ---- Ctrl+C / SIGINT リスナ起動 ----
     // tokio::signal::ctrl_c() が返ったら token.cancel() する。driver(各 run_with_* 経由で
@@ -408,6 +424,7 @@ async fn run_pipeline_live(
         goal,
         cancel_token,
         evidence_dir,
+        artifacts,
     )
     .await
 }
@@ -437,6 +454,7 @@ async fn run_with_windows(
     goal: Option<Goal>,
     cancel_token: CancellationToken,
     evidence_dir: Option<&Path>,
+    artifacts: &RunArtifacts,
 ) -> Result<()> {
     // ---- (1) パイプライン読込 + algorithm 上書き ----
     let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
@@ -554,6 +572,7 @@ async fn run_with_windows(
             recover_nomatch_threshold,
             recovery,
             goal,
+            artifacts,
         )
         .await
     } else {
@@ -575,6 +594,7 @@ async fn run_with_windows(
             recover_nomatch_threshold,
             recovery,
             goal,
+            artifacts,
         )
         .await
     }
@@ -600,6 +620,7 @@ async fn run_with_windows(
     _goal: Option<Goal>,
     _cancel_token: CancellationToken,
     _evidence_dir: Option<&Path>,
+    _artifacts: &RunArtifacts,
 ) -> Result<()> {
     anyhow::bail!(
         "このバイナリは Windows 向けではないため PC 版 (Win32) バックエンドを使用できません"
@@ -621,6 +642,7 @@ async fn run_driver<C, I>(
     recover_nomatch_threshold: u32,
     recovery: Option<anaden_engine::RecoveryHook>,
     goal: Option<Goal>,
+    artifacts: &RunArtifacts,
 ) -> Result<()>
 where
     C: anaden_engine::Capture,
@@ -657,24 +679,22 @@ where
     println!("サイクル数: {}", outcome.iterations);
     println!("発火回数:   {}", outcome.fired_commands.len());
     println!("終端タスク: {}", outcome.terminal);
+    // 停止理由ラベルは engine (stop_reason_label) の単一情報源。
+    // studio の stdout 行解析 (log_status) もこの文言に依存する。
     println!(
         "停止理由:   {}",
-        match outcome.reason {
-            anaden_engine::LoopStopReason::Stop => "Stop アクション到達(正常)",
-            anaden_engine::LoopStopReason::TerminalTask => "終端タスク到達(正常)",
-            anaden_engine::LoopStopReason::MaxIterations => "最大サイクル到達",
-            anaden_engine::LoopStopReason::GoalReached => "宣言的ゴール到達(正常)",
-            anaden_engine::LoopStopReason::GoalTimeout => "ゴール未到達タイムアウト(soft failure)",
-            anaden_engine::LoopStopReason::Interrupted => "Ctrl+C/SIGINT で中断",
-            anaden_engine::LoopStopReason::CaptureError => "キャプチャエラーで停止",
-            anaden_engine::LoopStopReason::ExecuteError => "発火エラーで停止",
-            anaden_engine::LoopStopReason::RecoveryExhausted => {
-                "リカバリ試行上限到達で停止 (環境故障で進行不能・02-recovery-budget)"
-            }
-        }
+        anaden_engine::stop_reason_label(outcome.reason.clone())
     );
     for (i, c) in outcome.fired_commands.iter().enumerate() {
         println!("  [{i}] {c:?}");
+    }
+    // 03-report-channel: run 成果物を機械可読レポートへ永続化 (fail-closed —
+    // 書込失敗は anyhow エラーで伝播し exit 非ゼロ。studio は本レポートを
+    // stdout スクレイピングの代替として消費する)。
+    if let Some(path) = artifacts.report_path.as_ref() {
+        run_report::write_report(path, &outcome)
+            .map_err(|e| anyhow::anyhow!("run レポート書込失敗 {}: {e}", path.display()))?;
+        info!("run レポート永続化: {}", path.display());
     }
     Ok(())
 }
@@ -764,17 +784,94 @@ fn spawn_ctrl_c_listener(token: CancellationToken) {
     });
 }
 
+/// stdout と run.log (ファイル) への二重出力 writer (03-report-channel)。
+///
+/// stdout 側は best-effort (パイプ切断等の失敗をファイル出力へ伝播させない)。
+/// ファイル側の失敗のみを呼出元へ返す。
+struct DualWriter {
+    file: std::sync::Arc<std::fs::File>,
+}
+
+impl std::io::Write for DualWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write(buf);
+        let _ = stdout.flush();
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stdout().flush();
+        self.file.flush()
+    }
+}
+
+/// tracing の初期化。`log_file` 指定時は stdout との二重出力とする
+/// (03-report-channel: run.log への永続化。ファイルへ ANSI 色付けを
+/// 混入させないため二重出力時は ansi を無効化)。
+fn init_tracing(log_file: Option<&Path>) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "anaden=info".into());
+    let file = log_file.and_then(|p| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok()
+    });
+    match file {
+        Some(file) => {
+            let file = std::sync::Arc::new(file);
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(move || DualWriter { file: file.clone() })
+                .init();
+        }
+        None => {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // ロギングの初期化
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "anaden=info".into()),
-        )
-        .init();
-
+    // 03-report-channel: 成果物永続化先 (report.json + run.log) はコマンド解決後に
+    // 決定できるため、CLI パースをロギング初期化より先に行う (run.log への
+    // tracing 二重出力を初期化時に配線するため。パース前のログ出力は無い)。
     let cli = Cli::parse();
+
+    // Run コマンドの成果物永続化先を解決し、run.log を事前作成する。
+    // 事前作成失敗 (読み取り専用 pipeline_dir 等) はロギング未初期化のため
+    // eprintln で通知し、永続化なし (stdout のみ) で継続する — run 自体は
+    // 実行可能なため fail-closed にしない。report 書込失敗は run_driver が
+    // fail-closed で伝播する。
+    let run_artifacts = match &cli.command {
+        Commands::Run {
+            pipeline_dir,
+            report_file,
+            no_persist,
+            ..
+        } => {
+            let resolved_dir = resolve_pipeline_dir(pipeline_dir, &cli_workspace_root());
+            let artifacts = run_report::resolve_run_artifacts(
+                &resolved_dir,
+                report_file.as_deref(),
+                *no_persist,
+                &run_report::run_artifact_timestamp(e2e::unix_now()),
+            );
+            if let Err(e) = artifacts.prepare() {
+                eprintln!("run 成果物ディレクトリの事前作成に失敗 (永続化せず継続): {e}");
+                RunArtifacts::default()
+            } else {
+                artifacts
+            }
+        }
+        _ => RunArtifacts::default(),
+    };
+
+    // ロギングの初期化。run.log 指定時は stdout との二重出力。
+    init_tracing(run_artifacts.log_path.as_deref());
 
     match cli.command {
         Commands::Run {
@@ -794,6 +891,7 @@ async fn main() -> Result<()> {
             goal,
             goal_file,
             evidence_run_id,
+            ..
         } => {
             let parsed_goal = parse_goal_flag(goal.as_deref(), goal_file.as_deref())
                 .map_err(|e| anyhow::anyhow!("ゴール指定の解決失敗: {e}"))?;
@@ -846,6 +944,7 @@ async fn main() -> Result<()> {
                 parsed_goal,
                 cancel_token,
                 evidence_ctx.as_ref().map(|(_, d)| d.as_path()),
+                &run_artifacts,
             )
             .await?;
             // run 終了後: メタデータ (tree hash・スクショ件数・runTimestamp) を永続化。
@@ -1210,6 +1309,101 @@ mod tests {
         assert!(
             format!("{err}").contains("exclusive"),
             "error should explain mutual exclusivity, got: {err}"
+        );
+    }
+
+    // ---- run レポート永続化 (03-report-channel) ----
+
+    /// デバイス不要の fake バックエンド (engine テストの FakeCapture 相当)。
+    /// capture 常時失敗 → recovery 無しで CaptureError 即停止を引き出す。
+    mod fake_backend {
+        use anaden_core::InputAction;
+        use anaden_device::DeviceError;
+        use anaden_engine::{Capture, Input};
+        use async_trait::async_trait;
+
+        pub(super) struct FailCapture;
+
+        #[async_trait]
+        impl Capture for FailCapture {
+            async fn capture(&self) -> Result<image::DynamicImage, DeviceError> {
+                Err(DeviceError::CommandFailed {
+                    message: "fake capture failure (test)".into(),
+                })
+            }
+        }
+
+        pub(super) struct NoopInput;
+
+        #[async_trait]
+        impl Input for NoopInput {
+            async fn execute(&self, _action: &InputAction) -> Result<(), DeviceError> {
+                Ok(())
+            }
+        }
+    }
+
+    /// 統合 (デバイス不要の fake pipeline): run_driver がループ終了後に
+    /// report.json を書き、停止理由・サイクル数・発火数が機械可読形式で
+    /// 入っていること。既定永続化 (report.json + run.log) も同時に検証。
+    #[tokio::test]
+    async fn run_driver_writes_report_file_with_stop_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline_dir = dir.path().join("pl");
+        std::fs::create_dir_all(&pipeline_dir).unwrap();
+        // 既定永続化経路 (report.json + run.log) を解決して事前作成。
+        let artifacts =
+            run_report::resolve_run_artifacts(&pipeline_dir, None, false, "20260101-000000");
+        artifacts.prepare().unwrap();
+
+        let driver = anaden_engine::PipelineDriver::new(
+            fake_backend::FailCapture,
+            fake_backend::NoopInput,
+            anaden_engine::PipelineState::new("t"),
+            vec![],
+            1280,
+            300,
+        );
+        run_driver(driver, Duration::ZERO, 3, 1, None, None, &artifacts)
+            .await
+            .unwrap();
+
+        // 既定場所に report.json + run.log が存在する。
+        let base = pipeline_dir.join(".anaden-run").join("20260101-000000");
+        assert!(base.join("run.log").is_file(), "run.log missing");
+        let file = std::fs::File::open(base.join("report.json")).unwrap();
+        let report: anaden_engine::ProgressReport = serde_json::from_reader(file).unwrap();
+        assert_eq!(
+            report.stop_reason,
+            Some(anaden_engine::LoopStopReason::CaptureError)
+        );
+        assert_eq!(report.iterations, 0);
+        assert_eq!(report.fired_count, 0);
+    }
+
+    /// 統合: `--no-persist` 相当 (artifacts 無効) では何も書かない。
+    #[tokio::test]
+    async fn run_driver_no_persist_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline_dir = dir.path().join("pl");
+        std::fs::create_dir_all(&pipeline_dir).unwrap();
+        let artifacts = run_report::resolve_run_artifacts(&pipeline_dir, None, true, "ts");
+
+        let driver = anaden_engine::PipelineDriver::new(
+            fake_backend::FailCapture,
+            fake_backend::NoopInput,
+            anaden_engine::PipelineState::new("t"),
+            vec![],
+            1280,
+            300,
+        );
+        run_driver(driver, Duration::ZERO, 3, 1, None, None, &artifacts)
+            .await
+            .unwrap();
+
+        assert!(
+            !pipeline_dir.join(".anaden-run").exists(),
+            "no-persist must not create artifacts dir"
         );
     }
 }

@@ -1024,6 +1024,13 @@ pub struct ProgressReport {
     pub terminal_task: Option<String>,
     /// 到達ゴール記述子(非ゴールモードでは [`None`])。
     pub reached_goal: Option<String>,
+    /// 停止理由 (`LoopOutcome::reason` と同値・03-report-channel)。
+    ///
+    /// report 単体 (JSON) を消費する CLI/studio が「なぜ止まったか」を
+    /// 読むためのフィールド。`#[serde(default)]` により旧成果物
+    /// (本フィールド無し) は [`None`] 補完で読める。
+    #[serde(default)]
+    pub stop_reason: Option<LoopStopReason>,
     /// run 通算のリカバリ試行回数 (02-recovery-budget)。
     /// `#[serde(default)]` により旧成果物 (本フィールド無し) は 0 補完で読める。
     #[serde(default)]
@@ -1105,6 +1112,29 @@ pub fn format_progress_report(outcome: &LoopOutcome) -> String {
         lines.push(format!("per_task_matches: {}", summary.join(", ")));
     }
     lines.join("\n")
+}
+
+/// [`LoopStopReason`] の人間可読ラベル (03-report-channel)。
+///
+/// CLI (`anaden run` の「停止理由:」行) と studio (report.json 由来の表示) を
+/// 繋ぐ単一情報源。studio の stdout 行解析 (`RunStatus::observe` の
+/// `停止理由:` 行マッチ) もこの文言に依存するため、変更時は anaden-studio
+/// (log_status.rs) の出力契約テストを併せて更新すること。
+#[must_use]
+pub fn stop_reason_label(reason: LoopStopReason) -> &'static str {
+    match reason {
+        LoopStopReason::Stop => "Stop アクション到達(正常)",
+        LoopStopReason::TerminalTask => "終端タスク到達(正常)",
+        LoopStopReason::MaxIterations => "最大サイクル到達",
+        LoopStopReason::GoalReached => "宣言的ゴール到達(正常)",
+        LoopStopReason::GoalTimeout => "ゴール未到達タイムアウト(soft failure)",
+        LoopStopReason::Interrupted => "Ctrl+C/SIGINT で中断",
+        LoopStopReason::CaptureError => "キャプチャエラーで停止",
+        LoopStopReason::ExecuteError => "発火エラーで停止",
+        LoopStopReason::RecoveryExhausted => {
+            "リカバリ試行上限到達で停止 (環境故障で進行不能・02-recovery-budget)"
+        }
+    }
 }
 
 /// [`Goal`](`anaden_core::Goal`) の到達記述子(descriptor)を [`StopCondition`] から導出する純関数。
@@ -1902,6 +1932,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             terminal_task: terminal_task.clone(),
             // 非ゴールモード。ゴール到達は T4/T5 で run_loop_with_recovery 側が上書きする。
             reached_goal: None,
+            // 停止理由 (03-report-channel)。report 単体の消費者向け。
+            stop_reason: Some(reason.clone()),
             // 復帰テレメトリ (02-recovery-budget)。両ループが RecoveryGuard から伝播。
             recovery_attempts: ctx.recovery.recovery_attempts,
             max_consecutive_recovery: ctx.recovery.max_consecutive_recovery,
@@ -3287,6 +3319,7 @@ mod tests {
             elapsed_ms: 10,
             terminal_task: None,
             reached_goal: None,
+            stop_reason: Some(LoopStopReason::MaxIterations),
             recovery_attempts: 4,
             max_consecutive_recovery: 2,
         };
@@ -3307,6 +3340,95 @@ mod tests {
         let legacy: ProgressReport = serde_json::from_str(legacy_json).expect("legacy deserialize");
         assert_eq!(legacy.recovery_attempts, 0, "got: {legacy_json}");
         assert_eq!(legacy.max_consecutive_recovery, 0, "got: {legacy_json}");
+    }
+
+    /// RED (03-report-channel): `ProgressReport::stop_reason` が JSON 経路で
+    /// round-trip し、新フィールド欠落の旧成果物は None 補完で読める
+    /// (report 単体を消費する CLI/studio のデシリアライズ互換)。
+    #[test]
+    fn progress_report_serializes_stop_reason() {
+        let pr = ProgressReport {
+            iterations: 7,
+            fired_count: 3,
+            per_task_matches: vec![],
+            elapsed_ms: 1200,
+            terminal_task: Some("max_iterations".to_string()),
+            reached_goal: None,
+            stop_reason: Some(LoopStopReason::MaxIterations),
+            recovery_attempts: 0,
+            max_consecutive_recovery: 0,
+        };
+        let j = serde_json::to_string(&pr).expect("serialize json");
+        // enum は #[serde(rename_all = "snake_case")] で機械可読表現になる。
+        assert!(j.contains("\"stop_reason\":\"max_iterations\""), "got: {j}");
+        let back: ProgressReport = serde_json::from_str(&j).expect("deserialize json");
+        assert_eq!(back.stop_reason, Some(LoopStopReason::MaxIterations));
+        // 旧成果物 (本フィールド無し JSON) は None 補完される。
+        let legacy_json =
+            "{\"iterations\":1,\"fired_count\":0,\"per_task_matches\":[],\"elapsed_ms\":5}";
+        let legacy: ProgressReport = serde_json::from_str(legacy_json).expect("legacy deserialize");
+        assert_eq!(legacy.stop_reason, None, "got: {legacy_json}");
+    }
+
+    /// RED (03-report-channel): run loop の停止 outcome が ProgressReport に
+    /// 停止理由を埋め込む (report 単体で「なぜ止まったか」が読める)。
+    /// capture 常時失敗 + recovery 無し → CaptureError で即停止する経路で検証。
+    #[tokio::test]
+    async fn loop_outcome_embeds_stop_reason_in_report() {
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_of(vec![]),
+                fail: true,
+            },
+            FakeInput {
+                fired: new_fired(),
+                fail: false,
+            },
+            PipelineState::new("t"),
+            vec![],
+            1280,
+            300,
+        );
+        let out = driver
+            .run_loop_with_recovery(Duration::ZERO, 3, 1, None)
+            .await;
+        assert_eq!(out.reason, LoopStopReason::CaptureError);
+        assert_eq!(
+            out.progress_report.stop_reason,
+            Some(LoopStopReason::CaptureError)
+        );
+    }
+
+    /// RED (03-report-channel): `stop_reason_label` は全バリアントに空でない
+    /// ラベルを返す。CLI の「停止理由:」行と studio の report 表示の単一情報源。
+    #[test]
+    fn stop_reason_label_covers_all_variants() {
+        let all = [
+            LoopStopReason::Stop,
+            LoopStopReason::TerminalTask,
+            LoopStopReason::MaxIterations,
+            LoopStopReason::CaptureError,
+            LoopStopReason::ExecuteError,
+            LoopStopReason::GoalReached,
+            LoopStopReason::GoalTimeout,
+            LoopStopReason::Interrupted,
+            LoopStopReason::RecoveryExhausted,
+        ];
+        for reason in all {
+            assert!(
+                !stop_reason_label(reason.clone()).is_empty(),
+                "{reason:?} にラベル未定義"
+            );
+        }
+        // studio の stdout 行解析契約 (log_status) が依存する既知値のピン。
+        assert_eq!(
+            stop_reason_label(LoopStopReason::MaxIterations),
+            "最大サイクル到達"
+        );
+        assert_eq!(
+            stop_reason_label(LoopStopReason::GoalReached),
+            "宣言的ゴール到達(正常)"
+        );
     }
 
     /// `RecoveryGuard` の試行予算 (circuit breaker) 純粋遷移:
@@ -3846,6 +3968,7 @@ mod tests {
                 elapsed_ms: 1234,
                 terminal_task: Some("Terminal".to_string()),
                 reached_goal: Some("loop_count=7".to_string()),
+                stop_reason: None,
                 recovery_attempts: 0,
                 max_consecutive_recovery: 0,
             },
@@ -3895,6 +4018,7 @@ mod tests {
                 elapsed_ms: 500,
                 terminal_task: Some("Terminal".to_string()),
                 reached_goal: None,
+                stop_reason: None,
                 recovery_attempts: 0,
                 max_consecutive_recovery: 0,
             },
@@ -3919,6 +4043,7 @@ mod tests {
             elapsed_ms: 999,
             terminal_task: Some("A".to_string()),
             reached_goal: Some("template_match conf>=0.85".to_string()),
+            stop_reason: None,
             recovery_attempts: 0,
             max_consecutive_recovery: 0,
         };
@@ -3949,6 +4074,7 @@ mod tests {
                 elapsed_ms: 4321,
                 terminal_task: Some("GoalTerminal".to_string()),
                 reached_goal: Some("loop_count=5".to_string()),
+                stop_reason: None,
                 recovery_attempts: 0,
                 max_consecutive_recovery: 0,
             },
@@ -3984,6 +4110,7 @@ mod tests {
             elapsed_ms: 1500,
             terminal_task: Some("Boss".to_string()),
             reached_goal: Some("template_match conf>=0.85".to_string()),
+            stop_reason: None,
             recovery_attempts: 0,
             max_consecutive_recovery: 0,
         };

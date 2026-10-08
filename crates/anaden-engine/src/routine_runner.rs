@@ -410,6 +410,7 @@ mod tests {
                 elapsed_ms: 0,
                 terminal_task: None,
                 reached_goal: None,
+                stop_reason: None,
                 recovery_attempts: 0,
                 max_consecutive_recovery: 0,
             },

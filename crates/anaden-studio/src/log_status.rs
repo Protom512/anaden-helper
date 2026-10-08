@@ -143,6 +143,22 @@ impl RunStatus {
             "未実行".to_string()
         }
     }
+
+    /// report.json (`anaden_engine::ProgressReport`) を観測して状態を更新する
+    /// (03-report-channel)。
+    ///
+    /// report を第一ソースとし、stdout 日本語行解析 (`observe`) はフォールバック
+    /// に格下げする: 終端状態 (iterations / stop_reason) は report の値で
+    /// **上書き** する。report に無い情報 (goal 名) は stdout 由来の値を維持。
+    /// 旧成果物由来で `stop_reason` が [`None`] の場合は stdout 解析の結果を
+    /// 維持する (フォールバック)。
+    pub fn apply_report(&mut self, report: &anaden_engine::ProgressReport) {
+        self.iterations = Some(report.iterations);
+        if let Some(reason) = report.stop_reason.clone() {
+            self.stop_reason = Some(anaden_engine::stop_reason_label(reason).to_string());
+        }
+        self.running = false;
+    }
 }
 
 #[cfg(test)]
@@ -204,6 +220,73 @@ mod tests {
         assert_eq!(s.iterations, None);
         assert_eq!(s.stop_reason, None);
         assert_eq!(s.goal.as_deref(), Some("g2"));
+    }
+
+    // ---- apply_report (03-report-channel: report を第一ソース化) ----
+
+    /// report.json fixture から終端状態 (サイクル数・停止理由) が構築できる。
+    /// stdout の開始行由来の goal は report に無い情報のためフォールバック保持。
+    #[test]
+    fn status_builds_from_report_fixture() {
+        let dir = tempfile::tempdir().expect("tempdir");
+        let path = dir.path().join("report.json");
+        std::fs::write(
+            &path,
+            r#"{"iterations":42,"fired_count":7,"per_task_matches":[],"elapsed_ms":1000,"terminal_task":"goal_reached","reached_goal":"loop_count=42","stop_reason":"goal_reached","recovery_attempts":0,"max_consecutive_recovery":0}"#,
+        )
+        .expect("write fixture");
+        let report: anaden_engine::ProgressReport =
+            serde_json::from_reader(std::fs::File::open(&path).expect("open")).expect("parse");
+
+        let mut s = RunStatus::new();
+        s.observe("INFO anaden_cli: run_loop 開始: interval=2s max_iters=10 goal=farm50");
+        s.apply_report(&report);
+
+        assert!(!s.running, "report は終端成果物 = 実行中でない");
+        assert_eq!(s.iterations, Some(42));
+        assert_eq!(s.stop_reason.as_deref(), Some("宣言的ゴール到達(正常)"));
+        assert_eq!(s.goal.as_deref(), Some("farm50"));
+    }
+
+    /// report の値は stdout 行解析の結果を上書きする (report が第一ソース)。
+    #[test]
+    fn status_report_overrides_stdout_parsed_values() {
+        let report = anaden_engine::ProgressReport {
+            iterations: 9,
+            fired_count: 2,
+            per_task_matches: vec![],
+            elapsed_ms: 10,
+            terminal_task: Some("max_iterations".to_string()),
+            reached_goal: None,
+            stop_reason: Some(anaden_engine::LoopStopReason::MaxIterations),
+            recovery_attempts: 0,
+            max_consecutive_recovery: 0,
+        };
+        let mut s = RunStatus::new();
+        s.observe("run_loop 開始: interval=1s goal=g");
+        // stdout 解析で誤った値が入った状態をシミュレート。
+        s.observe("サイクル数: 999");
+        s.observe("停止理由:   宣言的ゴール到達(正常)");
+        s.apply_report(&report);
+        assert_eq!(s.iterations, Some(9), "report のサイクル数が優先");
+        assert_eq!(s.stop_reason.as_deref(), Some("最大サイクル到達"));
+        assert!(!s.running);
+    }
+
+    /// 旧成果物由来 (stop_reason 無し) の report は stdout 解析結果を維持。
+    #[test]
+    fn status_report_without_stop_reason_keeps_stdout_value() {
+        let mut s = RunStatus::new();
+        s.observe("run_loop 開始: goal=g");
+        s.observe("停止理由:   最大サイクル到達");
+        s.observe("サイクル数: 3");
+        let legacy = anaden_engine::ProgressReport {
+            iterations: 3,
+            ..anaden_engine::ProgressReport::default()
+        };
+        s.apply_report(&legacy);
+        assert_eq!(s.stop_reason.as_deref(), Some("最大サイクル到達"));
+        assert_eq!(s.iterations, Some(3));
     }
 
     // ---- AutoScrollFollow (T4: 自動スクロール追従の純ロジック) ----
