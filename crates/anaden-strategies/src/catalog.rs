@@ -9,8 +9,17 @@
 //! fishing / login は templates/tasks のタスクバンク経由で扱うため未登録）。
 //! `pipeline_dir` / `start_task` / `algorithm` / `target` を [`StrategyDef`] が持つ
 //! ことで、`anaden run` 引数列の組み立てはカタログ定義単一情報源から行われる。
+//! `max_iters` (04-studio-maxiters-outcome / F6) も同様にカタログ定義から
+//! `--max-iters` として明示渡され、CLI 黙示既定 (100 サイクル) に依存しない。
 
 use serde::{Deserialize, Serialize};
+
+/// builtin カタログ戦略の既定最大サイクル数 (`--max-iters` 明示値)。
+///
+/// `anaden run` の CLI 既定は 100 サイクル (interval 1s なら ≈100 秒) で、
+/// farming 周回の打ち切りとしては短すぎる黙示既定だった (F6)。カタログ経由の
+/// studio 実行は本値を明示渡しし、CLI 黙示既定に依存しない。
+const BUILTIN_MAX_ITERS: u64 = 10_000;
 
 /// 戦略オプションの定義（ON/OFF トグル）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -45,6 +54,12 @@ pub struct StrategyDef {
     /// `--target` 上書き（Issue #188 で CLI 側フラグを削除。settings.toml 互換で残置）。
     #[serde(default)]
     pub target: Option<String>,
+    /// `anaden run` へ明示渡す最大サイクル数 (`--max-iters <N>`)。
+    ///
+    /// 未指定 (None) の場合はフラグを出力しない (= CLI 既定 100 に黙示依存)。
+    /// builtin 戦略は CLI 既定が farming に短すぎるため (F6) 必ず明示値を設定する。
+    #[serde(default)]
+    pub max_iters: Option<u64>,
 }
 
 impl StrategyDef {
@@ -56,17 +71,27 @@ impl StrategyDef {
     pub fn to_run_args(&self) -> Vec<String> {
         // --target フラグは Issue #188 で CLI から削除済み (Win32 固定) のため
         // 出力しない。`target` フィールドは settings.toml 互換で残置。
-        vec![
+        let mut args = vec![
             "run".to_string(),
             "--algorithm".to_string(),
             self.algorithm.clone(),
-            self.pipeline_dir.clone(),
-            self.start_task.clone(),
-        ]
+        ];
+        // F6 (04-studio-maxiters-outcome): max_iters は明示渡す。
+        // 未指定時のみフラグを出さない (CLI 既定へ委譲)。
+        if let Some(max_iters) = self.max_iters {
+            args.push("--max-iters".to_string());
+            args.push(max_iters.to_string());
+        }
+        args.push(self.pipeline_dir.clone());
+        args.push(self.start_task.clone());
+        args
     }
 }
 
 /// 実在パイプラインのカタログ定義を構築するヘルパ（builtin の宣言性確保用）。
+///
+/// `max_iters` は builtin 全戦略共通の [`BUILTIN_MAX_ITERS`] を設定する
+/// (04-studio-maxiters-outcome / F6: CLI 既定 100 への黙示依存を排除)。
 fn pipeline_def(
     id: &str,
     label: &str,
@@ -83,6 +108,7 @@ fn pipeline_def(
         start_task: start_task.to_string(),
         algorithm: algorithm.to_string(),
         target: target.map(std::string::ToString::to_string),
+        max_iters: Some(BUILTIN_MAX_ITERS),
     }
 }
 
@@ -313,6 +339,9 @@ mod tests {
                 "run",
                 "--algorithm",
                 "ccoeff",
+                // F6: builtin は CLI 既定 (100) でなく明示値を渡す。
+                "--max-iters",
+                "10000",
                 "templates/pipelines/nav_to_field_pc",
                 "TapToStartPc",
             ]
@@ -324,10 +353,68 @@ mod tests {
                 "run",
                 "--algorithm",
                 "ccoeff",
+                "--max-iters",
+                "10000",
                 "templates/pipelines/field_loop_pc",
                 "TapBottomStablePc",
             ]
         );
+    }
+
+    // ---- 04-studio-maxiters-outcome: --max-iters 明示化 (F6) ----
+
+    /// StrategyDef が max_iters を持つとき to_run_args は --max-iters <N> を含む。
+    #[test]
+    fn to_run_args_includes_explicit_max_iters_when_set() {
+        let mut def = StrategyCatalog::builtin()
+            .find("field_loop_pc")
+            .unwrap()
+            .clone();
+        def.max_iters = Some(500);
+        assert_eq!(
+            def.to_run_args(),
+            vec![
+                "run",
+                "--algorithm",
+                "ccoeff",
+                "--max-iters",
+                "500",
+                "templates/pipelines/field_loop_pc",
+                "TapBottomStablePc",
+            ]
+        );
+    }
+
+    /// max_iters 未指定 (None) のときは --max-iters を出力しない
+    /// (CLI 既定値への黙示依存は builtin 側で排除済みのため実運用では未発生)。
+    #[test]
+    fn to_run_args_omits_max_iters_flag_when_none() {
+        let mut def = StrategyCatalog::builtin()
+            .find("field_loop_pc")
+            .unwrap()
+            .clone();
+        def.max_iters = None;
+        assert!(
+            !def.to_run_args().iter().any(|a| a == "--max-iters"),
+            "args: {:?}",
+            def.to_run_args()
+        );
+    }
+
+    /// builtin 戦略は CLI 既定 100 サイクル (≈100 秒で打ち切り) への黙示依存を
+    /// 排除し、farming に十分大きな max_iters を明示持つこと (F6)。
+    #[test]
+    fn builtin_strategies_carry_explicit_large_max_iters() {
+        for s in StrategyCatalog::builtin().strategies() {
+            let n = s
+                .max_iters
+                .unwrap_or_else(|| panic!("{}: max_iters must be set explicitly", s.id));
+            assert!(
+                n > 100,
+                "{}: max_iters={n} must exceed the CLI default of 100",
+                s.id
+            );
+        }
     }
 
     #[test]

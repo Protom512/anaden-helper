@@ -612,7 +612,8 @@ impl PipelineRunnerApp {
     /// `LogEvent::Exit` を観測した場合:
     /// - exit code を保持し、異常終了（非零 / 不明）なら失敗状態サマリ
     ///   （run_status_summary + エラーログ末尾）を保持する（UC-3）
-    /// - 履歴へ RunRecord を追記する（正常: Success / 非零・不明: Failed）
+    /// - 履歴へ RunRecord を追記する（[`history::classify_outcome`]: exit 0 は
+    ///   report 停止理由ベースで Success / BudgetExhausted、非零・不明は Failed）
     pub fn drain_logs(&mut self) {
         let (_new_lines, observed) = crate::log_view::drain_channel_into(&self.log, &self.log_rx);
         let exit_seen = observed.is_some();
@@ -631,12 +632,11 @@ impl PipelineRunnerApp {
             if let Some(r) = &report {
                 self.log.with_buf(|b| b.status.apply_report(r));
             }
-            // 履歴 Record 追記（正常終了 / 異常終了）。中止は stop_pipeline 側。
-            let outcome = if failed {
-                RunOutcome::Failed
-            } else {
-                RunOutcome::Success
-            };
+            // 履歴 Record 追記。成否分類は report 停止理由ベース
+            // (04-studio-maxiters-outcome / F6): exit 0 でも成果ゼロの
+            // MaxIterations 打ち切りは BudgetExhausted として記録する。
+            // 中止は stop_pipeline 側。
+            let outcome = crate::history::classify_outcome(exit_code, report.as_ref());
             self.append_history_record(outcome, exit_code, report.as_ref());
         }
     }
@@ -1137,11 +1137,12 @@ mod tests {
     #[test]
     fn test_build_run_args_field_loop_pc_includes_positional_args() {
         let args = build_run_args(&pipeline_selection("field_loop_pc")).unwrap();
-        // run の位置引数（フラグ以降の非フラグトークン）は pipeline_dir と start_task。
+        // run の位置引数（フラグとその値を除く非フラグトークン）は pipeline_dir と
+        // start_task (--max-iters の値 "10000" はフラグ値のため除外)。
         let positional: Vec<&String> = args
             .iter()
             .enumerate()
-            .filter(|(i, a)| *i > 0 && !a.starts_with("--") && args[*i - 1] != "--algorithm")
+            .filter(|(i, a)| *i > 0 && !a.starts_with("--") && !args[*i - 1].starts_with("--"))
             .map(|(_, a)| a)
             .collect();
         assert_eq!(positional.len(), 2, "args: {args:?}");
@@ -1838,5 +1839,60 @@ mod tests {
         assert_eq!(record.stop_reason, None);
         assert_eq!(record.fired_count, None);
         assert_eq!(app.run_status_summary(), "未実行");
+    }
+
+    // ---- 04-studio-maxiters-outcome: MaxIterations/Success の成否分類 (F6) ----
+
+    /// exit 0 でも report が MaxIterations + fired=0 (成果ゼロ打ち切り) の場合、
+    /// 履歴は BudgetExhausted として記録される (従来は Success = 誤成功)。
+    #[test]
+    fn exit_drain_classifies_budget_exhausted_run() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("report.json");
+        std::fs::write(
+            &report_path,
+            r#"{"iterations":100,"fired_count":0,"per_task_matches":[],"elapsed_ms":100000,"terminal_task":null,"reached_goal":null,"stop_reason":"max_iterations","recovery_attempts":0,"max_consecutive_recovery":0}"#,
+        )
+        .unwrap();
+        app.pending_report_path = Some(report_path);
+        app.run_started_at = Some(1);
+        app.run_strategy = Some("field_loop_pc".to_string());
+        app.log_tx
+            .send(crate::log_view::LogEvent::Exit(Some(0)))
+            .unwrap();
+        app.drain_logs();
+
+        let record = app.history.records().first().expect("history record");
+        assert_eq!(record.outcome, RunOutcome::BudgetExhausted);
+        assert_eq!(record.exit_code, Some(0));
+        assert_eq!(record.stop_reason.as_deref(), Some("最大サイクル到達"));
+        assert_eq!(record.fired_count, Some(0));
+    }
+
+    /// fired>0 の MaxIterations は成果あり扱い — 従来通り Success で記録される。
+    #[test]
+    fn exit_drain_max_iterations_with_fired_is_success() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("report.json");
+        std::fs::write(
+            &report_path,
+            r#"{"iterations":100,"fired_count":7,"per_task_matches":[],"elapsed_ms":100000,"terminal_task":null,"reached_goal":null,"stop_reason":"max_iterations","recovery_attempts":0,"max_consecutive_recovery":0}"#,
+        )
+        .unwrap();
+        app.pending_report_path = Some(report_path);
+        app.run_started_at = Some(1);
+        app.run_strategy = Some("field_loop_pc".to_string());
+        app.log_tx
+            .send(crate::log_view::LogEvent::Exit(Some(0)))
+            .unwrap();
+        app.drain_logs();
+
+        let record = app.history.records().first().expect("history record");
+        assert_eq!(record.outcome, RunOutcome::Success);
+        assert_eq!(record.fired_count, Some(7));
     }
 }

@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::history::RunOutcome;
 use crate::tasks_def::{TaskDefinition, TaskError, TaskKind, load_task_definitions};
 
 /// チェックボックス選択から組み立てられた実行キュー。
@@ -218,6 +219,10 @@ pub enum QueueState {
         /// 失敗タスクの exit code (wait 失敗等は None)。
         exit_code: Option<i32>,
     },
+    /// `current` 番目が exit 0 でも成果ゼロの打ち切り (BudgetExhausted) で
+    /// 終了し、明示的な継続判断待ち (04-studio-maxiters-outcome / F6)。
+    /// 従来は exit 0 一律で自動継続していた誤成功を停止させる。
+    PausedAfterBudgetExhausted { current: usize },
     /// 全完了または abort による終端状態。
     Completed,
 }
@@ -245,6 +250,8 @@ pub enum QueueAction {
 ///
 /// 失敗 (非零 exit / 不明) では**自動継続しない**: `PausedAfterFailure` で
 /// 停止し、[`QueueExec::resume`] の明示呼び出しでのみ次タスクを開始する。
+/// exit 0 でも成果ゼロの打ち切り (BudgetExhausted・F6) も同様に
+/// `PausedAfterBudgetExhausted` で停止する (誤成功のキュー継続を排除)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueExec {
     state: QueueState,
@@ -278,12 +285,12 @@ impl QueueExec {
         &self.entries
     }
 
-    /// 現在対象 (Running / PausedAfterFailure) のエントリ。
+    /// 現在対象 (Running / PausedAfterFailure / PausedAfterBudgetExhausted) のエントリ。
     pub fn current_entry(&self) -> Option<&QueueEntry> {
         match self.state {
-            QueueState::Running { current } | QueueState::PausedAfterFailure { current, .. } => {
-                self.entries.get(current)
-            }
+            QueueState::Running { current }
+            | QueueState::PausedAfterFailure { current, .. }
+            | QueueState::PausedAfterBudgetExhausted { current } => self.entries.get(current),
             QueueState::Pending | QueueState::Completed => None,
         }
     }
@@ -305,30 +312,59 @@ impl QueueExec {
 
     /// 実行中タスクの終了観測 (`LogEvent::Exit` が唯一の完了シグナル)。
     ///
-    /// Running 以外での呼び出しは [`QueueAction::Noop`]。
-    /// - `Some(0)`: 次エントリの起動 (`Start`)、残り無しなら完了 (`QueueCompleted`)
-    /// - 非零 / `None`: 失敗停止 (`PausedAfterFailure` + `WaitForExit`)。
-    ///   **自動継続禁止** — 継続は [`QueueExec::resume`] の明示呼び出し専用。
+    /// exit code のみから分類できる経路 (report 未読み込み) の簡易ラッパー:
+    /// `Some(0)` → Success、非零/`None` → Failed として
+    /// [`QueueExec::on_exit_classified`] へ委譲する。
     pub fn on_exit(&mut self, code: Option<i32>) -> QueueAction {
+        let outcome = if code == Some(0) {
+            RunOutcome::Success
+        } else {
+            RunOutcome::Failed
+        };
+        self.on_exit_classified(outcome, code)
+    }
+
+    /// 成否分類付きの終了観測 (04-studio-maxiters-outcome / F6)。
+    ///
+    /// `outcome` には [`crate::history::classify_outcome`] (report 停止理由
+    /// ベースの分類) の結果を渡す。継続 policy は exit code 一律ではなく
+    /// この outcome enum で switch する:
+    /// - Success — 次エントリの起動 (`Start`)、残り無しなら完了 (`QueueCompleted`)
+    /// - BudgetExhausted — 予算切れ停止 (`PausedAfterBudgetExhausted` +
+    ///   `WaitForExit`)。exit 0 でも成果ゼロ (= 進捗ゼロ) のタスクで自動継続
+    ///   しない (F6 の誤成功キュー継続の解消)。継続は [`QueueExec::resume`] 専用。
+    /// - Failed — 失敗停止 (`PausedAfterFailure` + `WaitForExit`)。
+    ///   **自動継続禁止** — 継続は [`QueueExec::resume`] の明示呼び出し専用。
+    pub fn on_exit_classified(
+        &mut self,
+        outcome: RunOutcome,
+        exit_code: Option<i32>,
+    ) -> QueueAction {
         let QueueState::Running { current } = self.state else {
             return QueueAction::Noop;
         };
-        if code == Some(0) {
-            self.advance_from(current)
-        } else {
-            self.state = QueueState::PausedAfterFailure {
-                current,
-                exit_code: code,
-            };
-            QueueAction::WaitForExit
+        match outcome {
+            RunOutcome::Success => self.advance_from(current),
+            RunOutcome::BudgetExhausted => {
+                self.state = QueueState::PausedAfterBudgetExhausted { current };
+                QueueAction::WaitForExit
+            }
+            RunOutcome::Failed | RunOutcome::Cancelled => {
+                self.state = QueueState::PausedAfterFailure { current, exit_code };
+                QueueAction::WaitForExit
+            }
         }
     }
 
-    /// 失敗停止からの明示継続: 次エントリの起動 or 完了。
-    /// PausedAfterFailure 以外での呼び出しは [`QueueAction::Noop`]。
+    /// 失敗停止・予算切れ停止からの明示継続: 次エントリの起動 or 完了。
+    /// Pause 系状態以外での呼び出しは [`QueueAction::Noop`]。
     pub fn resume(&mut self) -> QueueAction {
-        let QueueState::PausedAfterFailure { current, .. } = self.state else {
-            return QueueAction::Noop;
+        let current = match self.state {
+            QueueState::PausedAfterFailure { current, .. }
+            | QueueState::PausedAfterBudgetExhausted { current } => current,
+            QueueState::Pending | QueueState::Running { .. } | QueueState::Completed => {
+                return QueueAction::Noop;
+            }
         };
         self.advance_from(current)
     }
@@ -378,6 +414,17 @@ impl QueueExec {
                         .unwrap_or("?")
                 )
             }
+            QueueState::PausedAfterBudgetExhausted { current } => {
+                format!(
+                    "予算切れ停止 {}/{} (成果ゼロ打ち切り): {} — 継続/停止を選択",
+                    current + 1,
+                    self.entries.len(),
+                    self.entries
+                        .get(*current)
+                        .map(|e| e.label.as_str())
+                        .unwrap_or("?")
+                )
+            }
             QueueState::Completed => {
                 format!("完了 {}/{}", self.entries.len(), self.entries.len())
             }
@@ -404,6 +451,15 @@ impl QueueExec {
                     "完了"
                 } else if index == *current {
                     "失敗"
+                } else {
+                    "待機"
+                }
+            }
+            QueueState::PausedAfterBudgetExhausted { current } => {
+                if index < *current {
+                    "完了"
+                } else if index == *current {
+                    "予算切れ"
                 } else {
                     "待機"
                 }
@@ -797,6 +853,74 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         let _ = q.on_exit(Some(1));
         assert!(matches!(q.on_exit(Some(0)), QueueAction::Noop));
         assert!(matches!(q.state(), QueueState::PausedAfterFailure { .. }));
+    }
+
+    // ---- 04-studio-maxiters-outcome: 成否分類による継続 policy 分岐 (F6) ----
+
+    /// BudgetExhausted (exit 0 でも成果ゼロの打ち切り) は自動継続しない —
+    /// 予算切れ停止へ遷移し明示 resume を待つ (現状は exit 0 一律で継続)。
+    #[test]
+    fn test_queue_budget_exhausted_pauses_without_auto_continue() {
+        let mut q = QueueExec::new(vec![queue_entry("A", "a"), queue_entry("B", "b")]);
+        let _ = q.start();
+        assert!(matches!(
+            q.on_exit_classified(crate::history::RunOutcome::BudgetExhausted, Some(0)),
+            QueueAction::WaitForExit
+        ));
+        assert!(matches!(
+            q.state(),
+            QueueState::PausedAfterBudgetExhausted { current: 0 }
+        ));
+        // 明示 resume なら次タスクへ進めることはできる。
+        let QueueAction::Start(spec) = q.resume() else {
+            panic!("resume must return Start");
+        };
+        assert_eq!(spec.args[0], "b");
+        assert!(matches!(q.state(), QueueState::Running { current: 1 }));
+    }
+
+    /// 分類経路でも成果あり Success は自動継続する (policy 分岐の対偶)。
+    #[test]
+    fn test_queue_classified_success_auto_continues() {
+        let mut q = QueueExec::new(vec![queue_entry("A", "a"), queue_entry("B", "b")]);
+        let _ = q.start();
+        let QueueAction::Start(spec) =
+            q.on_exit_classified(crate::history::RunOutcome::Success, Some(0))
+        else {
+            panic!("classified success must auto-continue");
+        };
+        assert_eq!(spec.args[0], "b");
+    }
+
+    /// 分類経路の Failed は従来どおり失敗停止 (exit code を保持する)。
+    #[test]
+    fn test_queue_classified_failed_pauses_with_exit_code() {
+        let mut q = QueueExec::new(vec![queue_entry("A", "a")]);
+        let _ = q.start();
+        assert!(matches!(
+            q.on_exit_classified(crate::history::RunOutcome::Failed, Some(2)),
+            QueueAction::WaitForExit
+        ));
+        assert!(matches!(
+            q.state(),
+            QueueState::PausedAfterFailure {
+                current: 0,
+                exit_code: Some(2)
+            }
+        ));
+    }
+
+    /// 予算切れ停止の summary / entry marker は失敗停止と区別される。
+    #[test]
+    fn test_queue_budget_exhausted_summary_and_marker() {
+        let mut q = QueueExec::new(vec![queue_entry("周回", "run"), queue_entry("次", "x")]);
+        let _ = q.start();
+        let _ = q.on_exit_classified(crate::history::RunOutcome::BudgetExhausted, Some(0));
+        let summary = q.summary();
+        assert!(summary.contains("予算切れ"), "summary: {summary}");
+        assert!(summary.contains("1/2"), "summary: {summary}");
+        assert_eq!(q.entry_marker(0), "予算切れ");
+        assert_eq!(q.entry_marker(1), "待機");
     }
 
     /// エッジケース: abort は任意状態から全破棄する (子の停止は呼び出し側)。

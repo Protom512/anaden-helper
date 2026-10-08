@@ -101,6 +101,20 @@ impl StudioApp {
                         self.abort_task_queue();
                     }
                 }
+                // F6 (04-studio-maxiters-outcome): exit 0 でも成果ゼロ打ち切り。
+                // 失敗とは区別して警告色で継続判断を促す (自動継続しない)。
+                QueueState::PausedAfterBudgetExhausted { .. } => {
+                    ui.colored_label(
+                        egui::Color32::YELLOW,
+                        "タスクが予算切れ (成果ゼロ) で停止しました。継続しますか?",
+                    );
+                    if ui.button("継続").clicked() {
+                        self.resume_task_queue();
+                    }
+                    if ui.button("停止").clicked() {
+                        self.abort_task_queue();
+                    }
+                }
                 QueueState::Pending | QueueState::Completed => {}
             }
             for (i, entry) in queue.entries().iter().enumerate() {

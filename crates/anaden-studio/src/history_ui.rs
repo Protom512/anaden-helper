@@ -265,6 +265,8 @@ fn record_label(r: &RunRecord) -> String {
         RunOutcome::Success => "完了",
         RunOutcome::Failed => "異常終了",
         RunOutcome::Cancelled => "中止",
+        // F6: exit 0 でも成果ゼロ打ち切り = 成功表示しない。
+        RunOutcome::BudgetExhausted => "予算切れ",
     };
     format!("@{} {} [{}]", r.started_at_unix, r.strategy, outcome)
 }

@@ -31,6 +31,38 @@ pub enum RunOutcome {
     Failed,
     /// ユーザー操作による中止。
     Cancelled,
+    /// exit code 0 だが run レポート上、成果ゼロの MaxIterations 打ち切り
+    /// (停止理由=最大サイクル到達・発火 0 回)。予算切れどまりで成果が無いため
+    /// 成功とは記録しない (04-studio-maxiters-outcome / F6 の誤成功排除)。
+    BudgetExhausted,
+}
+
+/// run の成否を exit code (ゲート) と run レポート (report.json) の停止理由
+/// (第一情報源) から分類する純関数 (04-studio-maxiters-outcome / F6)。
+///
+/// 分類規約:
+/// 1. exit code 非零 / 不明 → [`RunOutcome::Failed`] (report より優先)
+/// 2. report の停止理由が `anaden_engine::LoopStopReason::MaxIterations` の場合 —
+///    - `fired_count == 0` → [`RunOutcome::BudgetExhausted`]
+///      (exit 0 でも成果ゼロの打ち切りどまり = 従来 Success だった誤成功)
+///    - `fired_count > 0`  → [`RunOutcome::Success`] (成果を伴う打ち切り)
+/// 3. それ以外 (report 無し・他の停止理由) かつ exit 0 → [`RunOutcome::Success`]
+///    (report を書かない古い anaden バイナリ・routine 実行の従来挙動を維持)
+#[must_use]
+pub fn classify_outcome(
+    exit_code: Option<i32>,
+    report: Option<&anaden_engine::ProgressReport>,
+) -> RunOutcome {
+    if !matches!(exit_code, Some(0)) {
+        return RunOutcome::Failed;
+    }
+    if let Some(r) = report
+        && r.stop_reason == Some(anaden_engine::LoopStopReason::MaxIterations)
+        && r.fired_count == 0
+    {
+        return RunOutcome::BudgetExhausted;
+    }
+    RunOutcome::Success
 }
 
 /// 1回の pipeline 実行の記録。
@@ -431,6 +463,83 @@ mod tests {
         );
         // 連続発行で異なるパス (再実行で上書きしない)。
         assert_ne!(new_report_path(), p);
+    }
+
+    // --- 成否分類 classify_outcome (04-studio-maxiters-outcome・F6) ---
+
+    /// テスト用の最小 ProgressReport (停止理由・発火回数のみ可変)。
+    fn report(
+        reason: Option<anaden_engine::LoopStopReason>,
+        fired: u64,
+    ) -> anaden_engine::ProgressReport {
+        anaden_engine::ProgressReport {
+            iterations: 10,
+            fired_count: fired,
+            per_task_matches: vec![],
+            elapsed_ms: 1000,
+            terminal_task: None,
+            reached_goal: None,
+            stop_reason: reason,
+            recovery_attempts: 0,
+            max_consecutive_recovery: 0,
+        }
+    }
+
+    /// exit 0 + MaxIterations + fired=0 → BudgetExhausted (誤成功の排除)。
+    #[test]
+    fn classify_outcome_max_iterations_zero_fired_is_budget_exhausted() {
+        let r = report(Some(anaden_engine::LoopStopReason::MaxIterations), 0);
+        assert_eq!(
+            classify_outcome(Some(0), Some(&r)),
+            RunOutcome::BudgetExhausted
+        );
+    }
+
+    /// exit 0 + MaxIterations + fired>0 → Success (成果を伴う打ち切りは成果あり)。
+    #[test]
+    fn classify_outcome_max_iterations_with_fired_is_success() {
+        let r = report(Some(anaden_engine::LoopStopReason::MaxIterations), 7);
+        assert_eq!(classify_outcome(Some(0), Some(&r)), RunOutcome::Success);
+    }
+
+    /// exit 非零は report より優先 — MaxIterations 表示でも Failed。
+    #[test]
+    fn classify_outcome_nonzero_exit_is_failed_even_with_report() {
+        let r = report(Some(anaden_engine::LoopStopReason::MaxIterations), 7);
+        assert_eq!(classify_outcome(Some(1), Some(&r)), RunOutcome::Failed);
+        assert_eq!(classify_outcome(None, Some(&r)), RunOutcome::Failed);
+    }
+
+    /// report 無し (古い anaden バイナリ・routine 実行) の exit 0 は従来通り Success。
+    #[test]
+    fn classify_outcome_no_report_exit_zero_is_success() {
+        assert_eq!(classify_outcome(Some(0), None), RunOutcome::Success);
+    }
+
+    /// 他の正常停止理由 (GoalReached / Stop / TerminalTask) は Success のまま。
+    #[test]
+    fn classify_outcome_goal_reached_and_stop_are_success() {
+        for reason in [
+            anaden_engine::LoopStopReason::GoalReached,
+            anaden_engine::LoopStopReason::Stop,
+            anaden_engine::LoopStopReason::TerminalTask,
+        ] {
+            let r = report(Some(reason.clone()), 0);
+            assert_eq!(
+                classify_outcome(Some(0), Some(&r)),
+                RunOutcome::Success,
+                "reason: {reason:?}"
+            );
+        }
+    }
+
+    /// BudgetExhausted は独自の serde ラベルで往復する (history.jsonl 互換)。
+    #[test]
+    fn budget_exhausted_outcome_serializes_as_distinct_label() {
+        let json = serde_json::to_string(&RunOutcome::BudgetExhausted).unwrap();
+        assert_eq!(json, "\"BudgetExhausted\"");
+        let back: RunOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, RunOutcome::BudgetExhausted);
     }
 
     // --- エッジケース ---

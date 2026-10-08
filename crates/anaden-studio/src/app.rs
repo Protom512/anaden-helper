@@ -79,7 +79,7 @@ impl StudioApp {
         &self.task_log_snapshot
     }
 
-    /// キューがアクティブ (未完了 = Pending/Running/PausedAfterFailure) か。
+    /// キューがアクティブ (未完了 = Pending/Running/Pause 系) か。
     pub(crate) fn task_queue_active(&self) -> bool {
         self.task_queue
             .as_ref()
