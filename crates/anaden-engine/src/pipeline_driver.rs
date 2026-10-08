@@ -437,6 +437,12 @@ pub enum StepErrorKind {
     Execute,
     /// 発火後検証の再 capture ([`PipelineDriver::run_once_verified`]) の IO エラー。
     VerifyCapture,
+    /// 画面取得・入力以外のステップ内エラー (05-template-cache / F34)。
+    ///
+    /// 現在はテンプレート読込失敗 ([`anaden_vision::TaskDefError::TemplateLoadFailed`]) が
+    /// ここに分類される。テンプレ欠落は設定破損 (恒常故障) のため非リカバリ = 停止系。
+    /// NoMatch (リトライ候補) とは区別される。
+    Other,
 }
 
 /// 画面取得系 IO エラー (capture / verify_capture) = リカバリ対象か。
@@ -689,8 +695,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         // 事前に採取する(UC-2 last_match の task 名要素)。
         let matched_task_name = self.state.current().to_string();
         let tick = match self.state.tick(&normalized, &self.tasks) {
-            Some(r) => r,
-            None => {
+            Ok(Some(r)) => r,
+            Ok(None) => {
                 debug!(
                     "cycle latency: capture={capture_ms:.2}ms recognize={:.2}ms e2e={:.2}ms (NoMatch) raw={raw_w}x{raw_h} norm={norm_w}x{norm_h}",
                     t_rec.elapsed().as_secs_f64() * 1000.0,
@@ -704,6 +710,16 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 // レポートを保存する。未設定時は no-op(ファイル IO ゼロ・後方互換)。
                 self.save_diagnose_report(&matched_task_name, &normalized);
                 return StepOutcome::NoMatch;
+            }
+            // F34 (05-template-cache): テンプレート読込エラーは NoMatch (リトライ候補) と
+            // 区別して停止系エラーにする。従来は run_step が None へ潰すため永久 NoMatch
+            // ループとして観測され、テンプレ欠落が fail-invisible だった。
+            Err(e) => {
+                warn!("template detect error (task '{matched_task_name}'): {e}");
+                return StepOutcome::Error {
+                    kind: StepErrorKind::Other,
+                    message: format!("template: {e}"),
+                };
             }
         };
         let recognize_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
@@ -793,9 +809,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// 消失なら [`StepOutcome::Fired`] を返す。capture IO エラーは [`StepOutcome::Error`]。
     ///
     /// ここでは [`PipelineState::tick`] を使わず `run_step` を直接呼ぶ(current をこれ以上
-    /// 動かさないため)。`run_step` は `task_name` が見つからない/テンプレ欠落で [`None`]
-    /// を返すが、これは検証上は「対象消失」と同義(発火前はマッチしていたタスクなので、
-    /// 欠落/不明になるケースは実運用上稀。安全側 = 検証成功扱いで Fired)。
+    /// 動かさないため)。`run_step` は `task_name` が見つからない場合は `Ok(None)` を返し、
+    /// これは検証上は「対象消失」と同義(発火前はマッチしていたタスクなので、欠落/不明に
+    /// なるケースは実運用上稀。安全側 = 検証成功扱いで Fired)。テンプレ読込エラーの
+    /// `Err` も同じ扱いだが warn で可視化する (F34)。なおテンプレ自体は run_once の
+    /// detect と同じ前処理済みキャッシュを使うため再読込は発生しない (F19)。
     async fn verify_action_effect(
         &mut self,
         task_name: &str,
@@ -816,7 +834,17 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         // CropInfo は検証では発火しないため保存不要。
         let (normalized, _crop_info) = self.scaler.normalize_capture(&screen);
         // run_step を直接呼び、task_name で再認識。マッチ残存 → 対象残存 = 未検証。
-        let still_present = anaden_vision::run_step(&self.tasks, &normalized, task_name).is_some();
+        // F34: run_step はテンプレ読込エラーを Err で返すが、検証時の Err は従来の
+        // 「対象消失」扱い (=Fired) を維持する (発火前はマッチしていたタスクなので
+        // 欠落は実運用上稀。安全側 = 検証成功扱い)。warn で fail-invisible を防ぐ。
+        let still_present = match anaden_vision::run_step(&self.tasks, &normalized, task_name) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                warn!("verify detect error (task '{task_name}'): {e}");
+                false
+            }
+        };
         if still_present {
             // ガード4: アクション無効(対象残存)時、ANADEN_SNAPSHOT_DIR 設定時に
             // 発火後フレームを PNG 保存(偽成功の原因特定用)。未設定時は no-op。
@@ -2270,6 +2298,65 @@ mod tests {
         assert_eq!(driver.current(), "LoadGame");
     }
 
+    /// F34 (05-template-cache): テンプレート読込エラー (欠落) は NoMatch に潰されず
+    /// `StepOutcome::Error { kind: Other, message: "template: ..." }` として区別可能である
+    /// こと。従来は run_step が None へ潰すため NoMatch (リトライ候補) と区別不能
+    /// (fail-invisible) で、テンプレ欠落が永久 NoMatch ループとしてしか観測できなかった。
+    #[tokio::test]
+    async fn run_once_missing_template_returns_template_error_not_nomatch() {
+        let (screen, _tpl) = matched_frame();
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let task = TaskDef {
+            template: PathBuf::from("/nonexistent/does_not_exist_template.png"),
+            ..click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )
+        };
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400, // device_width
+            300,
+        );
+
+        let out = driver.run_once().await;
+        match out {
+            StepOutcome::Error { kind, message } => {
+                assert_eq!(
+                    kind,
+                    StepErrorKind::Other,
+                    "template load error must classify as Other (non-recoverable)"
+                );
+                assert!(
+                    message.starts_with("template:"),
+                    "message must use the 'template: ...' convention, got {message:?}"
+                );
+            }
+            other => {
+                panic!("expected Error, got {other:?} (NoMatch would be the old squashed behavior)")
+            }
+        }
+        assert!(
+            fired.lock().expect("fired lock").is_empty(),
+            "no input must fire on template error"
+        );
+    }
+
     #[tokio::test]
     async fn run_once_stop_yields_nofire_none() {
         let (screen, _tpl) = matched_frame();
@@ -3127,13 +3214,15 @@ mod tests {
 
     /// kind 分類の表駆動単体テスト (F3: 文字列 prefix 一致の解消)。
     /// 画面取得系 (Capture / VerifyCapture) はリカバリ対象、入力発火系 (Execute) は
-    /// fail-closed。この契約が両ループの Error 分岐を決定する。
+    /// fail-closed。テンプレ読込系 (Other) は設定破損 = 恒常故障のため fail-closed
+    /// (05-template-cache / F34)。この契約が両ループの Error 分岐を決定する。
     #[test]
     fn test_step_error_kind_classification() {
         let cases = [
             (StepErrorKind::Capture, true),
             (StepErrorKind::VerifyCapture, true),
             (StepErrorKind::Execute, false),
+            (StepErrorKind::Other, false),
         ];
         for (kind, expected) in cases {
             assert_eq!(is_recoverable_io_error(kind), expected, "kind={kind:?}");

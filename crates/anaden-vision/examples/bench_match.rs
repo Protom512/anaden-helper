@@ -37,8 +37,16 @@ const ROI_W: u32 = 300;
 const ROI_H: u32 = 150;
 
 fn main() {
-    // キャプチャパス解決。コマンドライン引数がなければ既定の 3 枚を探す。
     let args: Vec<String> = std::env::args().collect();
+
+    // 合成 fixture モード (05-template-cache evidence 採取)。実キャプチャ不要で
+    // TaskDef::detect のサイクル時間を計測する。詳細は run_synthetic_bench の doc。
+    if args.get(1).map(String::as_str) == Some("synthetic") {
+        run_synthetic_bench();
+        return;
+    }
+
+    // キャプチャパス解決。コマンドライン引数がなければ既定の 3 枚を探す。
     let default_paths = [
         "/tmp/real_shot1.png",
         "/tmp/real_shot2.png",
@@ -363,4 +371,157 @@ fn crop_luma_gray(gray: &GrayImage, x: u32, y: u32, w: u32, h: u32) -> GrayImage
         }
     }
     out
+}
+
+// ---- 合成 fixture ベンチ (05-template-cache: detect サイクル時間の evidence 採取) ----
+//
+// 実行:
+//   cargo run --release --example bench_match -p anaden-vision -- synthetic
+//
+// 実キャプチャに依存せず、合成 needle テンプレート + 合成フレームで
+// [`anaden_vision::TaskDef::detect`] のサイクル時間を計測するモード。
+// テンプレート decode + needle リサイズ + ccoeff 前処理のキャッシュ効果
+// (F13/F17/F19) を before/after で比較するための生データを出力する。
+//
+// セル構成 (どちらも ccoeff / threshold 0.9 / frame 1258x708 = スケール恒等):
+//   - full-cycle: needle 120x120 + スラック ROI [604,223,160,180] (実運用形状。
+//     走査主導でテンプレ読込は数 % の寄与)
+//   - load-path : needle 400x300 + 同寸 ROI [100,100,400,300] (走査 1 定点。
+//     decode+resize+ccoeff 前処理の寄与を分離して可視化)
+//
+// 各セルで (1 + SYN_ITERS) 回 detect し、初回 (コールド = 読込+前処理を含む) と
+// 残りの中央値/平均/最小を生出力する。フレームは needle を LCG 決定論位置に埋め込んだ
+// ものを事前生成する (計測中の画像生成コストを排除)。全 detect がマッチすることを
+// fail-loud で検証する (偽 green の計測を許さない)。
+
+/// 合成ベンチの反復回数 (初回コールド分を含まず)。
+const SYN_ITERS: usize = 60;
+/// 合成フレーム寸法 (raw-1258x708 = スケール恒等にするため)。
+const SYN_W: u32 = 1258;
+const SYN_H: u32 = 708;
+
+fn run_synthetic_bench() {
+    let dir = std::env::temp_dir().join("anaden_bench_match_synthetic");
+    std::fs::create_dir_all(&dir).expect("create bench dir");
+
+    println!("# anaden-vision bench_match (synthetic mode)");
+    println!("# frame: {SYN_W}x{SYN_H} (scale-identity)  iters per cell: {SYN_ITERS} (+1 cold)");
+    println!(
+        "# cells: full-cycle = scan-dominated (realistic), load-path = decode/resize/preprocess-dominated"
+    );
+    println!();
+
+    let cells: [(&str, u32, u32, [u32; 4]); 2] = [
+        ("full-cycle", 120, 120, [604, 223, 160, 180]),
+        ("load-path", 400, 300, [100, 100, 400, 300]),
+    ];
+    for (label, tw, th, roi) in cells {
+        bench_detect_cell(&dir, label, tw, th, roi);
+    }
+    println!();
+    println!(
+        "# note: 'cold' is the first detect per cell (template decode + Lanczos3 resize +\n\
+         # ccoeff preprocess included). Compare before/after runs of the same binary args:\n\
+         # pre-cache builds show median ~= cold; cached builds show median << cold."
+    );
+}
+
+/// 1 セル分の detect サイクル計測。テンプレート PNG とフレーム群を合成して
+/// (1 + SYN_ITERS) 回 detect し、所要時間 (ms) を生出力する。
+fn bench_detect_cell(dir: &std::path::Path, label: &str, tw: u32, th: u32, roi: [u32; 4]) {
+    // 1) 合成テンプレート (勾配 = 構造あり, denomT != 0) を書き出す。
+    let tpl_path = dir.join(format!("synth_{label}_{tw}x{th}.png"));
+    gradient_pattern(tw, th)
+        .save(&tpl_path)
+        .expect("save synthetic template");
+
+    // 2) フレームを事前生成: needle を ROI 内の決定論 (LCG) 位置に埋め込む。
+    let frames: Vec<DynamicImage> = (0..=SYN_ITERS)
+        .map(|i| {
+            let [rx, ry, rw, rh] = roi;
+            let slack_x = (rw.saturating_sub(tw)) as u64;
+            let slack_y = (rh.saturating_sub(th)) as u64;
+            let ox = rx + (lcg(i as u64) % (slack_x + 1)) as u32;
+            let oy = ry + (lcg(i as u64 + 1) % (slack_y + 1)) as u32;
+            DynamicImage::ImageLuma8(embed_needle(
+                SYN_W,
+                SYN_H,
+                &gradient_pattern(tw, th),
+                ox,
+                oy,
+            ))
+        })
+        .collect();
+
+    // 3) TaskDef (ccoeff / threshold 0.9 / 絶対パステンプレート)。
+    let task = anaden_vision::TaskDef {
+        name: format!("Synth{label}"),
+        state: "Bench".into(),
+        algorithm: anaden_vision::Algorithm::Ccoeff,
+        template: tpl_path.clone(),
+        roi: Some(roi),
+        threshold: 0.9,
+        base: None,
+        action: None,
+        next: None,
+    };
+
+    // 4) 計測: 全 detect がマッチすることを fail-loud 検証しつつサンプル採取。
+    let mut cold_ms = f64::NAN;
+    let mut samples: Vec<f64> = Vec::with_capacity(SYN_ITERS);
+    for (i, frame) in frames.iter().enumerate() {
+        let t0 = Instant::now();
+        let m = task
+            .detect(frame, std::path::Path::new(""))
+            .expect("detect must not error");
+        let dt = t0.elapsed().as_secs_f64() * 1000.0;
+        assert!(
+            m.is_some(),
+            "synthetic embed must match at iter {i} (label={label})"
+        );
+        if i == 0 {
+            cold_ms = dt;
+        } else {
+            samples.push(dt);
+        }
+    }
+    samples.sort_by(|a, b| a.partial_cmp(b).unwrap_or(std::cmp::Ordering::Equal));
+    let median = samples[samples.len() / 2];
+    let mean = samples.iter().sum::<f64>() / samples.len() as f64;
+    let min = samples[0];
+    println!(
+        "{label:<12} needle={tw}x{th} roi={roi:?} cold={cold_ms:.3}ms median={median:.3}ms \
+         mean={mean:.3}ms min={min:.3}ms n={} (ccoeff thr=0.90)",
+        samples.len()
+    );
+}
+
+/// `(x+y) mod 64` の勾配パターン (pipeline.rs テスト準拠。denomT != 0 を保証)。
+fn gradient_pattern(w: u32, h: u32) -> GrayImage {
+    let mut img = GrayImage::new(w, h);
+    for y in 0..h {
+        for x in 0..w {
+            let v = ((x + y) % 64) as u8;
+            img.put_pixel(x, y, image::Luma([v]));
+        }
+    }
+    img
+}
+
+/// `w x h` の背景 `128` 上に needle を `(ox, oy)` に埋め込んだ画像。
+fn embed_needle(w: u32, h: u32, needle: &GrayImage, ox: u32, oy: u32) -> GrayImage {
+    let mut img = GrayImage::from_pixel(w, h, image::Luma([128u8]));
+    for y in 0..needle.height() {
+        for x in 0..needle.width() {
+            let p = needle.get_pixel(x, y)[0];
+            img.put_pixel(ox + x, oy + y, image::Luma([p]));
+        }
+    }
+    img
+}
+
+/// 決定論的な LCG (合成フレームの埋込位置を決める。乱数 crate 非依存)。
+fn lcg(seed: u64) -> u64 {
+    seed.wrapping_mul(6_364_136_223_846_793_005)
+        .wrapping_add(1_442_695_040_888_963_407)
 }

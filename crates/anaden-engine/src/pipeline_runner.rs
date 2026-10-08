@@ -12,7 +12,7 @@ use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 
 use anaden_core::ScreenRegion;
-use anaden_vision::{Action, StepOutcome, TaskDef, roi_to_normalized, run_step};
+use anaden_vision::{Action, StepOutcome, TaskDef, TaskDefError, roi_to_normalized, run_step};
 
 /// デバイスへ発火すべき入力コマンド（ピクセル座標）。
 ///
@@ -156,14 +156,23 @@ impl PipelineState {
     /// 1ステップ認識を実行し、コマンド変換 + next 遷移を行う。
     ///
     /// 内部で [`run_step`]（現在タスク名で [`TaskDef`] を検索 → detect）を呼ぶ。
-    /// 戻り値 [`Option<TickResult>`]:
-    /// - マッチ成功 → [`Some`]([`TickResult`])。`command` は action から変換、`next_current` は `next[0]`。
+    /// 戻り値 [`Result<Option<TickResult>, TaskDefError>`]:
+    /// - マッチ成功 → `Ok(Some(TickResult))`。`command` は action から変換、`next_current` は `next[0]`。
     ///   `next_current` が [`Some`] なら `current` をそこへ更新する。
-    /// - 非マッチ・閾値下・ROI 外・テンプレ欠落・未知タスク名 → [`None`]（`current` は変更せず）。
+    /// - 非マッチ・閾値下・ROI 外・未知タスク名 → `Ok(None)`（`current` は変更せず = NoMatch 扱い）。
+    /// - テンプレート読込失敗等の detect エラー → `Err(TaskDefError)`（F34: NoMatch に潰さず
+    ///   伝播。caller ([`crate::PipelineDriver::run_once`]) は停止系エラーとして扱う）。
     ///
     /// `screenshot`/`tasks` は借用参照。変更するのは `current` のみ（純粋計算 + 状態遷移）。
-    pub fn tick(&mut self, screenshot: &DynamicImage, tasks: &[TaskDef]) -> Option<TickResult> {
-        let outcome = run_step(tasks, screenshot, &self.current)?;
+    pub fn tick(
+        &mut self,
+        screenshot: &DynamicImage,
+        tasks: &[TaskDef],
+    ) -> Result<Option<TickResult>, TaskDefError> {
+        let outcome = match run_step(tasks, screenshot, &self.current)? {
+            Some(o) => o,
+            None => return Ok(None),
+        };
         let matched_region = outcome.matched_region;
         let matched_confidence = Some(outcome.matched_confidence);
         // ClickRect/Swipe の roi/from/to を screenshot（=normalize後空間）と同じ空間へ揃えるため、
@@ -178,12 +187,12 @@ impl PipelineState {
         if let Some(next) = &next_current {
             self.current = next.clone();
         }
-        Some(TickResult {
+        Ok(Some(TickResult {
             command,
             next_current,
             matched_confidence,
             matched_region: Some(matched_region),
-        })
+        }))
     }
 }
 
@@ -404,7 +413,10 @@ mod tests {
         }];
 
         let mut state = PipelineState::new("Title");
-        let result = state.tick(&screenshot, &tasks).expect("should match");
+        let result = state
+            .tick(&screenshot, &tasks)
+            .expect("tick must not error")
+            .expect("should match");
         assert_eq!(
             result.command,
             Some(InputCommand::Tap { x: 640, y: 360 }),
@@ -434,8 +446,10 @@ mod tests {
         }];
 
         let mut state = PipelineState::new("Title");
-        let result = state.tick(&screenshot, &tasks);
-        assert!(result.is_none(), "no needle must yield None");
+        let result = state
+            .tick(&screenshot, &tasks)
+            .expect("tick must not error");
+        assert!(result.is_none(), "no needle must yield Ok(None)");
         assert_eq!(state.current(), "Title", "current unchanged on no match");
     }
 
@@ -458,13 +472,44 @@ mod tests {
         }];
 
         let mut state = PipelineState::new("NoSuch");
-        let result = state.tick(&screenshot, &tasks);
-        assert!(result.is_none(), "unknown current must yield None");
+        let result = state
+            .tick(&screenshot, &tasks)
+            .expect("tick must not error");
+        assert!(result.is_none(), "unknown current must yield Ok(None)");
         assert_eq!(
             state.current(),
             "NoSuch",
             "current unchanged on unknown task"
         );
+    }
+
+    /// F34 (05-template-cache): テンプレート読込エラーは tick を Ok(None) (=NoMatch) に
+    /// 潰さず Err で伝播すること。driver (run_once) はこれを停止系エラーとして扱い、
+    /// リトライ候補の NoMatch と区別する。
+    #[test]
+    fn tick_missing_template_propagates_err_not_none() {
+        let screenshot = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let tasks = vec![TaskDef {
+            name: "Title".into(),
+            state: "Title".into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template: PathBuf::from("/nonexistent/does_not_exist.png"),
+            roi: None,
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickSelf),
+            next: None,
+        }];
+
+        let mut state = PipelineState::new("Title");
+        let err = state
+            .tick(&screenshot, &tasks)
+            .expect_err("missing template must surface Err (not Ok(None)=NoMatch)");
+        assert!(
+            matches!(err, TaskDefError::TemplateLoadFailed { .. }),
+            "error kind must be TemplateLoadFailed, got {err:?}"
+        );
+        assert_eq!(state.current(), "Title", "current unchanged on error");
     }
 
     #[test]
@@ -487,7 +532,10 @@ mod tests {
         }];
 
         let mut state = PipelineState::new("Title");
-        let result = state.tick(&screenshot, &tasks).expect("should match");
+        let result = state
+            .tick(&screenshot, &tasks)
+            .expect("tick must not error")
+            .expect("should match");
         assert_eq!(result.command, None, "Stop emits no command");
         assert_eq!(result.next_current, None, "Stop yields no next");
         assert_eq!(state.current(), "Title", "current unchanged on Stop");
@@ -514,7 +562,10 @@ mod tests {
         }];
 
         let mut state = PipelineState::new("Title");
-        let result = state.tick(&screenshot, &tasks).expect("should match");
+        let result = state
+            .tick(&screenshot, &tasks)
+            .expect("tick must not error")
+            .expect("should match");
         let tap = result
             .command
             .expect("ClickSelf with matched region must emit a Tap");

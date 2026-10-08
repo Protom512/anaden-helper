@@ -123,26 +123,67 @@ impl CcoeffVisionEngine {
             Some((haystack.clone(), needle.clone()))
         }
     }
-}
 
-impl VisionEngine for CcoeffVisionEngine {
-    fn match_template(
+    /// 前処理済みテンプレート ([`PreparedCcoeff`]) でマッチングする (F13: 前処理のキャッシュ)。
+    ///
+    /// `downscale_factor == 1` ([`Self::threshold_only`] 構成) のとき [`PreparedCcoeff`]
+    /// の前処理結果 (luma 変換 + `T'` 計算) をそのまま使い、毎サイクルの
+    /// [`preprocess_template`] 再実行を省く。factor > 1 のときは luma から
+    /// [`DynamicImage`] を復元して [`VisionEngine::match_template`] へフォールバックする
+    /// (ccoeff は両画像を to_luma8 してから計算するため luma 復元は等価)。
+    pub(crate) fn match_template_prepared(
         &self,
         haystack: &DynamicImage,
-        needle: &DynamicImage,
+        prepared: &PreparedCcoeff,
     ) -> Option<MatchResult> {
-        let (h, n) = self.downscale_images(haystack, needle)?;
-        let hg = h.to_luma8();
-        let ng = n.to_luma8();
+        if self.downscale_factor > 1 {
+            let needle = DynamicImage::ImageLuma8(prepared.luma.clone());
+            return self.match_template(haystack, &needle);
+        }
+        let hg = haystack.to_luma8();
+        let dims = prepared.luma.dimensions();
+        self.scan_best_thresholded(
+            &hg,
+            &prepared.t_prime,
+            prepared.sum_t_prime,
+            prepared.denom_t,
+            dims,
+            dims,
+        )
+    }
 
-        let nw = ng.width();
-        let nh = ng.height();
-        let rw = hg.width().saturating_sub(nw) + 1;
-        let rh = hg.height().saturating_sub(nh) + 1;
+    /// 前処理済みデータで haystack 全位置を走査し、最良一致を閾値判定して返す共通核。
+    ///
+    /// [`VisionEngine::match_template`] (毎回前処理) と [`Self::match_template_prepared`]
+    /// (前処理済みデータを受け取る) の双方が使う。`scan_dims` は走査に使う needle 寸法
+    /// (downscale 済み)、`report_dims` は [`MatchResult::region`] に報告する寸法
+    /// (downscale 前の元 needle 寸法)。
+    fn scan_best_thresholded(
+        &self,
+        hg: &GrayImage,
+        t_prime: &[f32],
+        sum_t_prime: f64,
+        denom_t: f64,
+        scan_dims: (u32, u32),
+        report_dims: (u32, u32),
+    ) -> Option<MatchResult> {
+        let (scan_w, scan_h) = scan_dims;
+        let (report_w, report_h) = report_dims;
+        if scan_w > hg.width() || scan_h > hg.height() {
+            debug!(
+                "Template ({}x{}) larger than screen ({}x{}), skipping",
+                scan_w,
+                scan_h,
+                hg.width(),
+                hg.height()
+            );
+            return None;
+        }
+        let rw = hg.width().saturating_sub(scan_w) + 1;
+        let rh = hg.height().saturating_sub(scan_h) + 1;
 
-        let (t_prime, sum_t_prime, denom_t) = preprocess_template(&ng);
-        let ii = integral_image::<_, u64>(&hg);
-        let ii2 = integral_squared_image::<_, u64>(&hg);
+        let ii = integral_image::<_, u64>(hg);
+        let ii2 = integral_squared_image::<_, u64>(hg);
 
         // 1パスで最大を発見（Vec 確保なし）。
         let mut best_x = 0u32;
@@ -151,7 +192,18 @@ impl VisionEngine for CcoeffVisionEngine {
 
         for y in 0..rh {
             for x in 0..rw {
-                let r = ccoeff_at(&hg, &t_prime, sum_t_prime, denom_t, &ii, &ii2, x, y, nw, nh);
+                let r = ccoeff_at(
+                    hg,
+                    t_prime,
+                    sum_t_prime,
+                    denom_t,
+                    &ii,
+                    &ii2,
+                    x,
+                    y,
+                    scan_w,
+                    scan_h,
+                );
                 if r > best_r {
                     best_r = r;
                     best_x = x;
@@ -172,9 +224,31 @@ impl VisionEngine for CcoeffVisionEngine {
         let orig_x = best_x * self.downscale_factor;
         let orig_y = best_y * self.downscale_factor;
         Some(MatchResult {
-            region: ScreenRegion::new(orig_x, orig_y, needle.width(), needle.height()),
+            region: ScreenRegion::new(orig_x, orig_y, report_w, report_h),
             confidence,
         })
+    }
+}
+
+impl VisionEngine for CcoeffVisionEngine {
+    fn match_template(
+        &self,
+        haystack: &DynamicImage,
+        needle: &DynamicImage,
+    ) -> Option<MatchResult> {
+        let (h, n) = self.downscale_images(haystack, needle)?;
+        let hg = h.to_luma8();
+        let ng = n.to_luma8();
+
+        let (t_prime, sum_t_prime, denom_t) = preprocess_template(&ng);
+        self.scan_best_thresholded(
+            &hg,
+            &t_prime,
+            sum_t_prime,
+            denom_t,
+            (ng.width(), ng.height()),
+            (needle.width(), needle.height()),
+        )
     }
 
     fn score_map(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<GrayImage> {
@@ -241,6 +315,40 @@ impl VisionEngine for CcoeffVisionEngine {
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         matches
+    }
+}
+
+/// テンプレートの ccoeff 前処理済み表現 (05-template-cache / F13)。
+///
+/// [`CcoeffVisionEngine`] は毎マッチ呼び出しで needle を to_luma8 → 平均除去 (`T'`)
+/// していた。本型はその結果を保持し、[`CcoeffVisionEngine::match_template_prepared`]
+/// 経路で再計算を省く (decode+resize と併せ pipeline のテンプレートキャッシュが保持)。
+#[derive(Debug, Clone)]
+pub(crate) struct PreparedCcoeff {
+    /// グレースケール化済み needle (正規化後寸法。downscale は適用前)。
+    pub(crate) luma: GrayImage,
+    /// 平均除去テンプレート `T'` ([`preprocess_template`] の第 1 返却値)。
+    pub(crate) t_prime: Vec<f32>,
+    /// `ΣT'` (f64)。
+    pub(crate) sum_t_prime: f64,
+    /// `sqrt(Σ T'^2)` (denomT)。
+    pub(crate) denom_t: f64,
+}
+
+impl PreparedCcoeff {
+    /// needle (正規化済み [`DynamicImage`]) から前処理済みテンプレートを作る。
+    ///
+    /// `to_luma8` + [`preprocess_template`] を 1 回だけ実行する。以降のマッチ呼び出しは
+    /// [`CcoeffVisionEngine::match_template_prepared`] で本結果を再利用する。
+    pub(crate) fn prepare(needle: &DynamicImage) -> Self {
+        let luma = needle.to_luma8();
+        let (t_prime, sum_t_prime, denom_t) = preprocess_template(&luma);
+        Self {
+            luma,
+            t_prime,
+            sum_t_prime,
+            denom_t,
+        }
     }
 }
 
@@ -502,6 +610,52 @@ mod tests {
         assert!(
             (best.unwrap().confidence.0 - all[0].confidence.0).abs() < 0.001,
             "best and all[0] confidence must match"
+        );
+    }
+
+    // ---- 05-template-cache: 前処理済みテンプレート経路の等価性 (F13) ----
+
+    /// 前処理済みテンプレート経路 ([`CcoeffVisionEngine::match_template_prepared`]) は
+    /// 通常の [`VisionEngine::match_template`] (毎回前処理) と同一の region/confidence を
+    /// 返すこと (キャッシュ経路がマッチ結果を変えないことの固定)。
+    #[test]
+    fn ccoeff_match_template_prepared_matches_unprepared_result() {
+        let needle = gradient_needle(20, 20);
+        let haystack = embed(100, 100, &needle, 40, 40, 128);
+        let needle_dyn = luma_dyn(needle);
+        let haystack_dyn = luma_dyn(haystack);
+
+        let engine = CcoeffVisionEngine::threshold_only(MatchConfidence(0.0));
+        let plain = engine
+            .match_template(&haystack_dyn, &needle_dyn)
+            .expect("plain path should match");
+
+        let prepared = PreparedCcoeff::prepare(&needle_dyn);
+        let cached = engine
+            .match_template_prepared(&haystack_dyn, &prepared)
+            .expect("prepared path should match");
+
+        assert_eq!(plain.region, cached.region, "region must be identical");
+        assert!(
+            (plain.confidence.0 - cached.confidence.0).abs() < 1e-6,
+            "confidence must be identical: plain={} cached={}",
+            plain.confidence.0,
+            cached.confidence.0
+        );
+    }
+
+    /// 前処理済み経路でも needle が haystack より大きい場合は None (downscale_images の
+    /// サイズガードと同一挙動。diagnose の skipped 表現が依存)。
+    #[test]
+    fn ccoeff_match_template_prepared_needle_too_large_returns_none() {
+        let prepared = PreparedCcoeff::prepare(&luma_dyn(gradient_needle(20, 20)));
+        let haystack = luma_dyn(GrayImage::from_pixel(10, 10, Luma([0])));
+        let engine = CcoeffVisionEngine::threshold_only(MatchConfidence(0.0));
+        assert!(
+            engine
+                .match_template_prepared(&haystack, &prepared)
+                .is_none(),
+            "oversized prepared needle must yield None (no panic, no underflow)"
         );
     }
 

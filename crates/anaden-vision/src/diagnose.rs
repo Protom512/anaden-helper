@@ -1,9 +1,11 @@
 //! テンプレート別 conf 内訳の診断モード（Issue #71）。
 //!
 //! [`crate::pipeline::TaskDef::detect`] と同じ ROI/needle スケール経路
-//! （[`crate::scale::roi_to_normalized`] / [`crate::scale::needle_to_normalized`]）を通り、
+//! （[`crate::scale::roi_to_normalized`] / [`crate::scale::needle_to_normalized`]）と
+//! 同一の前処理済みテンプレートキャッシュ (05-template-cache) を通り、
 //! threshold=0.0 のエンジンで best conf を閾値によらず取得する。
-//! NoMatch 原因特定をデータドリブン化するための純粋関数層（ファイル IO なし）。
+//! NoMatch 原因特定をデータドリブン化するための純粋関数層（テンプレート解決は
+//! [`crate::pipeline`] のキャッシュ経由 — detect と同じ前処理結果を共有する）。
 
 use std::path::PathBuf;
 
@@ -15,9 +17,7 @@ use crate::ccoeff::CcoeffVisionEngine;
 use crate::engine::{SseVisionEngine, VisionEngine};
 use crate::matcher::TemplateMatcher;
 use crate::pipeline::{Algorithm, TaskDef};
-use crate::scale::{
-    PC_CLIENT_HEIGHT_MEASURED, PC_CLIENT_WIDTH_MEASURED, needle_to_normalized, roi_to_normalized,
-};
+use crate::scale::{PC_CLIENT_HEIGHT_MEASURED, PC_CLIENT_WIDTH_MEASURED, roi_to_normalized};
 
 /// 1タスク分の診断結果。
 ///
@@ -85,15 +85,18 @@ pub fn diagnose_task(task: &TaskDef, screenshot: &DynamicImage) -> DiagnoseEntry
         error: None,
     };
 
-    let needle = match image::open(&task.template) {
-        Ok(n) => n,
+    // テンプレート解決: pipeline と同一の前処理済みキャッシュ (05-template-cache /
+    // F13/F17) を使う。diagnose の全タスク走査 (diagnose_all) も detect と同じ
+    // (パス, norm_w, norm_h) キーのエントリを共有し、disk 読込+リサイズ+ccoeff 前処理を
+    // 繰り返さない。
+    let prepared = match crate::pipeline::prepared_template(&task.template, norm_w, norm_h) {
+        Ok(p) => p,
         Err(e) => {
-            entry.error = Some(format!("template load failed: {e}"));
+            entry.error = Some(e.to_string());
             return entry;
         }
     };
-    let needle = needle_to_normalized(&needle, norm_w, norm_h);
-    entry.needle_scaled_size = Some((needle.width(), needle.height()));
+    entry.needle_scaled_size = Some((prepared.needle.width(), prepared.needle.height()));
 
     let work = match entry.scaled_roi {
         Some(r) => crop_clamped(screenshot, r),
@@ -103,8 +106,10 @@ pub fn diagnose_task(task: &TaskDef, screenshot: &DynamicImage) -> DiagnoseEntry
     let thr = MatchConfidence::new(0.0);
     let result = match task.algorithm {
         Algorithm::Sse => SseVisionEngine::new(TemplateMatcher::threshold_only(thr))
-            .match_template(&work, &needle),
-        Algorithm::Ccoeff => CcoeffVisionEngine::threshold_only(thr).match_template(&work, &needle),
+            .match_template(&work, &prepared.needle),
+        Algorithm::Ccoeff => {
+            CcoeffVisionEngine::threshold_only(thr).match_template_prepared(&work, &prepared.ccoeff)
+        }
     };
 
     match result {
