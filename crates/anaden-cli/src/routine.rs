@@ -41,7 +41,9 @@ const RECOVERY_BOOT_GRACE_SECS: u64 = 180;
 /// - 0: 全ステップが失敗なく実行完了 ([`RoutineSummary::all_ok`])
 /// - 2: 失敗ステップあり / 中断 (on_failure=stop・割り込み・invoker エラー)。
 ///   MaxIterations 到達かつ fired=0 のステップ (no_fire) も失敗扱い (Issue #210)
-/// - 1: routine 読込・検証失敗等のハードエラー (anyhow Err 経由)
+/// - 1: routine 読込・検証失敗等のハードエラー (anyhow Err 経由)。
+///   `--report-file` 明示指定時のレポート書込失敗も 1 (fail-closed —
+///   ユーザが明示的に要求したファイルを黙って捨てない。`run` と同一契約)
 ///
 /// # Errors
 /// routine ファイル読込・検証失敗、evidence ディレクトリ作成失敗等の
@@ -50,6 +52,7 @@ pub(crate) async fn run_routine_command(
     routine_path: &Path,
     dry_run: bool,
     evidence_run_id: Option<&str>,
+    report_file: Option<&Path>,
 ) -> anyhow::Result<i32> {
     let root = crate::cli_workspace_root();
     let def = load_and_validate(routine_path)?;
@@ -95,7 +98,7 @@ pub(crate) async fn run_routine_command(
     };
     print!("{}", summary.format_text());
 
-    let command = command_line(routine_path, dry_run);
+    let command = command_line(routine_path, dry_run, report_file);
     let exit_code = summary_exit_code(&summary);
     if let Some(dir) = &evidence_dir {
         match write_routine_evidence(dir, &def.name, &command, &summary, exit_code) {
@@ -106,6 +109,13 @@ pub(crate) async fn run_routine_command(
             ),
             Err(e) => warn!("routine evidence 書込失敗: {e}"),
         }
+    }
+    // 機械可読レポート (03-report-channel follow-up)。明示指定のみ
+    // (run と違い既定永続化は無い — routine の既定成果物は evidence 経路)。
+    // 書込失敗はハードエラー (fail-closed)。
+    if let Some(path) = report_file {
+        write_routine_report(path, &summary)?;
+        info!("routine レポート永続化: {}", path.display());
     }
     Ok(exit_code)
 }
@@ -124,12 +134,20 @@ async fn ensure_game_open() {
 
 /// evidence ログ冒頭に残すコマンド全文 (生コマンド出力規約)。
 #[must_use]
-pub(crate) fn command_line(routine_path: &Path, dry_run: bool) -> String {
-    format!(
+pub(crate) fn command_line(
+    routine_path: &Path,
+    dry_run: bool,
+    report_file: Option<&Path>,
+) -> String {
+    let mut out = format!(
         "anaden routine {}{}",
         routine_path.display(),
         if dry_run { " --dry-run" } else { "" }
-    )
+    );
+    if let Some(p) = report_file {
+        out.push_str(&format!(" --report-file {}", p.display()));
+    }
+    out
 }
 
 /// サマリ → 終了コードの射影 (純関数・テスト対象)。
@@ -189,6 +207,25 @@ fn run_id_of(dir: &Path) -> String {
     dir.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// routine 終了時の機械可読レポート書込 (03-report-channel follow-up)。
+///
+/// 中身は `RoutineSummary` の JSON (run の `run_report::write_report` に対応)。
+/// 親ディレクトリが無ければ作成する。書込 io エラーは呼出元へ伝播し
+/// exit 非ゼロ (fail-closed)。
+///
+/// # Errors
+/// ディレクトリ作成・JSON 化・書込の io エラーを返す (panic しない)。
+pub(crate) fn write_routine_report(path: &Path, summary: &RoutineSummary) -> std::io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(summary)
+        .map_err(|e| std::io::Error::other(format!("RoutineSummary の JSON 化に失敗: {e}")))?;
+    std::fs::write(path, json)
 }
 
 /// 本番 invoker: 各ステップを PipelineDriver (Win32) でライブ実行する。
@@ -402,10 +439,42 @@ mod tests {
     #[test]
     fn command_line_includes_path_and_dry_run_flag() {
         assert_eq!(
-            command_line(Path::new("templates/routines/daily.toml"), false),
+            command_line(Path::new("templates/routines/daily.toml"), false, None),
             "anaden routine templates/routines/daily.toml"
         );
-        assert!(command_line(Path::new("a.toml"), true).ends_with("--dry-run"));
+        assert!(command_line(Path::new("a.toml"), true, None).ends_with("--dry-run"));
+    }
+
+    /// `--report-file` 指定時はコマンド全文にも残る (生コマンド出力規約)。
+    #[test]
+    fn command_line_includes_report_file_flag() {
+        assert_eq!(
+            command_line(
+                Path::new("daily.toml"),
+                false,
+                Some(Path::new("reports/1.json"))
+            ),
+            "anaden routine daily.toml --report-file reports/1.json"
+        );
+    }
+
+    // ---- write_routine_report (report.json 書込の機械可読契約) ----
+
+    /// 書込んだ report.json は `serde_json::from_reader::<RoutineSummary>` で
+    /// 読める (studio 消費契約)。親ディレクトリは自動作成。
+    #[test]
+    fn write_routine_report_roundtrips_routine_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("report.json");
+        let s = summary_of(vec![
+            StepStatus::Completed(LoopStopReason::GoalReached),
+            StepStatus::NoFire(LoopStopReason::MaxIterations),
+        ]);
+        write_routine_report(&path, &s).expect("write report");
+        let file = std::fs::File::open(&path).unwrap();
+        let back: RoutineSummary = serde_json::from_reader(file).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.failed, 1, "no_fire step must survive roundtrip");
     }
 
     // ---- write_routine_evidence (永続化形式) ----
@@ -506,23 +575,32 @@ mod tests {
     }
 
     /// `run_routine_command` の dry-run 経路が exit 0 で完了する (実機に触れない)。
+    /// `--report-file` を渡しても dry-run は実行しないためレポートを書かない。
     #[tokio::test]
     async fn run_routine_command_dry_run_exits_zero() {
         let path = workspace_root()
             .join("templates")
             .join("routines")
             .join("daily.toml");
-        let code = run_routine_command(&path, true, None)
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report.json");
+        let code = run_routine_command(&path, true, None, Some(&report))
             .await
             .expect("dry-run must succeed");
         assert_eq!(code, 0);
+        assert!(!report.exists(), "dry-run must not write report.json");
     }
 
     /// 不正 routine の実行経路はハードエラー (Err) で抜ける。
     #[tokio::test]
     async fn run_routine_command_missing_file_is_err() {
-        let result =
-            run_routine_command(Path::new("C:/definitely/not/here/daily.toml"), true, None).await;
+        let result = run_routine_command(
+            Path::new("C:/definitely/not/here/daily.toml"),
+            true,
+            None,
+            None,
+        )
+        .await;
         assert!(result.is_err());
     }
 }

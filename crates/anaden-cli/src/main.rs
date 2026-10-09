@@ -172,6 +172,14 @@ enum Commands {
         /// `.omc/logs/{run-id}/` へ永続化する。未指定時は採取なし。
         #[arg(long)]
         evidence_run_id: Option<String>,
+        /// routine 成果物レポート (report.json) の書込先
+        /// (03-report-channel follow-up — run の `--report-file` に対応)。
+        ///
+        /// routine 終了時に `RoutineSummary` (ステップ別・合計の機械可読サマリ)
+        /// を JSON で書き込む。`--dry-run` では実行しないため書かない。
+        /// 書込失敗はハードエラー (exit 1・fail-closed)。
+        #[arg(long)]
+        report_file: Option<PathBuf>,
     },
     /// ゲームの起動状態を確認し、未起動なら起動して生存を確認する(Issue #21)。
     ///
@@ -1052,12 +1060,17 @@ async fn main() -> Result<()> {
             routine_path,
             dry_run,
             evidence_run_id,
+            report_file,
         } => {
             // routine: 複数 pipeline の連続実行 (Issue #199)。終了コードは
             // run_routine_command の契約 (全完了=0 / 失敗・中断=2) に従う。
-            let code =
-                routine::run_routine_command(&routine_path, dry_run, evidence_run_id.as_deref())
-                    .await?;
+            let code = routine::run_routine_command(
+                &routine_path,
+                dry_run,
+                evidence_run_id.as_deref(),
+                report_file.as_deref(),
+            )
+            .await?;
             std::process::exit(code);
         }
     }

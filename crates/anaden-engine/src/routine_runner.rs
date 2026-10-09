@@ -7,6 +7,7 @@
 //! on_failure ポリシー (Stop/Skip) を適用、全体サマリ ([`RoutineSummary`]) を返す。
 
 use async_trait::async_trait;
+use serde::{Deserialize, Serialize};
 
 use crate::routine::{OnFailure, RoutineDef, RoutineError, RoutineStep};
 use crate::{LoopOutcome, LoopStopReason, resolve_pipeline_dir};
@@ -27,7 +28,8 @@ pub trait PipelineInvoker: Send + Sync {
 }
 
 /// ステップの実行結果分類。
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum StepStatus {
     /// 正常完了 (Stop/TerminalTask/GoalReached、または成果物のある MaxIterations 到達)。
     Completed(LoopStopReason),
@@ -61,7 +63,7 @@ impl StepStatus {
 }
 
 /// 1ステップの実行記録。
-#[derive(Debug, Clone, PartialEq)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineStepResult {
     /// ステップ名。
     pub step: String,
@@ -78,7 +80,10 @@ pub struct RoutineStepResult {
 }
 
 /// routine 全体の実行サマリ (ステップ別 + 合計)。
-#[derive(Debug, Clone, PartialEq)]
+///
+/// Serialize 付き (routine `--report-file` の機械可読契約 — run の
+/// `ProgressReport` report.json に対応する routine 版)。
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineSummary {
     /// routine 名。
     pub routine: String,
@@ -105,6 +110,22 @@ impl RoutineSummary {
     #[must_use]
     pub fn all_ok(&self) -> bool {
         self.failed == 0 && self.skipped == 0 && !self.aborted
+    }
+
+    /// 全体成否の 1 行ラベル (studio 履歴テーブル・ステータスバーの単一情報源)。
+    ///
+    /// [`Self::format_text`] が複数行人間可読であるのに対し、本ラベルは
+    /// 1 行に収める必要がある UI 向け (run の `stop_reason_label` に対応)。
+    #[must_use]
+    pub fn outcome_label(&self) -> String {
+        if self.all_ok() {
+            format!("routine 完了 ({}/{})", self.completed, self.results.len())
+        } else {
+            format!(
+                "routine 失敗 (failed={} skipped={} aborted={})",
+                self.failed, self.skipped, self.aborted
+            )
+        }
     }
 
     /// 人間可読テキスト (CLI 出力・evidence `routine-summary.txt` の単一情報源)。
@@ -649,6 +670,108 @@ mod tests {
             s.format_text().contains("aborted=true"),
             "summary must report interruption: {}",
             s.format_text()
+        );
+    }
+
+    // ---- Serialize (routine --report-file の機械可読契約) ----
+
+    /// RoutineSummary は全 StepStatus バリアントを含めて JSON 往復できる
+    /// (report.json として書いたものが studio 側で同じ構造に読める)。
+    #[test]
+    fn routine_summary_roundtrips_json_with_all_step_statuses() {
+        let summary = RoutineSummary {
+            routine: "daily".to_string(),
+            results: vec![
+                RoutineStepResult {
+                    step: "s1".to_string(),
+                    pipeline_dir: "templates/pipelines/login".to_string(),
+                    status: StepStatus::Completed(LoopStopReason::GoalReached),
+                    iterations: 12,
+                    fired_count: 3,
+                    terminal: "field_hud".to_string(),
+                },
+                RoutineStepResult {
+                    step: "s2".to_string(),
+                    pipeline_dir: "p2".to_string(),
+                    status: StepStatus::NoFire(LoopStopReason::MaxIterations),
+                    iterations: 50,
+                    fired_count: 0,
+                    terminal: String::new(),
+                },
+                RoutineStepResult {
+                    step: "s3".to_string(),
+                    pipeline_dir: "p3".to_string(),
+                    status: StepStatus::Failed(LoopStopReason::CaptureError),
+                    iterations: 1,
+                    fired_count: 0,
+                    terminal: String::new(),
+                },
+                RoutineStepResult {
+                    step: "s4".to_string(),
+                    pipeline_dir: "p4".to_string(),
+                    status: StepStatus::Interrupted,
+                    iterations: 0,
+                    fired_count: 0,
+                    terminal: String::new(),
+                },
+                RoutineStepResult {
+                    step: "s5".to_string(),
+                    pipeline_dir: "p5".to_string(),
+                    status: StepStatus::Skipped,
+                    iterations: 0,
+                    fired_count: 0,
+                    terminal: String::new(),
+                },
+                RoutineStepResult {
+                    step: "s6".to_string(),
+                    pipeline_dir: "p6".to_string(),
+                    status: StepStatus::InvokerError("boom".to_string()),
+                    iterations: 0,
+                    fired_count: 0,
+                    terminal: String::new(),
+                },
+            ],
+            total_iterations: 63,
+            total_fired: 3,
+            completed: 1,
+            failed: 3,
+            skipped: 1,
+            aborted: true,
+        };
+        let json = serde_json::to_string(&summary).expect("serialize");
+        let back: RoutineSummary = serde_json::from_str(&json).expect("deserialize");
+        assert_eq!(back, summary);
+    }
+
+    /// outcome_label: all_ok は完了ラベル、失敗系は内訳入り失敗ラベル。
+    #[test]
+    fn outcome_label_reflects_all_ok_and_failure_breakdown() {
+        let ok = RoutineSummary {
+            routine: "r".to_string(),
+            results: vec![RoutineStepResult {
+                step: "s1".to_string(),
+                pipeline_dir: "p".to_string(),
+                status: StepStatus::Completed(LoopStopReason::Stop),
+                iterations: 1,
+                fired_count: 0,
+                terminal: String::new(),
+            }],
+            total_iterations: 1,
+            total_fired: 0,
+            completed: 1,
+            failed: 0,
+            skipped: 0,
+            aborted: false,
+        };
+        assert_eq!(ok.outcome_label(), "routine 完了 (1/1)");
+
+        let mut ng = ok.clone();
+        ng.failed = 2;
+        ng.skipped = 1;
+        ng.aborted = true;
+        assert_eq!(
+            ng.outcome_label(),
+            "routine 失敗 (failed=2 skipped=1 aborted=true)"
         );
     }
 }

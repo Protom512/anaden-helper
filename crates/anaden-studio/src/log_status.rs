@@ -159,6 +159,18 @@ impl RunStatus {
         }
         self.running = false;
     }
+
+    /// routine レポート (`anaden_engine::RoutineSummary`) を観測して状態を更新する
+    /// (03-report-channel follow-up — routine 版 `--report-file`)。
+    ///
+    /// run 版 [`Self::apply_report`] と同一契約: 終端状態は report の値で
+    /// 上書きする。iterations は全ステップ合計、停止理由は全体成否ラベル
+    /// ([`anaden_engine::RoutineSummary::outcome_label`])。
+    pub fn apply_routine_report(&mut self, report: &anaden_engine::RoutineSummary) {
+        self.iterations = Some(report.total_iterations);
+        self.stop_reason = Some(report.outcome_label());
+        self.running = false;
+    }
 }
 
 #[cfg(test)]
@@ -287,6 +299,37 @@ mod tests {
         s.apply_report(&legacy);
         assert_eq!(s.stop_reason.as_deref(), Some("最大サイクル到達"));
         assert_eq!(s.iterations, Some(3));
+    }
+
+    /// routine レポート (RoutineSummary) も終端状態を上書きする:
+    /// iterations = 全ステップ合計・停止理由 = 全体成否ラベル (routine 版契約)。
+    #[test]
+    fn status_routine_report_overrides_with_totals_and_outcome_label() {
+        let step = || anaden_engine::RoutineStepResult {
+            step: "s".to_string(),
+            pipeline_dir: "p".to_string(),
+            status: anaden_engine::StepStatus::Completed(anaden_engine::LoopStopReason::Stop),
+            iterations: 1,
+            fired_count: 2,
+            terminal: "t".to_string(),
+        };
+        let report = anaden_engine::RoutineSummary {
+            routine: "daily".to_string(),
+            results: vec![step(), step()],
+            total_iterations: 15,
+            total_fired: 4,
+            completed: 2,
+            failed: 0,
+            skipped: 0,
+            aborted: false,
+        };
+        let mut s = RunStatus::new();
+        s.observe("run_loop 開始: goal=g");
+        s.observe("サイクル数: 999");
+        s.apply_routine_report(&report);
+        assert!(!s.running);
+        assert_eq!(s.iterations, Some(15));
+        assert_eq!(s.stop_reason.as_deref(), Some("routine 完了 (2/2)"));
     }
 
     // ---- AutoScrollFollow (T4: 自動スクロール追従の純ロジック) ----
