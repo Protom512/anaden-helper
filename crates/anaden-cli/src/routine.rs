@@ -7,6 +7,9 @@
 //!   (PipelineDriver 駆動・[`PipelineInvoker`] 実装)。
 //! - evidence は既存規約 (`.omc/logs/{run-id}/`) に準拠し
 //!   `routine-summary.txt` + `routine-metadata.json` を永続化する。
+//! - 機械可読レポートは run と対称な既定永続化 (loop 10):
+//!   `<routine_dir>/.anaden-routine/<timestamp>/routine-report.json` +
+//!   `routine.log` (解決は [`crate::run_report::resolve_routine_artifacts`])。
 
 use std::path::{Path, PathBuf};
 
@@ -42,17 +45,23 @@ const RECOVERY_BOOT_GRACE_SECS: u64 = 180;
 /// - 2: 失敗ステップあり / 中断 (on_failure=stop・割り込み・invoker エラー)。
 ///   MaxIterations 到達かつ fired=0 のステップ (no_fire) も失敗扱い (Issue #210)
 /// - 1: routine 読込・検証失敗等のハードエラー (anyhow Err 経由)。
-///   `--report-file` 明示指定時のレポート書込失敗も 1 (fail-closed —
-///   ユーザが明示的に要求したファイルを黙って捨てない。`run` と同一契約)
+///   レポート書込失敗 (明示 `--report-file`・既定永続化とも) も 1
+///   (fail-closed — 明示指定も既定成果物も黙って捨てない。`run` と同一契約)
 ///
 /// # Errors
 /// routine ファイル読込・検証失敗、evidence ディレクトリ作成失敗等の
 /// ハードエラーを anyhow で返す (panic しない)。
+///
+/// `report_file` は生の CLI フラグ (evidence コマンド全文の再現用)。
+/// `artifacts` は main.rs で解決済みの書込先 (loop 10 既定永続化 —
+/// 明示 `--report-file` 最優先 / 既定 `<routine_dir>/.anaden-routine/<ts>/` /
+/// `--no-persist` で None)。
 pub(crate) async fn run_routine_command(
     routine_path: &Path,
     dry_run: bool,
     evidence_run_id: Option<&str>,
     report_file: Option<&Path>,
+    artifacts: crate::run_report::RunArtifacts,
 ) -> anyhow::Result<i32> {
     let root = crate::cli_workspace_root();
     let def = load_and_validate(routine_path)?;
@@ -110,10 +119,11 @@ pub(crate) async fn run_routine_command(
             Err(e) => warn!("routine evidence 書込失敗: {e}"),
         }
     }
-    // 機械可読レポート (03-report-channel follow-up)。明示指定のみ
-    // (run と違い既定永続化は無い — routine の既定成果物は evidence 経路)。
-    // 書込失敗はハードエラー (fail-closed)。
-    if let Some(path) = report_file {
+    // 機械可読レポート (03-report-channel follow-up / loop 10 既定永続化)。
+    // 書込先は main.rs で解決済みの artifacts.report_path (明示 --report-file
+    // 最優先 / 既定 <routine_dir>/.anaden-routine/<ts>/routine-report.json /
+    // --no-persist で無効)。書込失敗はハードエラー (fail-closed・exit 1)。
+    if let Some(path) = artifacts.report_path.as_ref() {
         write_routine_report(path, &summary)?;
         info!("routine レポート永続化: {}", path.display());
     }
@@ -575,7 +585,7 @@ mod tests {
     }
 
     /// `run_routine_command` の dry-run 経路が exit 0 で完了する (実機に触れない)。
-    /// `--report-file` を渡しても dry-run は実行しないためレポートを書かない。
+    /// レポート書込先が解決されていても dry-run は実行しないため書かない。
     #[tokio::test]
     async fn run_routine_command_dry_run_exits_zero() {
         let path = workspace_root()
@@ -584,7 +594,11 @@ mod tests {
             .join("daily.toml");
         let dir = tempfile::tempdir().unwrap();
         let report = dir.path().join("report.json");
-        let code = run_routine_command(&path, true, None, Some(&report))
+        let artifacts = crate::run_report::RunArtifacts {
+            report_path: Some(report.clone()),
+            log_path: None,
+        };
+        let code = run_routine_command(&path, true, None, Some(&report), artifacts)
             .await
             .expect("dry-run must succeed");
         assert_eq!(code, 0);
@@ -599,6 +613,7 @@ mod tests {
             true,
             None,
             None,
+            crate::run_report::RunArtifacts::default(),
         )
         .await;
         assert!(result.is_err());

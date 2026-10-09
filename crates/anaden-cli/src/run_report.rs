@@ -5,6 +5,10 @@
 //! (report.json) の書込先解決・事前作成・書込の単一実装を担う。
 //! studio はこのレポートを読むことで CLI の人間可読 stdout 行の文字列解析
 //! (F11) から脱却する。
+//!
+//! loop 10: routine サブコマンドにも run と対称な既定永続化
+//! (`.anaden-routine/<timestamp>/`) を提供する。resolver のみを本モジュールが
+//! 担い、書込本体は `routine::write_routine_report` (RoutineSummary の JSON)。
 
 use std::io;
 use std::path::{Path, PathBuf};
@@ -27,36 +31,6 @@ pub(crate) struct RunArtifacts {
     pub log_path: Option<PathBuf>,
 }
 
-/// フラグ → 成果物パスの解決 (純関数・テスト可能)。
-///
-/// - `report_file = Some(p)`: 明示指定を最優先。`--no-persist` は既定永続化の
-///   無効化フラグであり、明示指定には効かない (ユーザが明示的に要求した
-///   ファイルは黙って捨てない)。
-/// - 既定 (`report_file = None`, `no_persist = false`):
-///   `<pipeline_dir>/.anaden-run/<timestamp>/` へ report.json + run.log。
-/// - `no_persist = true` (明示指定なし): 何も永続化しない。
-pub(crate) fn resolve_run_artifacts(
-    pipeline_dir: &Path,
-    report_file: Option<&Path>,
-    no_persist: bool,
-    timestamp: &str,
-) -> RunArtifacts {
-    match report_file {
-        Some(p) => RunArtifacts {
-            report_path: Some(p.to_path_buf()),
-            log_path: None,
-        },
-        None if !no_persist => {
-            let dir = pipeline_dir.join(DEFAULT_ARTIFACTS_DIR).join(timestamp);
-            RunArtifacts {
-                report_path: Some(dir.join(REPORT_FILE_NAME)),
-                log_path: Some(dir.join(RUN_LOG_FILE_NAME)),
-            }
-        }
-        None => RunArtifacts::default(),
-    }
-}
-
 impl RunArtifacts {
     /// 成果物ディレクトリと run.log を事前作成する (report は run 終了時に書込)。
     ///
@@ -74,6 +48,89 @@ impl RunArtifacts {
         }
         Ok(())
     }
+}
+
+/// routine 既定の成果物ディレクトリ名 (routine ファイルの置かれたディレクトリ直下)。
+const DEFAULT_ROUTINE_ARTIFACTS_DIR: &str = ".anaden-routine";
+/// routine レポートファイル名 (run の report.json と区別)。
+const ROUTINE_REPORT_FILE_NAME: &str = "routine-report.json";
+/// tracing 二重出力 (routine.log) のファイル名。
+const ROUTINE_LOG_FILE_NAME: &str = "routine.log";
+
+/// フラグ → 成果物パス解決の共通コア (run / routine で優先順位契約は同一)。
+///
+/// - `report_file = Some(p)`: 明示指定を最優先。`--no-persist` は既定永続化の
+///   無効化フラグであり、明示指定には効かない (ユーザが明示的に要求した
+///   ファイルは黙って捨てない)。
+/// - 既定 (`report_file = None`, `no_persist = false`):
+///   `<base_dir>/<default_dir>/<timestamp>/` へ report + log。
+/// - `no_persist = true` (明示指定なし): 何も永続化しない。
+fn resolve_artifacts_at(
+    base_dir: &Path,
+    report_file: Option<&Path>,
+    no_persist: bool,
+    timestamp: &str,
+    default_dir: &str,
+    report_name: &str,
+    log_name: &str,
+) -> RunArtifacts {
+    match report_file {
+        Some(p) => RunArtifacts {
+            report_path: Some(p.to_path_buf()),
+            log_path: None,
+        },
+        None if !no_persist => {
+            let dir = base_dir.join(default_dir).join(timestamp);
+            RunArtifacts {
+                report_path: Some(dir.join(report_name)),
+                log_path: Some(dir.join(log_name)),
+            }
+        }
+        None => RunArtifacts::default(),
+    }
+}
+
+/// フラグ → パスの解決 (run 用・純関数・テスト可能)。
+///
+/// 既定 (`report_file = None`, `no_persist = false`) は
+/// `<pipeline_dir>/.anaden-run/<timestamp>/` へ report.json + run.log。
+pub(crate) fn resolve_run_artifacts(
+    pipeline_dir: &Path,
+    report_file: Option<&Path>,
+    no_persist: bool,
+    timestamp: &str,
+) -> RunArtifacts {
+    resolve_artifacts_at(
+        pipeline_dir,
+        report_file,
+        no_persist,
+        timestamp,
+        DEFAULT_ARTIFACTS_DIR,
+        REPORT_FILE_NAME,
+        RUN_LOG_FILE_NAME,
+    )
+}
+
+/// フラグ → パスの解決 (routine 用・純関数・テスト可能 — loop 10)。
+///
+/// run と対称な既定永続化: 未指定時は
+/// `<routine_dir>/.anaden-routine/<timestamp>/` へ routine-report.json +
+/// routine.log。優先順位契約 (明示最優先 / `--no-persist`) は run と同一。
+pub(crate) fn resolve_routine_artifacts(
+    routine_dir: &Path,
+    report_file: Option<&Path>,
+    no_persist: bool,
+    timestamp: &str,
+) -> RunArtifacts {
+    resolve_artifacts_at(
+        routine_dir,
+        report_file,
+        no_persist,
+        timestamp,
+        DEFAULT_ROUTINE_ARTIFACTS_DIR,
+        ROUTINE_REPORT_FILE_NAME,
+        ROUTINE_LOG_FILE_NAME,
+    )
 }
 
 /// run 終了時のレポート書込 (fail-closed: 失敗は呼出元へ伝播し exit 非ゼロ)。
@@ -171,6 +228,64 @@ mod tests {
         let got = resolve_run_artifacts(dir.path(), None, true, "20261008-093000");
         assert_eq!(got.report_path, None);
         assert_eq!(got.log_path, None);
+    }
+
+    // ---- resolve_routine_artifacts (routine 既定永続化 — loop 10) ----
+
+    /// 未指定時の既定: `<routine_dir>/.anaden-routine/<timestamp>/` へ
+    /// routine-report.json + routine.log (run の .anaden-run と対称)。
+    #[test]
+    fn resolve_routine_default_artifacts_under_routine_dir() {
+        let dir = tempfile::tempdir().unwrap();
+        let routines = dir.path().join("templates").join("routines");
+        std::fs::create_dir_all(&routines).unwrap();
+        let got = resolve_routine_artifacts(&routines, None, false, "20261010-120000");
+        let base = routines.join(".anaden-routine").join("20261010-120000");
+        assert_eq!(got.report_path, Some(base.join("routine-report.json")));
+        assert_eq!(got.log_path, Some(base.join("routine.log")));
+    }
+
+    /// 明示 `--report-file` は最優先。routine.log (tracing 二重出力) は
+    /// 既定永続化専用のため作らない (run と同一契約)。
+    #[test]
+    fn resolve_routine_explicit_report_file_wins() {
+        let dir = tempfile::tempdir().unwrap();
+        let explicit = dir.path().join("custom-routine-report.json");
+        let got = resolve_routine_artifacts(dir.path(), Some(&explicit), false, "ts");
+        assert_eq!(got.report_path, Some(explicit));
+        assert_eq!(got.log_path, None);
+    }
+
+    /// `--no-persist` は明示指定には効かない (run と同一契約)。
+    #[test]
+    fn resolve_routine_explicit_survives_no_persist() {
+        let dir = tempfile::tempdir().unwrap();
+        let explicit = dir.path().join("custom-routine-report.json");
+        let got = resolve_routine_artifacts(dir.path(), Some(&explicit), true, "ts");
+        assert_eq!(got.report_path, Some(explicit));
+    }
+
+    /// `--no-persist` (明示指定なし) は何も永続化しない。
+    #[test]
+    fn resolve_routine_no_persist_disables_all() {
+        let dir = tempfile::tempdir().unwrap();
+        let got = resolve_routine_artifacts(dir.path(), None, true, "20261010-120000");
+        assert_eq!(got.report_path, None);
+        assert_eq!(got.log_path, None);
+    }
+
+    /// prepare は routine 成果物ディレクトリと routine.log を事前作成する
+    /// (report は routine 終了時)。異常終了時も「どこで実行したか」が残る。
+    #[test]
+    fn prepare_creates_routine_dir_and_log() {
+        let dir = tempfile::tempdir().unwrap();
+        let routines = dir.path().join("routines");
+        std::fs::create_dir_all(&routines).unwrap();
+        let got = resolve_routine_artifacts(&routines, None, false, "20261010-120000");
+        got.prepare().expect("prepare");
+        let log = got.log_path.clone().unwrap();
+        assert!(log.is_file(), "routine.log should exist: {}", log.display());
+        assert!(!log.parent().unwrap().join("routine-report.json").is_file());
     }
 
     // ---- prepare (run.log の事前作成) ----

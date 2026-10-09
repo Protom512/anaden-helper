@@ -157,6 +157,9 @@ enum Commands {
     ///
     /// routine 定義 (`templates/routines/<name>.toml`) の steps を定義順に
     /// PipelineDriver で実行し、ステップ別 + 全体サマリを表示する。
+    /// 成果物は run と対称な既定永続化 (loop 10):
+    /// `<routine_dir>/.anaden-routine/<timestamp>/` へ routine-report.json +
+    /// routine.log (`--no-persist` で無効化)。
     ///
     /// **終了コード契約**:
     /// - 0: 全ステップが失敗なく実行完了
@@ -177,9 +180,17 @@ enum Commands {
         ///
         /// routine 終了時に `RoutineSummary` (ステップ別・合計の機械可読サマリ)
         /// を JSON で書き込む。`--dry-run` では実行しないため書かない。
+        /// 未指定時は既定場所
+        /// `<routine_dir>/.anaden-routine/<timestamp>/routine-report.json` へ
+        /// 永続化する (loop 10 — run の既定永続化と対称)。
         /// 書込失敗はハードエラー (exit 1・fail-closed)。
         #[arg(long)]
         report_file: Option<PathBuf>,
+        /// 既定の成果物永続化 (routine-report.json + routine.log) を無効化する
+        /// (loop 10 — run の `--no-persist` に対応)。`--report-file` の明示指定に
+        /// は影響しない。
+        #[arg(long)]
+        no_persist: bool,
     },
     /// ゲームの起動状態を確認し、未起動なら起動して生存を確認する(Issue #21)。
     ///
@@ -260,6 +271,19 @@ pub(crate) fn cli_workspace_root() -> PathBuf {
 /// `load_pipeline` の fail-closed エラーに委譲する（偽のパスを捏造しない）。
 fn resolve_pipeline_dir(input: &Path, root: &Path) -> PathBuf {
     anaden_engine::resolve_pipeline_dir(input, root).unwrap_or_else(|| input.to_path_buf())
+}
+
+/// routine 既定永続化 (`.anaden-routine/<ts>/`) の基準ディレクトリ (loop 10)。
+///
+/// routine ファイルの親ディレクトリ (`templates/routines/daily.toml` →
+/// `templates/routines`)。親が無い (ベアファイル名 `daily.toml`) 場合は
+/// カレントディレクトリ (`.`)。routine ファイル自体が CWD 相対で解決される
+/// (`load_routine`) のと同じ基準で、run の `pipeline_dir` 基準との対称。
+fn routine_artifacts_base_dir(routine_path: &Path) -> &Path {
+    routine_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
 }
 
 /// `--algorithm` 文字列を Algorithm へ解決する。
@@ -915,12 +939,12 @@ async fn main() -> Result<()> {
     // tracing 二重出力を初期化時に配線するため。パース前のログ出力は無い)。
     let cli = Cli::parse();
 
-    // Run コマンドの成果物永続化先を解決し、run.log を事前作成する。
-    // 事前作成失敗 (読み取り専用 pipeline_dir 等) はロギング未初期化のため
-    // eprintln で通知し、永続化なし (stdout のみ) で継続する — run 自体は
-    // 実行可能なため fail-closed にしない。report 書込失敗は run_driver が
+    // Run / Routine コマンドの成果物永続化先を解決し、run.log / routine.log を
+    // 事前作成する。事前作成失敗 (読み取り専用ディレクトリ等) はロギング未初期化
+    // のため eprintln で通知し、永続化なし (stdout のみ) で継続する — コマンド自体は
+    // 実行可能なため fail-closed にしない。report 書込失敗は各実行部が
     // fail-closed で伝播する。
-    let run_artifacts = match &cli.command {
+    let command_artifacts = match &cli.command {
         Commands::Run {
             pipeline_dir,
             report_file,
@@ -941,11 +965,34 @@ async fn main() -> Result<()> {
                 artifacts
             }
         }
+        // loop 10: routine も run と対称な既定永続化 (.anaden-routine/<ts>/
+        // routine-report.json + routine.log)。--dry-run は検証のみのため
+        // 成果物を作らない。
+        Commands::Routine {
+            routine_path,
+            dry_run: false,
+            report_file,
+            no_persist,
+            ..
+        } => {
+            let artifacts = run_report::resolve_routine_artifacts(
+                routine_artifacts_base_dir(routine_path),
+                report_file.as_deref(),
+                *no_persist,
+                &run_report::run_artifact_timestamp(e2e::unix_now()),
+            );
+            if let Err(e) = artifacts.prepare() {
+                eprintln!("routine 成果物ディレクトリの事前作成に失敗 (永続化せず継続): {e}");
+                RunArtifacts::default()
+            } else {
+                artifacts
+            }
+        }
         _ => RunArtifacts::default(),
     };
 
-    // ロギングの初期化。run.log 指定時は stdout との二重出力。
-    init_tracing(run_artifacts.log_path.as_deref());
+    // ロギングの初期化。run.log / routine.log 指定時は stdout との二重出力。
+    init_tracing(command_artifacts.log_path.as_deref());
 
     match cli.command {
         Commands::Run {
@@ -1022,7 +1069,7 @@ async fn main() -> Result<()> {
                 parsed_goal,
                 cancel_token,
                 evidence_ctx.as_ref().map(|(_, d)| d.as_path()),
-                &run_artifacts,
+                &command_artifacts,
             )
             .await?;
             // run 終了後: メタデータ (tree hash・スクショ件数・runTimestamp) を永続化。
@@ -1061,14 +1108,17 @@ async fn main() -> Result<()> {
             dry_run,
             evidence_run_id,
             report_file,
+            ..
         } => {
             // routine: 複数 pipeline の連続実行 (Issue #199)。終了コードは
             // run_routine_command の契約 (全完了=0 / 失敗・中断=2) に従う。
+            // 成果物書込先は事前解決済みの command_artifacts (loop 10 既定永続化)。
             let code = routine::run_routine_command(
                 &routine_path,
                 dry_run,
                 evidence_run_id.as_deref(),
                 report_file.as_deref(),
+                command_artifacts,
             )
             .await?;
             std::process::exit(code);
@@ -1084,6 +1134,20 @@ mod tests {
     use super::*;
 
     // ---- resolve_pipeline_dir (Issue #139 T2, cwd 非依存の決定的解決) ----
+
+    /// routine 既定永続化の基準ディレクトリ抽出 (loop 10)。
+    /// 親を持つパスは親、ベアファイル名は `.` へフォールバック。
+    #[test]
+    fn routine_artifacts_base_dir_parent_or_dot() {
+        assert_eq!(
+            routine_artifacts_base_dir(Path::new("templates/routines/daily.toml")),
+            Path::new("templates/routines")
+        );
+        assert_eq!(
+            routine_artifacts_base_dir(Path::new("daily.toml")),
+            Path::new(".")
+        );
+    }
 
     #[test]
     fn resolve_pipeline_dir_prefers_existing_cwd_path() {
