@@ -266,11 +266,11 @@ fn resolve_algorithm(value: &str) -> Result<anaden_vision::Algorithm> {
 
 /// `--goal` / `--goal-file` フラグを [`Option<Goal>`] へ解決する純粋ヘルパ(T4 option B)。
 ///
-/// T4-design-gate の決定に従い、Goal の供給源を manifest reader(Option A)ではなく
-/// CLI フラグ(Option B)とする。`load_pipeline_manifest` / `PipelineManifest` は
-/// Issue #38 で削除されて現 repo に存在しないため、manifest reader を新設するのは
-/// greenfield な dead-code となり避ける。TOML doc AC は [`toml::from_str::<Goal>`]
-/// (goal.rs の round-trip テスト済み)で充足できる。
+/// T4-design-gate 当時 (Issue #37) は Goal の供給源を manifest reader(Option A)ではなく
+/// CLI フラグ(Option B)のみとしていたが、DEF-004 (US-GOAL-01) で manifest 既定採用を
+/// 追加した (07-manifest-goal)。現在の役割分担: 本関数は**明示フラグの解決**のみ、
+/// manifest (`pipeline.toml`) の `[[goal]]` を含む優先順位付き解決は [`resolve_goal`]
+/// が担当する (呼出順: resolve_goal → 明示フラグがあれば本関数)。
 ///
 /// # 引数
 /// - `goal`: `--goal <inline-toml>` の値。`None` なら未指定。
@@ -1235,12 +1235,12 @@ mod tests {
     // ---- parse_goal_flag (T4 option B: CLI flag --goal / --goal-file) ----
     //
     // Issue #37 acceptance: `run` コマンドが宣言的 Goal を受け取れること。
-    // T4-design-gate で option (B) CLI flag を選定した根拠:
-    //   - load_pipeline_manifest/PipelineManifest は Issue #38 で削除対象となり
-    //     現 repo に存在しない(CTO gate の指摘通り)。option (A) は greenfield であり
-    //     「restoration」ではない。よって manifest reader を新設せず CLI flag で最低限の
-    //     配線にとどめる。
-    //   - TOML doc AC は toml::from_str::<Goal>(goal.rs:348-408 で round-trip 済み) で充足可能。
+    // T4-design-gate で option (B) CLI flag を選定した根拠 (当時):
+    //   - load_pipeline_manifest/PipelineManifest は Issue #38 で削除対象とされ
+    //     manifest reader は greenfield な dead-code になる懸念があった。
+    //   その後 manifest は anaden-vision に (再)実装され studio が保存するように
+    //   なったため、DEF-004 (07-manifest-goal) で resolve_goal が manifest 既定
+    //   採用を担当し、本関数は明示フラグ解決として存続する。
     //
     // 本 helper は純粋関数(I/O は --goal-file の fs::read_to_string のみ)で、
     // --goal と --goal-file の両方 None なら None を返す(後方互換: 無限ループ維持)。
