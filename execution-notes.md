@@ -25,6 +25,14 @@ Canonical tracker: canonical_feature_stories.csv (markdown 版は凡例のみ)�
   parse_goal_flag 8 / manifest 42 / goal 135 / studio 452 ほか) + コード突合で
   63 Pass / 4 Blocked (US-PIP-01/02/03/05 = 実ゲーム必要) に確定
   (72 stories: 68 Pass / 4 Blocked / 0 Unverified / 0 Fail)。
+- loop 10 (10-routine-default-persist): routine サブコマンドに run と対称な
+  既定永続化を追加 (loop 09 follow-up 解消・US-CLI-26)。未指定時は
+  `<routine_dir>/.anaden-routine/<ts>/routine-report.json` + `routine.log`、
+  `--no-persist` で無効化、明示 `--report-file` は最優先、dry-run は書かない、
+  書込失敗は fail-closed (exit 1)。resolver は run_report.rs の共通コア
+  (resolve_artifacts_at) へ DRY 化。studio 経路 (明示 --report-file) は無影響。
+  ゲート: nextest 1020 passed, 10 skipped / clippy -D warnings / fmt /
+  ast-grep すべて green。CSV は 73 stories: 69 Pass / 4 Blocked。
 
 ## Open (次回ループ)
 
@@ -33,10 +41,11 @@ Canonical tracker: canonical_feature_stories.csv (markdown 版は凡例のみ)�
    title_live_regression を実行して Pass 化する。
 2. US-GOAL-01 のライブゲーム確認: manifest goal でライブ run が停止する実機
    検証は未実施 (コード+テスト証拠のみ)。実機環境で login シナリオ実行。
-3. routine --report-file の実 GUI 確認: studio から routine を spawn し
-   レポート読込が履歴/ステータスバーへ反映されることを実機で確認
-   (unit テスト済み・GUI 操作は未実施)。run と違い routine は既定永続化
-   (report.json + run.log) が無い — 必要なら follow-up。
+3. routine --report-file / 既定永続化の実 GUI・実機確認: studio から routine
+   を spawn しレポート読込が履歴/ステータスバーへ反映されることを実機で確認
+   (unit テスト済み・GUI 操作は未実施)。CLI 直実行の既定永続化
+   (.anaden-routine/<ts>/ への書込) も実ゲーム実行を要するため live 未確認
+   (resolver/prepare/書込/dry-run 不書込は各 unit テストで担保)。
 4. F 系 backlog の未消化分 (F5, F8-F10, F12, F14-F16, F18-F33 の一部) は
    探索テーブルが永続化されていないため、再探索が必要な場合は CSV の
    Blocked/notes 行から再導出すること。
