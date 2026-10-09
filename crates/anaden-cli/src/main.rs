@@ -119,7 +119,10 @@ enum Commands {
         verify_after_fire: bool,
         /// 宣言的ゴールをインライン TOML で指定(Issue #37 T4 option B)。
         ///
-        /// `--goal-file` とは排他。未指定時はゴール無し(従来の無限ループ/MaxIterations 挙動)。
+        /// `--goal-file` とは排他。未指定時は `<pipeline_dir>/pipeline.toml`
+        /// manifest の `[[goal]]` を既定ゴールとして採用する (DEF-004)。
+        /// manifest の goals が空/不在時はゴール無し(従来の無限ループ/
+        /// MaxIterations 挙動)。明示指定は manifest より優先(マージしない)。
         /// 値は `toml::from_str::<Goal>` でパースされ、[`Goal::validate`] で検証される。
         ///
         /// 例: `--goal 'name = "farm50"\n[stop]\nLoopCount = { target = 50 }'`
@@ -128,7 +131,7 @@ enum Commands {
         /// 宣言的ゴールを格納した TOML ファイルパス(Issue #37 T4 option B)。
         ///
         /// `--goal` とは排他。ファイル内容は `toml::from_str::<Goal>` でパースされる。
-        /// `--goal` と同じく未指定時はゴール無し(後方互換)。
+        /// `--goal` と同じく未指定時は manifest の `[[goal]]` を既定採用 (DEF-004)。
         #[arg(long)]
         goal_file: Option<PathBuf>,
         /// UC-2 実機 E2E 証跡採取 (Issue #139 T6)。run-id を指定すると
@@ -320,6 +323,69 @@ fn parse_goal_flag(
             Ok(Some(parsed))
         }
     }
+}
+
+/// `--goal` / `--goal-file` / pipeline.toml manifest を優先順位付きで
+/// [`Option<Goal>`] へ解決する (DEF-004 / US-GOAL-01)。
+///
+/// 優先順位 (明示指定が常に勝つ・マージしない = 単一情報源):
+/// 1. `--goal` / `--goal-file` (排他検査は [`parse_goal_flag`])
+/// 2. `<pipeline_dir>/pipeline.toml` manifest の `[[goal]]` (既定ゴール)
+///    - goals 空 / manifest 不在: `None` (従来の無限ループ / MaxIterations 挙動)
+///    - 単一 goal: そのまま採用 (ゴール名も維持)
+///    - 複数 goal: `Any` 合成 (終端条件リスト = いずれかで停止)
+///    - manifest が存在して parse 不能: `Err` (fail-closed)
+fn resolve_goal(
+    goal: Option<&str>,
+    goal_file: Option<&std::path::Path>,
+    pipeline_dir: &std::path::Path,
+) -> Result<Option<Goal>> {
+    if goal.is_some() || goal_file.is_some() {
+        return parse_goal_flag(goal, goal_file);
+    }
+    manifest_default_goal(pipeline_dir)
+}
+
+/// manifest (`pipeline.toml`) の goals を run の既定ゴールへ変換する (DEF-004)。
+///
+/// 複数 `[[goal]]` を `Any` 合成する根拠: goal-manifest.md は `[[goal]]` を
+/// 「ゴール(終端条件)」のリストとして宣言する (manifest は「どこから始まり、
+/// いつ終わるか」の宣言層)。終端条件のリスト = いずれかの条件が満たされた時点で
+/// 停止する。OR を単一 goal 内の `Any` で表現する login の手書きパターン
+/// (Field 到達 OR Timeout 安全弁) と同一セマンティクス。
+fn manifest_default_goal(pipeline_dir: &std::path::Path) -> Result<Option<Goal>> {
+    let manifest_path = pipeline_dir.join(anaden_vision::PIPELINE_MANIFEST_FILENAME);
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let manifest = anaden_vision::load_pipeline_manifest(pipeline_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "pipeline.toml manifest の読込失敗 {}: {e}",
+            manifest_path.display()
+        )
+    })?;
+    let goal = match manifest.goals.split_first() {
+        // goals 空 = 無宣言 (無限ループの手書き後方互換形式)。
+        None => return Ok(None),
+        Some((only, [])) => only.clone(),
+        Some(_) => {
+            let names = manifest
+                .goals
+                .iter()
+                .map(|g| g.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Goal {
+                name: format!("any({names})"),
+                stop: anaden_core::StopCondition::Any {
+                    conditions: manifest.goals.iter().map(|g| g.stop.clone()).collect(),
+                },
+            }
+        }
+    };
+    goal.validate()
+        .map_err(|e| anyhow::anyhow!("manifest goal のバリデーション失敗: {e}"))?;
+    Ok(Some(goal))
 }
 
 /// NoMatch リカバリのエスカレーション hook (`run` / `routine` 共通の単一実装)。
@@ -893,8 +959,6 @@ async fn main() -> Result<()> {
             evidence_run_id,
             ..
         } => {
-            let parsed_goal = parse_goal_flag(goal.as_deref(), goal_file.as_deref())
-                .map_err(|e| anyhow::anyhow!("ゴール指定の解決失敗: {e}"))?;
             // UC-2 E2E 証跡 (T6): run-id 指定時のみ採取。無効 run-id は
             // fail-closed (パス逸脱を黙って無視しない)。
             let evidence_ctx = evidence_run_id.as_deref().and_then(|rid| {
@@ -923,6 +987,12 @@ async fn main() -> Result<()> {
             // Issue #139 T2: pipeline_dir を workspace ルート基準で決定的解決
             // （cwd 依存の読込失敗を除去。相対指定は manifest 基準でも探索）。
             let pipeline_dir = resolve_pipeline_dir(&pipeline_dir, &cli_workspace_root());
+            // DEF-004 (US-GOAL-01): ゴール解決は明示フラグ (--goal/--goal-file) 優先、
+            // 未指定時は解決済み pipeline_dir の pipeline.toml manifest の [[goal]] を
+            // 既定ゴールとして採用する (スタジオ実行・素の run 両方で authored goals が
+            // 追加フラグ無しで効く)。
+            let parsed_goal = resolve_goal(goal.as_deref(), goal_file.as_deref(), &pipeline_dir)
+                .map_err(|e| anyhow::anyhow!("ゴール指定の解決失敗: {e}"))?;
             // Ctrl+C / SIGINT を拾う協調的キャンセルトークン。run_pipeline_live 内で
             // spawn_ctrl_c_listener を起動し、driver へ .with_cancel(token) 配線する。
             // トークン発火で driver は LoopStopReason::Interrupted(exit 2) で安全停止する。
@@ -1310,6 +1380,128 @@ mod tests {
             format!("{err}").contains("exclusive"),
             "error should explain mutual exclusivity, got: {err}"
         );
+    }
+
+    // ---- resolve_goal: manifest 既定ゴール (DEF-004 / US-GOAL-01) ----
+
+    /// fixture: pipeline.toml に goals を持つ pipeline dir を作る。
+    fn manifest_goal_dir(goals_toml: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pipeline.toml"),
+            format!("start_task = \"SomeTaskPc\"\n{goals_toml}"),
+        )
+        .unwrap();
+        tmp
+    }
+
+    /// DEF-004: フラグ未指定時は manifest の goals が既定ゴールとして採用される
+    /// (単一 goal はそのまま — 名前も維持)。
+    #[test]
+    fn resolve_goal_manifest_single_goal_used_when_flags_absent() {
+        let dir = manifest_goal_dir(
+            "[[goal]]\nname = \"loop3\"\n[goal.stop]\nLoopCount = { target = 3 }\n",
+        );
+        let g = resolve_goal(None, None, dir.path())
+            .expect("resolve")
+            .unwrap();
+        assert_eq!(g.name, "loop3");
+        assert!(matches!(
+            g.stop,
+            anaden_core::StopCondition::LoopCount { target: 3 }
+        ));
+    }
+
+    /// DEF-004: goals 無宣言 (= 空) の manifest は従来どおりゴール無し
+    /// (無限ループ / MaxIterations 挙動の後方互換)。
+    #[test]
+    fn resolve_goal_manifest_empty_goals_returns_none() {
+        let dir = manifest_goal_dir("");
+        assert!(
+            resolve_goal(None, None, dir.path())
+                .expect("resolve")
+                .is_none()
+        );
+    }
+
+    /// DEF-004: manifest 不在 pipeline は従来どおりゴール無し。
+    #[test]
+    fn resolve_goal_manifest_missing_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            resolve_goal(None, None, tmp.path())
+                .expect("resolve")
+                .is_none()
+        );
+    }
+
+    /// DEF-004: 明示フラグは manifest より優先 (マージしない・単一情報源)。
+    #[test]
+    fn resolve_goal_explicit_flag_overrides_manifest() {
+        let dir = manifest_goal_dir(
+            "[[goal]]\nname = \"manifest_goal\"\n[goal.stop]\nLoopCount = { target = 99 }\n",
+        );
+        let g = resolve_goal(
+            Some("name = \"flag_goal\"\n[stop]\nLoopCount = { target = 1 }\n"),
+            None,
+            dir.path(),
+        )
+        .expect("resolve")
+        .unwrap();
+        assert_eq!(g.name, "flag_goal", "明示 --goal が manifest に勝つ");
+    }
+
+    /// DEF-004: manifest が存在して parse 不能なら Err (fail-closed)。
+    /// 壊れた manifest に黙ってゴール無しで実行し続けない。
+    #[test]
+    fn resolve_goal_broken_manifest_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pipeline.toml"), "not valid toml =").unwrap();
+        let err = resolve_goal(None, None, tmp.path()).expect_err("broken manifest must error");
+        assert!(
+            format!("{err}").contains("pipeline.toml"),
+            "error should mention pipeline.toml, got: {err}"
+        );
+    }
+
+    /// DEF-004: 複数 [[goal]] は終端条件リスト = Any 合成 (いずれかで停止)。
+    /// goal-manifest.md の「[[goal]] = ゴール(終端条件)」宣言と、login の
+    /// Any パターン (Field到達 OR Timeout 安全弁) と同一セマンティクス。
+    #[test]
+    fn resolve_goal_multiple_goals_composed_as_any() {
+        let dir = manifest_goal_dir(
+            "[[goal]]\nname = \"find\"\n[goal.stop]\nLoopCount = { target = 5 }\n\
+             [[goal]]\nname = \"cap\"\n[goal.stop]\nTimeout = { secs = 600 }\n",
+        );
+        let g = resolve_goal(None, None, dir.path())
+            .expect("resolve")
+            .unwrap();
+        assert_eq!(g.name, "any(find, cap)");
+        match g.stop {
+            anaden_core::StopCondition::Any { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    conditions[0],
+                    anaden_core::StopCondition::LoopCount { target: 5 }
+                ));
+                assert!(matches!(
+                    conditions[1],
+                    anaden_core::StopCondition::Timeout { secs: 600 }
+                ));
+            }
+            other => panic!("Any 合成が期待されるが {other:?}"),
+        }
+    }
+
+    /// DEF-004: リポジトリ実 manifest (login) の goals が解決される結合検証。
+    /// login の goal は Any (Field 到達 OR 120s 安全弁)。
+    #[test]
+    fn resolve_goal_repo_login_manifest_resolves() {
+        let root = cli_workspace_root();
+        let dir = root.join("templates").join("pipelines").join("login");
+        let g = resolve_goal(None, None, &dir).expect("resolve").unwrap();
+        assert_eq!(g.name, "login_field_reached");
+        assert!(matches!(g.stop, anaden_core::StopCondition::Any { .. }));
     }
 
     // ---- run レポート永続化 (03-report-channel) ----
