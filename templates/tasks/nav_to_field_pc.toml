@@ -1,7 +1,7 @@
 # マップ移動 (PC版) タスク (Issue #144)。
-# 実行経路: `anaden run templates/pipelines/nav_to_field_pc`。
-# pipeline.toml (manifest) は未整備のため start_task は宣言しない
-# (load_pipeline が TaskDef を列挙して開始タスクを解決する既存挙動に委ねる)。
+# 実行経路: `anaden run templates/pipelines/nav_to_field_pc TapToStartPc`。
+# start_task は pipeline.toml (manifest) の start_task = "TapToStartPc" と突合済み
+# (DEF-006: studio は manifest → TaskDef 名 の順で開始タスクを解決する)。
 id = "nav_to_field_pc"
 title = "マップ移動"
 kind = "pipeline_run"

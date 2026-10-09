@@ -484,11 +484,16 @@ impl QueueExec {
     }
 }
 
-/// パイプラインディレクトリから開始タスク名を解決する (start_task 未宣言タスク用)。
+/// パイプラインディレクトリから開始タスクのファイル stem を解決する。
 ///
 /// `pipeline.toml` (manifest) はタスク定義ではないため除外し、残る TaskDef TOML
-/// のファイル名 (stem) を辞書順で最初のものを開始タスクとする。TOML が 1 つも
+/// のファイル名 (stem) を辞書順で最初のものを返す。TOML が 1 つも
 /// 無い場合は None (呼び出し側で fail-closed 扱い)。
+///
+/// **注意**: 戻り値は stem (ファイル名) であり `anaden run` の開始タスク引数
+/// (TaskDef **名** を要求) としてそのまま使えない。実行引数への組込みには
+/// [`resolve_start_task_name`] を使うこと (DEF-006)。本関数の直接の呼出元は
+/// ファイルを特定する [`crate::scenario_load::derive_start_task_name`] のみ。
 pub fn resolve_start_task(pipeline_dir: &Path) -> Option<String> {
     let entries = std::fs::read_dir(pipeline_dir).ok()?;
     let mut stems: Vec<String> = entries
@@ -504,12 +509,42 @@ pub fn resolve_start_task(pipeline_dir: &Path) -> Option<String> {
     stems.into_iter().next()
 }
 
+/// パイプラインディレクトリから開始タスク**名** (TaskDef `name`) を解決する
+/// (start_task 未宣言タスク用・DEF-006)。
+///
+/// `anaden run <dir> <start_task>` の CLI 契約は `t.name == start_task`
+/// (crates/anaden-cli/src/main.rs) で TaskDef **名** を要求するため、
+/// stem (ファイル名) ではなく名前を解決する。優先順位:
+///
+/// 1. `pipeline.toml` (manifest) の `start_task` — manifest は
+///    「start_task = TaskDef 名」契約 (scenario_load と同一の単一情報源)。
+///    manifest が存在して parse 不能な場合は None (fail-closed: 壊れた
+///    manifest に黙って stem 推測で続けない)。
+/// 2. manifest 無し: [`resolve_start_task`] と同一規則 (辞書順最初 stem) で
+///    ファイルを特定し、その TaskDef `name` を返す
+///    (scenario_load の manifest 無し導出と同一の name 変換)。
+///    `name` キーを持たない TOML は TaskDef として不正のため None。
+pub fn resolve_start_task_name(pipeline_dir: &Path) -> Option<String> {
+    let manifest_path = pipeline_dir.join(anaden_vision::PIPELINE_MANIFEST_FILENAME);
+    if manifest_path.is_file() {
+        return anaden_vision::load_pipeline_manifest(pipeline_dir)
+            .ok()
+            .map(|m| m.start_task);
+    }
+    let first_stem = resolve_start_task(pipeline_dir)?;
+    let content = std::fs::read_to_string(pipeline_dir.join(format!("{first_stem}.toml"))).ok()?;
+    let value: toml::Value = toml::from_str(&content).ok()?;
+    value.get("name").and_then(|v| v.as_str()).map(String::from)
+}
+
 /// [`TaskDefinition`] から `anaden` CLI サブコマンドの引数列を組み立てる純関数
 /// (app.rs 配線用・Issue #144 Task 3 / Issue #188 で --target・serial を廃止)。
 ///
 /// - [`TaskKind::LaunchSubcommand`] → `launch` (起動保証・引数なしで既定 wait)
 /// - [`TaskKind::PipelineRun`] → `run <pipeline_dir> <start_task>`
-///   (start_task 未宣言時は `resolve_start_task` で解決。解決不能なら空 Vec)
+///   (start_task 未宣言時は [`resolve_start_task_name`] で TaskDef **名** を解決。
+///   DEF-006: 旧来の stem 解決は CLI の `t.name == start_task` 検証に合格しない。
+///   解決不能なら空 Vec)
 ///
 /// `target` / `serial` は Issue #188 で CLI 側フラグが削除されたため使用しない
 /// (呼出元互換のため引数形式のみ残置)。
@@ -526,7 +561,11 @@ pub fn spawn_args(
                 return Vec::new();
             };
             let abs = root.join(dir);
-            let Some(start) = def.start_task.clone().or_else(|| resolve_start_task(&abs)) else {
+            let Some(start) = def
+                .start_task
+                .clone()
+                .or_else(|| resolve_start_task_name(&abs))
+            else {
                 return Vec::new();
             };
             vec!["run".to_string(), abs.to_string_lossy().into_owned(), start]
@@ -646,6 +685,10 @@ mod tests {
 
     /// start_task 未宣言 + TaskDef TOML が実在する pipeline (リポジトリ実ファイル)
     /// でも解決できることの結合検証 (nav_to_field_pc)。
+    ///
+    /// DEF-006: `anaden run` の CLI 契約は TaskDef **名** (`t.name == start_task`)
+    /// を要求するため、stem (辞書順最初 `field_hud_top`) でなく manifest の
+    /// `start_task = "TapToStartPc"` (name) を解決する。
     #[test]
     fn test_spawn_args_pipeline_run_resolves_start_task_from_dir() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
@@ -665,8 +708,91 @@ pipeline_dir = "templates/pipelines/nav_to_field_pc"
             args[1].ends_with("templates\\pipelines\\nav_to_field_pc")
                 || args[1].ends_with("templates/pipelines/nav_to_field_pc")
         );
-        // 辞書順最初の TaskDef: field_hud_top
-        assert_eq!(args[2], "field_hud_top");
+        // manifest の start_task (TaskDef name): TapToStartPc
+        // (stem 辞書順最初の field_hud_top でない — DEF-006)
+        assert_eq!(args[2], "TapToStartPc");
+    }
+
+    /// DEF-006: リポジトリ実 pipeline のうち manifest が存在するもの (login) は
+    /// manifest の start_task (TaskDef 名) が使われることの結合検証。
+    /// 旧挙動は stem `tap_title` を返し CLI の `t.name == start_task` 検証で失敗した。
+    #[test]
+    fn test_spawn_args_pipeline_run_login_manifest_start_task() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let src = r#"
+id = "login"
+title = "ログイン"
+kind = "pipeline_run"
+implemented = true
+pipeline_dir = "templates/pipelines/login"
+"#;
+        let def = TaskDefinition::parse_toml(src, Path::new("login.toml")).unwrap();
+        let args = spawn_args(&def, "windows", None, &root);
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "run");
+        assert!(
+            args[1].ends_with("templates\\pipelines\\login")
+                || args[1].ends_with("templates/pipelines/login")
+        );
+        // login/pipeline.toml の start_task = "LoginTapTitlePc" (tap_title.toml の name)
+        assert_eq!(args[2], "LoginTapTitlePc");
+    }
+
+    /// DEF-006: manifest の start_task は stem 推測より優先される。
+    #[test]
+    fn test_spawn_args_pipeline_run_manifest_start_task_wins_over_stems() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pipeline.toml"),
+            "start_task = \"FromManifest\"",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("aa_first.toml"), "name = \"AaTaskName\"\n").unwrap();
+        assert_eq!(
+            resolve_start_task_name(tmp.path()).as_deref(),
+            Some("FromManifest")
+        );
+    }
+
+    /// DEF-006: manifest 無し pipeline は「辞書順最初 stem のファイル」を読み、
+    /// その TaskDef `name` を返す (stem そのものではない — CLI は名前で検証する)。
+    #[test]
+    fn test_resolve_start_task_name_manifestless_uses_taskdef_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("aa_first.toml"),
+            "name = \"AaTaskName\"\ntemplate = \"x.png\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("zz_last.toml"),
+            "name = \"ZzTaskName\"\ntemplate = \"y.png\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_start_task_name(tmp.path()).as_deref(),
+            Some("AaTaskName")
+        );
+    }
+
+    /// DEF-006: name キーを持たない TOML は TaskDef として不正のため
+    /// 解決不能 (None = fail-closed)。stem で代替しない。
+    #[test]
+    fn test_resolve_start_task_name_manifestless_nameless_toml_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("aa_first.toml"), "x = 1\n").unwrap();
+        assert_eq!(resolve_start_task_name(tmp.path()), None);
+    }
+
+    /// DEF-006: manifest が存在するのに parse 不能な場合は None (fail-closed)。
+    /// 壊れた manifest に黙って stem 推測で続けない
+    /// (scenario_load の「parse 不能ならエラー伝播」と同一方針)。
+    #[test]
+    fn test_resolve_start_task_name_broken_manifest_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pipeline.toml"), "not valid toml =").unwrap();
+        std::fs::write(tmp.path().join("aa_first.toml"), "name = \"AaTaskName\"\n").unwrap();
+        assert_eq!(resolve_start_task_name(tmp.path()), None);
     }
 
     /// pipeline_dir が実在せず start_task も解決不能なら空 Vec (fail-closed)。

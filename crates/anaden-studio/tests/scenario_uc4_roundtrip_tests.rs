@@ -207,7 +207,8 @@ fn all_four_repo_pipelines_roundtrip_losslessly() {
 
     // manifest 付き pipeline の保存 TOML は手書き pipeline.toml と toml::Value 等価
     // (= 「保存済み TOML は人間可読・既存形式と互換」の構造的証明)。
-    for name in ["field_loop_pc", "fishing", "login"] {
+    // (DEF-006 で nav_to_field_pc も手書き manifest を持つため比較対象に追加)
+    for name in ["field_loop_pc", "nav_to_field_pc", "fishing", "login"] {
         let handwritten = std::fs::read_to_string(
             repo_templates()
                 .join("pipelines")
@@ -223,17 +224,19 @@ fn all_four_repo_pipelines_roundtrip_losslessly() {
     }
 }
 
-/// 正常系 2 (焦点): manifest 無し pipeline (nav_to_field_pc) の load → save で
-/// pipeline.toml が新規生成され、start_task は resolve_start_task と同一規則
-/// (辞書順先頭 TOML stem) のファイルの **TaskDef name** になる (anaden CLI の
-/// `t.name == start_task` 実行契約と整合)。
-/// (旧 _title_load は Issue #188 で削除 — 現行 manifestless pipeline は
-///  nav_to_field_pc のみ)
+/// 正常系 2 (焦点): manifest 無し pipeline の load → save で pipeline.toml が
+/// 新規生成され、start_task は resolve_start_task と同一規則 (辞書順先頭 TOML
+/// stem) のファイルの **TaskDef name** になる (anaden CLI の `t.name ==
+/// start_task` 実行契約と整合)。
+/// (旧 _title_load は Issue #188 で削除。nav_to_field_pc は DEF-006 で manifest
+///  を整備したため現行リポジトリに manifestless pipeline は無い — コピーから
+///  manifest を除去した合成 fixture で契約を維持する)
 #[test]
 fn manifestless_save_creates_behavior_compatible_manifest() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = copy_pipelines_tomls(tmp.path());
     let dir = root.join("nav_to_field_pc");
+    std::fs::remove_file(dir.join("pipeline.toml")).expect("strip manifest for fixture");
     assert!(!dir.join("pipeline.toml").exists(), "前提: manifest 無し");
 
     let state = load_scenario_from_dir(&dir).expect("load");
@@ -439,8 +442,9 @@ fn save_sweeps_removed_and_renamed_task_files() {
     assert_eq!(state.task_names().len(), 3);
 
     // 削除 (LoadGamePc) + リネーム (FieldHudTopPc → FieldArrivalSentinelPc)。
-    // 削除で TapToStartPc.next が dangling に、リネームで start_task (manifest
-    // 無し導出値 = FieldHudTopPc) が dangling になるため両方繋ぎ替える。
+    // 削除で TapToStartPc.next が dangling に、リネームで参照中の start_task
+    // (manifest の start_task = TapToStartPc) の遷移先が dangling になるため
+    // next を繋ぎ替え、start_task は明示的に新 sentinel へ設定する。
     assert!(state.remove_task("LoadGamePc"));
     state.task_mut("FieldHudTopPc").unwrap().name = "FieldArrivalSentinelPc".to_string();
     state.task_mut("TapToStartPc").unwrap().next = Some(vec!["FieldArrivalSentinelPc".to_string()]);
