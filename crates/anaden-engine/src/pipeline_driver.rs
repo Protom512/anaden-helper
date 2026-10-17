@@ -6,8 +6,8 @@
 //! (旧 Android 実機バックエンド・命令型 Orchestrator は Issue #188 で削除済み。)
 //!
 //! 解像度モデル: device 側は生解像度(PC版は黒帯込み生幅)。
-//! capture した画像を黒帯クロップ([`crop_to_content_with_info`]) →
-//! [`ScreenScaler::normalize`] で基準幅(1280)へ縮小して tick に食わせる。
+//! capture した画像を [`ScreenScaler::normalize_capture`] (黒帯クロップ + キャンバス
+//! アスペクト保護 + 基準幅 1280 正規化の単一前処理・Issue #212) へ通して tick に食わせる。
 //! 発火座標は逆方向に [`rescale_command`] が [`CropInfo`]（黒帯オフセット情報）を使って
 //! normalize後1280空間 → 実機生画像（黒帯込み）へ戻す。
 //!
@@ -32,7 +32,7 @@ use tracing::{debug, info, warn};
 use anaden_core::InputAction;
 use anaden_core::ScreenRegion;
 use anaden_device::DeviceError;
-use anaden_vision::{BASE_WIDTH, CropInfo, ScreenScaler, TaskDef, crop_to_content_with_info};
+use anaden_vision::{BASE_WIDTH, CropInfo, ScreenScaler, TaskDef};
 
 use crate::pipeline_runner::{InputCommand, PipelineState};
 
@@ -478,14 +478,17 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let capture_ms = t_cap.elapsed().as_secs_f64() * 1000.0;
         let raw_w = screen.width();
         let raw_h = screen.height();
-        // 2. 黒帯クロップ → 描画領域(16:9)を抽出。黒帯なしならそのまま（copy 不要）。
-        //    normalize の前で行うことで、テンプレ（描画領域空間）とスケールが一致する。
-        //    CropInfo（元画像空間でのコンテンツ位置・寸法）も受け取り、後段の rescale で
-        //    発火座標を黒帯込み実機画像へ逆変換するために保持する。
-        let (cropped, crop_info) = crop_to_content_with_info(&screen);
+        // 2+3. 本番前処理 (単一情報源・Issue #212): 黒帯クロップ (キャンバス アスペクト保護
+        //     付き) → 基準幅 1280 正規化。`anaden-tool run-pipeline` も同じ
+        //     ScreenScaler::normalize_capture を呼ぶため両経路の前処理は常に一致する。
+        //     CropInfo（元画像空間でのコンテンツ位置・寸法）は後段の rescale で発火座標を
+        //     黒帯込み実機画像へ逆変換するために保持する。
+        //     アスペクト保護: キャンバス内部の黒 (起動途中フレームの未描画領域等) を黒帯と
+        //     誤判定して幾何を破壊するのを防ぐ (letterbox::crop_to_canvas_with_info)。
+        let (normalized, crop_info) = self.scaler.normalize_capture(&screen);
         self.last_crop_info = crop_info;
-        let crop_w = cropped.width();
-        let crop_h = cropped.height();
+        let crop_w = crop_info.width;
+        let crop_h = crop_info.height;
         if (crop_w, crop_h) != (raw_w, raw_h) {
             debug!(
                 "letterbox crop: raw={raw_w}x{raw_h} -> content={crop_w}x{crop_h} \
@@ -493,8 +496,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 crop_info.offset_x, crop_info.offset_y
             );
         }
-        // 3. normalize → 基準幅画像(tick は基準座標系前提)
-        let normalized = self.scaler.normalize(&cropped);
         let norm_w = normalized.width();
         let norm_h = normalized.height();
         // [DEBUG] 生フレーム寸法 + normalize 後寸法。向き/スケール乖離の診断用。
@@ -625,10 +626,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 return StepOutcome::Error(format!("verify_capture: {e}"));
             }
         };
-        // run_once と同じ黒帯クロップ → normalize 経路（検証も描画領域空間で行う）。
-        // CropInfo は検証では発火しないため保存不要だが、経路の一貫性のため _with_info を使用。
-        let (cropped, _crop_info) = crop_to_content_with_info(&screen);
-        let normalized = self.scaler.normalize(&cropped);
+        // run_once と同じ本番前処理 (normalize_capture・検証も描画領域空間で行う)。
+        // CropInfo は検証では発火しないため保存不要。
+        let (normalized, _crop_info) = self.scaler.normalize_capture(&screen);
         // run_step を直接呼び、task_name で再認識。マッチ残存 → 対象残存 = 未検証。
         let still_present = anaden_vision::run_step(&self.tasks, &normalized, task_name).is_some();
         if still_present {
@@ -2012,6 +2012,137 @@ mod tests {
             StepOutcome::Error(msg) => assert!(msg.starts_with("capture")),
             other => panic!("expected Error, got {other:?}"),
         }
+        assert!(fired.lock().expect("fired lock").is_empty());
+    }
+
+    // ---- (3b) Issue #212: 本番前処理 (normalize_capture) の engine 経路 pin ----
+    //
+    // run_once は ScreenScaler::normalize_capture (黒帯クロップ [キャンバス アスペクト
+    // 保護付き] → 1280 正規化) を使う。anaden-tool run-pipeline も同一関数を呼ぶため
+    // 両経路の前処理は常に一致する (Issue #212 受け入れ基準 1)。ここでは実 asset
+    // (実キャプチャ fixture + 実 login pipeline TOML) で engine 経路の end-to-end を
+    // pin する。
+
+    /// anaden-vision の tests/fixtures へのパス (crates/anaden-engine から見て)。
+    fn vision_fixture(name: &str) -> PathBuf {
+        PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("anaden-vision")
+            .join("tests")
+            .join("fixtures")
+            .join(name)
+    }
+
+    /// 実 login pipeline (templates/pipelines/login) から LoginTapTitlePc を読む。
+    fn real_login_tap_title_task() -> TaskDef {
+        let login_dir = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+            .join("..")
+            .join("..")
+            .join("templates")
+            .join("pipelines")
+            .join("login");
+        let tasks = anaden_vision::load_pipeline(&login_dir)
+            .unwrap_or_else(|e| panic!("load login pipeline {}: {e}", login_dir.display()));
+        tasks
+            .into_iter()
+            .find(|t| t.name == "LoginTapTitlePc")
+            .expect("LoginTapTitlePc must exist")
+    }
+
+    /// 健全な実タイトルキャプチャ (#208 fixture・左 8px 黒帯) が engine live 経路
+    /// (capture → normalize_capture → roi 付き tick → rescale) で発火することを保証。
+    ///
+    /// 期待値の導出 (Issue #212 実測・決定論的):
+    /// - crop (10,0) 1942x1098 (16:9 比 +0.52% → アスペクト保護は受理) → 1280x724。
+    /// - ClickRect roi [900,466,30,30] (raw-1258) → roi_to_normalized(.,1280,724)
+    ///   = [916,477,31,31] → 中心 (931,492)。
+    /// - rescale (crop 1942 幅・offset_x=10): x = 931*1942/1280 + 10 = 1423,
+    ///   y = 492*1942/1280 + 0 = 746 (両軸幅比・round)。
+    #[tokio::test]
+    async fn run_once_fires_on_real_title_fixture_through_guarded_preprocessing() {
+        let fixture = vision_fixture("title_live_1952x1098.png");
+        let screen =
+            image::open(&fixture).unwrap_or_else(|e| panic!("open {}: {e}", fixture.display()));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("LoginTapTitlePc"),
+            vec![real_login_tap_title_task()],
+            1952, // device_width = 生キャプチャ幅
+            300,
+        );
+
+        let out = driver.run_once().await;
+        match out {
+            StepOutcome::Fired {
+                next_current,
+                fired: just_fired,
+            } => {
+                assert_eq!(next_current.as_deref(), Some("LoginWaitFieldPc"));
+                // 実機生座標へ rescale 済みの Tap (導出は上記コメント)。
+                assert_eq!(just_fired, Some(InputCommand::Tap { x: 1423, y: 746 }));
+            }
+            other => panic!("expected Fired on real title fixture, got {other:?}"),
+        }
+        assert_eq!(driver.last_crop_info.offset_x, 10);
+        assert_eq!(
+            (driver.last_crop_info.width, driver.last_crop_info.height),
+            (1942, 1098),
+            "engine must consume the guarded crop (accepted: within 16:9 tolerance)"
+        );
+        assert_eq!(
+            fired.lock().expect("fired lock").as_slice(),
+            &[InputCommand::Tap { x: 1423, y: 746 }]
+        );
+    }
+
+    /// 過渡ブートフレーム (Issue #212 fixture・キャンバス下半分が未描画純黒) では
+    /// アスペクト保護がクロップを棄却し、座標系 (全面 = キャンバス) が保たれること。
+    /// 旧実装なら last_crop_info が 1952x577 (幾何破壊) になり、この pin が RED になる。
+    #[tokio::test]
+    async fn run_once_on_degenerate_frame_keeps_canvas_geometry() {
+        let fixture = vision_fixture("title_boot_degenerate_1952x1098.png");
+        let screen =
+            image::open(&fixture).unwrap_or_else(|e| panic!("open {}: {e}", fixture.display()));
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("LoginTapTitlePc"),
+            vec![real_login_tap_title_task()],
+            1952,
+            300,
+        );
+
+        let out = driver.run_once().await;
+        assert_eq!(
+            out,
+            StepOutcome::NoMatch,
+            "needle 不在の過渡フレームは正しく NoMatch"
+        );
+        assert_eq!(
+            driver.last_crop_info,
+            CropInfo::full(1952, 1098),
+            "aspect guard must reject the in-canvas-black crop: engine keeps the full canvas \
+             geometry (旧実装は 1952x577 に崩れ roi の Y マッピングが破壊された)"
+        );
         assert!(fired.lock().expect("fired lock").is_empty());
     }
 
@@ -5001,10 +5132,9 @@ mod tests {
         let out = driver.run_once().await;
         assert_eq!(out, StepOutcome::NoMatch);
 
-        // 期待値: run_once と同じ前処理(crop_to_content→normalize)を通した
+        // 期待値: run_once と同じ前処理(normalize_capture)を通した
         // フレームに対する diagnose_all の順序。
-        let (cropped, _) = anaden_vision::crop_to_content_with_info(&screen);
-        let normalized = ScreenScaler::new().normalize(&cropped);
+        let (normalized, _) = ScreenScaler::new().normalize_capture(&screen);
         let expected = anaden_vision::diagnose_all(&tasks, &normalized);
         assert_eq!(expected.len(), 2);
         let expected_tasks: Vec<&str> = expected.iter().map(|e| e.task.as_str()).collect();

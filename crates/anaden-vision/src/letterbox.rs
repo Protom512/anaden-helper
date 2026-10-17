@@ -17,6 +17,11 @@
 //!   [`MARGIN_PX`] だけ内側へ縮める余白を設ける。
 //! - クロップ結果が描画領域を破壊しないよう、最小寸法 [`MIN_CONTENT_PX`] を下回る場合は
 //!   クロップを行わず元画像を返す（フォールバック）。
+//! - **キャンバス アスペクト保護 (Issue #212)**: [`crop_to_canvas_with_info`] は
+//!   クロップ結果のアスペクト比が 16:9 ([`CANVAS_ASPECT`]) から
+//!   [`CANVAS_ASPECT_TOLERANCE`] 以内に収まるときのみクロップを受理する。
+//!   「キャンバス内部の黒」(起動途中フレームの未描画領域・実測 1952x1098 の下 521 行)
+//!   を黒帯と誤判定して幾何 (アスペクト → roi の Y マッピング) を破壊するのを防ぐ。
 
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 
@@ -225,6 +230,60 @@ fn margin_offset(bar: u32, max: u32) -> u32 {
         0
     } else {
         bar.saturating_add(MARGIN_PX).min(max)
+    }
+}
+
+/// ゲーム描画領域 (キャンバス) の期待アスペクト比 (16:9)。
+///
+/// PC 版実測クライアント領域 1258x708 (=1.7768) も 16:9 (=1.7778) との差 0.06% で
+/// 本定数の許容誤差内に収まる。
+pub const CANVAS_ASPECT: f64 = 16.0 / 9.0;
+
+/// [`CANVAS_ASPECT`] に対するクロップ受理許容誤差 (相対・5%)。
+///
+/// 実測の健全なクロップ結果は 0.6% 以内 (1952x1098 の左 8px 黒帯除去後 1942x1098 =
+/// 1.7685・16:9 比 +0.52%) に収まる。一方 **キャンバス内部の黒** (起動途中の未描画
+/// 領域・暗画面) を誤って黒帯扱いしたクロップは大きく崩れる (1952x1098 の下 521 行が
+/// 黒 → 1952x577 = 3.373・+89.6%)。5% はこの 2 群を弁別する十分広い閾値。
+pub const CANVAS_ASPECT_TOLERANCE: f64 = 0.05;
+
+/// [`crop_to_content_with_info`] に **キャンバス アスペクト保護** を加えたクロップ。
+///
+/// Issue #212 の根因対策: `crop_to_content_with_info` は「端から連続する黒行/列」を
+/// 黒帯として除去するが、黒帯と **キャンバス内部の黒** (起動途中フレームの未描画下半分、
+/// 暗いロード画面の黒帯状余白等) を区別できない。内部の黒を除去すると:
+///
+/// - クロップ後寸法のアスペクト比が 16:9 から大きく崩れ (実測: 1952x1098 → 1952x577 = 3.373)、
+/// - normalize 後の縦スケールが崩壊し (1280x720 になるべきが 1280x378)、
+/// - `roi_to_normalized` の Y マッピングが約 0.53 倍に圧縮されて roi 窓が外れ、
+/// - needle も縦に圧縮されるため全文探索でもマッチしない (NoMatch)。
+///
+/// 本関数はクロップ結果のアスペクト比が [`CANVAS_ASPECT`] から [`CANVAS_ASPECT_TOLERANCE`]
+/// 以内に収まるときのみクロップを受理し、大きく外れる場合は **クロップを棄却して元画像
+/// 全体** (=`CropInfo::full`) を返す。棄却時も座標系 (全面 = キャンバス) は保たれるため、
+/// roi/needle のスケールは正しいまま「マッチしない」判定だけが残る (= 未描画フレームに
+/// 対する正しい挙動。リトライ/リカバリに委ねる)。
+///
+/// 黒帯が検出されなかった・フォールバックしたケースは [`crop_to_content_with_info`]
+/// と同一の結果 (元画像 + full) を返す。
+pub fn crop_to_canvas_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo) {
+    let (w, h) = img.dimensions();
+    let (cropped, info) = crop_to_content_with_info(img);
+    // クロップが実質働いていない (黒帯なし / フォールバック / 空画像) はそのまま。
+    if info.offset_x == 0 && info.offset_y == 0 && info.width == w && info.height == h {
+        return (cropped, info);
+    }
+    // クロップ結果がキャンバスアスペクトを保っているか。保っていなければ内部黒の
+    // 誤検出 (幾何破壊) として棄却し、元画像全体 (= キャンバス) を使う。
+    if info.height == 0 {
+        return (img.clone(), CropInfo::full(w, h));
+    }
+    let aspect = f64::from(info.width) / f64::from(info.height);
+    let deviation = ((aspect - CANVAS_ASPECT) / CANVAS_ASPECT).abs();
+    if deviation <= CANVAS_ASPECT_TOLERANCE {
+        (cropped, info)
+    } else {
+        (img.clone(), CropInfo::full(w, h))
     }
 }
 
@@ -476,6 +535,97 @@ mod tests {
         let (out, info) = crop_to_content_with_info(&img);
         assert_eq!(out.dimensions(), (0, 0));
         assert_eq!(info, CropInfo::default());
+    }
+
+    // ---- crop_to_canvas_with_info: キャンバス アスペクト保護 (Issue #212) ----
+
+    /// 中央に 16:9 コンテンツ + 左右黒帯のある画像 (真のピラーボックス) を作る。
+    /// コンテンツ 320x180 (16:9) + 左右 bar px → 全面 (320+2*bar)x180。
+    fn pillarbox_16_9(bar: u32) -> DynamicImage {
+        let w = 320 + 2 * bar;
+        let mut img: RgbaImage = ImageBuffer::new(w, 180);
+        for y in 0..180 {
+            for x in 0..w {
+                let in_content = x >= bar && x < bar + 320;
+                let v = if in_content { 128u8 } else { 0u8 };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    /// 16:9 全面画像の下側 `bottom_black` 行だけ黒 (キャンバス内部の未描画領域を模擬)。
+    fn canvas_with_unpainted_bottom(bottom_black: u32) -> DynamicImage {
+        let mut img: RgbaImage = ImageBuffer::new(320, 180);
+        for y in 0..180 {
+            for x in 0..320 {
+                let v = if y < 180 - bottom_black { 128u8 } else { 0u8 };
+                img.put_pixel(x, y, Rgba([v, v, v, 255]));
+            }
+        }
+        DynamicImage::ImageRgba8(img)
+    }
+
+    /// 真のピラーボックス (左右黒帯・中身は 16:9) はクロップが受理される。
+    /// クロップ後 320x180 ≒ 16:9 (誤差 0) → guard を通過。
+    #[test]
+    fn canvas_guard_accepts_genuine_pillarbox() {
+        let img = pillarbox_16_9(20);
+        assert_eq!(img.dimensions(), (360, 180));
+        let (out, info) = crop_to_canvas_with_info(&img);
+        // 黒帯 20px + MARGIN_PX 2 = 左右 22px 除去 → 316x180 (アスペクト 1.7556・16:9 比 -1.2%)。
+        assert_eq!(out.dimensions(), (316, 180));
+        assert_eq!(info.offset_x, 22);
+        assert_eq!(info.width, 316);
+        assert_eq!(info.height, 180);
+    }
+
+    /// キャンバス内部の未描画黒 (下 90 行 = 50%) はクロップが棄却され元画像全体になる。
+    /// crop_to_content だけなら 320x88 (アスペクト 3.636・+104%) になり幾何が破壊される。
+    #[test]
+    fn canvas_guard_rejects_unpainted_in_canvas_black() {
+        let img = canvas_with_unpainted_bottom(90);
+        // 素の crop_to_content は (Issue #212 実測と同じ罠) 幾何を壊す — その前提を pin。
+        let (raw_cropped, _) = crop_to_content_with_info(&img);
+        assert_eq!(
+            raw_cropped.dimensions(),
+            (320, 88),
+            "素 crop は下 90+2 行を除去して非 16:9 になる (guard が必要な理由)"
+        );
+        // guard 付きは棄却して全面 (アスペクト 16:9 = 320/180) を返す。
+        let (out, info) = crop_to_canvas_with_info(&img);
+        assert_eq!(out.dimensions(), (320, 180), "幾何破壊クロップは棄却");
+        assert_eq!(info, CropInfo::full(320, 180));
+    }
+
+    /// 黒帯なし画像は guard を通っても何も変わらない (恒等)。
+    #[test]
+    fn canvas_guard_no_bars_is_identity() {
+        let img =
+            DynamicImage::ImageRgb8(ImageBuffer::from_fn(320, 180, |_, _| Rgb([64, 96, 128])));
+        let (out, info) = crop_to_canvas_with_info(&img);
+        assert_eq!(out.dimensions(), (320, 180));
+        assert_eq!(info, CropInfo::full(320, 180));
+    }
+
+    /// 全面黒フォールバックもそのまま透過する (CropInfo::full)。
+    #[test]
+    fn canvas_guard_all_black_falls_back_to_full() {
+        let img = DynamicImage::ImageRgb8(ImageBuffer::from_fn(100, 100, |_, _| Rgb([0, 0, 0])));
+        let (out, info) = crop_to_canvas_with_info(&img);
+        assert_eq!(out.dimensions(), (100, 100));
+        assert_eq!(info, CropInfo::full(100, 100));
+    }
+
+    /// 左右 8px 程度の小黒帯 (除去後も 16:9 に近い) は受理される。
+    /// pillarbox_16_9(8): 全面 336x180 → 左右 8+2=10px 除去 → 316x180 (+2.5% 偏差)。
+    #[test]
+    fn canvas_guard_accepts_small_deviations_within_tolerance() {
+        let img = pillarbox_16_9(8);
+        assert_eq!(img.dimensions(), (336, 180));
+        let (out, info) = crop_to_canvas_with_info(&img);
+        assert_eq!(out.dimensions(), (316, 180));
+        assert_eq!(info.offset_x, 10);
     }
 
     /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。

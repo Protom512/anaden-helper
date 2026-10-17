@@ -5,6 +5,7 @@
 //! これにより異なる解像度の端末（Pixel 7a 2400x1080 等）で同じ ROI/座標定義が使える。
 //! テンプレート画像・ROI はすべてこの基準座標系で定義・保存する。
 
+use crate::letterbox::CropInfo;
 use image::{DynamicImage, imageops::FilterType};
 
 /// 基準幅（MAA AsstTypes.h:28 WindowWidthDefault=1280 と同一）。
@@ -67,6 +68,21 @@ impl ScreenScaler {
         let s = self.scale_factor(sw);
         let new_h = ((img.height() as f32) * s).round().max(1.0) as u32;
         img.resize_exact(self.base_w, new_h, FilterType::Triangle)
+    }
+
+    /// 生キャプチャを本番認識フレームへ前処理する (Issue #212: 前処理の単一情報源)。
+    ///
+    /// `crop_to_canvas_with_info` (黒帯クロップ + キャンバス アスペクト保護) →
+    /// [`Self::normalize`] (基準幅 1280) をこの順で 1 つの関数に束ねたもので、
+    /// **engine live 経路 (`anaden_engine::PipelineDriver::run_once`) と
+    /// `anaden-tool run-pipeline` 経路の双方がこれを呼ぶ前提で単一化**されている
+    /// (両経路の前処理乖離禁止。Issue #212 の受け入れ基準)。
+    ///
+    /// 戻り値は `(認識フレーム, CropInfo)`。`CropInfo` は発火座標の逆変換
+    /// (normalize後1280空間 → 黒帯込み生キャプチャ) に必要なコンテンツ領域位置。
+    pub fn normalize_capture(&self, raw: &DynamicImage) -> (DynamicImage, CropInfo) {
+        let (cropped, info) = crate::letterbox::crop_to_canvas_with_info(raw);
+        (self.normalize(&cropped), info)
     }
 
     /// 元画像座標 → 基準座標。
@@ -328,5 +344,57 @@ mod tests {
         assert_eq!((out_w.width(), out_w.height()), (89, 94));
         let out_h = needle_to_normalized(&needle, 1280, 0);
         assert_eq!((out_h.width(), out_h.height()), (89, 94));
+    }
+
+    // ---- normalize_capture: 前処理の単一情報源 (Issue #212) ----
+    //
+    // 生キャプチャ → crop_to_canvas_with_info (アスペクト保護付き黒帯クロップ) →
+    // normalize (1280 基準) の合成。engine live 経路と tool run-pipeline 経路が
+    // 同一の前処理を使うことの単位。
+
+    /// 左右黒帯つき 16:9 コンテンツ (真のピラーボックス) はクロップが受理され、
+    /// normalize で 1280 幅 × 16:9 高さ (720 前後) になる。
+    #[test]
+    fn normalize_capture_pillarbox_yields_1280_16x9() {
+        let scaler = ScreenScaler::new();
+        // コンテンツ 320x180 (16:9) + 左右 20px 黒帯 → 全面 360x180。
+        let mut img = image::RgbaImage::new(360, 180);
+        for y in 0..180 {
+            for x in 0..360 {
+                let v = if (20..340).contains(&x) { 128u8 } else { 0u8 };
+                img.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+            }
+        }
+        let raw = DynamicImage::ImageRgba8(img);
+        let (frame, info) = scaler.normalize_capture(&raw);
+        // クロップ受理 (左右 22px 除去 → 316x180) → 1280 x round(180*1280/316)=729。
+        assert_eq!(info.offset_x, 22);
+        assert_eq!((info.width, info.height), (316, 180));
+        assert_eq!(frame.width(), 1280);
+        let h = frame.height();
+        assert!(
+            (715..=735).contains(&h),
+            "normalize 後高さは 16:9 前後 (720±15) になるべき: {h}"
+        );
+    }
+
+    /// キャンバス内部の未描画黒 (下半分黒) はクロップ棄却 → 全面がそのまま 1280x720 に
+    /// 正規化される (幾何保存)。Issue #212 実測 (1952x1098 → 誤 1280x378) の縮小再現。
+    #[test]
+    fn normalize_capture_unpainted_black_preserves_geometry() {
+        let scaler = ScreenScaler::new();
+        // 全面 320x180 (16:9)・下 90 行だけ黒 (未描画)。
+        let mut img = image::RgbaImage::new(320, 180);
+        for y in 0..180 {
+            for x in 0..320 {
+                let v = if y < 90 { 128u8 } else { 0u8 };
+                img.put_pixel(x, y, image::Rgba([v, v, v, 255]));
+            }
+        }
+        let raw = DynamicImage::ImageRgba8(img);
+        let (frame, info) = scaler.normalize_capture(&raw);
+        // guard がクロップを棄却 → CropInfo は全面 → 1280x720 (16:9 のまま)。
+        assert_eq!(info, CropInfo::full(320, 180));
+        assert_eq!((frame.width(), frame.height()), (1280, 720));
     }
 }

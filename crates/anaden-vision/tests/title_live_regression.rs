@@ -38,8 +38,9 @@
 //! ## 本テストの保証内容
 //!
 //! 1. [`title_live_shot_matches_login_task_through_production_preprocessing`]:
-//!    実ショット fixture を live 経路と **同一の前処理** (crop_to_content_with_info →
-//!    ScreenScaler::normalize) に通し、実 TOML の LoginTapTitlePc が roi 付き detect
+//!    実ショット fixture を live 経路と **同一の前処理** (Issue #212 単一化後は
+//!    `ScreenScaler::normalize_capture` = アスペクト保護付き黒帯クロップ → 正規化)
+//!    に通し、実 TOML の LoginTapTitlePc が roi 付き detect
 //!    で閾値以上にマッチすることを機械保証する。前処理 (crop/normalize)・roi 座標系・
 //!    テンプレート資産のいずれかが壊れたら RED。
 //! 2. [`version_label_template_is_free_of_full_width_dark_rows`]:
@@ -52,7 +53,7 @@
 
 use std::path::{Path, PathBuf};
 
-use anaden_vision::{ScreenScaler, TaskDef, crop_to_content_with_info, load_pipeline};
+use anaden_vision::{ScreenScaler, TaskDef, load_pipeline};
 
 /// workspace ルート (crates/anaden-vision から `../../`)。
 fn workspace_root() -> PathBuf {
@@ -105,20 +106,21 @@ fn title_live_shot_matches_login_task_through_production_preprocessing() {
         "live title fixture must be the 1952x1098 PrintWindow capture (Issue #208 evidence)"
     );
 
-    // 本番経路と同一の前処理: 黒帯クロップ → 基準幅 1280 へ正規化。
-    // (PipelineDriver::run_once と同じ crop_to_content_with_info + ScreenScaler::normalize)
-    let (cropped, crop_info) = crop_to_content_with_info(&raw);
+    // 本番経路と同一の前処理 (Issue #212 単一化): ScreenScaler::normalize_capture
+    // = 黒帯クロップ (キャンバス アスペクト保護付き) → 基準幅 1280 へ正規化。
+    // (PipelineDriver::run_once と anaden-tool run-pipeline が呼ぶ同一関数)
+    let (normalized, crop_info) = ScreenScaler::new().normalize_capture(&raw);
     // 左端に 8px の黒帯 (ゲーム描画の左インセット) があり、crop が 8+MARGIN_PX(2)=10px
     // 除去する。この crop が働いていること自体が本番経路の前提 (黒帯ごとマッチすると
-    // スケールがズレる — letterbox.rs の設計)。
+    // スケールがズレる — letterbox.rs の設計)。クロップ後 1942x1098 (16:9 比 +0.52%) は
+    // CANVAS_ASPECT_TOLERANCE (5%) 内なのでアスペクト保護はクロップを受理する。
     assert_eq!(
         (crop_info.offset_x, crop_info.offset_y),
         (10, 0),
         "letterbox crop must remove the 10px left inset (8px black bar + MARGIN_PX 2) \
          on this fixture"
     );
-    assert_eq!((cropped.width(), cropped.height()), (1942, 1098));
-    let normalized = ScreenScaler::new().normalize(&cropped);
+    assert_eq!((crop_info.width, crop_info.height), (1942, 1098));
     assert_eq!(
         (normalized.width(), normalized.height()),
         (1280, 724),

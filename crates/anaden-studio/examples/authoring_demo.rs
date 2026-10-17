@@ -200,8 +200,9 @@ fn main() -> Result<()> {
 
 /// フレームを読み、黒帯クロップ + raw-1258x708 空間へスケールして返す。
 ///
-/// クロップは `anaden run` の実行経路 (capture → `crop_to_content` → 正規化) と
-/// 同一の前処理。`raw → cropped → 1258x708` の寸法遷移も診断用に印字する。
+/// クロップは `anaden run` の実行経路 (capture → `crop_to_canvas_with_info` → 正規化・
+/// Issue #212 のアスペクト保護付き) と同一の前処理。`raw → cropped → 1258x708` の
+/// 寸法遷移も診断用に印字する。
 fn load_authored_frame(
     frames_dir: &Path,
     file: &str,
@@ -214,7 +215,7 @@ fn load_authored_frame(
     let raw =
         image::open(&path).with_context(|| format!("frame open failed: {}", path.display()))?;
     let (rw, rh) = (raw.width(), raw.height());
-    let cropped = anaden_vision::crop_to_content(&raw);
+    let (cropped, _crop_info) = anaden_vision::crop_to_canvas_with_info(&raw);
     let (cw, ch) = (cropped.width(), cropped.height());
     let authored = cropped.resize_exact(SCREEN_WIDTH, SCREEN_HEIGHT, FilterType::Lanczos3);
     println!(
