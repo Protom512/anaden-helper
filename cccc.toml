@@ -1,0 +1,10 @@
+# cccc 共通設定 (moznion/cccc の cccc.toml 形式に準拠)。
+# 注意: スタンドアロン front-end CLI `cccc-rs` 0.4.0 は設定ファイルを読まない
+# (バイナリ内に .toml 参照なし、--help にも config 項目なし)。本ファイルは:
+#   (a) 統合 `cccc` CLI 利用時に有効となる cache 有効化 (将来的な導入備え)
+#   (b) scripts/quality/complexity_gate.mjs が読み込む閾値の単一情報源
+# として機能する。crates 全走査は 0.14 秒のため cache は現状不要。
+max-cyclomatic = 15
+max-cognitive = 20
+cache = true
+cache-file = ".cccc.cache"
