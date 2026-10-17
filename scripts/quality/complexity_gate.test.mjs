@@ -198,6 +198,25 @@ test('braces inside nested block comments are ignored', () => {
   assert.equal(regions[0].end, 4);
 });
 
+test('region reports attrStart at the cfg(test) attribute line (for tests-untouched guard)', () => {
+  // T3 contract: editing the #[cfg(test)] attribute line itself must be
+  // detectable, so the region exposes the attribute line in addition to the
+  // item-line-based [start, end].
+  const src = [
+    'pub fn prod() {}', // 1
+    '', // 2
+    '#[cfg(test)]', // 3 <- attrStart
+    '#[allow(clippy::unwrap_used)]', // 4
+    'mod tests {', // 5 <- start
+    '}', // 6 <- end
+  ].join('\n');
+  const regions = computeTestRegions(src);
+  assert.equal(regions.length, 1);
+  assert.equal(regions[0].attrStart, 3);
+  assert.equal(regions[0].start, 5);
+  assert.equal(regions[0].end, 6);
+});
+
 test('non-cfg attribute alone does not create a region', () => {
   const src = [
     '#[allow(dead_code)]', // 1

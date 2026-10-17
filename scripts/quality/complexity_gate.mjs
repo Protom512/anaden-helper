@@ -238,6 +238,7 @@ export function computeTestRegions(source) {
     let kind = 'other';
     if (MOD_ITEM.test(itemText)) kind = 'mod';
     else if (FN_ITEM.test(itemText)) kind = 'fn';
+    const attrStart = ln + 1; // 1-based line of the cfg(test) attribute itself
     const start = item + 1; // 1-based item line
     let end = lines.length;
     let depth = 0;
@@ -260,7 +261,7 @@ export function computeTestRegions(source) {
       }
     }
     if (!closed && depth !== 0) end = lines.length; // unbalanced: exclude to EOF (fail-closed)
-    regions.push({ start, end, kind, note });
+    regions.push({ start, end, kind, note, attrStart });
   }
   return regions;
 }
