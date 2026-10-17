@@ -1,0 +1,29 @@
+# cargo-mutants 設定 (Issue #214 / Phase 0 T4)。
+# 合格判定は「ベースライン比 新規生存 mutant ゼロ」(ワークスペース全体) —
+# ベースラインは scripts/quality/mutants_gate.mjs snapshot で
+# target/quality/mutants-baseline.json に採取する。
+#
+# 注意 (実測 2026-10-17):
+# - mutants 総数 3180 (studio 1456 / vision 694 / device 366 / cli 336 /
+#   engine 206 / core 94 / strategies 28) — ワークスペース全体は夜間規模。
+# - 較正実測 (anaden-strategies 28 mutants, --in-place, jobserver-tasks=4):
+#   1m53s ≈ 4s/mutant (baseline build 26s 含む)。重い crate は 1 mutant あたり
+#   数十秒 (e2e/GUI テスト) になるため全体は 8-30 時間を見込むこと。
+# - wgpu/eframe を含む cold build は並列時にコミット上限 OOM を起こす
+#   (rustc "memory allocation of 1048576 bytes failed")ため、
+#   --in-place (mutant 試行は直列) + --jobserver-tasks 4 (内側 cargo の
+#   同時タスク上限) で実行する。--in-place は -j と併用不可。
+#
+# ベースライン取得 (夜間・無人実行):
+#   cargo mutants --workspace --in-place --jobserver-tasks 4
+#   node scripts/quality/mutants_gate.mjs snapshot
+#
+# フェーズ完了時のゲート (ベースライン比 新規生存ゼロ):
+#   cargo mutants --workspace --in-place --jobserver-tasks 4 --iterate
+#   node scripts/quality/mutants_gate.mjs check
+#
+# 出力先: -o/--output 相当 — target/ 直下に mutants.out を作る (gitignore 済み)。
+# 中断すると --in-place の変異ソースが残る恐れがあるため、再開前に
+# `git status` / `git checkout -- crates` で復帰確認すること。
+test_tool = "nextest"
+output = "target"
