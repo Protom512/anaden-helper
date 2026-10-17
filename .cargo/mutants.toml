@@ -25,5 +25,8 @@
 # 出力先: -o/--output 相当 — target/ 直下に mutants.out を作る (gitignore 済み)。
 # 中断すると --in-place の変異ソースが残る恐れがあるため、再開前に
 # `git status` / `git checkout -- crates` で復帰確認すること。
+# 実証済み (2026-10-17): 正常完了しても EOL 変更 (LF→CRLF) が書き残る
+# ことがある — 実行後は必ず `git status` を見て `git checkout -- crates`
+# で復帰する (テスト不改変ゲートはこれを検出しない: 内容 diff が空のため)。
 test_tool = "nextest"
 output = "target"
