@@ -1,0 +1,31 @@
+{
+  "labels": [
+    "crop_to_content_with_info",
+    "crop_to_canvas_with_info",
+    "16:9 ±5%",
+    "1942x1098",
+    "1280x724",
+    "1952x577",
+    "1280x720",
+    "1280x378",
+    "0.53",
+    "NoMatch",
+    "MATCH",
+    "0.9944",
+    "0.2057"
+  ],
+  "forbidden": [
+    "89.49",
+    "1952x578",
+    "誤マッチ"
+  ],
+  "edges": [
+    "raw->crop",
+    "crop->guard",
+    "guard->accept",
+    "accept->match",
+    "guard->reject",
+    "reject->honest",
+    "trap->guard"
+  ]
+}

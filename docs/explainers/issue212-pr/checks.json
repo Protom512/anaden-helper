@@ -1,0 +1,48 @@
+{
+  "checks": [
+    {
+      "name": "vision-regression",
+      "cmd": "cargo nextest run -p anaden-vision --test geometry_drift_regression",
+      "cwd": "../../..",
+      "expect": ["2 tests run: 2 passed, 0 skipped"]
+    },
+    {
+      "name": "engine-pins",
+      "cmd": "cargo nextest run -p anaden-engine -E 'test(run_once_fires_on_real_title_fixture_through_guarded_preprocessing) + test(run_once_on_degenerate_frame_keeps_canvas_geometry)'",
+      "cwd": "../../..",
+      "expect": ["2 tests run: 2 passed, 139 skipped"]
+    },
+    {
+      "name": "staged-degenerate",
+      "cmd": "cargo run --release -p anaden-vision --example issue212_staged -- crates/anaden-vision/tests/fixtures/title_boot_degenerate_1952x1098.png",
+      "cwd": "../../..",
+      "expect": [
+        "profile: rows with mean>=8: first=Some(0) last=Some(578) (h=1098; bottom black rows = 519)",
+        "B crop_to_content: offset=(0,0) size=1952x577",
+        "C normalize_capture: content 1952x1098 (offset 0,0) -> 1280x720",
+        "[C normalize_capture (production)] frame=1280x720"
+      ]
+    },
+    {
+      "name": "staged-healthy",
+      "cmd": "cargo run --release -p anaden-vision --example issue212_staged -- crates/anaden-vision/tests/fixtures/title_live_1952x1098.png",
+      "cwd": "../../..",
+      "expect": [
+        "profile: rows with mean>=8: first=Some(0) last=Some(1097) (h=1098; bottom black rows = 0)",
+        "B crop_to_content: offset=(10,0) size=1942x1098",
+        "C normalize_capture: content 1942x1098 (offset 10,0) -> 1280x724",
+        "[C normalize_capture (production)] frame=1280x724 roi=Some([604, 223, 160, 180]) thr=0.8: conf=0.9944"
+      ]
+    },
+    {
+      "name": "aspect-calc",
+      "cmd": "node calc-aspect.mjs",
+      "expect": [
+        "degenerate crop 1952x577: aspect=3.383 deviation=+90.3%",
+        "unguarded normalize height: 577*1280/1952 = 378 → 1280x378",
+        "roi Y factor: 378/708 = 0.53",
+        "healthy crop 1942x1098: deviation=0.51% (tolerance 5%)"
+      ]
+    }
+  ]
+}
