@@ -332,6 +332,12 @@ impl LoopState {
         )
     }
 
+    /// マッチ系 tick (Fired / NoFire) の共通 prologue: streak リセット + 集計 bump。
+    fn record_match_tick(&mut self, current_before: &str) {
+        self.guard.record_match();
+        bump_task_match(current_before, &mut self.per_task_matches);
+    }
+
     /// ゴール評価用の入力束 (現在の累積状態の借用スナップショット)。
     fn goal_eval_inputs(&self) -> GoalEvalInputs<'_> {
         GoalEvalInputs {
@@ -350,6 +356,32 @@ enum StepFlow {
     Continue,
     /// 停止 (呼出側がそのまま return する完成 outcome)。
     Stop(LoopOutcome),
+}
+
+/// マッチ系 arm の種別 (Fired / NoFire)。§A D9 の非対称契約をデータ化:
+/// ログ位置 (Fired は debug → eval、NoFire は eval → debug) と停止種別
+/// (TerminalTask+タスク名 / Stop+"stop") の両方がこの 1 enum で決まる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchArm {
+    /// コマンド発火済み。debug は評価**前**、停止は TerminalTask + 現在タスク名。
+    Fired,
+    /// 発火コマンド無し (ClickSelf w/o region 等)。debug は継続確定**後**、
+    /// 停止は Stop + "stop" 固定。
+    NoFire,
+}
+
+/// [`PipelineDriver::step_matched`] への arm 固有入力 (clippy
+/// `too_many_arguments` 回避の bundling — [`GoalEvalInputs`] と同じ方針)。
+/// `just_fired` は NoFire では [`None`]。
+struct MatchStepInput<'a> {
+    /// step 実行前のカレントタスク名 (集計 bump 用)。
+    current_before: &'a str,
+    /// 遷移先タスク名 ([`None`] はパイプライン終端/停止指示)。
+    next_current: Option<String>,
+    /// 実際に発火したコマンド (Fired のみ)。
+    just_fired: Option<InputCommand>,
+    /// ゴール評価へ伝播する直近マッチ情報 (§A D2)。
+    match_info: Option<(String, f32, ScreenRegion)>,
 }
 
 /// ゴール評価用の経過時間計測の抽象(Issue #37 T4)。
@@ -1413,81 +1445,84 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// Fired arm。副作用順 = guard 更新 → 集計 bump/push → debug-if-Some →
-    /// ゴール評価 → TerminalTask 判定 (§A D3/D9: goal 評価は terminal 停止より先。
-    /// [`GoalMode::Inactive`] では eval が即 [`None`] になるため、非ゴールループの
-    /// 「None → TerminalTask 停止 / Some → debug 継続」と副作用順が完全一致する)。
-    fn step_fired(
+    /// マッチ系 arm (Fired / NoFire) の共通尾部: ゴール評価 → 継続/停止判定。
+    /// eval より前の副作用 (集計 bump / debug! 等) は呼出側 [`Self::step_matched`]
+    /// の契約順序 (§A D9) に属する — Fired は debug → eval、NoFire は eval → debug。
+    fn eval_then_terminal(
         &mut self,
         state: &mut LoopState,
         goal_mode: &mut GoalMode<'_>,
-        current_before: &str,
-        next_current: Option<String>,
-        just_fired: Option<InputCommand>,
         match_info: Option<(String, f32, ScreenRegion)>,
+        next_current: &Option<String>,
+        arm: MatchArm,
     ) -> StepFlow {
-        state.guard.record_match();
-        bump_task_match(current_before, &mut state.per_task_matches);
-        if let Some(c) = just_fired {
-            state.fired.push(c);
-        }
-        if let Some(name) = &next_current {
-            debug!("fired, advancing to {}", name);
-        }
         if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
             return StepFlow::Stop(stop);
         }
-        match next_current {
-            None => StepFlow::Stop(self.build_outcome(
+        let Some(_) = next_current else {
+            let (reason, text) = match arm {
+                MatchArm::Fired => (LoopStopReason::TerminalTask, self.current().to_string()),
+                MatchArm::NoFire => (LoopStopReason::Stop, "stop".to_string()),
+            };
+            return StepFlow::Stop(self.build_outcome(
                 state.iterations,
                 std::mem::take(&mut state.fired),
-                LoopStopReason::TerminalTask,
-                self.current(),
+                reason,
+                &text,
                 state.ctx(),
-            )),
-            Some(_) => StepFlow::Continue,
-        }
+            ));
+        };
+        StepFlow::Continue
     }
 
-    /// NoFire arm。副作用順 = guard 更新 → 集計 bump → ゴール評価 → debug-if-Some →
-    /// Stop 判定 (§A D9: 元実装の非対称順序 — NoFire は eval が debug より先、
-    /// Fired は debug が eval より先 — をそのまま維持する)。
-    fn step_no_fire(
+    /// マッチ系 arm (Fired / NoFire) 共通の 1 tick 処理。
+    ///
+    /// 副作用順 (§A D3/D9): guard 更新 → 集計 bump/push (Fired のみ push) →
+    /// debug-if-Some (**Fired は eval 前**・eval 停止時も出力済み、NoFire は
+    /// 継続確定後) → ゴール評価 → 停止種別判定。
+    /// [`GoalMode::Inactive`] では eval が即 [`None`] になるため、非ゴール
+    /// ループの旧挙動 (None → 停止 / Some → debug 継続) と完全一致する。
+    /// 差分は [`MatchArm`] 1 値に集約 — 双生児関数を作らない (duplication gate)。
+    fn step_matched(
         &mut self,
         state: &mut LoopState,
         goal_mode: &mut GoalMode<'_>,
-        current_before: &str,
-        next_current: Option<String>,
-        match_info: Option<(String, f32, ScreenRegion)>,
+        input: MatchStepInput<'_>,
+        arm: MatchArm,
     ) -> StepFlow {
-        state.guard.record_match();
-        bump_task_match(current_before, &mut state.per_task_matches);
-        if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
-            return StepFlow::Stop(stop);
+        state.record_match_tick(input.current_before);
+        if let Some(c) = input.just_fired {
+            state.fired.push(c);
         }
-        if let Some(name) = &next_current {
+        if matches!(arm, MatchArm::Fired)
+            && let Some(name) = &input.next_current
+        {
+            debug!("fired, advancing to {}", name);
+        }
+        let flow =
+            self.eval_then_terminal(state, goal_mode, input.match_info, &input.next_current, arm);
+        if matches!(flow, StepFlow::Continue)
+            && matches!(arm, MatchArm::NoFire)
+            && let Some(name) = &input.next_current
+        {
             debug!("no-fire, transitioning to {}", name);
         }
-        match next_current {
-            None => StepFlow::Stop(self.build_outcome(
-                state.iterations,
-                std::mem::take(&mut state.fired),
-                LoopStopReason::Stop,
-                "stop",
-                state.ctx(),
-            )),
-            Some(_) => StepFlow::Continue,
-        }
+        flow
     }
 
     /// NoMatch arm。副作用順 = streak 記録 (`recovery_enabled &&` の短絡維持) →
     /// ゴール評価 → due なら recovery hook (§A D5: 同 tick での goal 到達は
     /// hook 発火より優先して停止する)。
+    ///
+    /// `miss_cause` は recovery ログ文言。NoMatch と FiredUnverified (実質
+    /// NoMatch 相当の誤成功 — bump/push のみ追加して本メソッドへ委譲) で
+    /// 文言を変えるため呼出側から渡す。
     async fn step_no_match(
         &mut self,
         state: &mut LoopState,
         goal_mode: &mut GoalMode<'_>,
         recover: &mut Option<RecoveryHook>,
+        miss_cause: &'static str,
         match_info: Option<(String, f32, ScreenRegion)>,
     ) -> StepFlow {
         let now = self.recovery_clock.elapsed();
@@ -1495,18 +1530,15 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
             return StepFlow::Stop(stop);
         }
-        if due
-            && let Some(stop) = self
-                .run_recovery_or_stop("NoMatch streak >= threshold", state, recover)
-                .await
-        {
+        if due && let Some(stop) = self.run_recovery_or_stop(miss_cause, state, recover).await {
             return StepFlow::Stop(stop);
         }
         StepFlow::Continue
     }
 
-    /// FiredUnverified arm (実質 NoMatch 相当の誤成功)。副作用順 = 集計 bump/push →
-    /// streak 記録 (短絡維持) → ゴール評価 → due なら recovery hook (§A D6)。
+    /// FiredUnverified arm (実質 NoMatch 相当の誤成功)。集計 bump/push のみを
+    /// 行い、以降 (streak 記録 → ゴール評価 → due なら recovery hook) は
+    /// [`Self::step_no_match`] に委譲 (§A D6 — cause 文言のみ差し替え)。
     async fn step_fired_unverified(
         &mut self,
         state: &mut LoopState,
@@ -1520,19 +1552,14 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         if let Some(c) = just_fired {
             state.fired.push(c);
         }
-        let now = self.recovery_clock.elapsed();
-        let due = state.recovery_enabled && state.guard.record_miss(now);
-        if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
-            return StepFlow::Stop(stop);
-        }
-        if due
-            && let Some(stop) = self
-                .run_recovery_or_stop("FiredUnverified streak >= threshold", state, recover)
-                .await
-        {
-            return StepFlow::Stop(stop);
-        }
-        StepFlow::Continue
+        self.step_no_match(
+            state,
+            goal_mode,
+            recover,
+            "FiredUnverified streak >= threshold",
+            match_info,
+        )
+        .await
     }
 
     /// Error arm (§A D7: ゴール評価は一切しない — 引数に goal_mode を取らない
@@ -1623,13 +1650,37 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         // 非ゴールモード(後方互換)。run_loop_with_goal(goal=None) からも本メソッドへ委譲される
         // ため、両者を相互再帰させず本メソッド内で完結させる(async fn の再帰は boxing が必要で
         // コストが高い+実装上の理由がない)。ゴール評価付きは run_loop_with_goal を直接呼ぶこと。
+        self.run_loop_core(
+            interval,
+            max_iterations,
+            recover_nomatch_threshold,
+            &mut recover,
+            &mut GoalMode::Inactive,
+        )
+        .await
+    }
+
+    /// 統合ループコア (§A C4)。[`Self::run_loop_with_recovery`] (Inactive) と
+    /// [`Self::run_loop_with_goal`] (Active) の共通実装。
+    ///
+    /// 両モードの差分は [`GoalMode`] に集約され、本体はモード非依意 —
+    /// [`Self::eval_goal_stop`] と match_info の take が Inactive で no-op に
+    /// なるため、cancel/MaxIterations 判定 → step 実行 → 5 arm dispatch →
+    /// interval sleep の構造は両公開メソッドで完全に同一。
+    async fn run_loop_core(
+        &mut self,
+        interval: Duration,
+        max_iterations: u64,
+        recover_nomatch_threshold: u32,
+        recover: &mut Option<RecoveryHook>,
+        goal_mode: &mut GoalMode<'_>,
+    ) -> LoopOutcome {
         let mut state = LoopState::new(
             recover_nomatch_threshold,
             self.recovery_grace,
             self.max_recovery_attempts,
             recover.is_some(),
         );
-        let mut goal_mode = GoalMode::Inactive;
         loop {
             // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
             if self.is_cancelled() {
@@ -1657,9 +1708,14 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             } else {
                 self.run_once().await
             };
-            // §A D2: last_match の take はゴール活性時のみ (Inactive は触らない =
-            // 非ゴールループとの完全一致)。
-            let match_info = match (&goal_mode, &step) {
+            // UC-2 (TemplateMatch): Fired/NoFire ブランチでは run_once が格納した
+            // self.last_match (task_name, confidence, region) を take() で取り出し
+            // GoalStatusContext::last_match へ伝播させる。NoMatch/FiredUnverified/Error は
+            // テンプレートマッチしていない(または誤成功)なので None を渡す。
+            // (NoFire は ClickSelf w/o region 等の「マッチしたが発火コマンド無」で、tick は
+            //  マッチしているので last_match を伝播する。)
+            // §A D2: take はゴール活性時のみ (Inactive は触らない = 非ゴールループとの完全一致)。
+            let match_info = match (&*goal_mode, &step) {
                 (GoalMode::Active(_), StepOutcome::Fired { .. } | StepOutcome::NoFire { .. }) => {
                     self.last_match.take()
                 }
@@ -1669,24 +1725,37 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 StepOutcome::Fired {
                     next_current,
                     fired: just_fired,
-                } => self.step_fired(
+                } => self.step_matched(
                     &mut state,
-                    &mut goal_mode,
-                    &current_before,
-                    next_current,
-                    just_fired,
-                    match_info,
+                    goal_mode,
+                    MatchStepInput {
+                        current_before: &current_before,
+                        next_current,
+                        just_fired,
+                        match_info,
+                    },
+                    MatchArm::Fired,
                 ),
-                StepOutcome::NoFire { next_current } => self.step_no_fire(
+                StepOutcome::NoFire { next_current } => self.step_matched(
                     &mut state,
-                    &mut goal_mode,
-                    &current_before,
-                    next_current,
-                    match_info,
+                    goal_mode,
+                    MatchStepInput {
+                        current_before: &current_before,
+                        next_current,
+                        just_fired: None,
+                        match_info,
+                    },
+                    MatchArm::NoFire,
                 ),
                 StepOutcome::NoMatch => {
-                    self.step_no_match(&mut state, &mut goal_mode, &mut recover, match_info)
-                        .await
+                    self.step_no_match(
+                        &mut state,
+                        goal_mode,
+                        recover,
+                        "NoMatch streak >= threshold",
+                        match_info,
+                    )
+                    .await
                 }
                 StepOutcome::FiredUnverified {
                     next_current: _,
@@ -1694,8 +1763,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 } => {
                     self.step_fired_unverified(
                         &mut state,
-                        &mut goal_mode,
-                        &mut recover,
+                        goal_mode,
+                        recover,
                         &current_before,
                         just_fired,
                         match_info,
@@ -1703,8 +1772,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     .await
                 }
                 StepOutcome::Error { kind, message } => {
-                    self.step_error(&mut state, &mut recover, kind, message)
-                        .await
+                    // §A D7: Error arm はゴール評価なし (tick も clock も進めない)。
+                    self.step_error(&mut state, recover, kind, message).await
                 }
             };
             match flow {
@@ -1757,108 +1826,21 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 )
                 .await;
         };
-        // ゴール活性パス。非ゴールループと同一の arm 構造 (step_* helpers) を使い、
+        // ゴール活性パス。非ゴールループと同一の run_loop_core を使い、
         // GoalMode::Active の差分 (tick+eval / match_info take) だけ挿動が変わる。
-        let mut state = LoopState::new(
-            recover_nomatch_threshold,
-            self.recovery_grace,
-            self.max_recovery_attempts,
-            recover.is_some(),
-        );
         let mut goal_mode = GoalMode::Active(GoalLoopCtx {
             goal: goal_ref,
             clock: &mut clock,
             goal_ctx: anaden_core::GoalStatusContext::new(),
         });
-        loop {
-            // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
-            if self.is_cancelled() {
-                return self.build_outcome(
-                    state.iterations,
-                    std::mem::take(&mut state.fired),
-                    LoopStopReason::Interrupted,
-                    "interrupted",
-                    state.ctx(),
-                );
-            }
-            state.iterations += 1;
-            if state.iterations > max_iterations {
-                return self.build_outcome(
-                    state.iterations - 1,
-                    std::mem::take(&mut state.fired),
-                    LoopStopReason::MaxIterations,
-                    "max_iterations",
-                    state.ctx(),
-                );
-            }
-            let current_before = self.current().to_string();
-            let step = if self.verify_after_fire {
-                self.run_once_verified().await
-            } else {
-                self.run_once().await
-            };
-            // UC-2 (TemplateMatch): Fired/NoFire ブランチでは run_once が格納した
-            // self.last_match (task_name, confidence, region) を take() で取り出し
-            // GoalStatusContext::last_match へ伝播させる。NoMatch/FiredUnverified/Error は
-            // テンプレートマッチしていない(または誤成功)なので None を渡す。
-            // (NoFire は ClickSelf w/o region 等の「マッチしたが発火コマンド無」で、tick は
-            //  マッチしているので last_match を伝播する。)
-            let match_info = match (&goal_mode, &step) {
-                (GoalMode::Active(_), StepOutcome::Fired { .. } | StepOutcome::NoFire { .. }) => {
-                    self.last_match.take()
-                }
-                _ => None,
-            };
-            let flow = match step {
-                StepOutcome::Fired {
-                    next_current,
-                    fired: just_fired,
-                } => self.step_fired(
-                    &mut state,
-                    &mut goal_mode,
-                    &current_before,
-                    next_current,
-                    just_fired,
-                    match_info,
-                ),
-                StepOutcome::NoFire { next_current } => self.step_no_fire(
-                    &mut state,
-                    &mut goal_mode,
-                    &current_before,
-                    next_current,
-                    match_info,
-                ),
-                StepOutcome::NoMatch => {
-                    self.step_no_match(&mut state, &mut goal_mode, &mut recover, match_info)
-                        .await
-                }
-                StepOutcome::FiredUnverified {
-                    next_current: _,
-                    fired: just_fired,
-                } => {
-                    self.step_fired_unverified(
-                        &mut state,
-                        &mut goal_mode,
-                        &mut recover,
-                        &current_before,
-                        just_fired,
-                        match_info,
-                    )
-                    .await
-                }
-                StepOutcome::Error { kind, message } => {
-                    // §A D7: Error arm はゴール評価なし (tick も clock も進めない)。
-                    self.step_error(&mut state, &mut recover, kind, message)
-                        .await
-                }
-            };
-            match flow {
-                StepFlow::Continue => {}
-                StepFlow::Stop(outcome) => return outcome,
-            }
-            // interval 待ちを cancel 通知で即時抜けられるように select! 化。
-            self.sleep_or_cancelled(interval).await;
-        }
+        self.run_loop_core(
+            interval,
+            max_iterations,
+            recover_nomatch_threshold,
+            &mut recover,
+            &mut goal_mode,
+        )
+        .await
     }
 
     /// ゴールを評価し、終端状態なら停止理由と terminal 文字列を返す。
