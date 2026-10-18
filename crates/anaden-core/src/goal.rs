@@ -272,12 +272,11 @@ pub fn evaluate(goal: &Goal, ctx: &GoalStatusContext, elapsed_secs: u64) -> Goal
     match &goal.stop {
         StopCondition::LoopCount { target } => {
             if ctx.iterations >= *target {
-                GoalStatus::Reached(GoalReport {
-                    goal: goal.name.clone(),
-                    iterations: ctx.iterations,
-                    reason: format!("reached loop_count target ({target})"),
-                    last_match: ctx.last_match.clone(),
-                })
+                GoalStatus::Reached(make_report(
+                    goal,
+                    ctx,
+                    format!("reached loop_count target ({target})"),
+                ))
             } else {
                 GoalStatus::NotYet
             }
@@ -287,93 +286,112 @@ pub fn evaluate(goal: &Goal, ctx: &GoalStatusContext, elapsed_secs: u64) -> Goal
                 && name == task
                 && *conf >= *confidence
             {
-                return GoalStatus::Reached(GoalReport {
-                    goal: goal.name.clone(),
-                    iterations: ctx.iterations,
-                    reason: format!(
-                        "template '{task}' matched at confidence {conf} >= {confidence}"
-                    ),
-                    last_match: ctx.last_match.clone(),
-                });
+                return GoalStatus::Reached(make_report(
+                    goal,
+                    ctx,
+                    format!("template '{task}' matched at confidence {conf} >= {confidence}"),
+                ));
             }
             GoalStatus::NotYet
         }
         StopCondition::Timeout { secs } => {
             if elapsed_secs >= *secs {
-                GoalStatus::Failed(GoalReport {
-                    goal: goal.name.clone(),
-                    iterations: ctx.iterations,
-                    reason: format!("timeout after {elapsed_secs}s (limit {secs}s)"),
-                    last_match: ctx.last_match.clone(),
-                })
+                GoalStatus::Failed(make_report(
+                    goal,
+                    ctx,
+                    format!("timeout after {elapsed_secs}s (limit {secs}s)"),
+                ))
             } else {
                 GoalStatus::NotYet
             }
         }
-        StopCondition::All { conditions } => {
-            let mut failed: Option<GoalReport> = None;
-            for c in conditions {
-                let child = evaluate_child(c, goal, ctx, elapsed_secs);
-                match child {
-                    GoalStatus::NotYet => return GoalStatus::NotYet,
-                    GoalStatus::Failed(report) => {
-                        failed = Some(report);
-                        break;
-                    }
-                    GoalStatus::Reached(_) => { /* 続行: 全て Reached が必要 */ }
+        StopCondition::All { conditions } => evaluate_all(goal, ctx, elapsed_secs, conditions),
+        StopCondition::Any { conditions } => evaluate_any(goal, ctx, elapsed_secs, conditions),
+    }
+}
+
+/// [`GoalReport`] 構築ヘルパー。全 arm で共通の「親名継承 + 現在 tick 数 +
+/// 直近マッチ」埋め込みを 1 箇所に集約する (reason だけが arm 固有)。
+fn make_report(goal: &Goal, ctx: &GoalStatusContext, reason: String) -> GoalReport {
+    GoalReport {
+        goal: goal.name.clone(),
+        iterations: ctx.iterations,
+        reason,
+        last_match: ctx.last_match.clone(),
+    }
+}
+
+/// `StopCondition::All` の評価: 全子が `Reached` のみ `Reached`。
+/// 子が1つでも `NotYet` なら即 `NotYet`、`Failed` ならその時点で `Failed`。
+fn evaluate_all(
+    goal: &Goal,
+    ctx: &GoalStatusContext,
+    elapsed_secs: u64,
+    conditions: &[StopCondition],
+) -> GoalStatus {
+    let mut failed: Option<GoalReport> = None;
+    for c in conditions {
+        let child = evaluate_child(c, goal, ctx, elapsed_secs);
+        match child {
+            GoalStatus::NotYet => return GoalStatus::NotYet,
+            GoalStatus::Failed(report) => {
+                failed = Some(report);
+                break;
+            }
+            GoalStatus::Reached(_) => { /* 続行: 全て Reached が必要 */ }
+        }
+    }
+    match failed {
+        Some(report) => GoalStatus::Failed(make_report(
+            goal,
+            ctx,
+            format!("All: child failed ({})", report.reason),
+        )),
+        None => GoalStatus::Reached(make_report(
+            goal,
+            ctx,
+            "All: all children reached".to_string(),
+        )),
+    }
+}
+
+/// `StopCondition::Any` の評価。
+///
+/// Failed 優先（安全弁）: 子に `Failed` が1つでもあれば `Failed` を返す。
+/// 順序非依存で全子を評価し、`Failed` を `Reached` より優先する
+/// （異常を正常で上書きしない）。`docs/goal-manifest.md` の exit code 分岐
+/// （`EXIT_run_TIMEOUT = 2`）に直結する意味論。
+fn evaluate_any(
+    goal: &Goal,
+    ctx: &GoalStatusContext,
+    elapsed_secs: u64,
+    conditions: &[StopCondition],
+) -> GoalStatus {
+    let mut has_reached = false;
+    let mut first_failure: Option<GoalReport> = None;
+    for c in conditions {
+        match evaluate_child(c, goal, ctx, elapsed_secs) {
+            GoalStatus::Failed(report) => {
+                if first_failure.is_none() {
+                    first_failure = Some(report);
                 }
             }
-            match failed {
-                Some(report) => GoalStatus::Failed(GoalReport {
-                    goal: goal.name.clone(),
-                    iterations: ctx.iterations,
-                    reason: format!("All: child failed ({})", report.reason),
-                    last_match: ctx.last_match.clone(),
-                }),
-                None => GoalStatus::Reached(GoalReport {
-                    goal: goal.name.clone(),
-                    iterations: ctx.iterations,
-                    reason: "All: all children reached".to_string(),
-                    last_match: ctx.last_match.clone(),
-                }),
+            GoalStatus::Reached(_) => {
+                has_reached = true;
             }
+            GoalStatus::NotYet => {}
         }
-        StopCondition::Any { conditions } => {
-            // Failed 優先（安全弁）: 子に `Failed` が1つでもあれば `Failed` を返す。
-            // 順序非依存で全子を評価し、`Failed` を `Reached` より優先する
-            // （異常を正常で上書きしない）。`docs/goal-manifest.md` の exit code 分岐
-            // （`EXIT_run_TIMEOUT = 2`）に直結する意味論。
-            let mut has_reached = false;
-            let mut first_failure: Option<GoalReport> = None;
-            for c in conditions {
-                match evaluate_child(c, goal, ctx, elapsed_secs) {
-                    GoalStatus::Failed(report) => {
-                        if first_failure.is_none() {
-                            first_failure = Some(report);
-                        }
-                    }
-                    GoalStatus::Reached(_) => {
-                        has_reached = true;
-                    }
-                    GoalStatus::NotYet => {}
-                }
-            }
-            match first_failure {
-                Some(report) => GoalStatus::Failed(GoalReport {
-                    goal: goal.name.clone(),
-                    iterations: ctx.iterations,
-                    reason: format!("Any: child failed ({})", report.reason),
-                    last_match: ctx.last_match.clone(),
-                }),
-                None if has_reached => GoalStatus::Reached(GoalReport {
-                    goal: goal.name.clone(),
-                    iterations: ctx.iterations,
-                    reason: "Any: a child reached".to_string(),
-                    last_match: ctx.last_match.clone(),
-                }),
-                None => GoalStatus::NotYet,
-            }
+    }
+    match first_failure {
+        Some(report) => GoalStatus::Failed(make_report(
+            goal,
+            ctx,
+            format!("Any: child failed ({})", report.reason),
+        )),
+        None if has_reached => {
+            GoalStatus::Reached(make_report(goal, ctx, "Any: a child reached".to_string()))
         }
+        None => GoalStatus::NotYet,
     }
 }
 
