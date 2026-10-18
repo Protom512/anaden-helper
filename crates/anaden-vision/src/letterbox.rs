@@ -109,7 +109,7 @@ pub fn crop_to_content_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo)
     let rgb = img.to_rgb8();
 
     // 第1段階: 行平均（全幅）で上下黒帯を検出。
-    let row_means = row_mean_luminance(&rgb, 0, w);
+    let row_means = axis_mean_luminance(&rgb, Axis::Row, 0, w);
     let top = leading_black_count(&row_means, BLACK_BAR_LUMINANCE_THRESHOLD);
     let bottom = trailing_black_count(&row_means, BLACK_BAR_LUMINANCE_THRESHOLD);
 
@@ -117,7 +117,7 @@ pub fn crop_to_content_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo)
     // これによりレターボックス時に左右端の列平均が上下黒帯で汚染されるのを防ぐ。
     let row_lo = top;
     let row_hi = h.saturating_sub(bottom);
-    let col_means = col_mean_luminance(&rgb, row_lo, row_hi);
+    let col_means = axis_mean_luminance(&rgb, Axis::Col, row_lo, row_hi);
     let left = leading_black_count(&col_means, BLACK_BAR_LUMINANCE_THRESHOLD);
     let right = trailing_black_count(&col_means, BLACK_BAR_LUMINANCE_THRESHOLD);
 
@@ -156,44 +156,51 @@ pub fn crop_to_content_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo)
     (DynamicImage::ImageRgb8(cropped), info)
 }
 
-/// 各行の平均輝度を、列範囲 `[x_lo, x_hi)` に限定して計算する。
-/// `x_lo=0, x_hi=w` で全幅の行平均になる。
-fn row_mean_luminance(rgb: &ImageBuffer<Rgb<u8>, Vec<u8>>, x_lo: u32, x_hi: u32) -> Vec<f64> {
-    let (_, h) = rgb.dimensions();
-    let span = (x_hi.saturating_sub(x_lo)) as f64;
-    if span <= 0.0 {
-        return vec![0.0_f64; h as usize];
-    }
-    let mut means = vec![0.0_f64; h as usize];
-    for y in 0..h {
-        let mut sum = 0.0_f64;
-        for x in x_lo..x_hi {
-            let p = rgb.get_pixel(x, y);
-            sum += 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
-        }
-        means[y as usize] = sum / span;
-    }
-    means
+/// 平均輝度の集計軸。
+#[derive(Clone, Copy)]
+enum Axis {
+    /// 行方向: 各行 (y) の平均を取る。列範囲 `[lo, hi)` に限定
+    /// (旧 `row_mean_luminance` — `lo=0, hi=w` で全幅の行平均)。
+    Row,
+    /// 列方向: 各列 (x) の平均を取る。行範囲 `[lo, hi)` に限定
+    /// (旧 `col_mean_luminance` — 上下黒帯除外範囲で列平均を取り
+    /// 相互汚染を防ぐ)。
+    Col,
 }
 
-/// 各列の平均輝度を、行範囲 `[y_lo, y_hi)` に限定して計算する。
-/// 上下黒帯を除外した行範囲で列平均を取ることで相互汚染を防ぐ。
-fn col_mean_luminance(rgb: &ImageBuffer<Rgb<u8>, Vec<u8>>, y_lo: u32, y_hi: u32) -> Vec<f64> {
-    let (w, _) = rgb.dimensions();
-    let span = (y_hi.saturating_sub(y_lo)) as f64;
+/// 指定軸の平均輝度を計算する。`Row` は行ごと (列範囲限定)、`Col` は
+/// 列ごと (行範囲限定)。f64 の加算順序は統合前の行/列それぞれの実装と
+/// 同一 (左から右への逐次加算 = bit-identical)。
+fn axis_mean_luminance(
+    rgb: &ImageBuffer<Rgb<u8>, Vec<u8>>,
+    axis: Axis,
+    lo: u32,
+    hi: u32,
+) -> Vec<f64> {
+    let (w, h) = rgb.dimensions();
+    let outer = match axis {
+        Axis::Row => h,
+        Axis::Col => w,
+    };
+    let span = (hi.saturating_sub(lo)) as f64;
     if span <= 0.0 {
-        return vec![0.0_f64; w as usize];
+        return vec![0.0_f64; outer as usize];
     }
-    let mut means = vec![0.0_f64; w as usize];
-    for x in 0..w {
-        let mut sum = 0.0_f64;
-        for y in y_lo..y_hi {
-            let p = rgb.get_pixel(x, y);
-            sum += 0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64;
-        }
-        means[x as usize] = sum / span;
-    }
-    means
+    let luminance = |x: u32, y: u32| -> f64 {
+        let p = rgb.get_pixel(x, y);
+        0.299 * p[0] as f64 + 0.587 * p[1] as f64 + 0.114 * p[2] as f64
+    };
+    (0..outer)
+        .map(|o| {
+            let sum: f64 = (lo..hi)
+                .map(|i| match axis {
+                    Axis::Row => luminance(i, o),
+                    Axis::Col => luminance(o, i),
+                })
+                .sum();
+            sum / span
+        })
+        .collect()
 }
 
 /// 先頭（インデックス 0..）から連続する黒要素の個数を返す。

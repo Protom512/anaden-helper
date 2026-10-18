@@ -230,6 +230,60 @@ impl CcoeffVisionEngine {
     }
 }
 
+/// score_map / match_all 共通のスキャン準備結果 (ダウンスケール → luma8 →
+/// テンプレート前処理 → 積分画像)。
+///
+/// ピクセル走査本体は両メソッドで別々に維持する (heatmap 全点出力と
+/// しきい値超過列挙は出力契約が異なるため — ピクセルループの統合禁止、
+/// 承認プラン §B の ccoeff 項参照)。
+struct CcoeffScan {
+    /// ダウンスケール後の探索対象 luma 画像。
+    hg: GrayImage,
+    /// 前処理済みテンプレート (平均除去済み `T'`)。
+    t_prime: Vec<f32>,
+    sum_t_prime: f64,
+    denom_t: f64,
+    /// 積分画像 (輝度和)。
+    ii: image::ImageBuffer<Luma<u64>, Vec<u64>>,
+    /// 積分画像 (輝度二乗和)。
+    ii2: image::ImageBuffer<Luma<u64>, Vec<u64>>,
+    /// テンプレート寸法 (ダウンスケール空間)。
+    nw: u32,
+    nh: u32,
+    /// スキャン結果マップ寸法。
+    rw: u32,
+    rh: u32,
+}
+
+impl CcoeffVisionEngine {
+    /// score_map / match_all 共通の準備。ダウンスケール不能 (探索対象より
+    /// テンプレートが大きい等) は [`None`]。
+    fn prepare_scan(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<CcoeffScan> {
+        let (h, n) = self.downscale_images(haystack, needle)?;
+        let hg = h.to_luma8();
+        let ng = n.to_luma8();
+        let nw = ng.width();
+        let nh = ng.height();
+        let rw = hg.width().saturating_sub(nw) + 1;
+        let rh = hg.height().saturating_sub(nh) + 1;
+        let (t_prime, sum_t_prime, denom_t) = preprocess_template(&ng);
+        let ii = integral_image::<_, u64>(&hg);
+        let ii2 = integral_squared_image::<_, u64>(&hg);
+        Some(CcoeffScan {
+            hg,
+            t_prime,
+            sum_t_prime,
+            denom_t,
+            ii,
+            ii2,
+            nw,
+            nh,
+            rw,
+            rh,
+        })
+    }
+}
+
 impl VisionEngine for CcoeffVisionEngine {
     fn match_template(
         &self,
@@ -252,23 +306,22 @@ impl VisionEngine for CcoeffVisionEngine {
     }
 
     fn score_map(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<GrayImage> {
-        let (h, n) = self.downscale_images(haystack, needle)?;
-        let hg = h.to_luma8();
-        let ng = n.to_luma8();
-
-        let nw = ng.width();
-        let nh = ng.height();
-        let rw = hg.width().saturating_sub(nw) + 1;
-        let rh = hg.height().saturating_sub(nh) + 1;
-
-        let (t_prime, sum_t_prime, denom_t) = preprocess_template(&ng);
-        let ii = integral_image::<_, u64>(&hg);
-        let ii2 = integral_squared_image::<_, u64>(&hg);
-
-        let mut out = GrayImage::new(rw, rh);
-        for y in 0..rh {
-            for x in 0..rw {
-                let r = ccoeff_at(&hg, &t_prime, sum_t_prime, denom_t, &ii, &ii2, x, y, nw, nh);
+        let s = self.prepare_scan(haystack, needle)?;
+        let mut out = GrayImage::new(s.rw, s.rh);
+        for y in 0..s.rh {
+            for x in 0..s.rw {
+                let r = ccoeff_at(
+                    &s.hg,
+                    &s.t_prime,
+                    s.sum_t_prime,
+                    s.denom_t,
+                    &s.ii,
+                    &s.ii2,
+                    x,
+                    y,
+                    s.nw,
+                    s.nh,
+                );
                 let v = (r.clamp(0.0, 1.0) * 255.0) as u8;
                 out.put_pixel(x, y, Luma([v]));
             }
@@ -277,26 +330,24 @@ impl VisionEngine for CcoeffVisionEngine {
     }
 
     fn match_all(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Vec<MatchResult> {
-        let (h, n) = match self.downscale_images(haystack, needle) {
-            Some(imgs) => imgs,
-            None => return vec![],
+        let Some(s) = self.prepare_scan(haystack, needle) else {
+            return vec![];
         };
-        let hg = h.to_luma8();
-        let ng = n.to_luma8();
-
-        let nw = ng.width();
-        let nh = ng.height();
-        let rw = hg.width().saturating_sub(nw) + 1;
-        let rh = hg.height().saturating_sub(nh) + 1;
-
-        let (t_prime, sum_t_prime, denom_t) = preprocess_template(&ng);
-        let ii = integral_image::<_, u64>(&hg);
-        let ii2 = integral_squared_image::<_, u64>(&hg);
-
         let mut matches: Vec<MatchResult> = Vec::new();
-        for y in 0..rh {
-            for x in 0..rw {
-                let r = ccoeff_at(&hg, &t_prime, sum_t_prime, denom_t, &ii, &ii2, x, y, nw, nh);
+        for y in 0..s.rh {
+            for x in 0..s.rw {
+                let r = ccoeff_at(
+                    &s.hg,
+                    &s.t_prime,
+                    s.sum_t_prime,
+                    s.denom_t,
+                    &s.ii,
+                    &s.ii2,
+                    x,
+                    y,
+                    s.nw,
+                    s.nh,
+                );
                 let confidence = MatchConfidence::new(r.max(0.0));
                 if confidence.exceeds_threshold(&self.threshold) {
                     let orig_x = x * self.downscale_factor;
