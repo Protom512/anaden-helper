@@ -74,17 +74,8 @@ impl ConfusionMatrix {
     }
 }
 
-/// テンプレート群をテスト画像群に対して一括評価し混同行列を構築する。
-///
-/// `engine` は閾値0（常に最良スコアを返す）を想定。`threshold` は
-/// 「マッチとみなす」決定閾値。
-pub fn evaluate(
-    engine: &dyn VisionEngine,
-    templates: &[LoadedTemplate],
-    tests: &[TestImage],
-    threshold: f32,
-) -> ConfusionMatrix {
-    // ラベル集合: テンプレート状態 ∪ テスト真ラベル ∪ {unknown}
+/// ラベル集合 (テンプレート状態 ∪ テスト真ラベル ∪ {unknown}) を昇順で返す。
+fn collect_labels(templates: &[LoadedTemplate], tests: &[TestImage]) -> Vec<String> {
     let mut label_set: BTreeSet<String> = BTreeSet::new();
     for t in templates {
         label_set.insert(t.spec.state.clone());
@@ -93,47 +84,50 @@ pub fn evaluate(
         label_set.insert(t.true_label.clone());
     }
     label_set.insert("unknown".to_string());
-    let labels: Vec<String> = label_set.into_iter().collect();
-    let n = labels.len();
-    let mut matrix = vec![vec![0usize; n]; n];
+    label_set.into_iter().collect()
+}
 
-    // 各テスト画像の予測状態を決定
-    let mut per_image_scores: Vec<Vec<f32>> = Vec::with_capacity(tests.len()); // [test][template]
-    for test in tests {
-        let scores: Vec<f32> = templates
-            .iter()
-            .map(|t| {
-                engine
-                    .match_template(&test.image, &t.image)
-                    .map(|m| m.confidence.0)
-                    .unwrap_or(0.0)
-            })
-            .collect();
+/// 各テスト画像 × 各テンプレートのスコア列 (`[test][template]`) を計算する。
+/// マッチ失敗 (IO 等) は 0.0 扱い。
+fn score_matrix(
+    engine: &dyn VisionEngine,
+    templates: &[LoadedTemplate],
+    tests: &[TestImage],
+) -> Vec<Vec<f32>> {
+    tests
+        .iter()
+        .map(|test| {
+            templates
+                .iter()
+                .map(|t| {
+                    engine
+                        .match_template(&test.image, &t.image)
+                        .map(|m| m.confidence.0)
+                        .unwrap_or(0.0)
+                })
+                .collect()
+        })
+        .collect()
+}
 
-        // 最高スコアのテンプレートを予測とする
-        let predicted = scores
-            .iter()
-            .enumerate()
-            .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
-            .and_then(|(idx, &best_score)| {
-                if best_score >= threshold {
-                    Some(templates[idx].spec.state.clone())
-                } else {
-                    None
-                }
-            })
-            .unwrap_or_else(|| "unknown".to_string());
-        per_image_scores.push(scores);
+/// 最高スコアのテンプレート状態を予測ラベルとする。閾値未満は `unknown`。
+fn predict_label(scores: &[f32], templates: &[LoadedTemplate], threshold: f32) -> String {
+    scores
+        .iter()
+        .enumerate()
+        .max_by(|a, b| a.1.partial_cmp(b.1).unwrap_or(std::cmp::Ordering::Equal))
+        .and_then(|(idx, &best)| (best >= threshold).then(|| templates[idx].spec.state.clone()))
+        .unwrap_or_else(|| "unknown".to_string())
+}
 
-        let ti = labels
-            .iter()
-            .position(|l| *l == test.true_label)
-            .unwrap_or(n - 1);
-        let pi = labels.iter().position(|l| *l == predicted).unwrap_or(n - 1);
-        matrix[ti][pi] += 1;
-    }
-
-    // テンプレート別の感度/特異性
+/// テンプレート別の感度/特異性レポート。各テンプレートを閾値判定にかけ、
+/// 正例 (同状態) は tp/pos、負例 (別状態) は fp/neg に集計する。
+fn per_template_reports(
+    templates: &[LoadedTemplate],
+    tests: &[TestImage],
+    per_image_scores: &[Vec<f32>],
+    threshold: f32,
+) -> Vec<TemplateReport> {
     let mut per_template = Vec::with_capacity(templates.len());
     for (tidx, t) in templates.iter().enumerate() {
         let mut tp = 0usize; // 正例(同状態)でマッチ
@@ -168,11 +162,38 @@ pub fn evaluate(
             specificity,
         });
     }
+    per_template
+}
+
+/// テンプレート群をテスト画像群に対して一括評価し混同行列を構築する。
+///
+/// `engine` は閾値0（常に最良スコアを返す）を想定。`threshold` は
+/// 「マッチとみなす」決定閾値。
+pub fn evaluate(
+    engine: &dyn VisionEngine,
+    templates: &[LoadedTemplate],
+    tests: &[TestImage],
+    threshold: f32,
+) -> ConfusionMatrix {
+    let labels = collect_labels(templates, tests);
+    let n = labels.len();
+    let mut matrix = vec![vec![0usize; n]; n];
+
+    let per_image_scores = score_matrix(engine, templates, tests);
+    for (test_idx, test) in tests.iter().enumerate() {
+        let predicted = predict_label(&per_image_scores[test_idx], templates, threshold);
+        let ti = labels
+            .iter()
+            .position(|l| *l == test.true_label)
+            .unwrap_or(n - 1);
+        let pi = labels.iter().position(|l| *l == predicted).unwrap_or(n - 1);
+        matrix[ti][pi] += 1;
+    }
 
     ConfusionMatrix {
         labels,
         matrix,
-        per_template,
+        per_template: per_template_reports(templates, tests, &per_image_scores, threshold),
         total: tests.len(),
     }
 }

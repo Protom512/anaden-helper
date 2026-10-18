@@ -141,6 +141,34 @@ fn workspace_root() -> PathBuf {
 ///
 /// `run` サブコマンド・`--algorithm`/`--target` とその値は位置引数ではない
 /// ためスキップする。
+/// `tok` が pipeline 位置引数候補か (run トークン自身、または run を含む
+/// 引数列の非フラグ トークン)。
+fn is_pipeline_positional(tok: &str, args: &[String]) -> bool {
+    tok == "run" || !tok.starts_with('-') && args.iter().any(|a| a == "run")
+}
+
+/// `tok` が bare name 形式か (パス区切りなし・フラグでない・run ではない)。
+fn is_bare_pipeline_name(tok: &str) -> bool {
+    !tok.starts_with('-') && !tok.contains('/') && !tok.contains('\\') && tok != "run"
+}
+
+/// 位置引数候補トークンを解決済み絶対パスへ置き換える。
+/// テンプレ相対形式 (`templates/pipelines/..`) と bare name のみ対象で、
+/// 解決先がディレクトリ実在のときのみ置換する。
+fn resolve_positional_token(tok: &mut String, root: &Path) {
+    let joined =
+        if tok.starts_with("templates/pipelines/") || tok.starts_with("templates\\pipelines\\") {
+            root.join(tok.as_str())
+        } else if is_bare_pipeline_name(tok) {
+            root.join("templates").join("pipelines").join(tok.as_str())
+        } else {
+            return;
+        };
+    if joined.is_dir() {
+        *tok = joined.to_string_lossy().into_owned();
+    }
+}
+
 #[must_use]
 pub fn resolve_pipeline_arg(args: &[String], root: &Path) -> Vec<String> {
     let mut out = args.to_vec();
@@ -150,24 +178,8 @@ pub fn resolve_pipeline_arg(args: &[String], root: &Path) -> Vec<String> {
             skip_value = false;
             continue;
         }
-        if tok == "run" || !tok.starts_with('-') && args.iter().any(|a| a == "run") {
-            // 位置引数候補。テンプレ相対形式か bare name のみ解決する。
-            if tok.starts_with("templates/pipelines/") || tok.starts_with("templates\\pipelines\\")
-            {
-                let joined = root.join(tok.as_str());
-                if joined.is_dir() {
-                    *tok = joined.to_string_lossy().into_owned();
-                }
-            } else if !tok.starts_with('-')
-                && !tok.contains('/')
-                && !tok.contains('\\')
-                && tok != "run"
-            {
-                let joined = root.join("templates").join("pipelines").join(tok.as_str());
-                if joined.is_dir() {
-                    *tok = joined.to_string_lossy().into_owned();
-                }
-            }
+        if is_pipeline_positional(tok, args) {
+            resolve_positional_token(tok, root);
         } else if tok.starts_with("--") {
             skip_value = true;
         }

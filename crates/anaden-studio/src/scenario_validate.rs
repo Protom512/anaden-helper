@@ -115,7 +115,15 @@ impl ScenarioEditorState {
     #[must_use]
     pub fn validation_issues(&self) -> Vec<ScenarioValidationError> {
         let mut issues = Vec::new();
+        self.check_scenario_name(&mut issues);
+        self.check_task_namespace(&mut issues);
+        self.check_task_references(&mut issues);
+        self.check_goals(&mut issues);
+        issues
+    }
 
+    /// scenario 名の検査: 空 / 保存先ディレクトリ名として不安全。
+    fn check_scenario_name(&self, issues: &mut Vec<ScenarioValidationError>) {
         if self.name.trim().is_empty() {
             issues.push(ScenarioValidationError::EmptyName);
         }
@@ -127,6 +135,10 @@ impl ScenarioEditorState {
                 name: self.name.clone(),
             });
         }
+    }
+
+    /// タスク名前空間の検査: 空でない / 名前一意 / start_task が解決可能。
+    fn check_task_namespace(&self, issues: &mut Vec<ScenarioValidationError>) {
         if self.tasks.is_empty() {
             issues.push(ScenarioValidationError::NoTasks);
         }
@@ -147,7 +159,11 @@ impl ScenarioEditorState {
                 task: self.start_task.clone(),
             });
         }
+    }
 
+    /// タスク毎の検査: 命名規約 (新規/リネーム分のみ) / next 参照解決 /
+    /// ROI 画面内 (新規/リネーム分のみ — UC-4 baseline ゲーティング)。
+    fn check_task_references(&self, issues: &mut Vec<ScenarioValidationError>) {
         for task in &self.tasks {
             let is_loaded = self.loaded_task_names.iter().any(|n| n == &task.name);
             if !is_loaded && let Some(reason) = crate::scenario_load::task_name_issue(&task.name) {
@@ -176,7 +192,10 @@ impl ScenarioEditorState {
                 });
             }
         }
+    }
 
+    /// ゴール毎の検査 ([`anaden_core::Goal::validate`] 委譲)。
+    fn check_goals(&self, issues: &mut Vec<ScenarioValidationError>) {
         for (index, goal) in self.goals.iter().enumerate() {
             if let Err(source) = goal.validate() {
                 issues.push(ScenarioValidationError::GoalInvalid {
@@ -186,8 +205,6 @@ impl ScenarioEditorState {
                 });
             }
         }
-
-        issues
     }
 
     /// 最初のバリデーション問題を返す ([`anaden_core::Goal::validate`] と同じ契約)。
