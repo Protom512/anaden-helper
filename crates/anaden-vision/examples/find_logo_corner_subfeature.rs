@@ -3,7 +3,29 @@
 //! the highest-variance small window (<=120px each side). The winning window
 //! becomes the new title_logo_corner sub-template (stable small feature that
 //! clears the <=130px small-template ceiling).
+use image::GrayImage;
 use image::imageops::FilterType;
+
+/// ウィンドウ内の隣接ピクセル絶対差の総和 (テクスチャエネルギー)。
+/// 水平隣接 (xx, xx+1) と垂直隣接 (yy, yy+1) の両方を足す。
+fn window_energy(p: &GrayImage, x: u32, y: u32, win: u32) -> u64 {
+    let mut energy: u64 = 0;
+    for yy in y..y + win {
+        for xx in x..x + win - 1 {
+            let a = p.get_pixel(xx, yy).0[0] as i32;
+            let b = p.get_pixel(xx + 1, yy).0[0] as i32;
+            energy += (a - b).unsigned_abs() as u64;
+        }
+    }
+    for yy in y..y + win - 1 {
+        for xx in x..x + win {
+            let a = p.get_pixel(xx, yy).0[0] as i32;
+            let b = p.get_pixel(xx, yy + 1).0[0] as i32;
+            energy += (a - b).unsigned_abs() as u64;
+        }
+    }
+    energy
+}
 
 fn main() {
     let probe =
@@ -20,22 +42,7 @@ fn main() {
     let mut confs = Vec::new();
     for y in (by0..by1.saturating_sub(win)).step_by(20) {
         for x in (bx0..bx1.saturating_sub(win)).step_by(20) {
-            // Sum of absolute differences between adjacent pixels = texture energy.
-            let mut energy: u64 = 0;
-            for yy in y..y + win {
-                for xx in x..x + win - 1 {
-                    let a = p.get_pixel(xx, yy).0[0] as i32;
-                    let b = p.get_pixel(xx + 1, yy).0[0] as i32;
-                    energy += (a - b).unsigned_abs() as u64;
-                }
-            }
-            for yy in y..y + win - 1 {
-                for xx in x..x + win {
-                    let a = p.get_pixel(xx, yy).0[0] as i32;
-                    let b = p.get_pixel(xx, yy + 1).0[0] as i32;
-                    energy += (a - b).unsigned_abs() as u64;
-                }
-            }
+            let energy = window_energy(&p, x, y, win);
             confs.push((energy, x, y));
             if energy > best.0 {
                 best = (energy, x, y);

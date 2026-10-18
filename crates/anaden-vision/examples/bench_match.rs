@@ -36,17 +36,9 @@ const TPL_H_SMALL: u32 = 80;
 const ROI_W: u32 = 300;
 const ROI_H: u32 = 150;
 
-fn main() {
-    let args: Vec<String> = std::env::args().collect();
-
-    // 合成 fixture モード (05-template-cache evidence 採取)。実キャプチャ不要で
-    // TaskDef::detect のサイクル時間を計測する。詳細は run_synthetic_bench の doc。
-    if args.get(1).map(String::as_str) == Some("synthetic") {
-        run_synthetic_bench();
-        return;
-    }
-
-    // キャプチャパス解決。コマンドライン引数がなければ既定の 3 枚を探す。
+/// キャプチャパス解決。コマンドライン引数がなければ既定の 3 枚を探す。
+/// 1 枚も無ければ exit 1。
+fn resolve_capture_paths(args: &[String]) -> Vec<PathBuf> {
     let default_paths = [
         "/tmp/real_shot1.png",
         "/tmp/real_shot2.png",
@@ -61,12 +53,56 @@ fn main() {
             .filter(|p| p.exists())
             .collect()
     };
-
     if paths.is_empty() {
         eprintln!("No capture PNG found. Pass paths as args.");
         std::process::exit(1);
     }
+    paths
+}
 
+/// scope 名 → haystack (full 全面 / roi 中央 crop) とその寸法。
+fn scope_haystack(
+    scope: &str,
+    full_dyn: &DynamicImage,
+    roi_dyn: &DynamicImage,
+    bw: u32,
+    bh: u32,
+) -> (DynamicImage, u32, u32) {
+    match scope {
+        "full" => (full_dyn.clone(), bw, bh),
+        "roi" => (roi_dyn.clone(), ROI_W, ROI_H),
+        _ => unreachable!(),
+    }
+}
+
+/// エンジン名 → 計測 (median_ms, confidence)。閾値は 0.0 固定 (最良マッチを
+/// 常に返させる = 計測の安定化)。
+fn measure_engine(engine: &str, hay: &DynamicImage, needle: &DynamicImage, ds: u32) -> (f64, f32) {
+    let thr = MatchConfidence::new(0.0);
+    match engine {
+        "sse" => {
+            let eng = SseVisionEngine::new(anaden_vision::TemplateMatcher::new(thr, ds));
+            measure(&eng, hay, needle, ITERS)
+        }
+        "ccoeff" => {
+            let eng = CcoeffVisionEngine::new(thr, ds);
+            measure(&eng, hay, needle, ITERS)
+        }
+        _ => unreachable!(),
+    }
+}
+
+fn main() {
+    let args: Vec<String> = std::env::args().collect();
+
+    // 合成 fixture モード (05-template-cache evidence 採取)。実キャプチャ不要で
+    // TaskDef::detect のサイクル時間を計測する。詳細は run_synthetic_bench の doc。
+    if args.get(1).map(String::as_str) == Some("synthetic") {
+        run_synthetic_bench();
+        return;
+    }
+
+    let paths = resolve_capture_paths(&args);
     let path0 = paths[0].to_string_lossy().to_string();
     println!("# anaden-vision bench_match");
     println!("# capture[0]: {}", path0);
@@ -133,17 +169,10 @@ fn main() {
     );
     println!("{}", "-".repeat(56));
 
-    // 閾値は低く（0.0）して必ず最良マッチを返させる＝計測の安定化。
-    let thr = MatchConfidence::new(0.0);
-
     for &engine in &engines {
         for &scope in &scopes {
             // scope ごとの haystack を決定。
-            let (hay, hay_w, hay_h): (DynamicImage, u32, u32) = match scope {
-                "full" => (full_dyn.clone(), bw, bh),
-                "roi" => (roi_dyn.clone(), ROI_W, ROI_H),
-                _ => unreachable!(),
-            };
+            let (hay, hay_w, hay_h) = scope_haystack(scope, &full_dyn, &roi_dyn, bw, bh);
             for &ds in &downscales {
                 // テンプレートサイズが downscale 後に haystack を超える場合は N/A。
                 // big テンプレで判定（small は通る場合も big で代表）。
@@ -151,39 +180,25 @@ fn main() {
                 let eff_hh = hay_h / ds;
                 let eff_tw = TPL_W / ds;
                 let eff_th = TPL_H / ds;
-                if eff_tw >= eff_hw || eff_th >= eff_hh || eff_hw == 0 || eff_hh == 0 {
-                    let row = Row {
+                let row = if eff_tw >= eff_hw || eff_th >= eff_hh || eff_hw == 0 || eff_hh == 0 {
+                    Row {
                         engine: engine.to_string(),
                         scope: scope.to_string(),
                         downscale: ds,
                         template_size: format!("{}x{}", TPL_W, TPL_H),
                         median_ms: f64::NAN,
                         confidence: "N/A (tpl>hay)".to_string(),
-                    };
-                    print_row(&row);
-                    results.push(row);
-                    continue;
-                }
-
-                let (median_ms, conf) = match engine {
-                    "sse" => {
-                        let eng =
-                            SseVisionEngine::new(anaden_vision::TemplateMatcher::new(thr, ds));
-                        measure(&eng, &hay, &big_dyn, ITERS)
                     }
-                    "ccoeff" => {
-                        let eng = CcoeffVisionEngine::new(thr, ds);
-                        measure(&eng, &hay, &big_dyn, ITERS)
+                } else {
+                    let (median_ms, conf) = measure_engine(engine, &hay, &big_dyn, ds);
+                    Row {
+                        engine: engine.to_string(),
+                        scope: scope.to_string(),
+                        downscale: ds,
+                        template_size: format!("{}x{}", TPL_W, TPL_H),
+                        median_ms,
+                        confidence: format!("{:.4}", conf),
                     }
-                    _ => unreachable!(),
-                };
-                let row = Row {
-                    engine: engine.to_string(),
-                    scope: scope.to_string(),
-                    downscale: ds,
-                    template_size: format!("{}x{}", TPL_W, TPL_H),
-                    median_ms,
-                    confidence: format!("{:.4}", conf),
                 };
                 print_row(&row);
                 results.push(row);
@@ -204,23 +219,9 @@ fn main() {
     println!("{}", "-".repeat(56));
     for &engine in &engines {
         for &scope in &scopes {
-            let (hay, _hay_w, _hay_h): (DynamicImage, u32, u32) = match scope {
-                "full" => (full_dyn.clone(), bw, bh),
-                "roi" => (roi_dyn.clone(), ROI_W, ROI_H),
-                _ => unreachable!(),
-            };
+            let (hay, _hay_w, _hay_h) = scope_haystack(scope, &full_dyn, &roi_dyn, bw, bh);
             let ds = 2u32;
-            let (median_ms, conf) = match engine {
-                "sse" => {
-                    let eng = SseVisionEngine::new(anaden_vision::TemplateMatcher::new(thr, ds));
-                    measure(&eng, &hay, &small_dyn, ITERS)
-                }
-                "ccoeff" => {
-                    let eng = CcoeffVisionEngine::new(thr, ds);
-                    measure(&eng, &hay, &small_dyn, ITERS)
-                }
-                _ => unreachable!(),
-            };
+            let (median_ms, conf) = measure_engine(engine, &hay, &small_dyn, ds);
             let row = Row {
                 engine: engine.to_string(),
                 scope: scope.to_string(),
