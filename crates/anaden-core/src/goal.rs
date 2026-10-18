@@ -305,8 +305,12 @@ pub fn evaluate(goal: &Goal, ctx: &GoalStatusContext, elapsed_secs: u64) -> Goal
                 GoalStatus::NotYet
             }
         }
-        StopCondition::All { conditions } => evaluate_all(goal, ctx, elapsed_secs, conditions),
-        StopCondition::Any { conditions } => evaluate_any(goal, ctx, elapsed_secs, conditions),
+        StopCondition::All { conditions } => {
+            evaluate_composition(goal, ctx, elapsed_secs, conditions, Composition::All)
+        }
+        StopCondition::Any { conditions } => {
+            evaluate_composition(goal, ctx, elapsed_secs, conditions, Composition::Any)
+        }
     }
 }
 
@@ -321,54 +325,39 @@ fn make_report(goal: &Goal, ctx: &GoalStatusContext, reason: String) -> GoalRepo
     }
 }
 
-/// `StopCondition::All` の評価: 全子が `Reached` のみ `Reached`。
-/// 子が1つでも `NotYet` なら即 `NotYet`、`Failed` ならその時点で `Failed`。
-fn evaluate_all(
-    goal: &Goal,
-    ctx: &GoalStatusContext,
-    elapsed_secs: u64,
-    conditions: &[StopCondition],
-) -> GoalStatus {
-    let mut failed: Option<GoalReport> = None;
-    for c in conditions {
-        let child = evaluate_child(c, goal, ctx, elapsed_secs);
-        match child {
-            GoalStatus::NotYet => return GoalStatus::NotYet,
-            GoalStatus::Failed(report) => {
-                failed = Some(report);
-                break;
-            }
-            GoalStatus::Reached(_) => { /* 続行: 全て Reached が必要 */ }
-        }
-    }
-    match failed {
-        Some(report) => GoalStatus::Failed(make_report(
-            goal,
-            ctx,
-            format!("All: child failed ({})", report.reason),
-        )),
-        None => GoalStatus::Reached(make_report(
-            goal,
-            ctx,
-            "All: all children reached".to_string(),
-        )),
-    }
+/// 合成条件の種別 (All = AND / Any = OR)。決定表の違いのみを保持。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Composition {
+    /// AND: 全子 `Reached` のみ `Reached`。`NotYet` が1つでもあれば `NotYet`。
+    All,
+    /// OR: **Failed 優先（安全弁）** — 子に `Failed` が1つでもあれば `Failed`
+    /// （異常を正常で上書きしない — 評価順序に依存しない。
+    /// `docs/goal-manifest.md` の exit code 分岐 `EXIT_run_TIMEOUT = 2` に直結)。
+    Any,
 }
 
-/// `StopCondition::Any` の評価。
+/// `StopCondition::All` / `StopCondition::Any` の合成評価。
 ///
-/// Failed 優先（安全弁）: 子に `Failed` が1つでもあれば `Failed` を返す。
-/// 順序非依存で全子を評価し、`Failed` を `Reached` より優先する
-/// （異常を正常で上書きしない）。`docs/goal-manifest.md` の exit code 分岐
-/// （`EXIT_run_TIMEOUT = 2`）に直結する意味論。
-fn evaluate_any(
+/// 子を全て評価して (first_failure, any_reached, any_not_yet) に集計し、
+/// [`Composition`] の決定表で確定する:
+///
+/// | mode | 判定順 |
+/// |------|--------|
+/// | All | any_not_yet → NotYet → first_failure → Failed → Reached |
+/// | Any | first_failure → Failed → any_reached → Reached → NotYet |
+///
+/// [`evaluate`] は純粋関数のため、旧 All 実装の短絡 (NotYet/Failed での
+/// 早期脱出) を解除して全子を評価しても観測可能な差は無い (評価回数のみ)。
+fn evaluate_composition(
     goal: &Goal,
     ctx: &GoalStatusContext,
     elapsed_secs: u64,
     conditions: &[StopCondition],
+    mode: Composition,
 ) -> GoalStatus {
-    let mut has_reached = false;
     let mut first_failure: Option<GoalReport> = None;
+    let mut any_reached = false;
+    let mut any_not_yet = false;
     for c in conditions {
         match evaluate_child(c, goal, ctx, elapsed_secs) {
             GoalStatus::Failed(report) => {
@@ -376,22 +365,34 @@ fn evaluate_any(
                     first_failure = Some(report);
                 }
             }
-            GoalStatus::Reached(_) => {
-                has_reached = true;
-            }
-            GoalStatus::NotYet => {}
+            GoalStatus::Reached(_) => any_reached = true,
+            GoalStatus::NotYet => any_not_yet = true,
         }
     }
-    match first_failure {
-        Some(report) => GoalStatus::Failed(make_report(
+    let label = match mode {
+        Composition::All => "All",
+        Composition::Any => "Any",
+    };
+    if matches!(mode, Composition::All) && any_not_yet {
+        return GoalStatus::NotYet;
+    }
+    if let Some(report) = first_failure {
+        return GoalStatus::Failed(make_report(
             goal,
             ctx,
-            format!("Any: child failed ({})", report.reason),
+            format!("{label}: child failed ({})", report.reason),
+        ));
+    }
+    match mode {
+        Composition::All => GoalStatus::Reached(make_report(
+            goal,
+            ctx,
+            "All: all children reached".to_string(),
         )),
-        None if has_reached => {
+        Composition::Any if any_reached => {
             GoalStatus::Reached(make_report(goal, ctx, "Any: a child reached".to_string()))
         }
-        None => GoalStatus::NotYet,
+        Composition::Any => GoalStatus::NotYet,
     }
 }
 
