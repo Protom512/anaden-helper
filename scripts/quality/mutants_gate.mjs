@@ -38,7 +38,10 @@ const readJson = (root, relative) => {
 // Outcome parsing and comparison
 // ---------------------------------------------------------------------------
 
-const SURVIVING_SUMMARIES = new Set(['MissedMutant', 'TimeoutMutant']);
+// 実測 (cargo-mutants 27, 2026-10-18 baseline run): timeout の summary は
+// "Timeout" ("TimeoutMutant" ではない)。Timeout = テストが mutant でハング =
+// 殺せていないため survivor 扱い (新規 Timeout は回帰)。
+const SURVIVING_SUMMARIES = new Set(['MissedMutant', 'Timeout']);
 
 /**
  * Extracts survivors (Missed/Timeout mutants) and totals from a parsed

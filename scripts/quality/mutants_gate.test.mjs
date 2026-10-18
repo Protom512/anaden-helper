@@ -34,7 +34,7 @@ const SAMPLE = {
     { scenario: 'Baseline', summary: 'Success', phase_results: [] },
     outcome('a:1:1: replace x with 1', 'CaughtMutant'),
     outcome('b:2:1: replace x with 2', 'MissedMutant'),
-    outcome('c:3:1: replace x with 3', 'TimeoutMutant'),
+    outcome('c:3:1: replace x with 3', 'Timeout'),
     outcome('d:4:1: replace x with 4', 'Unviable'),
     outcome('e:5:1: replace x with 5', 'MissedMutant'),
   ],
