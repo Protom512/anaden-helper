@@ -284,6 +284,22 @@ enum RecoveryStep {
     HookFailed(DeviceError),
 }
 
+/// [`PipelineDriver::run_recovery_or_stop`] へ渡す停止 outcome 素材の借用束
+/// (clippy `too_many_arguments` 回避 — [`GoalEvalInputs`] / [`OutcomeCtx`] と
+/// 同じ bundling 方針)。停止時に [`Self::build_outcome`] が消費する。
+/// ループの累積状態 (iterations / fired / per_task_matches / started) を
+/// まとめる LoopState (§A C3) 導入後にそれへ吸収される予定。
+struct RecoveryOutcomeSrc<'a> {
+    /// 累積発火コマンド (停止時のみ消費)。
+    fired: &'a mut Vec<InputCommand>,
+    /// タスク毎のマッチ回数 (停止時のみ消費)。
+    per_task_matches: &'a mut Vec<TaskMatchCount>,
+    /// ループ開始時刻。
+    started: Instant,
+    /// 停止 outcome に記録する tick 数 (呼出側で `iterations - 1` 済み)。
+    iterations_on_stop: u64,
+}
+
 /// ゴール評価用の経過時間計測の抽象(Issue #37 T4)。
 ///
 /// [`anaden_core::goal::evaluate`] は `elapsed_secs` を純粋パラメータとして受け取るため、
@@ -1278,6 +1294,52 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
+    /// [`Self::run_recovery_step`] を呼び、停止すべき結果なら完成 [`LoopOutcome`] を
+    /// 組み立てる (継続なら [`None`])。NoMatch / FiredUnverified / capture-error の
+    /// 3 arm × 両ループで重複していた RecoveryStep match を 1 箇所に集約する。
+    ///
+    /// 停止 outcome は「この tick は失敗扱い」の慣例どおり `iterations - 1` 相当の
+    /// 値を呼出側から受け取る (`run_recovery_step` 失敗 tick は進行と数えない)。
+    /// `fired` / `per_task_matches` は停止時のみ `std::mem::take` で消費する
+    /// (継続時は呼出側の蓄積をそのまま使うため borrow のまま)。
+    ///
+    /// warn! の位置 (HookFailed arm の 1 回のみ・Exhausted は run_recovery_step
+    /// 内部の warn で済ませる) は集約前の各 arm と同一順序を維持する。
+    async fn run_recovery_or_stop(
+        &mut self,
+        cause: &str,
+        guard: &mut RecoveryGuard,
+        recover: &mut Option<RecoveryHook>,
+        src: RecoveryOutcomeSrc<'_>,
+    ) -> Option<LoopOutcome> {
+        let RecoveryOutcomeSrc {
+            fired,
+            per_task_matches,
+            started,
+            iterations_on_stop,
+        } = src;
+        match self.run_recovery_step(cause, guard, recover).await {
+            RecoveryStep::Recovered => None,
+            RecoveryStep::Exhausted => Some(self.build_outcome(
+                iterations_on_stop,
+                std::mem::take(fired),
+                LoopStopReason::RecoveryExhausted,
+                "recovery_exhausted",
+                OutcomeCtx::new(std::mem::take(per_task_matches), started, guard),
+            )),
+            RecoveryStep::HookFailed(e) => {
+                warn!("recovery hook failed: {e}");
+                Some(self.build_outcome(
+                    iterations_on_stop,
+                    std::mem::take(fired),
+                    LoopStopReason::ExecuteError,
+                    "recovery_failed",
+                    OutcomeCtx::new(std::mem::take(per_task_matches), started, guard),
+                ))
+            }
+        }
+    }
+
     /// `run_loop` + NoMatch 連続時リカバリフック付き。
     ///
     /// `recover_nomatch_threshold > 0` かつ `recover` が [`Some`] のとき、
@@ -1390,36 +1452,23 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 }
                 StepOutcome::NoMatch => {
                     let now = self.recovery_clock.elapsed();
-                    if recovery_enabled && guard.record_miss(now) {
-                        match self
-                            .run_recovery_step(
+                    if recovery_enabled
+                        && guard.record_miss(now)
+                        && let Some(stop) = self
+                            .run_recovery_or_stop(
                                 "NoMatch streak >= threshold",
                                 &mut guard,
                                 &mut recover,
+                                RecoveryOutcomeSrc {
+                                    fired: &mut fired,
+                                    per_task_matches: &mut per_task_matches,
+                                    started,
+                                    iterations_on_stop: iterations - 1,
+                                },
                             )
                             .await
-                        {
-                            RecoveryStep::Recovered => {}
-                            RecoveryStep::Exhausted => {
-                                return self.build_outcome(
-                                    iterations - 1,
-                                    fired,
-                                    LoopStopReason::RecoveryExhausted,
-                                    "recovery_exhausted",
-                                    OutcomeCtx::new(per_task_matches, started, &guard),
-                                );
-                            }
-                            RecoveryStep::HookFailed(e) => {
-                                warn!("recovery hook failed: {e}");
-                                return self.build_outcome(
-                                    iterations - 1,
-                                    fired,
-                                    LoopStopReason::ExecuteError,
-                                    "recovery_failed",
-                                    OutcomeCtx::new(per_task_matches, started, &guard),
-                                );
-                            }
-                        }
+                    {
+                        return stop;
                     }
                 }
                 StepOutcome::FiredUnverified {
@@ -1431,36 +1480,23 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                         fired.push(c);
                     }
                     let now = self.recovery_clock.elapsed();
-                    if recovery_enabled && guard.record_miss(now) {
-                        match self
-                            .run_recovery_step(
+                    if recovery_enabled
+                        && guard.record_miss(now)
+                        && let Some(stop) = self
+                            .run_recovery_or_stop(
                                 "FiredUnverified streak >= threshold",
                                 &mut guard,
                                 &mut recover,
+                                RecoveryOutcomeSrc {
+                                    fired: &mut fired,
+                                    per_task_matches: &mut per_task_matches,
+                                    started,
+                                    iterations_on_stop: iterations - 1,
+                                },
                             )
                             .await
-                        {
-                            RecoveryStep::Recovered => {}
-                            RecoveryStep::Exhausted => {
-                                return self.build_outcome(
-                                    iterations - 1,
-                                    fired,
-                                    LoopStopReason::RecoveryExhausted,
-                                    "recovery_exhausted",
-                                    OutcomeCtx::new(per_task_matches, started, &guard),
-                                );
-                            }
-                            RecoveryStep::HookFailed(e) => {
-                                warn!("recovery hook failed: {e}");
-                                return self.build_outcome(
-                                    iterations - 1,
-                                    fired,
-                                    LoopStopReason::ExecuteError,
-                                    "recovery_failed",
-                                    OutcomeCtx::new(per_task_matches, started, &guard),
-                                );
-                            }
-                        }
+                    {
+                        return stop;
                     }
                 }
                 StepOutcome::Error { kind, message: msg } => {
@@ -1483,34 +1519,21 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                             );
                         } else if recovery_enabled {
                             info!("capture error outside grace (game presumed dead): {msg}");
-                            match self
-                                .run_recovery_step(
+                            if let Some(stop) = self
+                                .run_recovery_or_stop(
                                     "capture error outside grace",
                                     &mut guard,
                                     &mut recover,
+                                    RecoveryOutcomeSrc {
+                                        fired: &mut fired,
+                                        per_task_matches: &mut per_task_matches,
+                                        started,
+                                        iterations_on_stop: iterations - 1,
+                                    },
                                 )
                                 .await
                             {
-                                RecoveryStep::Recovered => {}
-                                RecoveryStep::Exhausted => {
-                                    return self.build_outcome(
-                                        iterations - 1,
-                                        fired,
-                                        LoopStopReason::RecoveryExhausted,
-                                        "recovery_exhausted",
-                                        OutcomeCtx::new(per_task_matches, started, &guard),
-                                    );
-                                }
-                                RecoveryStep::HookFailed(e) => {
-                                    warn!("recovery hook failed: {e}");
-                                    return self.build_outcome(
-                                        iterations - 1,
-                                        fired,
-                                        LoopStopReason::ExecuteError,
-                                        "recovery_failed",
-                                        OutcomeCtx::new(per_task_matches, started, &guard),
-                                    );
-                                }
+                                return stop;
                             }
                         } else {
                             return self.build_outcome(
@@ -1721,36 +1744,22 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     ) {
                         return stop;
                     }
-                    if due {
-                        match self
-                            .run_recovery_step(
+                    if due
+                        && let Some(stop) = self
+                            .run_recovery_or_stop(
                                 "NoMatch streak >= threshold",
                                 &mut guard,
                                 &mut recover,
+                                RecoveryOutcomeSrc {
+                                    fired: &mut fired,
+                                    per_task_matches: &mut per_task_matches,
+                                    started,
+                                    iterations_on_stop: iterations - 1,
+                                },
                             )
                             .await
-                        {
-                            RecoveryStep::Recovered => {}
-                            RecoveryStep::Exhausted => {
-                                return self.build_outcome(
-                                    iterations - 1,
-                                    fired,
-                                    LoopStopReason::RecoveryExhausted,
-                                    "recovery_exhausted",
-                                    OutcomeCtx::new(per_task_matches, started, &guard),
-                                );
-                            }
-                            RecoveryStep::HookFailed(e) => {
-                                warn!("recovery hook failed: {e}");
-                                return self.build_outcome(
-                                    iterations - 1,
-                                    fired,
-                                    LoopStopReason::ExecuteError,
-                                    "recovery_failed",
-                                    OutcomeCtx::new(per_task_matches, started, &guard),
-                                );
-                            }
-                        }
+                    {
+                        return stop;
                     }
                 }
                 StepOutcome::FiredUnverified {
@@ -1779,36 +1788,22 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     ) {
                         return stop;
                     }
-                    if due {
-                        match self
-                            .run_recovery_step(
+                    if due
+                        && let Some(stop) = self
+                            .run_recovery_or_stop(
                                 "FiredUnverified streak >= threshold",
                                 &mut guard,
                                 &mut recover,
+                                RecoveryOutcomeSrc {
+                                    fired: &mut fired,
+                                    per_task_matches: &mut per_task_matches,
+                                    started,
+                                    iterations_on_stop: iterations - 1,
+                                },
                             )
                             .await
-                        {
-                            RecoveryStep::Recovered => {}
-                            RecoveryStep::Exhausted => {
-                                return self.build_outcome(
-                                    iterations - 1,
-                                    fired,
-                                    LoopStopReason::RecoveryExhausted,
-                                    "recovery_exhausted",
-                                    OutcomeCtx::new(per_task_matches, started, &guard),
-                                );
-                            }
-                            RecoveryStep::HookFailed(e) => {
-                                warn!("recovery hook failed: {e}");
-                                return self.build_outcome(
-                                    iterations - 1,
-                                    fired,
-                                    LoopStopReason::ExecuteError,
-                                    "recovery_failed",
-                                    OutcomeCtx::new(per_task_matches, started, &guard),
-                                );
-                            }
-                        }
+                    {
+                        return stop;
                     }
                 }
                 StepOutcome::Error { kind, message: msg } => {
@@ -1828,34 +1823,21 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                             );
                         } else if recovery_enabled {
                             info!("capture error outside grace (game presumed dead): {msg}");
-                            match self
-                                .run_recovery_step(
+                            if let Some(stop) = self
+                                .run_recovery_or_stop(
                                     "capture error outside grace",
                                     &mut guard,
                                     &mut recover,
+                                    RecoveryOutcomeSrc {
+                                        fired: &mut fired,
+                                        per_task_matches: &mut per_task_matches,
+                                        started,
+                                        iterations_on_stop: iterations - 1,
+                                    },
                                 )
                                 .await
                             {
-                                RecoveryStep::Recovered => {}
-                                RecoveryStep::Exhausted => {
-                                    return self.build_outcome(
-                                        iterations - 1,
-                                        fired,
-                                        LoopStopReason::RecoveryExhausted,
-                                        "recovery_exhausted",
-                                        OutcomeCtx::new(per_task_matches, started, &guard),
-                                    );
-                                }
-                                RecoveryStep::HookFailed(e) => {
-                                    warn!("recovery hook failed: {e}");
-                                    return self.build_outcome(
-                                        iterations - 1,
-                                        fired,
-                                        LoopStopReason::ExecuteError,
-                                        "recovery_failed",
-                                        OutcomeCtx::new(per_task_matches, started, &guard),
-                                    );
-                                }
+                                return stop;
                             }
                         } else {
                             return self.build_outcome(
