@@ -120,6 +120,31 @@ fn predict_label(scores: &[f32], templates: &[LoadedTemplate], threshold: f32) -
         .unwrap_or_else(|| "unknown".to_string())
 }
 
+/// クラス別の (総数, マッチ数) を集計する。`positive == true` は正例
+/// (真ラベル == テンプレート状態)、`false` は負例 (真ラベル != 状態)。
+fn class_counts(
+    tests: &[TestImage],
+    per_image_scores: &[Vec<f32>],
+    tidx: usize,
+    threshold: f32,
+    state: &str,
+    positive: bool,
+) -> (usize, usize) {
+    let mut total = 0usize;
+    let mut matched = 0usize;
+    for (test_idx, test) in tests.iter().enumerate() {
+        let is_positive = test.true_label == state;
+        if is_positive != positive {
+            continue;
+        }
+        total += 1;
+        if per_image_scores[test_idx][tidx] >= threshold {
+            matched += 1;
+        }
+    }
+    (total, matched)
+}
+
 /// テンプレート別の感度/特異性レポート。各テンプレートを閾値判定にかけ、
 /// 正例 (同状態) は tp/pos、負例 (別状態) は fp/neg に集計する。
 fn per_template_reports(
@@ -130,25 +155,9 @@ fn per_template_reports(
 ) -> Vec<TemplateReport> {
     let mut per_template = Vec::with_capacity(templates.len());
     for (tidx, t) in templates.iter().enumerate() {
-        let mut tp = 0usize; // 正例(同状態)でマッチ
-        let mut pos = 0usize; // 正例総数
-        let mut fp = 0usize; // 負例(別状態)でマッチ
-        let mut neg = 0usize; // 負例総数
-        for (test_idx, test) in tests.iter().enumerate() {
-            let score = per_image_scores[test_idx][tidx];
-            let is_match = score >= threshold;
-            if test.true_label == t.spec.state {
-                pos += 1;
-                if is_match {
-                    tp += 1;
-                }
-            } else {
-                neg += 1;
-                if is_match {
-                    fp += 1;
-                }
-            }
-        }
+        let state = t.spec.state.as_str();
+        let (pos, tp) = class_counts(tests, per_image_scores, tidx, threshold, state, true);
+        let (neg, fp) = class_counts(tests, per_image_scores, tidx, threshold, state, false);
         let sensitivity = if pos > 0 { tp as f32 / pos as f32 } else { 0.0 };
         let specificity = if neg > 0 {
             1.0 - (fp as f32 / neg as f32)
