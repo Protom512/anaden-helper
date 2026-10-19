@@ -38,24 +38,24 @@ pub fn spawn_stdout_reader(
     cmd.stderr(Stdio::null()); // shard-4 では stdout のみ（tracing は stdout 出力）
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take();
-    let child = SharedChild::new(child);
-    let poll_child = child.clone();
-    let reader = std::thread::spawn(move || {
-        if let Some(out) = stdout {
-            for line in BufReader::new(out).lines() {
-                let Ok(line) = line else { break };
-                if matches!(
-                    tx.try_send(LogEvent::Line(line)),
-                    Err(TrySendError::Full(_) | TrySendError::Disconnected(_))
-                ) {
-                    // UI が受信しなくても読み取りは続行（EOF 検出のため）。
-                }
-            }
-        }
-        let code = poll_child.wait_for_exit();
+    let shared = SharedChild::new(child);
+    let reader = spawn_exit_reporting_reader(stdout, shared.clone(), tx);
+    Ok((shared, reader))
+}
+
+/// drain → 子の終了待ち → `LogEvent::Exit` 通知 (1 回だけ) を行う
+/// reader スレッドを起動する。[`spawn_stdout_reader`] と
+/// [`spawn_output_readers`] の stdout 側に共通。
+fn spawn_exit_reporting_reader(
+    stdout: Option<std::process::ChildStdout>,
+    child: SharedChild,
+    tx: SyncSender<LogEvent>,
+) -> JoinHandle<()> {
+    std::thread::spawn(move || {
+        drain_pipe(stdout, &tx, "");
+        let code = child.wait_for_exit();
         let _ = tx.try_send(LogEvent::Exit(code));
-    });
-    Ok((child, reader))
+    })
 }
 
 /// 複数スレッド（UI 側 kill/wait と reader スレッドの終了検出）で共有する子プロセス。
@@ -152,21 +152,13 @@ pub fn spawn_output_readers(
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take();
     let stderr = child.stderr.take();
-    let child = SharedChild::new(child);
-    let poll_child = child.clone();
-    let stdout_reader = {
-        let tx = tx.clone();
-        std::thread::spawn(move || {
-            drain_pipe(stdout, &tx, "");
-            let code = poll_child.wait_for_exit();
-            let _ = tx.try_send(LogEvent::Exit(code));
-        })
-    };
+    let shared = SharedChild::new(child);
+    let stdout_reader = spawn_exit_reporting_reader(stdout, shared.clone(), tx.clone());
     let stderr_reader = {
         let tx = tx.clone();
         std::thread::spawn(move || drain_pipe(stderr, &tx, "[stderr] "))
     };
-    Ok((child, stdout_reader, stderr_reader))
+    Ok((shared, stdout_reader, stderr_reader))
 }
 
 #[cfg(test)]

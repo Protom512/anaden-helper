@@ -24,6 +24,12 @@
       "functions": ["client_to_screen_abs", "bring_to_foreground"],
       "similarityAtRegistration": 0.84,
       "reason": "全く別の Win32 操作 (座標変換 vs ウィンドウ前面化)。トークン列が似ているだけ"
+    },
+    {
+      "file": "crates/anaden-studio/src/scenario_panel.rs",
+      "functions": ["link_saved_pipeline", "ui_task_link"],
+      "similarityAtRegistration": 0.9034,
+      "reason": "語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。link_saved_pipeline はドメインフロー (ガード→scenario_task_link 呼出→status 変換)、ui_task_link は egui 描画 (CollapsingHeader/TextEdit/ComboBox)。共有するのは UC-3 の同じ場面語彙 (task_id_input / bind_selection / タスク登録・有効化 等の文字列とフィールド名) で、制御フローは無共有。元の実双生児 register_as_new_task↔bind_stub_task (92.81%) は LinkMode enum データ化で構造解消済み (両者は 3 行 wrapper になった)"
     }
   ]
 }

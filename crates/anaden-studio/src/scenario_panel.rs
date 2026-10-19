@@ -52,6 +52,15 @@ impl GoalKind {
     }
 }
 
+/// UC-3 のリンク経路 (差分はこの 1 値に集約 — 双生児メソッドを作らない)。
+#[derive(Clone, Copy)]
+enum LinkMode {
+    /// (i) 新規タスクとして登録 (task id/title フォーム入力を使用)。
+    Register,
+    /// (ii) 選択中の stub タスク (`ScenarioPanel::bind_selection`) へ紐付け。
+    Bind,
+}
+
 /// 保存済みシナリオの記録 (UC-3 登録フローの対象)。
 ///
 /// `save()` 成功時の実体 (保存先 dir + manifest の start_task) を保持する。
@@ -300,6 +309,29 @@ impl ScenarioPanel {
         self.saved.as_ref().map(|s| s.dir.as_path())
     }
 
+    /// ドメイン呼出結果を status 文字列 + [`crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled`]
+    /// へ変換する共通尾部。成功/失敗の文言だけが「新規登録」と「stub 紐付け」の
+    /// 経路差 (§B 共通フロー化)。
+    fn task_link_outcome(
+        result: Result<crate::tasks::TaskDefinition, crate::scenario_task_link::ScenarioTaskError>,
+        status: &mut String,
+        ok_message: impl FnOnce(&crate::tasks::TaskDefinition) -> String,
+        err_prefix: &str,
+    ) -> Option<crate::scenario_task_link::ScenarioPanelEvent> {
+        match result {
+            Ok(def) => {
+                *status = ok_message(&def);
+                Some(crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled {
+                    message: status.clone(),
+                })
+            }
+            Err(e) => {
+                *status = format!("{err_prefix}{e}");
+                None
+            }
+        }
+    }
+
     /// UC-3 (i): 保存済み pipeline を新規タスクとして登録・有効化する
     /// (「新規タスクとして登録・有効化」ボタンの実体。ドメインは
     /// `scenario_task_link::register_and_enable_task`)。
@@ -309,32 +341,7 @@ impl ScenarioPanel {
         ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
         status: &mut String,
     ) -> Option<crate::scenario_task_link::ScenarioPanelEvent> {
-        let Some(saved) = self.saved.clone() else {
-            *status = "タスク登録には先にシナリオを保存してください".to_string();
-            return None;
-        };
-        match crate::scenario_task_link::register_and_enable_task(
-            ctx.tasks_dir,
-            ctx.root,
-            &saved.dir,
-            &self.task_id_input,
-            &self.task_title_input,
-            &saved.start_task,
-        ) {
-            Ok(def) => {
-                *status = format!(
-                    "タスク登録・有効化: {} [{}] (ホーム一覧へ反映)",
-                    def.title, def.id
-                );
-                Some(crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled {
-                    message: status.clone(),
-                })
-            }
-            Err(e) => {
-                *status = format!("タスク登録失敗: {e}");
-                None
-            }
-        }
+        self.link_saved_pipeline(LinkMode::Register, ctx, status)
     }
 
     /// UC-3 (ii): 選択中の既存 stub タスク (implemented=false の pipeline_run) へ
@@ -345,34 +352,58 @@ impl ScenarioPanel {
         ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
         status: &mut String,
     ) -> Option<crate::scenario_task_link::ScenarioPanelEvent> {
+        self.link_saved_pipeline(LinkMode::Bind, ctx, status)
+    }
+
+    /// UC-3 共通フロー: 保存済み pipeline をタスクへ登録/紐付けして有効化する。
+    /// 経路差 ([`LinkMode`]) 以外は同一: 保存ガード → (Bind のみ選択ガード) →
+    /// ドメイン呼出 → [`Self::task_link_outcome`]。
+    fn link_saved_pipeline(
+        &mut self,
+        mode: LinkMode,
+        ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
+        status: &mut String,
+    ) -> Option<crate::scenario_task_link::ScenarioPanelEvent> {
+        let action = match mode {
+            LinkMode::Register => "タスク登録",
+            LinkMode::Bind => "タスク紐付け",
+        };
         let Some(saved) = self.saved.clone() else {
-            *status = "タスク紐付けには先にシナリオを保存してください".to_string();
+            *status = format!("{action}には先にシナリオを保存してください");
             return None;
         };
-        let Some(id) = self.bind_selection.clone() else {
-            *status = "紐付け先の未実装タスクを選択してください".to_string();
-            return None;
+        let result = match mode {
+            LinkMode::Register => crate::scenario_task_link::register_and_enable_task(
+                ctx.tasks_dir,
+                ctx.root,
+                &saved.dir,
+                &self.task_id_input,
+                &self.task_title_input,
+                &saved.start_task,
+            ),
+            LinkMode::Bind => {
+                let Some(id) = self.bind_selection.clone() else {
+                    *status = "紐付け先の未実装タスクを選択してください".to_string();
+                    return None;
+                };
+                crate::scenario_task_link::bind_and_enable_task(
+                    ctx.tasks_dir,
+                    ctx.root,
+                    &id,
+                    &saved.dir,
+                )
+            }
         };
-        match crate::scenario_task_link::bind_and_enable_task(
-            ctx.tasks_dir,
-            ctx.root,
-            &id,
-            &saved.dir,
-        ) {
-            Ok(def) => {
-                *status = format!(
-                    "タスク有効化: {} [{}] (ホーム一覧へ反映)",
-                    def.title, def.id
-                );
-                Some(crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled {
-                    message: status.clone(),
-                })
-            }
-            Err(e) => {
-                *status = format!("タスク有効化失敗: {e}");
-                None
-            }
-        }
+        let (ok_label, err_prefix) = match mode {
+            LinkMode::Register => ("タスク登録・有効化", "タスク登録失敗: "),
+            LinkMode::Bind => ("タスク有効化", "タスク有効化失敗: "),
+        };
+        Self::task_link_outcome(
+            result,
+            status,
+            |def| format!("{ok_label}: {} [{}] (ホーム一覧へ反映)", def.title, def.id),
+            err_prefix,
+        )
     }
 
     /// UC-3: 保存済み pipeline をタスクへ登録・有効化するセクションを描画する。
