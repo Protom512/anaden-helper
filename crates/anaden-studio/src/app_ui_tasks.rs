@@ -26,112 +26,138 @@ impl StudioApp {
                 self.load_task_list(&Self::workspace_root().join("templates/tasks"));
             }
         } else if let Some(list) = self.task_defs.clone() {
-            // UC-3: 詳細プレビューは実行と同じ引数解決条件 (target/root)。
-            // serial は Issue #188 の Android 削除で廃止 — 常に None。
-            let target = self.cli_target();
-            let serial: Option<&str> = None;
-            let root = Self::workspace_root();
-            let selected = list.selected_ids().to_vec();
-            let mut clicked: Option<String> = None;
-            for def in list.definitions() {
-                let mut checked = list.is_selected(&def.id);
-                let label = tasks::checkbox_label(def);
-                ui.horizontal(|ui| {
-                    ui.add_enabled(
-                        def.is_selectable(),
-                        egui::Checkbox::new(&mut checked, label),
-                    );
-                    // UC-3: 選択済みなら実行順位置を横に表示 (未選択は非表示)。
-                    if let Some(pos) = tasks::queue_position_label(&selected, &def.id) {
-                        ui.weak(pos);
-                    }
-                });
-                if checked != list.is_selected(&def.id) {
-                    clicked = Some(def.id.clone());
-                }
-                // UC-3: 展開可能な詳細表示 (kind・pipeline_dir・start_task・
-                // 引数プレビュー — 読み取り専用・schema 変更なし)。
-                egui::CollapsingHeader::new(egui::RichText::new("詳細").weak())
-                    .id_salt(&def.id)
-                    .show(ui, |ui| {
-                        Self::task_detail_ui(ui, def, target, serial, &root);
-                    });
-            }
-            if let Some(id) = clicked {
-                self.toggle_task(&id);
-            }
-            // 開始ボタンはキュー非アクティブ時のみ有効 (実行中の再開始拒否)。
-            let can_start = list.selected_count() > 0 && !self.task_queue_active();
-            ui.add_enabled_ui(can_start, |ui| {
-                if ui.button("開始").clicked() {
-                    self.start_task_queue();
-                }
-            });
-            // UC-3: 選択済みキューの実行順リスト (チェック順 1. 2. 3. ...・
-            // 未実装 (不整合検出時) はグレー表示)。
-            let rows = tasks::queue_order_rows(&selected, list.definitions());
-            if !rows.is_empty() {
-                ui.separator();
-                ui.label("実行順 (チェック順)");
-                for row in &rows {
-                    if row.runnable {
-                        ui.label(format!("{}. {}", row.position, row.title));
-                    } else {
-                        ui.weak(format!("{}. {} (未実装)", row.position, row.title));
-                    }
-                }
-            }
+            self.task_checkboxes(ui, &list);
+            self.task_queue_start_controls(ui, &list);
+            Self::task_queue_order_preview(ui, &list);
         }
-        // UC-4: 進行サマリ + 実行制御 + チェック順キュー一覧。
-        if let Some(queue) = self.task_queue.clone() {
-            ui.separator();
-            ui.label(queue.summary());
-            match queue.state() {
-                QueueState::Running { .. } => {
-                    if ui.button("中止").clicked() {
-                        self.abort_task_queue();
-                    }
-                }
-                QueueState::PausedAfterFailure { .. } => {
-                    ui.colored_label(egui::Color32::RED, "タスクが失敗しました。継続しますか?");
-                    if ui.button("継続").clicked() {
-                        self.resume_task_queue();
-                    }
-                    if ui.button("停止").clicked() {
-                        self.abort_task_queue();
-                    }
-                }
-                // F6 (04-studio-maxiters-outcome): exit 0 でも成果ゼロ打ち切り。
-                // 失敗とは区別して警告色で継続判断を促す (自動継続しない)。
-                QueueState::PausedAfterBudgetExhausted { .. } => {
-                    ui.colored_label(
-                        egui::Color32::YELLOW,
-                        "タスクが予算切れ (成果ゼロ) で停止しました。継続しますか?",
-                    );
-                    if ui.button("継続").clicked() {
-                        self.resume_task_queue();
-                    }
-                    if ui.button("停止").clicked() {
-                        self.abort_task_queue();
-                    }
-                }
-                QueueState::Pending | QueueState::Completed => {}
-            }
-            for (i, entry) in queue.entries().iter().enumerate() {
-                ui.label(format!(
-                    "{}. [{}] {}",
-                    i + 1,
-                    queue.entry_marker(i),
-                    entry.label
-                ));
-            }
-        }
+        self.task_queue_progress(ui);
         ui.separator();
         self.task_log_ui(ui);
         ui.separator();
         ui.label(&self.status);
     }
 
+    /// タスク定義のチェックボックス一覧 (MAA 型・UC-3 詳細プレビューつき)。
+    /// implemented=false はグレー表示・チェック不可 (嘘の動作可能表示禁止)。
+    /// チェックトグルはループ後に 1 回だけ適用 (借用分離)。
+    fn task_checkboxes(&mut self, ui: &mut egui::Ui, list: &tasks::TaskListState) {
+        // UC-3: 詳細プレビューは実行と同じ引数解決条件 (target/root)。
+        // serial は Issue #188 の Android 削除で廃止 — 常に None。
+        let target = self.cli_target();
+        let serial: Option<&str> = None;
+        let root = Self::workspace_root();
+        let selected = list.selected_ids().to_vec();
+        let mut clicked: Option<String> = None;
+        for def in list.definitions() {
+            let mut checked = list.is_selected(&def.id);
+            let label = tasks::checkbox_label(def);
+            ui.horizontal(|ui| {
+                ui.add_enabled(
+                    def.is_selectable(),
+                    egui::Checkbox::new(&mut checked, label),
+                );
+                // UC-3: 選択済みなら実行順位置を横に表示 (未選択は非表示)。
+                if let Some(pos) = tasks::queue_position_label(&selected, &def.id) {
+                    ui.weak(pos);
+                }
+            });
+            if checked != list.is_selected(&def.id) {
+                clicked = Some(def.id.clone());
+            }
+            // UC-3: 展開可能な詳細表示 (kind・pipeline_dir・start_task・
+            // 引数プレビュー — 読み取り専用・schema 変更なし)。
+            egui::CollapsingHeader::new(egui::RichText::new("詳細").weak())
+                .id_salt(&def.id)
+                .show(ui, |ui| {
+                    Self::task_detail_ui(ui, def, target, serial, &root);
+                });
+        }
+        if let Some(id) = clicked {
+            self.toggle_task(&id);
+        }
+    }
+
+    /// 「開始」ボタン (キュー非アクティブ時のみ有効 = 実行中の再開始拒否)。
+    fn task_queue_start_controls(&mut self, ui: &mut egui::Ui, list: &tasks::TaskListState) {
+        let can_start = list.selected_count() > 0 && !self.task_queue_active();
+        ui.add_enabled_ui(can_start, |ui| {
+            if ui.button("開始").clicked() {
+                self.start_task_queue();
+            }
+        });
+    }
+
+    /// UC-3: 選択済みキューの実行順リスト (チェック順 1. 2. 3. ...・
+    /// 未実装 (不整合検出時) はグレー表示)。
+    fn task_queue_order_preview(ui: &mut egui::Ui, list: &tasks::TaskListState) {
+        let selected = list.selected_ids().to_vec();
+        let rows = tasks::queue_order_rows(&selected, list.definitions());
+        if rows.is_empty() {
+            return;
+        }
+        ui.separator();
+        ui.label("実行順 (チェック順)");
+        for row in &rows {
+            if row.runnable {
+                ui.label(format!("{}. {}", row.position, row.title));
+            } else {
+                ui.weak(format!("{}. {} (未実装)", row.position, row.title));
+            }
+        }
+    }
+
+    /// UC-4: 進行サマリ + 実行制御 (中止/継続/停止) + チェック順キュー一覧。
+    fn task_queue_progress(&mut self, ui: &mut egui::Ui) {
+        let Some(queue) = self.task_queue.clone() else {
+            return;
+        };
+        ui.separator();
+        ui.label(queue.summary());
+        self.task_queue_controls(ui, queue.state());
+        for (i, entry) in queue.entries().iter().enumerate() {
+            ui.label(format!(
+                "{}. [{}] {}",
+                i + 1,
+                queue.entry_marker(i),
+                entry.label
+            ));
+        }
+    }
+
+    /// キュー状態別の実行制御ボタン。Running=中止、一時停止系=継続/停止。
+    fn task_queue_controls(&mut self, ui: &mut egui::Ui, state: &QueueState) {
+        match state {
+            QueueState::Running { .. } => {
+                if ui.button("中止").clicked() {
+                    self.abort_task_queue();
+                }
+            }
+            QueueState::PausedAfterFailure { .. } => {
+                ui.colored_label(egui::Color32::RED, "タスクが失敗しました。継続しますか?");
+                self.task_queue_resume_or_abort(ui);
+            }
+            // F6 (04-studio-maxiters-outcome): exit 0 でも成果ゼロ打ち切り。
+            // 失敗とは区別して警告色で継続判断を促す (自動継続しない)。
+            QueueState::PausedAfterBudgetExhausted { .. } => {
+                ui.colored_label(
+                    egui::Color32::YELLOW,
+                    "タスクが予算切れ (成果ゼロ) で停止しました。継続しますか?",
+                );
+                self.task_queue_resume_or_abort(ui);
+            }
+            QueueState::Pending | QueueState::Completed => {}
+        }
+    }
+
+    /// 一時停止中キューの「継続」「停止」ボタン (失敗・予算切れで共通)。
+    fn task_queue_resume_or_abort(&mut self, ui: &mut egui::Ui) {
+        if ui.button("継続").clicked() {
+            self.resume_task_queue();
+        }
+        if ui.button("停止").clicked() {
+            self.abort_task_queue();
+        }
+    }
     /// UC-3: タスク 1 件の詳細表示ボディ (collapsing header 配下・読み取り専用)。
     ///
     /// kind・pipeline_dir・start_task (未宣言時は解決結果)・実引数プレビューを
