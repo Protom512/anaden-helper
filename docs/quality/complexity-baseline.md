@@ -138,3 +138,21 @@ counts: 56 ペア = 生産 40 + テスト除外 15 + bench 1。advisory (0.80-0.
 注意: `node --test <dir>` は Node v24.22.0/win32 で壊れている
 (ディレクトリを展開しない) — `node --test scripts/quality/complexity_gate.test.mjs`
 等ファイル直指定で実行すること。
+
+## 7. リファクタリング完了時点の実績 (2026-10-19 追記 — §0〜6 の基線数値は凍結維持)
+
+Phase 1〜5 完了 (a99b458)。基線からの変化 (gate 実測):
+
+- **複雑度**: 違反 17 件 → **0** (gate exit 0)。worst だった
+  run_loop_with_goal 38/74 は wrapper (~2/2) + run_loop_core (~9/9) に統合。
+- **重複**: 違反 8 件 → **0** (gate exit 0)。解消 8 ペア
+  (engine ループ統合 / win32_capture HWND / letterbox 軸平均 / ccoeff
+  prepare_scan / scenario_panel LinkMode / log_process reader / app.rs 保存 /
+  app_ui_live セクション分割)。allowlist は 4 → 24 エントリ (追加分は
+  egui セクション語彙重複などの偽陽性 — 各エントリに判定根拠)。
+- **テスト**: テストコード 1 行も変更せず (assert_tests_untouched green)、
+  workspace 1020 passed / 10 skipped・clippy -D warnings green を維持。
+- 手法ノート (双生児を作らない): 分割で生まれる同型小関数は similarity
+  gate で必ず対になる。決定表の違いだけを enum にデータ化した単一関数化
+  (engine MatchArm / core Composition / scenario_panel LinkMode) が実効解。
+  UI セクション群 (enum 化不可能) は語彙重複偽陽性として allowlist 扱い。
