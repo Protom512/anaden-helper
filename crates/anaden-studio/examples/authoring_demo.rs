@@ -113,26 +113,55 @@ fn main() -> Result<()> {
 
     // Step 1 の前に「誤タップ → 確定 → undo」を実演する (オーサリング操作の一部として)。
     // 模擬とはいえ実フローと同じ API 経路 (record_tap/record_region/undo) を通す。
+    // 戻り値 (Pending/Confirmed) は本デモでは使わないので捨てる。
     if let Some(first) = SCRIPT.first() {
         let frame = load_authored_frame(&frames_dir, first.frame, &mut frame_cache)?;
         session.push_frame(&frame);
         // 誤った領域で確定してしまう → 1 ステップ確定 → 取り消し。
-        let bad_region = [0, 0, 40, 30];
-        match session.record_tap((10, 10))? {
-            GestureOutcome::Pending => {}
-            GestureOutcome::Confirmed { .. } => {}
-        }
-        match session.record_region(bad_region)? {
-            GestureOutcome::Confirmed { .. } => {}
-            GestureOutcome::Pending => {}
-        }
+        let _ = session.record_tap((10, 10))?;
+        let _ = session.record_region([0, 0, 40, 30])?;
         let undone = session.undo();
         println!("undo 実演 (誤ステップ取り消し): 取り消した={undone}");
         // undo 後の番号再利用を明示 (steps.len()+1 採番のため衝突しない)。
     }
 
+    run_script_steps(&mut session, &frames_dir, &mut frame_cache)?;
+
+    // 保存 (repo の templates/ 外へ)。既存 dir は所有権ガードで拒否される
+    // (再実行時は .omc/logs/run-issue-190-e2e/authored-* を手動削除)。
+    let root = Path::new(SAVE_ROOT);
+    match session.save(root) {
+        Ok(outcome) => {
+            println!("保存先: {}", outcome.dir.display());
+            for warning in &outcome.warnings {
+                println!("保存時テンプレ品質警告: {warning}");
+            }
+        }
+        Err(e) => {
+            bail!(
+                "save failed: {e} (再実行時は {}/authored-{SCENARIO_NAME} を削除してください)",
+                root.display()
+            );
+        }
+    }
+
+    println!(
+        "E2E 実行例: cargo run -p anaden-cli -- run --target windows \
+         {SAVE_ROOT}/authored-{SCENARIO_NAME} AuthoredStep01 \
+         --max-iters 10 --interval 2 --recover-launch false \
+         --evidence-run-id run-issue-190-e2e"
+    );
+    Ok(())
+}
+
+/// SCRIPT を 1 ステップずつ実行し、確定結果と警告を出力する。
+fn run_script_steps(
+    session: &mut AuthoringSession,
+    frames_dir: &Path,
+    frame_cache: &mut HashMap<String, DynamicImage>,
+) -> Result<()> {
     for (i, step) in SCRIPT.iter().enumerate() {
-        let frame = load_authored_frame(&frames_dir, step.frame, &mut frame_cache)?;
+        let frame = load_authored_frame(frames_dir, step.frame, frame_cache)?;
         session.push_frame(&frame);
         // タップ → 領域 の順で記録 (逆順も可・セッションは順非依存)。
         let tap_outcome = session.record_tap(step.tap)?;
@@ -170,31 +199,6 @@ fn main() -> Result<()> {
             println!("    警告: {warning}");
         }
     }
-
-    // 保存 (repo の templates/ 外へ)。既存 dir は所有権ガードで拒否される
-    // (再実行時は .omc/logs/run-issue-190-e2e/authored-* を手動削除)。
-    let root = Path::new(SAVE_ROOT);
-    match session.save(root) {
-        Ok(outcome) => {
-            println!("保存先: {}", outcome.dir.display());
-            for warning in &outcome.warnings {
-                println!("保存時テンプレ品質警告: {warning}");
-            }
-        }
-        Err(e) => {
-            bail!(
-                "save failed: {e} (再実行時は {}/authored-{SCENARIO_NAME} を削除してください)",
-                root.display()
-            );
-        }
-    }
-
-    println!(
-        "E2E 実行例: cargo run -p anaden-cli -- run --target windows \
-         {SAVE_ROOT}/authored-{SCENARIO_NAME} AuthoredStep01 \
-         --max-iters 10 --interval 2 --recover-launch false \
-         --evidence-run-id run-issue-190-e2e"
-    );
     Ok(())
 }
 

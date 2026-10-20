@@ -347,7 +347,7 @@ fn run_pipeline(
     let mut state = anaden_engine::PipelineState::new(start_task);
     let before = state.current().to_string();
     match state.tick(&screenshot, &tasks) {
-        Some(result) => {
+        Ok(Some(result)) => {
             let command_str = match result.command {
                 Some(anaden_engine::InputCommand::Tap { x, y }) => format!("Tap({x},{y})"),
                 Some(anaden_engine::InputCommand::Swipe { from, to }) => {
@@ -361,11 +361,16 @@ fn run_pipeline(
                 before, command_str, next_str,
             );
         }
-        None => {
+        Ok(None) => {
             println!(
                 "❌ 非マッチ: {} は現在の画面で検出されませんでした（閾値下または ROI 外）",
                 before,
             );
+        }
+        // F34 (05-template-cache): テンプレート読込エラーは非マッチと区別して可視化する。
+        Err(e) => {
+            println!("⚠️ テンプレートエラー: {before}: {e}");
+            anyhow::bail!("template error in task '{before}': {e}");
         }
     }
 

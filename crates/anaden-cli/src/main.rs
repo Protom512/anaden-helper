@@ -22,6 +22,10 @@ use e2e::tree_hash_of_pipeline;
 // routine サブコマンド (Issue #199): 複数 pipeline の連続実行。
 mod routine;
 
+// 03-report-channel: run 成果物 (report.json + run.log) の永続化。
+mod run_report;
+use run_report::RunArtifacts;
+
 use anaden_cli_contract::{ensure_outcome_label, standalone_exit_code};
 use anyhow::Result;
 use clap::{Parser, Subcommand};
@@ -33,6 +37,14 @@ use anaden_core::Goal;
 /// リカバリ (ゲーム再起動) 前の既存プロセス終了待ち上限秒 (Issue #210: 二重起動防止)。
 /// `routine` サブコマンド側 (routine.rs) の RECOVERY_EXIT_WAIT_SECS と同じ値。
 const RECOVERY_EXIT_WAIT_SECS: u64 = 15;
+
+/// リカバリ試行の予算上限 既定値 (02-recovery-budget: circuit breaker)。
+///
+/// 健全サイクル (テンプレートマッチ成功) を挟まずに連続したリカバリ試行がこの回数に
+/// 達すると `LoopStopReason::RecoveryExhausted` (exit 1) で停止する。永久 NoMatch
+/// (ゲームが起動できない環境故障) での再起動無限ループを構造的に止める。
+/// `routine` サブコマンド側 (routine.rs) も同じ値を使う (run と routine の契約統一)。
+const DEFAULT_MAX_RECOVERY_ATTEMPTS: u32 = 5;
 
 #[derive(Parser, Debug)]
 #[command(
@@ -85,6 +97,17 @@ enum Commands {
         /// マッチすれば即座に通常動作へ復帰する。
         #[arg(long, default_value_t = 180)]
         recover_grace_secs: u64,
+        /// リカバリ試行の予算上限 (02-recovery-budget: circuit breaker)。
+        ///
+        /// 健全サイクル (テンプレートマッチ成功) を挟まずに連続したリカバリ試行が
+        /// この回数に達すると、それ以上の再起動を打ち切り exit 1
+        /// (RecoveryExhausted = 環境故障で進行不能) で停止する。永久 NoMatch 状態で
+        /// ゲーム再起動を無限に繰り返すのを構造的に防ぐ。マッチ成功を挟むごとに
+        /// 試行番号は 1 からやり直し (毎エピソード「初回 = kill なし起動」から
+        /// エスカレーションし直す)。0 にすると初回発火時に即上限到達となるため
+        /// 実質的に `--recover-launch false` と同じ意味になる。
+        #[arg(long, default_value_t = DEFAULT_MAX_RECOVERY_ATTEMPTS)]
+        max_recovery_attempts: u32,
         /// 発火後検証(誠実検証)を有効化する(デフォルト true)。
         ///
         /// 有効時、発火成功後にもう1回 capture して同タスクのテンプレがまだマッチするか検証し、
@@ -96,7 +119,10 @@ enum Commands {
         verify_after_fire: bool,
         /// 宣言的ゴールをインライン TOML で指定(Issue #37 T4 option B)。
         ///
-        /// `--goal-file` とは排他。未指定時はゴール無し(従来の無限ループ/MaxIterations 挙動)。
+        /// `--goal-file` とは排他。未指定時は `<pipeline_dir>/pipeline.toml`
+        /// manifest の `[[goal]]` を既定ゴールとして採用する (DEF-004)。
+        /// manifest の goals が空/不在時はゴール無し(従来の無限ループ/
+        /// MaxIterations 挙動)。明示指定は manifest より優先(マージしない)。
         /// 値は `toml::from_str::<Goal>` でパースされ、[`Goal::validate`] で検証される。
         ///
         /// 例: `--goal 'name = "farm50"\n[stop]\nLoopCount = { target = 50 }'`
@@ -105,7 +131,7 @@ enum Commands {
         /// 宣言的ゴールを格納した TOML ファイルパス(Issue #37 T4 option B)。
         ///
         /// `--goal` とは排他。ファイル内容は `toml::from_str::<Goal>` でパースされる。
-        /// `--goal` と同じく未指定時はゴール無し(後方互換)。
+        /// `--goal` と同じく未指定時は manifest の `[[goal]]` を既定採用 (DEF-004)。
         #[arg(long)]
         goal_file: Option<PathBuf>,
         /// UC-2 実機 E2E 証跡採取 (Issue #139 T6)。run-id を指定すると
@@ -115,11 +141,25 @@ enum Commands {
         /// 未指定時は証跡採取なし (通常実行)。
         #[arg(long)]
         evidence_run_id: Option<String>,
+        /// run 成果物レポート (report.json) の書込先 (03-report-channel)。
+        ///
+        /// run 終了時に `ProgressReport` (サイクル数・発火数・停止理由等の
+        /// 機械可読サマリ) を JSON で書き込む。未指定時は既定場所
+        /// `<pipeline_dir>/.anaden-run/<timestamp>/report.json` へ永続化する。
+        #[arg(long)]
+        report_file: Option<PathBuf>,
+        /// 既定の成果物永続化 (report.json + run.log) を無効化する
+        /// (03-report-channel)。`--report-file` の明示指定には影響しない。
+        #[arg(long)]
+        no_persist: bool,
     },
     /// 複数 pipeline を1日のルーチンとして連続実行する (Issue #199)。
     ///
     /// routine 定義 (`templates/routines/<name>.toml`) の steps を定義順に
     /// PipelineDriver で実行し、ステップ別 + 全体サマリを表示する。
+    /// 成果物は run と対称な既定永続化 (loop 10):
+    /// `<routine_dir>/.anaden-routine/<timestamp>/` へ routine-report.json +
+    /// routine.log (`--no-persist` で無効化)。
     ///
     /// **終了コード契約**:
     /// - 0: 全ステップが失敗なく実行完了
@@ -135,6 +175,22 @@ enum Commands {
         /// `.omc/logs/{run-id}/` へ永続化する。未指定時は採取なし。
         #[arg(long)]
         evidence_run_id: Option<String>,
+        /// routine 成果物レポート (report.json) の書込先
+        /// (03-report-channel follow-up — run の `--report-file` に対応)。
+        ///
+        /// routine 終了時に `RoutineSummary` (ステップ別・合計の機械可読サマリ)
+        /// を JSON で書き込む。`--dry-run` では実行しないため書かない。
+        /// 未指定時は既定場所
+        /// `<routine_dir>/.anaden-routine/<timestamp>/routine-report.json` へ
+        /// 永続化する (loop 10 — run の既定永続化と対称)。
+        /// 書込失敗はハードエラー (exit 1・fail-closed)。
+        #[arg(long)]
+        report_file: Option<PathBuf>,
+        /// 既定の成果物永続化 (routine-report.json + routine.log) を無効化する
+        /// (loop 10 — run の `--no-persist` に対応)。`--report-file` の明示指定に
+        /// は影響しない。
+        #[arg(long)]
+        no_persist: bool,
     },
     /// ゲームの起動状態を確認し、未起動なら起動して生存を確認する(Issue #21)。
     ///
@@ -217,6 +273,19 @@ fn resolve_pipeline_dir(input: &Path, root: &Path) -> PathBuf {
     anaden_engine::resolve_pipeline_dir(input, root).unwrap_or_else(|| input.to_path_buf())
 }
 
+/// routine 既定永続化 (`.anaden-routine/<ts>/`) の基準ディレクトリ (loop 10)。
+///
+/// routine ファイルの親ディレクトリ (`templates/routines/daily.toml` →
+/// `templates/routines`)。親が無い (ベアファイル名 `daily.toml`) 場合は
+/// カレントディレクトリ (`.`)。routine ファイル自体が CWD 相対で解決される
+/// (`load_routine`) のと同じ基準で、run の `pipeline_dir` 基準との対称。
+fn routine_artifacts_base_dir(routine_path: &Path) -> &Path {
+    routine_path
+        .parent()
+        .filter(|p| !p.as_os_str().is_empty())
+        .unwrap_or(Path::new("."))
+}
+
 /// `--algorithm` 文字列を Algorithm へ解決する。
 /// `sse` / `ccoeff` 以外は即座に anyhow エラーを返す(panic しない)。
 fn resolve_algorithm(value: &str) -> Result<anaden_vision::Algorithm> {
@@ -229,11 +298,11 @@ fn resolve_algorithm(value: &str) -> Result<anaden_vision::Algorithm> {
 
 /// `--goal` / `--goal-file` フラグを [`Option<Goal>`] へ解決する純粋ヘルパ(T4 option B)。
 ///
-/// T4-design-gate の決定に従い、Goal の供給源を manifest reader(Option A)ではなく
-/// CLI フラグ(Option B)とする。`load_pipeline_manifest` / `PipelineManifest` は
-/// Issue #38 で削除されて現 repo に存在しないため、manifest reader を新設するのは
-/// greenfield な dead-code となり避ける。TOML doc AC は [`toml::from_str::<Goal>`]
-/// (goal.rs の round-trip テスト済み)で充足できる。
+/// T4-design-gate 当時 (Issue #37) は Goal の供給源を manifest reader(Option A)ではなく
+/// CLI フラグ(Option B)のみとしていたが、DEF-004 (US-GOAL-01) で manifest 既定採用を
+/// 追加した (07-manifest-goal)。現在の役割分担: 本関数は**明示フラグの解決**のみ、
+/// manifest (`pipeline.toml`) の `[[goal]]` を含む優先順位付き解決は [`resolve_goal`]
+/// が担当する (呼出順: resolve_goal → 明示フラグがあれば本関数)。
 ///
 /// # 引数
 /// - `goal`: `--goal <inline-toml>` の値。`None` なら未指定。
@@ -288,6 +357,110 @@ fn parse_goal_flag(
     }
 }
 
+/// `--goal` / `--goal-file` / pipeline.toml manifest を優先順位付きで
+/// [`Option<Goal>`] へ解決する (DEF-004 / US-GOAL-01)。
+///
+/// 優先順位 (明示指定が常に勝つ・マージしない = 単一情報源):
+/// 1. `--goal` / `--goal-file` (排他検査は [`parse_goal_flag`])
+/// 2. `<pipeline_dir>/pipeline.toml` manifest の `[[goal]]` (既定ゴール)
+///    - goals 空 / manifest 不在: `None` (従来の無限ループ / MaxIterations 挙動)
+///    - 単一 goal: そのまま採用 (ゴール名も維持)
+///    - 複数 goal: `Any` 合成 (終端条件リスト = いずれかで停止)
+///    - manifest が存在して parse 不能: `Err` (fail-closed)
+fn resolve_goal(
+    goal: Option<&str>,
+    goal_file: Option<&std::path::Path>,
+    pipeline_dir: &std::path::Path,
+) -> Result<Option<Goal>> {
+    if goal.is_some() || goal_file.is_some() {
+        return parse_goal_flag(goal, goal_file);
+    }
+    manifest_default_goal(pipeline_dir)
+}
+
+/// manifest (`pipeline.toml`) の goals を run の既定ゴールへ変換する (DEF-004)。
+///
+/// 複数 `[[goal]]` を `Any` 合成する根拠: goal-manifest.md は `[[goal]]` を
+/// 「ゴール(終端条件)」のリストとして宣言する (manifest は「どこから始まり、
+/// いつ終わるか」の宣言層)。終端条件のリスト = いずれかの条件が満たされた時点で
+/// 停止する。OR を単一 goal 内の `Any` で表現する login の手書きパターン
+/// (Field 到達 OR Timeout 安全弁) と同一セマンティクス。
+fn manifest_default_goal(pipeline_dir: &std::path::Path) -> Result<Option<Goal>> {
+    let manifest_path = pipeline_dir.join(anaden_vision::PIPELINE_MANIFEST_FILENAME);
+    if !manifest_path.is_file() {
+        return Ok(None);
+    }
+    let manifest = anaden_vision::load_pipeline_manifest(pipeline_dir).map_err(|e| {
+        anyhow::anyhow!(
+            "pipeline.toml manifest の読込失敗 {}: {e}",
+            manifest_path.display()
+        )
+    })?;
+    let goal = match manifest.goals.split_first() {
+        // goals 空 = 無宣言 (無限ループの手書き後方互換形式)。
+        None => return Ok(None),
+        Some((only, [])) => only.clone(),
+        Some(_) => {
+            let names = manifest
+                .goals
+                .iter()
+                .map(|g| g.name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            Goal {
+                name: format!("any({names})"),
+                stop: anaden_core::StopCondition::Any {
+                    conditions: manifest.goals.iter().map(|g| g.stop.clone()).collect(),
+                },
+            }
+        }
+    };
+    goal.validate()
+        .map_err(|e| anyhow::anyhow!("manifest goal のバリデーション失敗: {e}"))?;
+    Ok(Some(goal))
+}
+
+/// NoMatch リカバリのエスカレーション hook (`run` / `routine` 共通の単一実装)。
+///
+/// [`anaden_engine::RecoveryContext::attempt`] (健全サイクルで 1 へ戻る試行番号)
+/// で段階分けする (Issue #210 のエスカレーション方針を踏襲):
+/// - attempt 1 : `launch_app` (kill なし・起動中のゲームを殺さない)
+/// - attempt 2+: `restart_app` (kill + 終了待ち → spawn・ハングゲームの本気回復)
+///
+/// 従来は run/routine 各々がクロージャ内で AtomicU32 の単調カウンタを回して試行
+/// 番号を数えていたため、健全サイクルを挟んでも「2 回目以降 = 即 kill+restart」の
+/// 強いエスカレーションが続いた (02-recovery-budget F4)。試行番号の管理は engine
+/// (`RecoveryGuard`) へ移譲し、本関数は attempt → 起動方式 の射影のみを担う
+/// (エスカレーション判定の単一情報源化)。
+///
+/// `label` はログの呼出元識別 ("PC版" / "routine")。
+#[cfg(windows)]
+pub(crate) fn escalation_recovery_hook(
+    launcher: anaden_device::Win32Launch,
+    label: &'static str,
+) -> anaden_engine::RecoveryHook {
+    Box::new(move |ctx: anaden_engine::RecoveryContext| {
+        let l = launcher.clone();
+        Box::pin(async move {
+            if ctx.attempt == 1 {
+                info!(
+                    "NoMatch 継続({label}): ゲームを起動します \
+                     (attempt 1・kill なし・Issue #210)"
+                );
+                l.launch_app().await
+            } else {
+                info!(
+                    "NoMatch 継続({label}): ゲームを kill+再起動します \
+                     (attempt {}・Issue #210)",
+                    ctx.attempt
+                );
+                l.restart_app(Duration::from_secs(RECOVERY_EXIT_WAIT_SECS))
+                    .await
+            }
+        })
+    })
+}
+
 /// `run` サブコマンド: 宣言的パイプラインを PC 版 (Win32) でライブ実行する。
 ///
 /// フロー:
@@ -309,10 +482,12 @@ async fn run_pipeline_live(
     recover_launch: bool,
     recover_nomatch_threshold: u32,
     recover_grace_secs: u64,
+    max_recovery_attempts: u32,
     verify_after_fire: bool,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
     evidence_dir: Option<&Path>,
+    artifacts: &RunArtifacts,
 ) -> Result<()> {
     // ---- Ctrl+C / SIGINT リスナ起動 ----
     // tokio::signal::ctrl_c() が返ったら token.cancel() する。driver(各 run_with_* 経由で
@@ -342,10 +517,12 @@ async fn run_pipeline_live(
         recover_launch,
         recover_nomatch_threshold,
         recover_grace_secs,
+        max_recovery_attempts,
         verify_after_fire,
         goal,
         cancel_token,
         evidence_dir,
+        artifacts,
     )
     .await
 }
@@ -370,10 +547,12 @@ async fn run_with_windows(
     recover_launch: bool,
     recover_nomatch_threshold: u32,
     recover_grace_secs: u64,
+    max_recovery_attempts: u32,
     verify_after_fire: bool,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
     evidence_dir: Option<&Path>,
+    artifacts: &RunArtifacts,
 ) -> Result<()> {
     // ---- (1) パイプライン読込 + algorithm 上書き ----
     let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
@@ -449,33 +628,19 @@ async fn run_with_windows(
         }
     };
 
-    // ---- (5) NoMatch リカバリフック(Win32Launch::restart_app + 起動猶予・Issue #210) ----
-    // 再起動ストーム対策: 従来の launch_app (spawn-only 3ms) は起動途中のゲームを
-    // 残したまま再 spawn するため ≈18 秒周期でゲームを殺し続けた。restart_app は
-    // 既存プロセスを終了待ちしてから spawn し (二重起動防止)、with_recovery_grace で
-    // 再起動後 recover_grace_secs 秒は NoMatch streak を数えない (タイトル到達待ち)。
-    // エスカレーション型 recovery (Issue #210・routine と同一方式): 1 回目は
-    // launch_app (kill なし・起動中のゲームを殺さない)、2 回目以降は
-    // restart_app (kill+終了待ち→spawn・ハングゲームの本気回復)。
-    // 実測 (issue210-verify2): 毎回 kill は タイトル到達 (~2分) 前のゲームを
-    // 殺し続ける。カウントは run 実行内で単調増加。
+    // ---- (5) NoMatch リカバリフック(Win32Launch + 起動猶予 + 試行予算・Issue #210 / 02-recovery-budget) ----
+    // 再起動ストーム対策 (Issue #210): エスカレーション型 recovery は
+    // [`escalation_recovery_hook`] (run / routine 共通の単一実装) へ集約した。
+    // - 1 回目は launch_app (kill なし・起動中のゲームを殺さない)、2 回目以降は
+    //   restart_app (kill+終了待ち→spawn・ハングゲームの本気回復)。
+    //   試行番号は engine (RecoveryGuard) が供給し、健全サイクルで 1 からやり直す。
+    // - with_recovery_grace: 再起動後 recover_grace_secs 秒は NoMatch streak を
+    //   数えない (タイトル到達待ち)。
+    // - with_max_recovery_attempts (02-recovery-budget): 健全サイクルを挟まず
+    //   max_recovery_attempts 回連続で再起動しても復帰しなければ
+    //   RecoveryExhausted (exit 1) で打ち切る (永久 NoMatch での無限再起動防止)。
     let recovery: Option<anaden_engine::RecoveryHook> = if recover_launch {
-        let launcher = launcher.clone();
-        let recoveries = std::sync::atomic::AtomicU32::new(0);
-        Some(Box::new(move |_streak| {
-            let l = launcher.clone();
-            let n = recoveries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            Box::pin(async move {
-                if n == 1 {
-                    info!("NoMatch 継続(PC版): ゲームを起動します (初回・kill なし・Issue #210)");
-                    l.launch_app().await
-                } else {
-                    info!("NoMatch 継続(PC版): ゲームを kill+再起動します ({n} 回目・Issue #210)");
-                    l.restart_app(Duration::from_secs(RECOVERY_EXIT_WAIT_SECS))
-                        .await
-                }
-            })
-        }))
+        Some(escalation_recovery_hook(launcher.clone(), "PC版"))
     } else {
         None
     };
@@ -498,12 +663,14 @@ async fn run_with_windows(
             )
             .with_verify(verify_after_fire)
             .with_cancel(cancel_token)
-            .with_recovery_grace(recovery_grace),
+            .with_recovery_grace(recovery_grace)
+            .with_max_recovery_attempts(max_recovery_attempts),
             interval_dur,
             max_iters,
             recover_nomatch_threshold,
             recovery,
             goal,
+            artifacts,
         )
         .await
     } else {
@@ -518,12 +685,14 @@ async fn run_with_windows(
             )
             .with_verify(verify_after_fire)
             .with_cancel(cancel_token)
-            .with_recovery_grace(recovery_grace),
+            .with_recovery_grace(recovery_grace)
+            .with_max_recovery_attempts(max_recovery_attempts),
             interval_dur,
             max_iters,
             recover_nomatch_threshold,
             recovery,
             goal,
+            artifacts,
         )
         .await
     }
@@ -544,10 +713,12 @@ async fn run_with_windows(
     _recover_launch: bool,
     _recover_nomatch_threshold: u32,
     _recover_grace_secs: u64,
+    _max_recovery_attempts: u32,
     _verify_after_fire: bool,
     _goal: Option<Goal>,
     _cancel_token: CancellationToken,
     _evidence_dir: Option<&Path>,
+    _artifacts: &RunArtifacts,
 ) -> Result<()> {
     anyhow::bail!(
         "このバイナリは Windows 向けではないため PC 版 (Win32) バックエンドを使用できません"
@@ -569,6 +740,7 @@ async fn run_driver<C, I>(
     recover_nomatch_threshold: u32,
     recovery: Option<anaden_engine::RecoveryHook>,
     goal: Option<Goal>,
+    artifacts: &RunArtifacts,
 ) -> Result<()>
 where
     C: anaden_engine::Capture,
@@ -605,21 +777,22 @@ where
     println!("サイクル数: {}", outcome.iterations);
     println!("発火回数:   {}", outcome.fired_commands.len());
     println!("終端タスク: {}", outcome.terminal);
+    // 停止理由ラベルは engine (stop_reason_label) の単一情報源。
+    // studio の stdout 行解析 (log_status) もこの文言に依存する。
     println!(
         "停止理由:   {}",
-        match outcome.reason {
-            anaden_engine::LoopStopReason::Stop => "Stop アクション到達(正常)",
-            anaden_engine::LoopStopReason::TerminalTask => "終端タスク到達(正常)",
-            anaden_engine::LoopStopReason::MaxIterations => "最大サイクル到達",
-            anaden_engine::LoopStopReason::GoalReached => "宣言的ゴール到達(正常)",
-            anaden_engine::LoopStopReason::GoalTimeout => "ゴール未到達タイムアウト(soft failure)",
-            anaden_engine::LoopStopReason::Interrupted => "Ctrl+C/SIGINT で中断",
-            anaden_engine::LoopStopReason::CaptureError => "キャプチャエラーで停止",
-            anaden_engine::LoopStopReason::ExecuteError => "発火エラーで停止",
-        }
+        anaden_engine::stop_reason_label(outcome.reason.clone())
     );
     for (i, c) in outcome.fired_commands.iter().enumerate() {
         println!("  [{i}] {c:?}");
+    }
+    // 03-report-channel: run 成果物を機械可読レポートへ永続化 (fail-closed —
+    // 書込失敗は anyhow エラーで伝播し exit 非ゼロ。studio は本レポートを
+    // stdout スクレイピングの代替として消費する)。
+    if let Some(path) = artifacts.report_path.as_ref() {
+        run_report::write_report(path, &outcome)
+            .map_err(|e| anyhow::anyhow!("run レポート書込失敗 {}: {e}", path.display()))?;
+        info!("run レポート永続化: {}", path.display());
     }
     Ok(())
 }
@@ -709,17 +882,117 @@ fn spawn_ctrl_c_listener(token: CancellationToken) {
     });
 }
 
+/// stdout と run.log (ファイル) への二重出力 writer (03-report-channel)。
+///
+/// stdout 側は best-effort (パイプ切断等の失敗をファイル出力へ伝播させない)。
+/// ファイル側の失敗のみを呼出元へ返す。
+struct DualWriter {
+    file: std::sync::Arc<std::fs::File>,
+}
+
+impl std::io::Write for DualWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let mut stdout = std::io::stdout();
+        let _ = stdout.write(buf);
+        let _ = stdout.flush();
+        self.file.write(buf)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        let _ = std::io::stdout().flush();
+        self.file.flush()
+    }
+}
+
+/// tracing の初期化。`log_file` 指定時は stdout との二重出力とする
+/// (03-report-channel: run.log への永続化。ファイルへ ANSI 色付けを
+/// 混入させないため二重出力時は ansi を無効化)。
+fn init_tracing(log_file: Option<&Path>) {
+    let filter = tracing_subscriber::EnvFilter::try_from_default_env()
+        .unwrap_or_else(|_| "anaden=info".into());
+    let file = log_file.and_then(|p| {
+        std::fs::OpenOptions::new()
+            .create(true)
+            .append(true)
+            .open(p)
+            .ok()
+    });
+    match file {
+        Some(file) => {
+            let file = std::sync::Arc::new(file);
+            tracing_subscriber::fmt()
+                .with_env_filter(filter)
+                .with_ansi(false)
+                .with_writer(move || DualWriter { file: file.clone() })
+                .init();
+        }
+        None => {
+            tracing_subscriber::fmt().with_env_filter(filter).init();
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
-    // ロギングの初期化
-    tracing_subscriber::fmt()
-        .with_env_filter(
-            tracing_subscriber::EnvFilter::try_from_default_env()
-                .unwrap_or_else(|_| "anaden=info".into()),
-        )
-        .init();
-
+    // 03-report-channel: 成果物永続化先 (report.json + run.log) はコマンド解決後に
+    // 決定できるため、CLI パースをロギング初期化より先に行う (run.log への
+    // tracing 二重出力を初期化時に配線するため。パース前のログ出力は無い)。
     let cli = Cli::parse();
+
+    // Run / Routine コマンドの成果物永続化先を解決し、run.log / routine.log を
+    // 事前作成する。事前作成失敗 (読み取り専用ディレクトリ等) はロギング未初期化
+    // のため eprintln で通知し、永続化なし (stdout のみ) で継続する — コマンド自体は
+    // 実行可能なため fail-closed にしない。report 書込失敗は各実行部が
+    // fail-closed で伝播する。
+    let command_artifacts = match &cli.command {
+        Commands::Run {
+            pipeline_dir,
+            report_file,
+            no_persist,
+            ..
+        } => {
+            let resolved_dir = resolve_pipeline_dir(pipeline_dir, &cli_workspace_root());
+            let artifacts = run_report::resolve_run_artifacts(
+                &resolved_dir,
+                report_file.as_deref(),
+                *no_persist,
+                &run_report::run_artifact_timestamp(e2e::unix_now()),
+            );
+            if let Err(e) = artifacts.prepare() {
+                eprintln!("run 成果物ディレクトリの事前作成に失敗 (永続化せず継続): {e}");
+                RunArtifacts::default()
+            } else {
+                artifacts
+            }
+        }
+        // loop 10: routine も run と対称な既定永続化 (.anaden-routine/<ts>/
+        // routine-report.json + routine.log)。--dry-run は検証のみのため
+        // 成果物を作らない。
+        Commands::Routine {
+            routine_path,
+            dry_run: false,
+            report_file,
+            no_persist,
+            ..
+        } => {
+            let artifacts = run_report::resolve_routine_artifacts(
+                routine_artifacts_base_dir(routine_path),
+                report_file.as_deref(),
+                *no_persist,
+                &run_report::run_artifact_timestamp(e2e::unix_now()),
+            );
+            if let Err(e) = artifacts.prepare() {
+                eprintln!("routine 成果物ディレクトリの事前作成に失敗 (永続化せず継続): {e}");
+                RunArtifacts::default()
+            } else {
+                artifacts
+            }
+        }
+        _ => RunArtifacts::default(),
+    };
+
+    // ロギングの初期化。run.log / routine.log 指定時は stdout との二重出力。
+    init_tracing(command_artifacts.log_path.as_deref());
 
     match cli.command {
         Commands::Run {
@@ -734,13 +1007,13 @@ async fn main() -> Result<()> {
             recover_launch,
             recover_nomatch_threshold,
             recover_grace_secs,
+            max_recovery_attempts,
             verify_after_fire,
             goal,
             goal_file,
             evidence_run_id,
+            ..
         } => {
-            let parsed_goal = parse_goal_flag(goal.as_deref(), goal_file.as_deref())
-                .map_err(|e| anyhow::anyhow!("ゴール指定の解決失敗: {e}"))?;
             // UC-2 E2E 証跡 (T6): run-id 指定時のみ採取。無効 run-id は
             // fail-closed (パス逸脱を黙って無視しない)。
             let evidence_ctx = evidence_run_id.as_deref().and_then(|rid| {
@@ -769,6 +1042,12 @@ async fn main() -> Result<()> {
             // Issue #139 T2: pipeline_dir を workspace ルート基準で決定的解決
             // （cwd 依存の読込失敗を除去。相対指定は manifest 基準でも探索）。
             let pipeline_dir = resolve_pipeline_dir(&pipeline_dir, &cli_workspace_root());
+            // DEF-004 (US-GOAL-01): ゴール解決は明示フラグ (--goal/--goal-file) 優先、
+            // 未指定時は解決済み pipeline_dir の pipeline.toml manifest の [[goal]] を
+            // 既定ゴールとして採用する (スタジオ実行・素の run 両方で authored goals が
+            // 追加フラグ無しで効く)。
+            let parsed_goal = resolve_goal(goal.as_deref(), goal_file.as_deref(), &pipeline_dir)
+                .map_err(|e| anyhow::anyhow!("ゴール指定の解決失敗: {e}"))?;
             // Ctrl+C / SIGINT を拾う協調的キャンセルトークン。run_pipeline_live 内で
             // spawn_ctrl_c_listener を起動し、driver へ .with_cancel(token) 配線する。
             // トークン発火で driver は LoopStopReason::Interrupted(exit 2) で安全停止する。
@@ -785,10 +1064,12 @@ async fn main() -> Result<()> {
                 recover_launch,
                 recover_nomatch_threshold,
                 recover_grace_secs,
+                max_recovery_attempts,
                 verify_after_fire,
                 parsed_goal,
                 cancel_token,
                 evidence_ctx.as_ref().map(|(_, d)| d.as_path()),
+                &command_artifacts,
             )
             .await?;
             // run 終了後: メタデータ (tree hash・スクショ件数・runTimestamp) を永続化。
@@ -826,12 +1107,20 @@ async fn main() -> Result<()> {
             routine_path,
             dry_run,
             evidence_run_id,
+            report_file,
+            ..
         } => {
             // routine: 複数 pipeline の連続実行 (Issue #199)。終了コードは
             // run_routine_command の契約 (全完了=0 / 失敗・中断=2) に従う。
-            let code =
-                routine::run_routine_command(&routine_path, dry_run, evidence_run_id.as_deref())
-                    .await?;
+            // 成果物書込先は事前解決済みの command_artifacts (loop 10 既定永続化)。
+            let code = routine::run_routine_command(
+                &routine_path,
+                dry_run,
+                evidence_run_id.as_deref(),
+                report_file.as_deref(),
+                command_artifacts,
+            )
+            .await?;
             std::process::exit(code);
         }
     }
@@ -845,6 +1134,20 @@ mod tests {
     use super::*;
 
     // ---- resolve_pipeline_dir (Issue #139 T2, cwd 非依存の決定的解決) ----
+
+    /// routine 既定永続化の基準ディレクトリ抽出 (loop 10)。
+    /// 親を持つパスは親、ベアファイル名は `.` へフォールバック。
+    #[test]
+    fn routine_artifacts_base_dir_parent_or_dot() {
+        assert_eq!(
+            routine_artifacts_base_dir(Path::new("templates/routines/daily.toml")),
+            Path::new("templates/routines")
+        );
+        assert_eq!(
+            routine_artifacts_base_dir(Path::new("daily.toml")),
+            Path::new(".")
+        );
+    }
 
     #[test]
     fn resolve_pipeline_dir_prefers_existing_cwd_path() {
@@ -1009,12 +1312,12 @@ mod tests {
     // ---- parse_goal_flag (T4 option B: CLI flag --goal / --goal-file) ----
     //
     // Issue #37 acceptance: `run` コマンドが宣言的 Goal を受け取れること。
-    // T4-design-gate で option (B) CLI flag を選定した根拠:
-    //   - load_pipeline_manifest/PipelineManifest は Issue #38 で削除対象となり
-    //     現 repo に存在しない(CTO gate の指摘通り)。option (A) は greenfield であり
-    //     「restoration」ではない。よって manifest reader を新設せず CLI flag で最低限の
-    //     配線にとどめる。
-    //   - TOML doc AC は toml::from_str::<Goal>(goal.rs:348-408 で round-trip 済み) で充足可能。
+    // T4-design-gate で option (B) CLI flag を選定した根拠 (当時):
+    //   - load_pipeline_manifest/PipelineManifest は Issue #38 で削除対象とされ
+    //     manifest reader は greenfield な dead-code になる懸念があった。
+    //   その後 manifest は anaden-vision に (再)実装され studio が保存するように
+    //   なったため、DEF-004 (07-manifest-goal) で resolve_goal が manifest 既定
+    //   採用を担当し、本関数は明示フラグ解決として存続する。
     //
     // 本 helper は純粋関数(I/O は --goal-file の fs::read_to_string のみ)で、
     // --goal と --goal-file の両方 None なら None を返す(後方互換: 無限ループ維持)。
@@ -1153,6 +1456,223 @@ mod tests {
         assert!(
             format!("{err}").contains("exclusive"),
             "error should explain mutual exclusivity, got: {err}"
+        );
+    }
+
+    // ---- resolve_goal: manifest 既定ゴール (DEF-004 / US-GOAL-01) ----
+
+    /// fixture: pipeline.toml に goals を持つ pipeline dir を作る。
+    fn manifest_goal_dir(goals_toml: &str) -> tempfile::TempDir {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pipeline.toml"),
+            format!("start_task = \"SomeTaskPc\"\n{goals_toml}"),
+        )
+        .unwrap();
+        tmp
+    }
+
+    /// DEF-004: フラグ未指定時は manifest の goals が既定ゴールとして採用される
+    /// (単一 goal はそのまま — 名前も維持)。
+    #[test]
+    fn resolve_goal_manifest_single_goal_used_when_flags_absent() {
+        let dir = manifest_goal_dir(
+            "[[goal]]\nname = \"loop3\"\n[goal.stop]\nLoopCount = { target = 3 }\n",
+        );
+        let g = resolve_goal(None, None, dir.path())
+            .expect("resolve")
+            .unwrap();
+        assert_eq!(g.name, "loop3");
+        assert!(matches!(
+            g.stop,
+            anaden_core::StopCondition::LoopCount { target: 3 }
+        ));
+    }
+
+    /// DEF-004: goals 無宣言 (= 空) の manifest は従来どおりゴール無し
+    /// (無限ループ / MaxIterations 挙動の後方互換)。
+    #[test]
+    fn resolve_goal_manifest_empty_goals_returns_none() {
+        let dir = manifest_goal_dir("");
+        assert!(
+            resolve_goal(None, None, dir.path())
+                .expect("resolve")
+                .is_none()
+        );
+    }
+
+    /// DEF-004: manifest 不在 pipeline は従来どおりゴール無し。
+    #[test]
+    fn resolve_goal_manifest_missing_returns_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        assert!(
+            resolve_goal(None, None, tmp.path())
+                .expect("resolve")
+                .is_none()
+        );
+    }
+
+    /// DEF-004: 明示フラグは manifest より優先 (マージしない・単一情報源)。
+    #[test]
+    fn resolve_goal_explicit_flag_overrides_manifest() {
+        let dir = manifest_goal_dir(
+            "[[goal]]\nname = \"manifest_goal\"\n[goal.stop]\nLoopCount = { target = 99 }\n",
+        );
+        let g = resolve_goal(
+            Some("name = \"flag_goal\"\n[stop]\nLoopCount = { target = 1 }\n"),
+            None,
+            dir.path(),
+        )
+        .expect("resolve")
+        .unwrap();
+        assert_eq!(g.name, "flag_goal", "明示 --goal が manifest に勝つ");
+    }
+
+    /// DEF-004: manifest が存在して parse 不能なら Err (fail-closed)。
+    /// 壊れた manifest に黙ってゴール無しで実行し続けない。
+    #[test]
+    fn resolve_goal_broken_manifest_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pipeline.toml"), "not valid toml =").unwrap();
+        let err = resolve_goal(None, None, tmp.path()).expect_err("broken manifest must error");
+        assert!(
+            format!("{err}").contains("pipeline.toml"),
+            "error should mention pipeline.toml, got: {err}"
+        );
+    }
+
+    /// DEF-004: 複数 [[goal]] は終端条件リスト = Any 合成 (いずれかで停止)。
+    /// goal-manifest.md の「[[goal]] = ゴール(終端条件)」宣言と、login の
+    /// Any パターン (Field到達 OR Timeout 安全弁) と同一セマンティクス。
+    #[test]
+    fn resolve_goal_multiple_goals_composed_as_any() {
+        let dir = manifest_goal_dir(
+            "[[goal]]\nname = \"find\"\n[goal.stop]\nLoopCount = { target = 5 }\n\
+             [[goal]]\nname = \"cap\"\n[goal.stop]\nTimeout = { secs = 600 }\n",
+        );
+        let g = resolve_goal(None, None, dir.path())
+            .expect("resolve")
+            .unwrap();
+        assert_eq!(g.name, "any(find, cap)");
+        match g.stop {
+            anaden_core::StopCondition::Any { conditions } => {
+                assert_eq!(conditions.len(), 2);
+                assert!(matches!(
+                    conditions[0],
+                    anaden_core::StopCondition::LoopCount { target: 5 }
+                ));
+                assert!(matches!(
+                    conditions[1],
+                    anaden_core::StopCondition::Timeout { secs: 600 }
+                ));
+            }
+            other => panic!("Any 合成が期待されるが {other:?}"),
+        }
+    }
+
+    /// DEF-004: リポジトリ実 manifest (login) の goals が解決される結合検証。
+    /// login の goal は Any (Field 到達 OR 120s 安全弁)。
+    #[test]
+    fn resolve_goal_repo_login_manifest_resolves() {
+        let root = cli_workspace_root();
+        let dir = root.join("templates").join("pipelines").join("login");
+        let g = resolve_goal(None, None, &dir).expect("resolve").unwrap();
+        assert_eq!(g.name, "login_field_reached");
+        assert!(matches!(g.stop, anaden_core::StopCondition::Any { .. }));
+    }
+
+    // ---- run レポート永続化 (03-report-channel) ----
+
+    /// デバイス不要の fake バックエンド (engine テストの FakeCapture 相当)。
+    /// capture 常時失敗 → recovery 無しで CaptureError 即停止を引き出す。
+    mod fake_backend {
+        use anaden_core::InputAction;
+        use anaden_device::DeviceError;
+        use anaden_engine::{Capture, Input};
+        use async_trait::async_trait;
+
+        pub(super) struct FailCapture;
+
+        #[async_trait]
+        impl Capture for FailCapture {
+            async fn capture(&self) -> Result<image::DynamicImage, DeviceError> {
+                Err(DeviceError::CommandFailed {
+                    message: "fake capture failure (test)".into(),
+                })
+            }
+        }
+
+        pub(super) struct NoopInput;
+
+        #[async_trait]
+        impl Input for NoopInput {
+            async fn execute(&self, _action: &InputAction) -> Result<(), DeviceError> {
+                Ok(())
+            }
+        }
+    }
+
+    /// 統合 (デバイス不要の fake pipeline): run_driver がループ終了後に
+    /// report.json を書き、停止理由・サイクル数・発火数が機械可読形式で
+    /// 入っていること。既定永続化 (report.json + run.log) も同時に検証。
+    #[tokio::test]
+    async fn run_driver_writes_report_file_with_stop_reason() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline_dir = dir.path().join("pl");
+        std::fs::create_dir_all(&pipeline_dir).unwrap();
+        // 既定永続化経路 (report.json + run.log) を解決して事前作成。
+        let artifacts =
+            run_report::resolve_run_artifacts(&pipeline_dir, None, false, "20260101-000000");
+        artifacts.prepare().unwrap();
+
+        let driver = anaden_engine::PipelineDriver::new(
+            fake_backend::FailCapture,
+            fake_backend::NoopInput,
+            anaden_engine::PipelineState::new("t"),
+            vec![],
+            1280,
+            300,
+        );
+        run_driver(driver, Duration::ZERO, 3, 1, None, None, &artifacts)
+            .await
+            .unwrap();
+
+        // 既定場所に report.json + run.log が存在する。
+        let base = pipeline_dir.join(".anaden-run").join("20260101-000000");
+        assert!(base.join("run.log").is_file(), "run.log missing");
+        let file = std::fs::File::open(base.join("report.json")).unwrap();
+        let report: anaden_engine::ProgressReport = serde_json::from_reader(file).unwrap();
+        assert_eq!(
+            report.stop_reason,
+            Some(anaden_engine::LoopStopReason::CaptureError)
+        );
+        assert_eq!(report.iterations, 0);
+        assert_eq!(report.fired_count, 0);
+    }
+
+    /// 統合: `--no-persist` 相当 (artifacts 無効) では何も書かない。
+    #[tokio::test]
+    async fn run_driver_no_persist_writes_nothing() {
+        let dir = tempfile::tempdir().unwrap();
+        let pipeline_dir = dir.path().join("pl");
+        std::fs::create_dir_all(&pipeline_dir).unwrap();
+        let artifacts = run_report::resolve_run_artifacts(&pipeline_dir, None, true, "ts");
+
+        let driver = anaden_engine::PipelineDriver::new(
+            fake_backend::FailCapture,
+            fake_backend::NoopInput,
+            anaden_engine::PipelineState::new("t"),
+            vec![],
+            1280,
+            300,
+        );
+        run_driver(driver, Duration::ZERO, 3, 1, None, None, &artifacts)
+            .await
+            .unwrap();
+
+        assert!(
+            !pipeline_dir.join(".anaden-run").exists(),
+            "no-persist must not create artifacts dir"
         );
     }
 }

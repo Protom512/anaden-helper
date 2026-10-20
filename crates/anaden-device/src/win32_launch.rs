@@ -230,6 +230,10 @@ fn terminate_pid(pid: u32) -> windows::core::Result<()> {
 
 /// `ensure_open` の同期本体。プローブ `run()` の判定ロジックを `EnsureOutcome` へ読み替える。
 ///
+/// 各フェーズは [`precheck_child_running`] / [`wait_for_child_discovery`] /
+/// [`monitor_child_alive`] に分離しており、本関数は進行の繋ぎ合わせと
+/// ログ出力のみを担う。
+///
 /// 戻り値:
 /// - `Ok(AlreadyOpen)`: 事前ガードで子プロセスが既に存在した。
 /// - `Ok(Launched)`: spawn → 子出現 → 生存確認(STILL_ACTIVE 維持)まで完遂。
@@ -243,18 +247,8 @@ fn run_blocking(
 ) -> Result<EnsureOutcome, DeviceError> {
     // [ステップ0] 事前ガード: 既に子が存在すれば AlreadyOpen。
     //   既存プロセスが残っていると後続の「子発見」が既存プロセスにヒットして偽成功になる。
-    match snapshot_processes() {
-        Ok(entries) => {
-            if entries.iter().any(|e| e.name.eq_ignore_ascii_case(child)) {
-                info!("Win32Launch: {child} は既に起動中 → AlreadyOpen");
-                return Ok(EnsureOutcome::AlreadyOpen);
-            }
-        }
-        Err(e) => {
-            return Err(DeviceError::CommandFailed {
-                message: format!("Win32Launch: 事前スナップショット失敗: {e}"),
-            });
-        }
+    if matches!(precheck_child_running(child)?, Precheck::AlreadyOpen) {
+        return Ok(EnsureOutcome::AlreadyOpen);
     }
 
     // [ステップ1] Launcher spawn。std::thread::sleep を含む待機が続くので blocking 内。
@@ -273,53 +267,27 @@ fn run_blocking(
     let overall_deadline = launcher_started + wait;
 
     // [ステップ2] --wait 期間内に子が出現するかポーリング。
-    let mut first_seen: Option<(u32, u32)> = None; // (pid, parent_pid)
-    let mut snapshot_failed = false;
-    while Instant::now() < overall_deadline {
-        match snapshot_processes() {
-            Ok(entries) => {
-                for entry in &entries {
-                    if entry.name.eq_ignore_ascii_case(child) {
-                        first_seen = Some((entry.pid, entry.parent_pid));
-                        break;
-                    }
-                }
-                if first_seen.is_some() {
-                    break;
-                }
-            }
-            Err(e) => {
-                warn!("Win32Launch: CreateToolhelp32Snapshot 失敗: {e}");
-                snapshot_failed = true;
-                break;
-            }
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-
-    let (child_pid, child_parent_pid) = match first_seen {
-        Some(v) => {
-            if v.1 == launcher_child {
+    let (child_pid, child_parent_pid) = match wait_for_child_discovery(child, overall_deadline) {
+        ChildDiscovery::Seen(pid, parent_pid) => {
+            if parent_pid == launcher_child {
                 info!(
-                    "Win32Launch: 子発見 pid={} parent={} (Launcher({}) → child, OK)",
-                    v.0, v.1, launcher_child
+                    "Win32Launch: 子発見 pid={pid} parent={parent_pid} (Launcher({launcher_child}) → child, OK)"
                 );
             } else {
                 warn!(
-                    "Win32Launch: 子発見 pid={} parent_pid={} != launcher_pid={} (別世代/既存の可能性)",
-                    v.0, v.1, launcher_child
+                    "Win32Launch: 子発見 pid={pid} parent_pid={parent_pid} != launcher_pid={launcher_child} (別世代/既存の可能性)"
                 );
             }
-            v
+            (pid, parent_pid)
         }
-        None => {
-            if snapshot_failed {
-                return Err(DeviceError::CommandFailed {
-                    message:
-                        "Win32Launch: CreateToolhelp32Snapshot 呼び出し失敗により子を監視できなかった"
-                            .to_string(),
-                });
-            }
+        ChildDiscovery::SnapshotFailed => {
+            return Err(DeviceError::CommandFailed {
+                message:
+                    "Win32Launch: CreateToolhelp32Snapshot 呼び出し失敗により子を監視できなかった"
+                        .to_string(),
+            });
+        }
+        ChildDiscovery::NotAppeared => {
             warn!(
                 "Win32Launch: 子 {child} が {:.0}s 期間内に出現しなかった → Timeout",
                 wait.as_secs_f64()
@@ -329,11 +297,94 @@ fn run_blocking(
     };
 
     // [ステップ3] 子発見後、GetExitCodeProcess == STILL_ACTIVE が継続するか監視。
+    let watch = monitor_child_alive(child_pid, overall_deadline)?;
+    if watch.alive {
+        info!(
+            "Win32Launch: LAUNCH_OK child_pid={child_pid} survived={}s (STILL_ACTIVE)",
+            wait.as_secs()
+        );
+        Ok(EnsureOutcome::Launched)
+    } else {
+        warn!(
+            "Win32Launch: 子 pid={child_pid} parent={child_parent_pid} が即死: exit_code=0x{:08X} → Timeout",
+            watch.last_exit_code
+        );
+        Ok(EnsureOutcome::Timeout)
+    }
+}
+
+/// [ステップ0] 事前ガードの結果。
+enum Precheck {
+    /// 子プロセスが既に存在する (= AlreadyOpen)。
+    AlreadyOpen,
+    /// 子プロセスは存在しない (起動へ進む)。
+    NotRunning,
+}
+
+/// [ステップ0] 事前ガード: 子プロセスが既に起動中かどうかをスナップショットで判定。
+fn precheck_child_running(child: &str) -> Result<Precheck, DeviceError> {
+    match snapshot_processes() {
+        Ok(entries) => {
+            if entries.iter().any(|e| e.name.eq_ignore_ascii_case(child)) {
+                info!("Win32Launch: {child} は既に起動中 → AlreadyOpen");
+                Ok(Precheck::AlreadyOpen)
+            } else {
+                Ok(Precheck::NotRunning)
+            }
+        }
+        Err(e) => Err(DeviceError::CommandFailed {
+            message: format!("Win32Launch: 事前スナップショット失敗: {e}"),
+        }),
+    }
+}
+
+/// [ステップ2] の子発見ポーリング結果。
+enum ChildDiscovery {
+    /// 子を (pid, parent_pid) 付きで発見。
+    Seen(u32, u32),
+    /// deadline までに出現しなかった。
+    NotAppeared,
+    /// スナップショット API 失敗により監視不能 (fail-closed)。
+    SnapshotFailed,
+}
+
+/// [ステップ2] `deadline` まで子プロセスの出現をポーリングする。
+fn wait_for_child_discovery(child: &str, deadline: Instant) -> ChildDiscovery {
+    while Instant::now() < deadline {
+        match snapshot_processes() {
+            Ok(entries) => {
+                if let Some(entry) = entries.iter().find(|e| e.name.eq_ignore_ascii_case(child)) {
+                    return ChildDiscovery::Seen(entry.pid, entry.parent_pid);
+                }
+            }
+            Err(e) => {
+                warn!("Win32Launch: CreateToolhelp32Snapshot 失敗: {e}");
+                return ChildDiscovery::SnapshotFailed;
+            }
+        }
+        std::thread::sleep(POLL_INTERVAL);
+    }
+    ChildDiscovery::NotAppeared
+}
+
+/// [ステップ3] の生存監視結果。
+struct ChildWatch {
+    /// STILL_ACTIVE が維持された (生存) なら `true`。
+    alive: bool,
+    /// 最後に観測した exit code (即死時のワーンログ用)。
+    last_exit_code: u32,
+}
+
+/// [ステップ3] `deadline` まで子の GetExitCodeProcess を監視する。
+///
+/// 初回から OpenProcess 不可 (権限等) は真の API エラーとして [`Err`]。
+/// 一度でも観測成功した後に不可となれば「子消失 = 即死」(alive=false)。
+fn monitor_child_alive(child_pid: u32, deadline: Instant) -> Result<ChildWatch, DeviceError> {
     let mut last_exit_code: u32 = STILL_ACTIVE_U32;
     let mut alive = true;
     // 初回から OpenProcess 不可(権限等)は真の API エラーと区別するための成功履歴。
     let mut ever_queried_ok = false;
-    while Instant::now() < overall_deadline {
+    while Instant::now() < deadline {
         match query_exit_code(child_pid) {
             Ok(code) => {
                 ever_queried_ok = true;
@@ -352,31 +403,18 @@ fn run_blocking(
                     );
                     alive = false;
                     break;
-                } else {
-                    return Err(DeviceError::CommandFailed {
-                        message: format!(
-                            "Win32Launch: OpenProcess 呼び出し失敗(初回から不可): {e}"
-                        ),
-                    });
                 }
+                return Err(DeviceError::CommandFailed {
+                    message: format!("Win32Launch: OpenProcess 呼び出し失敗(初回から不可): {e}"),
+                });
             }
         }
         std::thread::sleep(POLL_INTERVAL);
     }
-
-    if alive {
-        info!(
-            "Win32Launch: LAUNCH_OK child_pid={child_pid} survived={}s (STILL_ACTIVE)",
-            wait.as_secs()
-        );
-        Ok(EnsureOutcome::Launched)
-    } else {
-        warn!(
-            "Win32Launch: 子 pid={child_pid} parent={child_parent_pid} が即死: exit_code=0x{:08X} → Timeout",
-            last_exit_code
-        );
-        Ok(EnsureOutcome::Timeout)
-    }
+    Ok(ChildWatch {
+        alive,
+        last_exit_code,
+    })
 }
 
 /// `Launcher.exe` を起動し、その PID を返す。

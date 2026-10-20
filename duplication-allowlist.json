@@ -1,0 +1,221 @@
+{
+  "_comment": "duplication gate (scripts/quality/duplication_gate.mjs) の免除リスト。設計エージェント実読判定により偽陽性と確定したペアのみ登録する (承認プラン Phase 0 item 3)。関数ペアの実体が共通化された場合はエントリを削除すること。",
+  "entries": [
+    {
+      "file": "crates/anaden-cli/src/main.rs",
+      "functions": [
+        "run_pipeline_live",
+        "run_with_windows"
+      ],
+      "similarityAtRegistration": 0.9276,
+      "reason": "704-726 は cfg(not(windows)) の bail stub。実体 538-699 は run_pipeline_live の呼び出し先。シグネチャ一致のみの偽陽性"
+    },
+    {
+      "file": "crates/anaden-cli/src/run_report.rs",
+      "functions": [
+        "resolve_run_artifacts",
+        "resolve_routine_artifacts"
+      ],
+      "similarityAtRegistration": 0.9404,
+      "reason": "既に resolve_artifacts_at に共通化済み (wrapper 対称性)。解消不要"
+    },
+    {
+      "file": "crates/anaden-device/src/win32_input.rs",
+      "functions": [
+        "click",
+        "postmessage_click"
+      ],
+      "similarityAtRegistration": 0.84,
+      "reason": "dispatcher と呼び出し先の injector — 異なる責務の Win32 操作ペア"
+    },
+    {
+      "file": "crates/anaden-device/src/win32_input.rs",
+      "functions": [
+        "client_to_screen_abs",
+        "bring_to_foreground"
+      ],
+      "similarityAtRegistration": 0.84,
+      "reason": "全く別の Win32 操作 (座標変換 vs ウィンドウ前面化)。トークン列が似ているだけ"
+    },
+    {
+      "file": "crates/anaden-studio/src/scenario_panel.rs",
+      "functions": [
+        "link_saved_pipeline",
+        "ui_task_link"
+      ],
+      "similarityAtRegistration": 0.9034,
+      "reason": "語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。link_saved_pipeline はドメインフロー (ガード→scenario_task_link 呼出→status 変換)、ui_task_link は egui 描画 (CollapsingHeader/TextEdit/ComboBox)。共有するのは UC-3 の同じ場面語彙 (task_id_input / bind_selection / タスク登録・有効化 等の文字列とフィールド名) で、制御フローは無共有。元の実双生児 register_as_new_task↔bind_stub_task (92.81%) は LinkMode enum データ化で構造解消済み (両者は 3 行 wrapper になった)"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_discrimination_section",
+        "authoring_canvas"
+      ],
+      "similarityAtRegistration": 0.9103,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_proposals_section",
+        "authoring_canvas"
+      ],
+      "similarityAtRegistration": 0.8563,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "render_authoring",
+        "authoring_proposals_section"
+      ],
+      "similarityAtRegistration": 0.8545,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_proposals_section",
+        "authoring_discrimination_section"
+      ],
+      "similarityAtRegistration": 0.915,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_save_section",
+        "authoring_pipeline_section"
+      ],
+      "similarityAtRegistration": 0.9076,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_capture_section",
+        "authoring_pipeline_section"
+      ],
+      "similarityAtRegistration": 0.8814,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_capture_section",
+        "authoring_save_section"
+      ],
+      "similarityAtRegistration": 0.8704,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_discrimination_section",
+        "authoring_scenario_section"
+      ],
+      "similarityAtRegistration": 0.8831,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_pipeline_section",
+        "authoring_scenario_section"
+      ],
+      "similarityAtRegistration": 0.8804,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_capture_section",
+        "authoring_scenario_section"
+      ],
+      "similarityAtRegistration": 0.8847,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_proposals_section",
+        "authoring_scenario_section"
+      ],
+      "similarityAtRegistration": 0.8695,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "render_authoring",
+        "authoring_engine_section"
+      ],
+      "similarityAtRegistration": 0.8779,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_save_section",
+        "authoring_scenario_section"
+      ],
+      "similarityAtRegistration": 0.8781,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_engine_section",
+        "authoring_proposals_section"
+      ],
+      "similarityAtRegistration": 0.9121,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_engine_section",
+        "authoring_capture_section"
+      ],
+      "similarityAtRegistration": 0.8523,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_data_section",
+        "authoring_capture_section"
+      ],
+      "similarityAtRegistration": 0.9089,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_data_section",
+        "authoring_proposals_section"
+      ],
+      "similarityAtRegistration": 0.8885,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_data_section",
+        "authoring_pipeline_section"
+      ],
+      "similarityAtRegistration": 0.8581,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_authoring.rs",
+      "functions": [
+        "authoring_data_section",
+        "authoring_engine_section"
+      ],
+      "similarityAtRegistration": 0.9001,
+      "reason": "egui セクション renderer 群の語彙重複によるツール偽陽性 (Issue #214 Phase 4 実測)。render_authoring の巨大クロージャ (cog 35) をセクション method 化した結果、同ファイル内の UI セクション群 (label/button/horizontal/ComboBox の同一イディオム) が構造類似と判定される。各セクションは異なるデータ・異なる操作を描画しロジック重複なし。統合すると複雑度違反 (cog>20) が再発するため、セクション分割 + 本免除が両 gate の両立解"
+    }
+  ]
+}

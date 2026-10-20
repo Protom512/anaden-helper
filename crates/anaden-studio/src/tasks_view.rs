@@ -8,7 +8,7 @@
 
 use std::path::Path;
 
-use crate::tasks::{TaskDefinition, TaskKind, resolve_start_task, spawn_args};
+use crate::tasks::{TaskDefinition, TaskKind, resolve_start_task_name, spawn_args};
 
 /// チェックボックスの表示ラベル (豆腐なし ASCII 括弧 + 日本語)。
 /// implemented=false には「未実装」接尾を付けグレー表示 (嘘の動作可能表示禁止)。
@@ -43,7 +43,7 @@ pub struct TaskDetailView {
     pub kind: &'static str,
     /// pipeline 実行時の対象ディレクトリ (root 結合済みパス文字列)。
     pub pipeline_dir: Option<String>,
-    /// 開始タスク名 (未宣言時は [`resolve_start_task`] の解決結果)。
+    /// 開始タスク名 (未宣言時は [`resolve_start_task_name`] の解決結果 = TaskDef 名)。
     pub start_task: Option<String>,
     /// 実引数プレビュー (子プロセスへ実際に渡される引数列)。
     pub spawn_args: Vec<String>,
@@ -63,8 +63,9 @@ impl TaskDetailView {
 
 /// タスク定義から GUI 詳細表示モデルを組み立てる純関数 (UC-3)。
 ///
-/// - `start_task` は未宣言時に [`resolve_start_task`] の解決結果を反映
-///   ([`spawn_args`] と同じ解決 — 実行と表示で同一の引数になる)。
+/// - `start_task` は未宣言時に [`resolve_start_task_name`] の解決結果を反映
+///   ([`spawn_args`] と同じ解決 — 実行と表示で同一の引数になる。DEF-006:
+///   stem でなく manifest start_task / TaskDef 名を解決する)。
 /// - `implemented = false`、または実行に必要な引数が解決不能 (pipeline_dir
 ///   実在せず start_task 不明) の場合は `unimplemented = true` + 理由を含む
 ///   (fail-closed: 嘘の実行可能表示をしない)。
@@ -87,7 +88,7 @@ pub fn task_detail_view(
                 .pipeline_dir
                 .as_ref()
                 .map(|d| root.join(d))
-                .and_then(|abs| resolve_start_task(&abs)),
+                .and_then(|abs| resolve_start_task_name(&abs)),
         },
     };
     let spawn_args = spawn_args(def, target, serial, root);
@@ -227,8 +228,9 @@ pipeline_dir = "templates/pipelines/login"
         assert!(!view.unimplemented);
     }
 
-    /// 正常系: start_task 未宣言タスクは resolve_start_task の解決結果を
-    /// 詳細ビューへ反映する (リポジトリ実 pipeline で結合検証)。
+    /// 正常系: start_task 未宣言タスクは resolve_start_task_name (manifest の
+    /// start_task = TaskDef 名) の解決結果を詳細ビューへ反映する
+    /// (リポジトリ実 pipeline で結合検証・DEF-006: stem でなく名前)。
     #[test]
     fn test_detail_view_pipeline_run_resolves_undeclared_start_task() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
@@ -241,10 +243,10 @@ pipeline_dir = "templates/pipelines/nav_to_field_pc"
 "#;
         let def = TaskDefinition::parse_toml(src, Path::new("nav_to_field_pc.toml")).unwrap();
         let view = task_detail_view(&def, "windows", None, &root);
-        assert_eq!(view.start_task.as_deref(), Some("field_hud_top"));
+        assert_eq!(view.start_task.as_deref(), Some("TapToStartPc"));
         assert_eq!(
             view.spawn_args.last().map(String::as_str),
-            Some("field_hud_top")
+            Some("TapToStartPc")
         );
         assert!(!view.unimplemented);
     }

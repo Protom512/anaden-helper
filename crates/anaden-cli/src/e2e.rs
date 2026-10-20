@@ -49,12 +49,14 @@ pub fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// ISO 8601 (UTC, 秒精度) 文字列を Unix 秒から生成。
+/// Unix 秒 → (年, 月, 日, 時, 分, 秒) (UTC・秒精度)。
 ///
 /// 実装はcivil-from-days (Howard Hinnant アルゴリズム) の手書き変換。
 /// chrono 依存を増やさないための最小実装 (テストで既知値を検証)。
+/// 03-report-channel: ファイル名安全なタイムスタンプ (run_report) との
+/// 単一変換源として pub(crate) 公開。
 #[must_use]
-pub fn iso8601_utc(unix_secs: u64) -> String {
+pub(crate) fn date_parts_unix(unix_secs: u64) -> (i64, u64, u64, u64, u64, u64) {
     let days = (unix_secs / 86_400) as i64;
     let secs_of_day = unix_secs % 86_400;
     // civil_from_days: days=1970-01-01 起点の経過日 → y/m/d
@@ -68,12 +70,21 @@ pub fn iso8601_utc(unix_secs: u64) -> String {
     let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
     let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
     let y = if m <= 2 { y + 1 } else { y };
-    format!(
-        "{y:04}-{m:02}-{d:02}T{:02}:{:02}:{:02}Z",
+    (
+        y,
+        m as u64,
+        d as u64,
         secs_of_day / 3600,
         (secs_of_day % 3600) / 60,
-        secs_of_day % 60
+        secs_of_day % 60,
     )
+}
+
+/// ISO 8601 (UTC, 秒精度) 文字列を Unix 秒から生成。
+#[must_use]
+pub fn iso8601_utc(unix_secs: u64) -> String {
+    let (y, m, d, hh, mm, ss) = date_parts_unix(unix_secs);
+    format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
 /// FNV-1a 64bit hash (tree hash 計算の単一情報源)。

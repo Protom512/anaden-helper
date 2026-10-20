@@ -19,7 +19,7 @@ pub use crate::tasks_def::{
 };
 pub use crate::tasks_queue::{
     QueueAction, QueueEntry, QueueExec, QueueState, TaskListState, TaskQueue, resolve_start_task,
-    spawn_args,
+    resolve_start_task_name, spawn_args,
 };
 pub use crate::tasks_view::{
     QueueOrderRow, TaskDetailView, checkbox_label, queue_order_rows, queue_position_label,

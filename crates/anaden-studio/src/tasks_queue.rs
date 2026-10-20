@@ -18,6 +18,7 @@
 use std::collections::BTreeMap;
 use std::path::Path;
 
+use crate::history::RunOutcome;
 use crate::tasks_def::{TaskDefinition, TaskError, TaskKind, load_task_definitions};
 
 /// チェックボックス選択から組み立てられた実行キュー。
@@ -218,6 +219,10 @@ pub enum QueueState {
         /// 失敗タスクの exit code (wait 失敗等は None)。
         exit_code: Option<i32>,
     },
+    /// `current` 番目が exit 0 でも成果ゼロの打ち切り (BudgetExhausted) で
+    /// 終了し、明示的な継続判断待ち (04-studio-maxiters-outcome / F6)。
+    /// 従来は exit 0 一律で自動継続していた誤成功を停止させる。
+    PausedAfterBudgetExhausted { current: usize },
     /// 全完了または abort による終端状態。
     Completed,
 }
@@ -245,6 +250,8 @@ pub enum QueueAction {
 ///
 /// 失敗 (非零 exit / 不明) では**自動継続しない**: `PausedAfterFailure` で
 /// 停止し、[`QueueExec::resume`] の明示呼び出しでのみ次タスクを開始する。
+/// exit 0 でも成果ゼロの打ち切り (BudgetExhausted・F6) も同様に
+/// `PausedAfterBudgetExhausted` で停止する (誤成功のキュー継続を排除)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueueExec {
     state: QueueState,
@@ -278,12 +285,12 @@ impl QueueExec {
         &self.entries
     }
 
-    /// 現在対象 (Running / PausedAfterFailure) のエントリ。
+    /// 現在対象 (Running / PausedAfterFailure / PausedAfterBudgetExhausted) のエントリ。
     pub fn current_entry(&self) -> Option<&QueueEntry> {
         match self.state {
-            QueueState::Running { current } | QueueState::PausedAfterFailure { current, .. } => {
-                self.entries.get(current)
-            }
+            QueueState::Running { current }
+            | QueueState::PausedAfterFailure { current, .. }
+            | QueueState::PausedAfterBudgetExhausted { current } => self.entries.get(current),
             QueueState::Pending | QueueState::Completed => None,
         }
     }
@@ -305,30 +312,59 @@ impl QueueExec {
 
     /// 実行中タスクの終了観測 (`LogEvent::Exit` が唯一の完了シグナル)。
     ///
-    /// Running 以外での呼び出しは [`QueueAction::Noop`]。
-    /// - `Some(0)`: 次エントリの起動 (`Start`)、残り無しなら完了 (`QueueCompleted`)
-    /// - 非零 / `None`: 失敗停止 (`PausedAfterFailure` + `WaitForExit`)。
-    ///   **自動継続禁止** — 継続は [`QueueExec::resume`] の明示呼び出し専用。
+    /// exit code のみから分類できる経路 (report 未読み込み) の簡易ラッパー:
+    /// `Some(0)` → Success、非零/`None` → Failed として
+    /// [`QueueExec::on_exit_classified`] へ委譲する。
     pub fn on_exit(&mut self, code: Option<i32>) -> QueueAction {
+        let outcome = if code == Some(0) {
+            RunOutcome::Success
+        } else {
+            RunOutcome::Failed
+        };
+        self.on_exit_classified(outcome, code)
+    }
+
+    /// 成否分類付きの終了観測 (04-studio-maxiters-outcome / F6)。
+    ///
+    /// `outcome` には [`crate::history::classify_outcome`] (report 停止理由
+    /// ベースの分類) の結果を渡す。継続 policy は exit code 一律ではなく
+    /// この outcome enum で switch する:
+    /// - Success — 次エントリの起動 (`Start`)、残り無しなら完了 (`QueueCompleted`)
+    /// - BudgetExhausted — 予算切れ停止 (`PausedAfterBudgetExhausted` +
+    ///   `WaitForExit`)。exit 0 でも成果ゼロ (= 進捗ゼロ) のタスクで自動継続
+    ///   しない (F6 の誤成功キュー継続の解消)。継続は [`QueueExec::resume`] 専用。
+    /// - Failed — 失敗停止 (`PausedAfterFailure` + `WaitForExit`)。
+    ///   **自動継続禁止** — 継続は [`QueueExec::resume`] の明示呼び出し専用。
+    pub fn on_exit_classified(
+        &mut self,
+        outcome: RunOutcome,
+        exit_code: Option<i32>,
+    ) -> QueueAction {
         let QueueState::Running { current } = self.state else {
             return QueueAction::Noop;
         };
-        if code == Some(0) {
-            self.advance_from(current)
-        } else {
-            self.state = QueueState::PausedAfterFailure {
-                current,
-                exit_code: code,
-            };
-            QueueAction::WaitForExit
+        match outcome {
+            RunOutcome::Success => self.advance_from(current),
+            RunOutcome::BudgetExhausted => {
+                self.state = QueueState::PausedAfterBudgetExhausted { current };
+                QueueAction::WaitForExit
+            }
+            RunOutcome::Failed | RunOutcome::Cancelled => {
+                self.state = QueueState::PausedAfterFailure { current, exit_code };
+                QueueAction::WaitForExit
+            }
         }
     }
 
-    /// 失敗停止からの明示継続: 次エントリの起動 or 完了。
-    /// PausedAfterFailure 以外での呼び出しは [`QueueAction::Noop`]。
+    /// 失敗停止・予算切れ停止からの明示継続: 次エントリの起動 or 完了。
+    /// Pause 系状態以外での呼び出しは [`QueueAction::Noop`]。
     pub fn resume(&mut self) -> QueueAction {
-        let QueueState::PausedAfterFailure { current, .. } = self.state else {
-            return QueueAction::Noop;
+        let current = match self.state {
+            QueueState::PausedAfterFailure { current, .. }
+            | QueueState::PausedAfterBudgetExhausted { current } => current,
+            QueueState::Pending | QueueState::Running { .. } | QueueState::Completed => {
+                return QueueAction::Noop;
+            }
         };
         self.advance_from(current)
     }
@@ -378,6 +414,17 @@ impl QueueExec {
                         .unwrap_or("?")
                 )
             }
+            QueueState::PausedAfterBudgetExhausted { current } => {
+                format!(
+                    "予算切れ停止 {}/{} (成果ゼロ打ち切り): {} — 継続/停止を選択",
+                    current + 1,
+                    self.entries.len(),
+                    self.entries
+                        .get(*current)
+                        .map(|e| e.label.as_str())
+                        .unwrap_or("?")
+                )
+            }
             QueueState::Completed => {
                 format!("完了 {}/{}", self.entries.len(), self.entries.len())
             }
@@ -408,6 +455,15 @@ impl QueueExec {
                     "待機"
                 }
             }
+            QueueState::PausedAfterBudgetExhausted { current } => {
+                if index < *current {
+                    "完了"
+                } else if index == *current {
+                    "予算切れ"
+                } else {
+                    "待機"
+                }
+            }
         }
     }
 
@@ -428,11 +484,16 @@ impl QueueExec {
     }
 }
 
-/// パイプラインディレクトリから開始タスク名を解決する (start_task 未宣言タスク用)。
+/// パイプラインディレクトリから開始タスクのファイル stem を解決する。
 ///
 /// `pipeline.toml` (manifest) はタスク定義ではないため除外し、残る TaskDef TOML
-/// のファイル名 (stem) を辞書順で最初のものを開始タスクとする。TOML が 1 つも
+/// のファイル名 (stem) を辞書順で最初のものを返す。TOML が 1 つも
 /// 無い場合は None (呼び出し側で fail-closed 扱い)。
+///
+/// **注意**: 戻り値は stem (ファイル名) であり `anaden run` の開始タスク引数
+/// (TaskDef **名** を要求) としてそのまま使えない。実行引数への組込みには
+/// [`resolve_start_task_name`] を使うこと (DEF-006)。本関数の直接の呼出元は
+/// ファイルを特定する [`crate::scenario_load::derive_start_task_name`] のみ。
 pub fn resolve_start_task(pipeline_dir: &Path) -> Option<String> {
     let entries = std::fs::read_dir(pipeline_dir).ok()?;
     let mut stems: Vec<String> = entries
@@ -448,12 +509,42 @@ pub fn resolve_start_task(pipeline_dir: &Path) -> Option<String> {
     stems.into_iter().next()
 }
 
+/// パイプラインディレクトリから開始タスク**名** (TaskDef `name`) を解決する
+/// (start_task 未宣言タスク用・DEF-006)。
+///
+/// `anaden run <dir> <start_task>` の CLI 契約は `t.name == start_task`
+/// (crates/anaden-cli/src/main.rs) で TaskDef **名** を要求するため、
+/// stem (ファイル名) ではなく名前を解決する。優先順位:
+///
+/// 1. `pipeline.toml` (manifest) の `start_task` — manifest は
+///    「start_task = TaskDef 名」契約 (scenario_load と同一の単一情報源)。
+///    manifest が存在して parse 不能な場合は None (fail-closed: 壊れた
+///    manifest に黙って stem 推測で続けない)。
+/// 2. manifest 無し: [`resolve_start_task`] と同一規則 (辞書順最初 stem) で
+///    ファイルを特定し、その TaskDef `name` を返す
+///    (scenario_load の manifest 無し導出と同一の name 変換)。
+///    `name` キーを持たない TOML は TaskDef として不正のため None。
+pub fn resolve_start_task_name(pipeline_dir: &Path) -> Option<String> {
+    let manifest_path = pipeline_dir.join(anaden_vision::PIPELINE_MANIFEST_FILENAME);
+    if manifest_path.is_file() {
+        return anaden_vision::load_pipeline_manifest(pipeline_dir)
+            .ok()
+            .map(|m| m.start_task);
+    }
+    let first_stem = resolve_start_task(pipeline_dir)?;
+    let content = std::fs::read_to_string(pipeline_dir.join(format!("{first_stem}.toml"))).ok()?;
+    let value: toml::Value = toml::from_str(&content).ok()?;
+    value.get("name").and_then(|v| v.as_str()).map(String::from)
+}
+
 /// [`TaskDefinition`] から `anaden` CLI サブコマンドの引数列を組み立てる純関数
 /// (app.rs 配線用・Issue #144 Task 3 / Issue #188 で --target・serial を廃止)。
 ///
 /// - [`TaskKind::LaunchSubcommand`] → `launch` (起動保証・引数なしで既定 wait)
 /// - [`TaskKind::PipelineRun`] → `run <pipeline_dir> <start_task>`
-///   (start_task 未宣言時は `resolve_start_task` で解決。解決不能なら空 Vec)
+///   (start_task 未宣言時は [`resolve_start_task_name`] で TaskDef **名** を解決。
+///   DEF-006: 旧来の stem 解決は CLI の `t.name == start_task` 検証に合格しない。
+///   解決不能なら空 Vec)
 ///
 /// `target` / `serial` は Issue #188 で CLI 側フラグが削除されたため使用しない
 /// (呼出元互換のため引数形式のみ残置)。
@@ -470,7 +561,11 @@ pub fn spawn_args(
                 return Vec::new();
             };
             let abs = root.join(dir);
-            let Some(start) = def.start_task.clone().or_else(|| resolve_start_task(&abs)) else {
+            let Some(start) = def
+                .start_task
+                .clone()
+                .or_else(|| resolve_start_task_name(&abs))
+            else {
                 return Vec::new();
             };
             vec!["run".to_string(), abs.to_string_lossy().into_owned(), start]
@@ -590,6 +685,10 @@ mod tests {
 
     /// start_task 未宣言 + TaskDef TOML が実在する pipeline (リポジトリ実ファイル)
     /// でも解決できることの結合検証 (nav_to_field_pc)。
+    ///
+    /// DEF-006: `anaden run` の CLI 契約は TaskDef **名** (`t.name == start_task`)
+    /// を要求するため、stem (辞書順最初 `field_hud_top`) でなく manifest の
+    /// `start_task = "TapToStartPc"` (name) を解決する。
     #[test]
     fn test_spawn_args_pipeline_run_resolves_start_task_from_dir() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
@@ -609,8 +708,91 @@ pipeline_dir = "templates/pipelines/nav_to_field_pc"
             args[1].ends_with("templates\\pipelines\\nav_to_field_pc")
                 || args[1].ends_with("templates/pipelines/nav_to_field_pc")
         );
-        // 辞書順最初の TaskDef: field_hud_top
-        assert_eq!(args[2], "field_hud_top");
+        // manifest の start_task (TaskDef name): TapToStartPc
+        // (stem 辞書順最初の field_hud_top でない — DEF-006)
+        assert_eq!(args[2], "TapToStartPc");
+    }
+
+    /// DEF-006: リポジトリ実 pipeline のうち manifest が存在するもの (login) は
+    /// manifest の start_task (TaskDef 名) が使われることの結合検証。
+    /// 旧挙動は stem `tap_title` を返し CLI の `t.name == start_task` 検証で失敗した。
+    #[test]
+    fn test_spawn_args_pipeline_run_login_manifest_start_task() {
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let src = r#"
+id = "login"
+title = "ログイン"
+kind = "pipeline_run"
+implemented = true
+pipeline_dir = "templates/pipelines/login"
+"#;
+        let def = TaskDefinition::parse_toml(src, Path::new("login.toml")).unwrap();
+        let args = spawn_args(&def, "windows", None, &root);
+        assert_eq!(args.len(), 3);
+        assert_eq!(args[0], "run");
+        assert!(
+            args[1].ends_with("templates\\pipelines\\login")
+                || args[1].ends_with("templates/pipelines/login")
+        );
+        // login/pipeline.toml の start_task = "LoginTapTitlePc" (tap_title.toml の name)
+        assert_eq!(args[2], "LoginTapTitlePc");
+    }
+
+    /// DEF-006: manifest の start_task は stem 推測より優先される。
+    #[test]
+    fn test_spawn_args_pipeline_run_manifest_start_task_wins_over_stems() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pipeline.toml"),
+            "start_task = \"FromManifest\"",
+        )
+        .unwrap();
+        std::fs::write(tmp.path().join("aa_first.toml"), "name = \"AaTaskName\"\n").unwrap();
+        assert_eq!(
+            resolve_start_task_name(tmp.path()).as_deref(),
+            Some("FromManifest")
+        );
+    }
+
+    /// DEF-006: manifest 無し pipeline は「辞書順最初 stem のファイル」を読み、
+    /// その TaskDef `name` を返す (stem そのものではない — CLI は名前で検証する)。
+    #[test]
+    fn test_resolve_start_task_name_manifestless_uses_taskdef_name() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("aa_first.toml"),
+            "name = \"AaTaskName\"\ntemplate = \"x.png\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            tmp.path().join("zz_last.toml"),
+            "name = \"ZzTaskName\"\ntemplate = \"y.png\"\n",
+        )
+        .unwrap();
+        assert_eq!(
+            resolve_start_task_name(tmp.path()).as_deref(),
+            Some("AaTaskName")
+        );
+    }
+
+    /// DEF-006: name キーを持たない TOML は TaskDef として不正のため
+    /// 解決不能 (None = fail-closed)。stem で代替しない。
+    #[test]
+    fn test_resolve_start_task_name_manifestless_nameless_toml_is_none() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("aa_first.toml"), "x = 1\n").unwrap();
+        assert_eq!(resolve_start_task_name(tmp.path()), None);
+    }
+
+    /// DEF-006: manifest が存在するのに parse 不能な場合は None (fail-closed)。
+    /// 壊れた manifest に黙って stem 推測で続けない
+    /// (scenario_load の「parse 不能ならエラー伝播」と同一方針)。
+    #[test]
+    fn test_resolve_start_task_name_broken_manifest_fails_closed() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(tmp.path().join("pipeline.toml"), "not valid toml =").unwrap();
+        std::fs::write(tmp.path().join("aa_first.toml"), "name = \"AaTaskName\"\n").unwrap();
+        assert_eq!(resolve_start_task_name(tmp.path()), None);
     }
 
     /// pipeline_dir が実在せず start_task も解決不能なら空 Vec (fail-closed)。
@@ -797,6 +979,74 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         let _ = q.on_exit(Some(1));
         assert!(matches!(q.on_exit(Some(0)), QueueAction::Noop));
         assert!(matches!(q.state(), QueueState::PausedAfterFailure { .. }));
+    }
+
+    // ---- 04-studio-maxiters-outcome: 成否分類による継続 policy 分岐 (F6) ----
+
+    /// BudgetExhausted (exit 0 でも成果ゼロの打ち切り) は自動継続しない —
+    /// 予算切れ停止へ遷移し明示 resume を待つ (現状は exit 0 一律で継続)。
+    #[test]
+    fn test_queue_budget_exhausted_pauses_without_auto_continue() {
+        let mut q = QueueExec::new(vec![queue_entry("A", "a"), queue_entry("B", "b")]);
+        let _ = q.start();
+        assert!(matches!(
+            q.on_exit_classified(crate::history::RunOutcome::BudgetExhausted, Some(0)),
+            QueueAction::WaitForExit
+        ));
+        assert!(matches!(
+            q.state(),
+            QueueState::PausedAfterBudgetExhausted { current: 0 }
+        ));
+        // 明示 resume なら次タスクへ進めることはできる。
+        let QueueAction::Start(spec) = q.resume() else {
+            panic!("resume must return Start");
+        };
+        assert_eq!(spec.args[0], "b");
+        assert!(matches!(q.state(), QueueState::Running { current: 1 }));
+    }
+
+    /// 分類経路でも成果あり Success は自動継続する (policy 分岐の対偶)。
+    #[test]
+    fn test_queue_classified_success_auto_continues() {
+        let mut q = QueueExec::new(vec![queue_entry("A", "a"), queue_entry("B", "b")]);
+        let _ = q.start();
+        let QueueAction::Start(spec) =
+            q.on_exit_classified(crate::history::RunOutcome::Success, Some(0))
+        else {
+            panic!("classified success must auto-continue");
+        };
+        assert_eq!(spec.args[0], "b");
+    }
+
+    /// 分類経路の Failed は従来どおり失敗停止 (exit code を保持する)。
+    #[test]
+    fn test_queue_classified_failed_pauses_with_exit_code() {
+        let mut q = QueueExec::new(vec![queue_entry("A", "a")]);
+        let _ = q.start();
+        assert!(matches!(
+            q.on_exit_classified(crate::history::RunOutcome::Failed, Some(2)),
+            QueueAction::WaitForExit
+        ));
+        assert!(matches!(
+            q.state(),
+            QueueState::PausedAfterFailure {
+                current: 0,
+                exit_code: Some(2)
+            }
+        ));
+    }
+
+    /// 予算切れ停止の summary / entry marker は失敗停止と区別される。
+    #[test]
+    fn test_queue_budget_exhausted_summary_and_marker() {
+        let mut q = QueueExec::new(vec![queue_entry("周回", "run"), queue_entry("次", "x")]);
+        let _ = q.start();
+        let _ = q.on_exit_classified(crate::history::RunOutcome::BudgetExhausted, Some(0));
+        let summary = q.summary();
+        assert!(summary.contains("予算切れ"), "summary: {summary}");
+        assert!(summary.contains("1/2"), "summary: {summary}");
+        assert_eq!(q.entry_marker(0), "予算切れ");
+        assert_eq!(q.entry_marker(1), "待機");
     }
 
     /// エッジケース: abort は任意状態から全破棄する (子の停止は呼び出し側)。

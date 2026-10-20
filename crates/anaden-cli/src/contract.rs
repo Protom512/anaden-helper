@@ -96,27 +96,35 @@ pub const EXIT_RUN_TIMEOUT: i32 = EXIT_TIMEOUT;
 /// [`LoopStopReason`](anaden_engine::LoopStopReason) を `run` サブコマンドの
 /// 終了コードへ射影する純粋関数(Issue #37 AC: exit code + 成果レポート)。
 ///
-/// # 契約(真実の源)
+/// # 契約(真実の源 — 下表は match 式の全分岐と 1:1)
 ///
-/// | `LoopStopReason`        | 終了コード | 由来 |
-/// |-------------------------|-----------|------|
-/// | `Stop`                  | 0 (success) | `Action::Stop` 到達 = 宣言的終端 |
-/// | `TerminalTask`          | 0 (success) | next 無し終端タスク到達 = 正常収束 |
-/// | `GoalReached`           | 0 (success) | 宣言的ゴール到達 = CI success(Issue #37) |
-/// | `MaxIterations`         | 0 (success) | **非ゴールモードは今日の exit 0 を保持** |
-/// | `GoalTimeout`           | 2 (timeout) | ゴール未到達だが進捗あり = soft failure(Issue #37) |
-/// | `CaptureError`          | 1 (hard)    | capture IO 失敗 = ハードエラー |
-/// | `ExecuteError`          | 1 (hard)    | execute IO 失敗 = ハードエラー |
+/// | `LoopStopReason`    | 終了コード | 由来 |
+/// |---------------------|-----------|------|
+/// | `Stop`              | 0 (success) | `Action::Stop` 到達 = 宣言的終端 |
+/// | `TerminalTask`      | 0 (success) | next 無し終端タスク到達 = 正常収束 |
+/// | `MaxIterations`     | 0 (success) | **非ゴールモードは今日の exit 0 を保持** (注記参照) |
+/// | `GoalReached`       | 0 (success) | 宣言的ゴール到達 = CI success(Issue #37) |
+/// | `GoalTimeout`       | 2 (timeout) | ゴール未到達だが進捗あり = soft failure(Issue #37) |
+/// | `Interrupted`       | 2 (timeout) | Ctrl+C / SIGINT 中断 = ユーザー意図の中断 (soft failure) |
+/// | `CaptureError`      | 1 (hard)    | capture IO 失敗 = ハードエラー |
+/// | `ExecuteError`      | 1 (hard)    | execute IO 失敗 = ハードエラー |
+/// | `RecoveryExhausted` | 1 (hard)    | リカバリ試行上限到達 = 環境故障で進行不能 (02-recovery-budget)。soft timeout(2) と区別 — 成果は出ておらず進行も不能 |
+///
+/// `MaxIterations` 注記 (04-studio-maxiters-outcome / F6): exit code 上は非ゴール
+/// モードの `MaxIterations` を success(0) のまま保持する (CI の `run` 呼出意味論を
+/// 断片化させない)。**成果ゼロ打ち切り (fired_count == 0) の誤成功**は exit code
+/// ではなく run レポート (`--report-file` の report.json: 停止理由 + 発火回数) を
+/// 読む側 (anaden-studio `history::classify_outcome` → `RunOutcome::BudgetExhausted`)
+/// で分類する — 終了コード表と停止理由の対応は本表に 1:1 集約し、studio 側分類は
+/// 本表の `MaxIterations = 0` 契約と整合する補助情報源として扱う。
 ///
 /// # 設計意図(pre-T5 決定ゲート: org-feedback estimate approval)
 ///
 /// **非ゴールパスは今日の exit 0 を保存**しゼロ以外終了コードはゴール活性時のみ表面化
 /// する方針を取る。これにより既存 CI の `run` 呼出意味論を断片化させない。
-/// 現時点では `GoalReached` / `GoalTimeout` バリアントは未追加(T3 待ち)のため、
-/// 本関数は既存5バリアントのみを扱い、`MaxIterations` は success(0) へ射影する。
-/// T3 でバリアントが追加された際は本関数の match 式を拡張し、`MaxIterations` の
-/// 意味論を「ゴール活性時のみ timeout(2)」へ切り替えるか別途検証コンテキストを
-/// 導入すること(後続タスク)。
+/// `GoalReached` / `GoalTimeout` は Issue #37 T3 で追加済み、`Interrupted` は
+/// Ctrl+C/SIGINT ガード、`RecoveryExhausted` は 02-recovery-budget で追加済み
+/// (いずれも本表どおりの射影)。
 ///
 /// # 純粋性
 ///
@@ -128,7 +136,9 @@ pub fn run_exit_code(reason: &anaden_engine::LoopStopReason) -> i32 {
         anaden_engine::LoopStopReason::Stop => EXIT_RUN_SUCCESS,
         anaden_engine::LoopStopReason::TerminalTask => EXIT_RUN_SUCCESS,
         // 非ゴールモードの最大イテレーション到達は今日の exit 0 を保存。
-        // (ゴール活性時の timeout 扱いは T3 でバリアント追加後に再検討)
+        // (ゴール活性時の timeout 扱いは T3 でバリアント追加後に再検討。
+        //  成果ゼロ打ち切りの誤成功分類は exit code でなく report 停止理由を
+        //  読む側 = anaden-studio history::classify_outcome の担当 — Doc 表参照)
         anaden_engine::LoopStopReason::MaxIterations => EXIT_RUN_SUCCESS,
         // 宣言的ゴール到達 = CI success(Issue #37 T3/T4)。
         anaden_engine::LoopStopReason::GoalReached => EXIT_RUN_SUCCESS,
@@ -140,6 +150,10 @@ pub fn run_exit_code(reason: &anaden_engine::LoopStopReason) -> i32 {
         // IO 系ハードエラー = exit 1。
         anaden_engine::LoopStopReason::CaptureError => EXIT_RUN_HARDCERROR,
         anaden_engine::LoopStopReason::ExecuteError => EXIT_RUN_HARDCERROR,
+        // リカバリ試行上限到達 (健全サイクル無しでゲーム再起動を試み尽くした =
+        // 環境故障で進行不能) = IO 系ハードエラーと同じ exit 1 (02-recovery-budget)。
+        // soft timeout(2) ではない — timeout は「成果物は出た」が、こちらは進行不能。
+        anaden_engine::LoopStopReason::RecoveryExhausted => EXIT_RUN_HARDCERROR,
     }
 }
 
@@ -311,10 +325,27 @@ mod tests {
     }
 
     #[test]
+    fn run_exit_code_recovery_exhausted_is_hard_error() {
+        // 02-recovery-budget: リカバリ試行上限到達 = 恒久 NoMatch で進行不能。
+        // recovery hook 失敗 (ExecuteError) と同じハードエラー(1)へ射影する。
+        let code = run_exit_code(&anaden_engine::LoopStopReason::RecoveryExhausted);
+        assert_eq!(
+            code, EXIT_RUN_HARDCERROR,
+            "RecoveryExhausted must map to hard-error exit 1"
+        );
+        assert_ne!(code, EXIT_RUN_SUCCESS, "RecoveryExhausted is not success");
+        assert_ne!(
+            code, EXIT_RUN_TIMEOUT,
+            "RecoveryExhausted is not a soft timeout (環境故障で進行不能)"
+        );
+    }
+
+    #[test]
     fn run_exit_code_covers_all_variants() {
         // LoopStopReason へ新バリアントが追加された際、このテストが未対応を検出する。
         // GoalReached / GoalTimeout は Issue #37 で追加済み(T3)。
         // Interrupted は Ctrl+C/SIGINT 中断(ガード1)。
+        // RecoveryExhausted はリカバリ試行上限到達 (02-recovery-budget)。
         let variants = [
             anaden_engine::LoopStopReason::Stop,
             anaden_engine::LoopStopReason::TerminalTask,
@@ -324,6 +355,7 @@ mod tests {
             anaden_engine::LoopStopReason::Interrupted,
             anaden_engine::LoopStopReason::CaptureError,
             anaden_engine::LoopStopReason::ExecuteError,
+            anaden_engine::LoopStopReason::RecoveryExhausted,
         ];
         for v in &variants {
             // 各バリアントが success(0) / timeout(2) / hard-error(1) のいずれかへ解決されること。
@@ -473,6 +505,9 @@ mod tests {
                 elapsed_ms: 3000,
                 terminal_task: None,
                 reached_goal: Some("timeout=3".to_string()),
+                stop_reason: None,
+                recovery_attempts: 0,
+                max_consecutive_recovery: 0,
             },
         };
         // 1行の統合 assert: ループ産出 reason → run_exit_code → EXIT_RUN_TIMEOUT(2)。
