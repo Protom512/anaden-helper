@@ -323,6 +323,11 @@ struct Args {
     method: Method,
 }
 
+/// `argv[i + 1]` を値として取り出し、成功時にのみインデックスを進める。
+fn next_value(argv: &[String], i: &mut usize) -> Option<String> {
+    argv.get(*i + 1).cloned().inspect(|_| *i += 1)
+}
+
 fn parse_args() -> Args {
     let argv: Vec<String> = std::env::args().collect();
     let mut a = Args {
@@ -337,47 +342,35 @@ fn parse_args() -> Args {
     let mut i = 1;
     while i < argv.len() {
         let k = argv[i].as_str();
-        let mut next = || -> Option<String> {
-            i += 1;
-            argv.get(i).cloned()
-        };
         match k {
             "--self-test" => a.self_test = true,
             "--process" => {
-                if let Some(v) = next() {
+                if let Some(v) = next_value(&argv, &mut i) {
                     a.process = v;
                 }
             }
             "--x" => {
-                if let Some(v) = next()
-                    && let Ok(n) = v.parse()
-                {
-                    a.x = n;
-                }
+                a.x = next_value(&argv, &mut i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(a.x)
             }
             "--y" => {
-                if let Some(v) = next()
-                    && let Ok(n) = v.parse()
-                {
-                    a.y = n;
-                }
+                a.y = next_value(&argv, &mut i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(a.y)
             }
             "--hold-ms" => {
-                if let Some(v) = next()
-                    && let Ok(n) = v.parse()
-                {
-                    a.hold_ms = n;
-                }
+                a.hold_ms = next_value(&argv, &mut i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(a.hold_ms)
             }
             "--settle-ms" => {
-                if let Some(v) = next()
-                    && let Ok(n) = v.parse()
-                {
-                    a.settle_ms = n;
-                }
+                a.settle_ms = next_value(&argv, &mut i)
+                    .and_then(|v| v.parse().ok())
+                    .unwrap_or(a.settle_ms)
             }
             "--method" => {
-                if let Some(v) = next() {
+                if let Some(v) = next_value(&argv, &mut i) {
                     a.method = match v.as_str() {
                         "postmessage" => Method::PostMessage,
                         _ => Method::SendInput,

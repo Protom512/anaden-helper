@@ -81,9 +81,12 @@ anaden ensure-open || { echo "起動保証失敗"; exit 1; }
 | `--ensure-open` | `true` \| `false` | 接続時にゲーム未起動なら自動起動（デフォルト ON） |
 | `--recover-launch` | `true` \| `false` | NoMatch 連続時のゲーム再起動リカバリ（デフォルト ON） |
 | `--recover-nomatch-threshold` | `N` | リカバリ発動の連続 NoMatch 回数（デフォルト 5、`0` で無効） |
+| `--max-recovery-attempts` | `N` | リカバリ試行の予算上限（デフォルト 5）。健全サイクルを挟まず連続到達で打ち切り exit 1 |
 | `--max-iters` | `N` | 最大サイクル数 |
 | `--interval` | `秒` | サイクル間隔 |
 | `--width` | `px` | device_width 手動指定（PC 版は実測推奨・未指定可） |
+| `--goal` | inline TOML | 宣言的ゴール。`--goal-file` と排他。未指定時は pipeline.toml の `[[goal]]` を既定採用 |
+| `--goal-file` | パス | 宣言的ゴールの TOML ファイル。`--goal` と排他。明示指定は manifest より優先 |
 
 ## パイプライン例
 
@@ -98,6 +101,8 @@ templates/pipelines/
 （旧 Android 版 1280x720 空間の field_loop / nav_to_field / worldmap_loop / _title_load は Issue #188 で削除）
 
 TOML 1ファイル = 1タスク。`next` で状態遷移チェーンを組める。テンプレート画像と同じディレクトリに配置（パスは TOML 親ディレクトリ基準）。PC 版は RAW 1258x708 空間でオーサリングする。
+
+各ディレクトリには `pipeline.toml`（manifest）を置ける: `start_task`（最初に実行する TaskDef 名）と `[[goal]]`（終端条件）を宣言する。`anaden run` は `--goal`/`--goal-file` 未指定時、manifest の `[[goal]]` を既定ゴールとして採用する（複数 goal はいずれかで停止する Any 合成）。goal 無宣言 = 従来どおり無限ループ（`--max-iters` で打ち切り）。schema 詳細は `docs/goal-manifest.md`。
 
 ## anaden-studio（テンプレート作成 GUI）
 

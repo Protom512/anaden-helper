@@ -1,0 +1,27 @@
+{
+  "labels": [
+    "run_once",
+    "run-pipeline",
+    "normalize_capture",
+    "crop_to_canvas_with_info",
+    "crop_to_content_with_info",
+    "normalize",
+    "単一情報源",
+    "16:9±5%"
+  ],
+  "forbidden": [
+    "1280x378",
+    "89%"
+  ],
+  "edges": [
+    "e1->c1",
+    "t1->n1",
+    "c1->n1",
+    "e2->nc",
+    "t2->nc",
+    "nc->g2",
+    "g2->c2",
+    "nc->n2",
+    "BEFORE->AFTER"
+  ]
+}

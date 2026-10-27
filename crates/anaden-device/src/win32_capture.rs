@@ -115,41 +115,49 @@ impl Win32Capture {
     /// HWND キャッシュが有効だったのにキャプチャ失敗した場合はキャッシュを破棄し、
     /// 次回 capture で再解決させる(ウィンドウ再生成対策)。
     ///
-    /// GDI 同期処理は `tokio::task::spawn_blocking` へ逃し、async ランタイムをブロックしない。
-    pub async fn capture(&self) -> Result<DynamicImage, DeviceError> {
-        let process = self.process.clone();
-        // キャッシュは isize(HWND のポインタ値)で保持するため、そのままスレッド境界を越えられる。
-        // 戻り値には HWND を含めない(画像のみ)。
-        let cached_isize = self
+    /// HWND キャッシュを取り出す (take — 使用成否に関わらず今回分を消費。
+    /// 失敗時はキャッシュが空のまま = 次回再解決、ウィンドウ再生成対策)。
+    /// キャッシュは isize(HWND のポインタ値)で保持するため、そのまま
+    /// スレッド境界を越えられる。戻り値には HWND を含めない(画像のみ)。
+    fn take_cached_hwnd(&self) -> Result<Option<isize>, DeviceError> {
+        let taken = self
             .cached_hwnd
             .lock()
             .map_err(|e| DeviceError::CommandFailed {
                 message: format!("HWND キャッシュロック失敗: {e}"),
             })?
             .take();
+        Ok(taken)
+    }
 
-        // ブロッキング内で HWND(を isize 経由で再構築)を解決/使用し、成功時は
-        // 使用した HWND のポインタ値を isize で持ち帰る(キャッシュ更新用)。
-        let capture_result =
-            tokio::task::spawn_blocking(move || resolve_and_capture(&process, cached_isize))
-                .await
-                .map_err(|e| DeviceError::CommandFailed {
-                    message: format!("capture spawn_blocking Join 失敗: {e}"),
-                })??;
-
-        // 成功時は使用した HWND をキャッシュへ戻す。失敗時は take() 済みで None のまま(次回再解決)。
+    /// 使用した HWND をキャッシュへ戻す (None なら残さない = 次回再解決)。
+    fn restore_cached_hwnd(&self, hwnd_isize: Option<isize>) -> Result<(), DeviceError> {
         let mut guard = self
             .cached_hwnd
             .lock()
             .map_err(|e| DeviceError::CommandFailed {
                 message: format!("HWND キャッシュロック失敗: {e}"),
             })?;
-        let (hwnd_isize, image) = capture_result;
         if let Some(p) = hwnd_isize {
             *guard = Some(p);
         }
-        drop(guard);
+        Ok(())
+    }
 
+    /// GDI 同期処理は `tokio::task::spawn_blocking` へ逃し、async ランタイムをブロックしない。
+    pub async fn capture(&self) -> Result<DynamicImage, DeviceError> {
+        let process = self.process.clone();
+        let cached_isize = self.take_cached_hwnd()?;
+
+        // ブロッキング内で HWND(を isize 経由で再構築)を解決/使用し、成功時は
+        // 使用した HWND のポインタ値を isize で持ち帰る(キャッシュ更新用)。
+        let (hwnd_isize, image) =
+            tokio::task::spawn_blocking(move || resolve_and_capture(&process, cached_isize))
+                .await
+                .map_err(|e| DeviceError::CommandFailed {
+                    message: format!("capture spawn_blocking Join 失敗: {e}"),
+                })??;
+        self.restore_cached_hwnd(hwnd_isize)?;
         Ok(image)
     }
 
@@ -160,28 +168,9 @@ impl Win32Capture {
     /// HWND キャッシュの扱い(HWND 解決→PrintWindow→GetDIBits、失敗時キャッシュ破棄)も同等。
     pub fn capture_blocking(&self) -> Result<DynamicImage, DeviceError> {
         let process = self.process.clone();
-        let cached_isize = self
-            .cached_hwnd
-            .lock()
-            .map_err(|e| DeviceError::CommandFailed {
-                message: format!("HWND キャッシュロック失敗: {e}"),
-            })?
-            .take();
-
-        let capture_result = resolve_and_capture(&process, cached_isize)?;
-
-        let mut guard = self
-            .cached_hwnd
-            .lock()
-            .map_err(|e| DeviceError::CommandFailed {
-                message: format!("HWND キャッシュロック失敗: {e}"),
-            })?;
-        let (hwnd_isize, image) = capture_result;
-        if let Some(p) = hwnd_isize {
-            *guard = Some(p);
-        }
-        drop(guard);
-
+        let cached_isize = self.take_cached_hwnd()?;
+        let (hwnd_isize, image) = resolve_and_capture(&process, cached_isize)?;
+        self.restore_cached_hwnd(hwnd_isize)?;
         Ok(image)
     }
 }

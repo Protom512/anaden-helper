@@ -31,6 +31,38 @@ pub enum RunOutcome {
     Failed,
     /// ユーザー操作による中止。
     Cancelled,
+    /// exit code 0 だが run レポート上、成果ゼロの MaxIterations 打ち切り
+    /// (停止理由=最大サイクル到達・発火 0 回)。予算切れどまりで成果が無いため
+    /// 成功とは記録しない (04-studio-maxiters-outcome / F6 の誤成功排除)。
+    BudgetExhausted,
+}
+
+/// run の成否を exit code (ゲート) と run レポート (report.json) の停止理由
+/// (第一情報源) から分類する純関数 (04-studio-maxiters-outcome / F6)。
+///
+/// 分類規約:
+/// 1. exit code 非零 / 不明 → [`RunOutcome::Failed`] (report より優先)
+/// 2. report の停止理由が `anaden_engine::LoopStopReason::MaxIterations` の場合 —
+///    - `fired_count == 0` → [`RunOutcome::BudgetExhausted`]
+///      (exit 0 でも成果ゼロの打ち切りどまり = 従来 Success だった誤成功)
+///    - `fired_count > 0`  → [`RunOutcome::Success`] (成果を伴う打ち切り)
+/// 3. それ以外 (report 無し・他の停止理由) かつ exit 0 → [`RunOutcome::Success`]
+///    (report を書かない古い anaden バイナリ・routine 実行の従来挙動を維持)
+#[must_use]
+pub fn classify_outcome(
+    exit_code: Option<i32>,
+    report: Option<&anaden_engine::ProgressReport>,
+) -> RunOutcome {
+    if !matches!(exit_code, Some(0)) {
+        return RunOutcome::Failed;
+    }
+    if let Some(r) = report
+        && r.stop_reason == Some(anaden_engine::LoopStopReason::MaxIterations)
+        && r.fired_count == 0
+    {
+        return RunOutcome::BudgetExhausted;
+    }
+    RunOutcome::Success
 }
 
 /// 1回の pipeline 実行の記録。
@@ -52,6 +84,13 @@ pub struct RunRecord {
     /// 旧履歴ファイル (本フィールド不存在行) は None で復元される。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_run_id: Option<String>,
+    /// run レポート (report.json) 由来の停止理由ラベル (03-report-channel)。
+    /// 未読込 (古い anaden バイナリ・読込失敗)・旧履歴は None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stop_reason: Option<String>,
+    /// run レポート由来の発火回数 (03-report-channel)。未読込・旧履歴は None。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub fired_count: Option<u64>,
 }
 
 impl RunRecord {
@@ -71,6 +110,8 @@ impl RunRecord {
             exit_code,
             log_tail: truncate_tail(log_tail),
             evidence_run_id: None,
+            stop_reason: None,
+            fired_count: None,
         }
     }
 
@@ -78,6 +119,19 @@ impl RunRecord {
     #[must_use]
     pub fn with_evidence_run_id(mut self, run_id: Option<String>) -> Self {
         self.evidence_run_id = run_id;
+        self
+    }
+
+    /// run レポート (report.json) 由来のサマリ (停止理由ラベル・発火回数) を
+    /// 付与する (builder・03-report-channel)。
+    #[must_use]
+    pub fn with_report_summary(
+        mut self,
+        stop_reason: Option<String>,
+        fired_count: Option<u64>,
+    ) -> Self {
+        self.stop_reason = stop_reason;
+        self.fired_count = fired_count;
         self
     }
 }
@@ -201,6 +255,25 @@ pub fn history_path() -> PathBuf {
         return PathBuf::from(explicit);
     }
     config_dir().join("anaden-studio").join(HISTORY_FILE_NAME)
+}
+
+/// studio 管理の run レポートパス (03-report-channel)。
+///
+/// 履歴ファイルと同一の app data ディレクトリ配下 `reports/` に、ナノ秒
+/// 時刻ベースの一意なファイル名で生成する。spawn のたびに新規発行する
+/// (再実行で前回の report を上書きしない — Issue #204 と同一方針)。
+/// 子 (`anaden run`) へ `--report-file` で渡し、終了時に読み取る。
+#[must_use]
+pub fn new_report_path() -> PathBuf {
+    let nanos = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_nanos())
+        .unwrap_or(0);
+    let base = history_path()
+        .parent()
+        .map(|p| p.to_path_buf())
+        .unwrap_or_else(|| PathBuf::from("."));
+    base.join("reports").join(format!("{nanos}.json"))
 }
 
 /// プラットフォーム別の config ディレクトリを解決する。
@@ -341,6 +414,132 @@ mod tests {
         let r: RunRecord = serde_json::from_str(legacy).unwrap();
         assert_eq!(r.evidence_run_id, None);
         assert_eq!(r.strategy, "fishing");
+    }
+
+    // --- report 由来フィールド (03-report-channel) ---
+
+    /// 付与した record は report サマリ (停止理由・発火回数) を round-trip する。
+    #[test]
+    fn record_with_report_summary_round_trips() {
+        let r = sample_record("field_loop_pc", 1)
+            .with_report_summary(Some("最大サイクル到達".to_string()), Some(7));
+        let json = serde_json::to_string(&r).unwrap();
+        assert!(
+            json.contains("\"stop_reason\":\"最大サイクル到達\""),
+            "{json}"
+        );
+        assert!(json.contains("\"fired_count\":7"), "{json}");
+        let back: RunRecord = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, r);
+    }
+
+    /// 未付与 (None) の record は report フィールドを JSON に出力しない
+    /// (フィールド追加前と同一 JSON = 互換)。
+    #[test]
+    fn record_without_report_omits_fields_in_json() {
+        let json = serde_json::to_string(&sample_record("fishing", 1)).unwrap();
+        assert!(!json.contains("stop_reason"), "{json}");
+        assert!(!json.contains("fired_count"), "{json}");
+    }
+
+    /// 本フィールド追加前の旧履歴ファイル行は None で復元される。
+    #[test]
+    fn legacy_record_without_report_fields_deserializes_to_none() {
+        let legacy = r#"{"started_at_unix":1,"strategy":"fishing","outcome":"Success","exit_code":0,"log_tail":["l"]}"#;
+        let r: RunRecord = serde_json::from_str(legacy).unwrap();
+        assert_eq!(r.stop_reason, None);
+        assert_eq!(r.fired_count, None);
+    }
+
+    /// new_report_path は app data dir 配下の reports/ に一意な JSON パスを返す。
+    #[test]
+    fn new_report_path_is_under_reports_dir_with_json_ext() {
+        let p = new_report_path();
+        assert_eq!(p.extension().and_then(|e| e.to_str()), Some("json"));
+        assert!(
+            p.to_string_lossy().contains("reports"),
+            "unexpected path: {}",
+            p.display()
+        );
+        // 連続発行で異なるパス (再実行で上書きしない)。
+        assert_ne!(new_report_path(), p);
+    }
+
+    // --- 成否分類 classify_outcome (04-studio-maxiters-outcome・F6) ---
+
+    /// テスト用の最小 ProgressReport (停止理由・発火回数のみ可変)。
+    fn report(
+        reason: Option<anaden_engine::LoopStopReason>,
+        fired: u64,
+    ) -> anaden_engine::ProgressReport {
+        anaden_engine::ProgressReport {
+            iterations: 10,
+            fired_count: fired,
+            per_task_matches: vec![],
+            elapsed_ms: 1000,
+            terminal_task: None,
+            reached_goal: None,
+            stop_reason: reason,
+            recovery_attempts: 0,
+            max_consecutive_recovery: 0,
+        }
+    }
+
+    /// exit 0 + MaxIterations + fired=0 → BudgetExhausted (誤成功の排除)。
+    #[test]
+    fn classify_outcome_max_iterations_zero_fired_is_budget_exhausted() {
+        let r = report(Some(anaden_engine::LoopStopReason::MaxIterations), 0);
+        assert_eq!(
+            classify_outcome(Some(0), Some(&r)),
+            RunOutcome::BudgetExhausted
+        );
+    }
+
+    /// exit 0 + MaxIterations + fired>0 → Success (成果を伴う打ち切りは成果あり)。
+    #[test]
+    fn classify_outcome_max_iterations_with_fired_is_success() {
+        let r = report(Some(anaden_engine::LoopStopReason::MaxIterations), 7);
+        assert_eq!(classify_outcome(Some(0), Some(&r)), RunOutcome::Success);
+    }
+
+    /// exit 非零は report より優先 — MaxIterations 表示でも Failed。
+    #[test]
+    fn classify_outcome_nonzero_exit_is_failed_even_with_report() {
+        let r = report(Some(anaden_engine::LoopStopReason::MaxIterations), 7);
+        assert_eq!(classify_outcome(Some(1), Some(&r)), RunOutcome::Failed);
+        assert_eq!(classify_outcome(None, Some(&r)), RunOutcome::Failed);
+    }
+
+    /// report 無し (古い anaden バイナリ・routine 実行) の exit 0 は従来通り Success。
+    #[test]
+    fn classify_outcome_no_report_exit_zero_is_success() {
+        assert_eq!(classify_outcome(Some(0), None), RunOutcome::Success);
+    }
+
+    /// 他の正常停止理由 (GoalReached / Stop / TerminalTask) は Success のまま。
+    #[test]
+    fn classify_outcome_goal_reached_and_stop_are_success() {
+        for reason in [
+            anaden_engine::LoopStopReason::GoalReached,
+            anaden_engine::LoopStopReason::Stop,
+            anaden_engine::LoopStopReason::TerminalTask,
+        ] {
+            let r = report(Some(reason.clone()), 0);
+            assert_eq!(
+                classify_outcome(Some(0), Some(&r)),
+                RunOutcome::Success,
+                "reason: {reason:?}"
+            );
+        }
+    }
+
+    /// BudgetExhausted は独自の serde ラベルで往復する (history.jsonl 互換)。
+    #[test]
+    fn budget_exhausted_outcome_serializes_as_distinct_label() {
+        let json = serde_json::to_string(&RunOutcome::BudgetExhausted).unwrap();
+        assert_eq!(json, "\"BudgetExhausted\"");
+        let back: RunOutcome = serde_json::from_str(&json).unwrap();
+        assert_eq!(back, RunOutcome::BudgetExhausted);
     }
 
     // --- エッジケース ---

@@ -142,24 +142,8 @@ fn run(launcher: &str, workdir: &str, child_name: &str, wait: Duration) -> i32 {
     //   ステップ2 の「子発見」が本来 spawn した子ではなく既存プロセスにヒットしてしまい
     //   検証が無意味になる(偽成功)。存在すれば即座に exit 50 で停止し、検証前に全終了を促す。
     // ---------------------------------------------------------------
-    match snapshot_processes() {
-        Ok(entries) => {
-            let preexisting = entries.iter().find(|e| eq_ignore_case(&e.name, child_name));
-            if let Some(e) = preexisting {
-                eprintln!(
-                    "{FAIL_TAG} 既存プロセス検出: {child_name} が既に起動中 (pid={} parent_pid={})",
-                    e.pid, e.parent_pid
-                );
-                eprintln!("     → exit 50: ゲーム既存プロセス検出。検証前に全て終了すること。");
-                return 50;
-            }
-        }
-        Err(e) => {
-            // 事前スナップショット失敗は致命的(以降の監視もできない)。exit 40。
-            eprintln!("{FAIL_TAG} 事前スナップショット失敗: {e}");
-            eprintln!("     → exit 40: windows-rs feature / 昇格を確認。");
-            return 40;
-        }
+    if let Err(code) = precheck_existing_child(child_name) {
+        return code;
     }
 
     // ---------------------------------------------------------------
@@ -169,35 +153,9 @@ fn run(launcher: &str, workdir: &str, child_name: &str, wait: Duration) -> i32 {
     //   spawn() でハンドルだけ取り、終了を待機しない。
     // ---------------------------------------------------------------
     let launcher_started = Instant::now();
-
-    let spawn_result = Command::new(launcher)
-        .current_dir(workdir)
-        // Launcher の GL ログ出力でブロックしないよう stdio を切る(オプション)。
-        .stdin(Stdio::null())
-        .stdout(Stdio::null())
-        .stderr(Stdio::null())
-        // CREATE_NEW_PROCESS_GROUP(0x00000200)。コンソール信号がプローブ本体へ
-        // 伝播しないようにする最小の分離。
-        .creation_flags(CREATE_NEW_PROCESS_GROUP.0)
-        .spawn();
-
-    let launcher_child = match spawn_result {
-        Ok(c) => {
-            let pid = c.id();
-            println!("[1] Launcher spawn OK (launcher_pid={pid})");
-            // c をドロップすると子が kill される実装環境もあるため、明示的に離す。
-            // std::process::Child の drop は kill しない(終了待ちもしない)ので保持不要。
-            // ただし PID は記録しておく(親子関係検証用)。
-            let _ = c;
-            pid
-        }
-        Err(e) => {
-            eprintln!(
-                "{FAIL_TAG} Launcher spawn 失敗: {e} (launcher={launcher}, workdir={workdir})"
-            );
-            eprintln!("     → exit 10: パス/権限を確認してください。");
-            return 10;
-        }
+    let launcher_child = match spawn_launcher_probe(launcher, workdir) {
+        Ok(pid) => pid,
+        Err(code) => return code,
     };
 
     // ---------------------------------------------------------------
@@ -210,10 +168,112 @@ fn run(launcher: &str, workdir: &str, child_name: &str, wait: Duration) -> i32 {
     //     最悪でも合計 wait 秒(2×wait にならない)。
     // ---------------------------------------------------------------
     let overall_deadline = launcher_started + wait;
+    let (child_pid, child_parent_pid) = match wait_discovery_probe(
+        child_name,
+        overall_deadline,
+        launcher_started,
+        launcher_child,
+    ) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    // ---------------------------------------------------------------
+    // [ステップ3] 子発見後、GetExitCodeProcess == STILL_ACTIVE が継続するか監視。
+    //   即死(0xC0000005 等)を検出する。生存監視も [ステップ2] と同じ絶対 deadline
+    //   (overall_deadline = launcher_started + wait) を共有するため、発見+生存の合計は
+    //   「spawn から wait 秒」に収まる(doc「--wait 秒ずっと STILL_ACTIVE なら成功」と整合)。
+    // ---------------------------------------------------------------
+    let (alive, last_exit_code) = match monitor_survival(child_pid, overall_deadline) {
+        Ok(v) => v,
+        Err(code) => return code,
+    };
+
+    // ---------------------------------------------------------------
+    // [ステップ4] 判定とサマリ出力。
+    // ---------------------------------------------------------------
+    probe_verdict(
+        alive,
+        child_pid,
+        child_parent_pid,
+        launcher_child,
+        last_exit_code,
+        wait,
+        launcher_started,
+        child_name,
+    )
+}
+
+/// [ステップ0] 事前ガード。既存子プロセス検出は exit 50、スナップショット失敗は
+/// exit 40 を [`Err`] で返す。
+fn precheck_existing_child(child_name: &str) -> Result<(), i32> {
+    match snapshot_processes() {
+        Ok(entries) => {
+            let preexisting = entries.iter().find(|e| eq_ignore_case(&e.name, child_name));
+            if let Some(e) = preexisting {
+                eprintln!(
+                    "{FAIL_TAG} 既存プロセス検出: {child_name} が既に起動中 (pid={} parent_pid={})",
+                    e.pid, e.parent_pid
+                );
+                eprintln!("     → exit 50: ゲーム既存プロセス検出。検証前に全て終了すること。");
+                return Err(50);
+            }
+            Ok(())
+        }
+        Err(e) => {
+            // 事前スナップショット失敗は致命的(以降の監視もできない)。exit 40。
+            eprintln!("{FAIL_TAG} 事前スナップショット失敗: {e}");
+            eprintln!("     → exit 40: windows-rs feature / 昇格を確認。");
+            Err(40)
+        }
+    }
+}
+
+/// [ステップ1] Launcher spawn。成功なら launcher PID、失敗なら exit 10。
+fn spawn_launcher_probe(launcher: &str, workdir: &str) -> Result<u32, i32> {
+    let spawn_result = Command::new(launcher)
+        .current_dir(workdir)
+        // Launcher の GL ログ出力でブロックしないよう stdio を切る(オプション)。
+        .stdin(Stdio::null())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        // CREATE_NEW_PROCESS_GROUP(0x00000200)。コンソール信号がプローブ本体へ
+        // 伝播しないようにする最小の分離。
+        .creation_flags(CREATE_NEW_PROCESS_GROUP.0)
+        .spawn();
+
+    match spawn_result {
+        Ok(c) => {
+            let pid = c.id();
+            println!("[1] Launcher spawn OK (launcher_pid={pid})");
+            // c をドロップすると子が kill される実装環境もあるため、明示的に離す。
+            // std::process::Child の drop は kill しない(終了待ちもしない)ので保持不要。
+            // ただし PID は記録しておく(親子関係検証用)。
+            let _ = c;
+            Ok(pid)
+        }
+        Err(e) => {
+            eprintln!(
+                "{FAIL_TAG} Launcher spawn 失敗: {e} (launcher={launcher}, workdir={workdir})"
+            );
+            eprintln!("     → exit 10: パス/権限を確認してください。");
+            Err(10)
+        }
+    }
+}
+
+/// [ステップ2] `deadline` まで子の出現をポーリング。発見なら (pid, parent_pid)、
+/// スナップショット失敗は exit 40、期限内不出現は exit 20。
+fn wait_discovery_probe(
+    child_name: &str,
+    deadline: Instant,
+    launcher_started: Instant,
+    launcher_child: u32,
+) -> Result<(u32, u32), i32> {
     let mut first_seen: Option<(u32, u32)> = None; // (pid, parent_pid)
     let mut snapshot_failed = false;
 
-    while Instant::now() < overall_deadline {
+    while Instant::now() < deadline {
         match snapshot_processes() {
             Ok(entries) => {
                 for entry in &entries {
@@ -236,7 +296,7 @@ fn run(launcher: &str, workdir: &str, child_name: &str, wait: Duration) -> i32 {
         std::thread::sleep(POLL_INTERVAL);
     }
 
-    let (child_pid, child_parent_pid) = match first_seen {
+    match first_seen {
         Some(v) => {
             let discover_ms = launcher_started.elapsed().as_millis();
             println!(
@@ -244,54 +304,48 @@ fn run(launcher: &str, workdir: &str, child_name: &str, wait: Duration) -> i32 {
                 v.0, v.1, discover_ms
             );
             if v.1 == launcher_child {
-                println!("    親子関係: Launcher({}) → child (OK)", launcher_child);
+                println!("    親子関係: Launcher({launcher_child}) → child (OK)");
             } else {
                 println!(
-                    "    親子関係メモ: child parent_pid={} != launcher_pid={} (別Launcher世代/既存プロセスの可能性)",
-                    v.1, launcher_child
+                    "    親子関係メモ: child parent_pid={} != launcher_pid={launcher_child} (別Launcher世代/既存プロセスの可能性)",
+                    v.1
                 );
             }
-            v
+            Ok(v)
+        }
+        None if snapshot_failed => {
+            eprintln!("{FAIL_TAG} CreateToolhelp32Snapshot 呼び出し失敗により子を監視できなかった");
+            eprintln!("     → exit 40: windows-rs feature / 昇格を確認。");
+            Err(40)
         }
         None => {
-            if snapshot_failed {
-                eprintln!(
-                    "{FAIL_TAG} CreateToolhelp32Snapshot 呼び出し失敗により子を監視できなかった"
-                );
-                eprintln!("     → exit 40: windows-rs feature / 昇格を確認。");
-                return 40;
-            }
+            let wait_secs = (deadline - launcher_started).as_secs_f64();
             eprintln!(
-                "{FAIL_TAG} 子プロセス {child_name} が --wait({:.0}s) 期間内に出現しなかった",
-                wait.as_secs_f64()
+                "{FAIL_TAG} 子プロセス {child_name} が --wait({wait_secs:.0}s) 期間内に出現しなかった"
             );
             eprintln!(
                 "     → exit 20: Launcher が子を起動していない/即座に失敗。KB5094126 回帰疑い。"
             );
-            return 20;
+            Err(20)
         }
-    };
+    }
+}
 
-    // ---------------------------------------------------------------
-    // [ステップ3] 子発見後、GetExitCodeProcess == STILL_ACTIVE が継続するか監視。
-    //   即死(0xC0000005 等)を検出する。生存監視も [ステップ2] と同じ絶対 deadline
-    //   (overall_deadline = launcher_started + wait) を共有するため、発見+生存の合計は
-    //   「spawn から wait 秒」に収まる(doc「--wait 秒ずっと STILL_ACTIVE なら成功」と整合)。
-    // ---------------------------------------------------------------
+/// [ステップ3] 子の GetExitCodeProcess 監視。`Ok((alive, last_exit_code))` を返す。
+/// 初回から OpenProcess 不可は真の API エラー (exit 40)。
+fn monitor_survival(child_pid: u32, deadline: Instant) -> Result<(bool, u32), i32> {
     let mut last_exit_code: u32 = STILL_ACTIVE_0;
     let mut alive = true;
     // exit code の問い合わせに一度でも成功したか。初回から OpenProcess 不可(権限等)の場合は
     // 真の API エラー(exit 40)とするため、成功履歴で (a)即死/(b)APIエラー を区別する。
     let mut ever_queried_ok = false;
 
-    while Instant::now() < overall_deadline {
+    while Instant::now() < deadline {
         match query_exit_code(child_pid) {
             Ok(code) => {
                 ever_queried_ok = true;
                 last_exit_code = code;
-                if code == STILL_ACTIVE_0 {
-                    // 生存継続。次ポーリングへ。
-                } else {
+                if code != STILL_ACTIVE_0 {
                     alive = false;
                     break;
                 }
@@ -307,19 +361,29 @@ fn run(launcher: &str, workdir: &str, child_name: &str, wait: Duration) -> i32 {
                     );
                     alive = false;
                     break;
-                } else {
-                    eprintln!("{FAIL_TAG} OpenProcess 呼び出し失敗(初回から不可): {e}");
-                    eprintln!("     → exit 40: 権限/feature を確認。");
-                    return 40;
                 }
+                eprintln!("{FAIL_TAG} OpenProcess 呼び出し失敗(初回から不可): {e}");
+                eprintln!("     → exit 40: 権限/feature を確認。");
+                return Err(40);
             }
         }
         std::thread::sleep(POLL_INTERVAL);
     }
+    Ok((alive, last_exit_code))
+}
 
-    // ---------------------------------------------------------------
-    // [ステップ4] 判定とサマリ出力。
-    // ---------------------------------------------------------------
+/// [ステップ4] 判定とサマリ出力。プローブの最終 exit code (0=PASS / 30=即死) を返す。
+#[allow(clippy::too_many_arguments)]
+fn probe_verdict(
+    alive: bool,
+    child_pid: u32,
+    child_parent_pid: u32,
+    launcher_child: u32,
+    last_exit_code: u32,
+    wait: Duration,
+    launcher_started: Instant,
+    child_name: &str,
+) -> i32 {
     let survived_secs: f64 = if alive {
         wait.as_secs_f64()
     } else {

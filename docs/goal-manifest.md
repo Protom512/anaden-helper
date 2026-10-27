@@ -4,6 +4,20 @@
 
 > 設計背景: Issue #37（ゴール駆動自動化）。TaskDef は「認識とアクション」を宣言し、manifest は「どこから始まり、いつ終わるか」を宣言する。両者を1ファイルに混ぜると `deny_unknown_fields` が効かなくなるため、慣例ファイル名 `pipeline.toml` で物理分離する。
 
+## CLI からの消費 (DEF-004 / 07-manifest-goal)
+
+`anaden run` のゴール解決の優先順位:
+
+1. 明示フラグ `--goal` / `--goal-file`（排他・常に優先・マージしない）
+2. 未指定時は `<pipeline_dir>/pipeline.toml` の `[[goal]]` を**既定ゴールとして採用**
+   - goals 無宣言（空）/ manifest 不在: ゴール無し = 従来の無限ループ（`--max-iters` 打ち切り）
+   - 単一 goal: そのまま採用（ゴール名も維持）
+   - 複数 `[[goal]]`: `Any` 合成（終端条件リスト = いずれかの条件で停止。合成名 `any(g1, g2)`）
+   - manifest が存在して parse 不能: run 開始前にエラー停止（fail-closed）
+
+studio の scenario 実行は `run <dir> <start>` をフラグなしで起動するため、
+authored goals は追加フラグ無しでライブ実行に効く（US-GOAL-01 受入）。
+
 ## Schema
 
 ```toml

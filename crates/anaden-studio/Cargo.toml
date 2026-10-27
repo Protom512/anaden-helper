@@ -18,6 +18,7 @@ test = false
 [dependencies]
 anaden-core.workspace = true
 anaden-device.workspace = true
+anaden-engine.workspace = true
 anaden-strategies.workspace = true
 anaden-vision.workspace = true
 anyhow.workspace = true

@@ -36,12 +36,32 @@ use anaden_vision::{BASE_WIDTH, CropInfo, ScreenScaler, TaskDef};
 
 use crate::pipeline_runner::{InputCommand, PipelineState};
 
+/// リカバリフックへ渡す実行コンテキスト (02-recovery-budget)。
+///
+/// 従来は hook へ `u32` (NoMatch streak) を渡すだけだったため、CLI 側は試行番号を
+/// 独自の単調カウンタ (AtomicU32) で数えるしかなく、健全サイクルを挟んでも
+/// 「2 回目以降 = 即 kill+restart」の強いエスカレーションが続いていた (F4)。
+/// 試行番号の管理を engine 側 [`RecoveryGuard`] へ集約し、hook は本構造体を受け取る。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RecoveryContext {
+    /// 現在のエピソード (直近の健全サイクル以降) でのリカバリ試行番号 (1 起点)。
+    /// テンプレートマッチ成功 (Fired / NoFire) で 1 へ戻る。
+    pub attempt: u32,
+    /// リカバリ発火時点の NoMatch / FiredUnverified 連続回数 (閾値と同値)。
+    pub streak: u32,
+}
+
 /// boxed async リカバリフック(`run_loop_with_recovery` で使用)。
 ///
-/// NoMatch が `threshold` 回連続したときに呼ばれる。`Ok` ならリカバリ成功とみなし
-/// NoMatch 連続カウンタをリセットしてループを継続、`Err` なら IO エラーとして停止する。
-pub type RecoveryHook =
-    Box<dyn FnMut(u32) -> Pin<Box<dyn Future<Output = Result<(), DeviceError>> + Send>> + Send>;
+/// NoMatch が `threshold` 回連続したときに [`RecoveryContext`] を渡して呼ばれる。
+/// `Ok` ならリカバリ成功とみなし NoMatch 連続カウンタをリセットしてループを継続、
+/// `Err` なら IO エラーとして停止する。試行回数の上限 (circuit breaker) は
+/// [`PipelineDriver::with_max_recovery_attempts`] が担い、上限到達時は hook を
+/// 呼ばず [`LoopStopReason::RecoveryExhausted`] で停止する。
+pub type RecoveryHook = Box<
+    dyn FnMut(RecoveryContext) -> Pin<Box<dyn Future<Output = Result<(), DeviceError>> + Send>>
+        + Send,
+>;
 
 /// リカバリ後の起動猶予 (boot-wait) 判定に使う経過時間の供給抽象 (Issue #210)。
 ///
@@ -102,6 +122,19 @@ impl RecoveryClock for SystemRecoveryClock {
 ///
 /// `grace == Duration::ZERO` のとき `in_grace` は常に [`false`] = 猶予なしの従来挙動
 /// (猶予導入前のテスト契約を 1 ビットも変えない)。
+///
+/// # リカバリ試行の予算 (circuit breaker・02-recovery-budget)
+///
+/// NoMatch が続く限り hook を発火し続ける従来挙動は、永久 NoMatch (ゲームが起動
+/// できない環境故障) で再起動を無限に繰り返した (F4)。本状態機械は試行予算
+/// `max_attempts` を持ち、[`Self::consume_attempt`] が予算到達時に [`None`] を返す
+/// ことで呼出側を [`LoopStopReason::RecoveryExhausted`] 停止へ導く。
+///
+/// 予算は「健全サイクルを挟まずに連続した試行数」に対して適用される
+/// ([`Self::record_match`] で現在エピソードの試行番号は 1 からやり直し)。
+/// 従って「起動 → 数分プレイ → 落ちる」を繰り返す間は毎エピソード attempt=1 の
+/// 弱いエスカレーション (kill なし起動) からやり直し、連続して復帰できない時だけ
+/// 上限へ到達する。予算には [`u32::MAX`] (= 上限なし = 従来挙動) も指定できる。
 struct RecoveryGuard {
     /// NoMatch 連続でリカバリを発火する閾値。0 はリカバリ無効。
     threshold: u32,
@@ -111,15 +144,27 @@ struct RecoveryGuard {
     streak: u32,
     /// 直近のリカバリ成功時刻 (ループ開始からの経過時間)。未実施なら [`None`]。
     recovered_at: Option<Duration>,
+    /// リカバリ試行の予算 (1 エピソード内の最大試行数)。[`u32::MAX`] は上限なし。
+    max_attempts: u32,
+    /// 現在のエピソードで消費した試行数 (直近の健全サイクルからの連続試行数)。
+    attempts: u32,
+    /// run 通算のリカバリ試行回数 (`ProgressReport::recovery_attempts` の元)。
+    total_attempts: u32,
+    /// エピソード内連続試行の最大値 (`ProgressReport::max_consecutive_recovery` の元)。
+    max_consecutive: u32,
 }
 
 impl RecoveryGuard {
-    fn new(threshold: u32, grace: Duration) -> Self {
+    fn new(threshold: u32, grace: Duration, max_attempts: u32) -> Self {
         Self {
             threshold,
             grace,
             streak: 0,
             recovered_at: None,
+            max_attempts,
+            attempts: 0,
+            total_attempts: 0,
+            max_consecutive: 0,
         }
     }
 
@@ -149,16 +194,194 @@ impl RecoveryGuard {
 
     /// テンプレートマッチ成功 (Fired / NoFire) を記録する。
     /// streak をリセットし、起動猶予も解除する (画面認識 = 起動完了)。
+    /// あわせて現在エピソードの試行番号も 1 からやり直し (健全サイクルを挟んだ
+    /// 再発 NoMatch は新規エピソードとして弱いエスカレーションから開始する)。
     fn record_match(&mut self) {
         self.streak = 0;
         self.recovered_at = None;
+        self.attempts = 0;
     }
 
     /// リカバリフック成功を記録する。streak をリセットし、`now` から猶予タイマーを開始。
+    /// 試行番号 (`attempts`) はリセットしない — hook 成功は「起動コマンドを打てた」
+    /// ことでありゲームが復帰した保証は無いため、連続故障時はエスカレーションを
+    /// 継続する (単調カウンタだった従来と同じ強度。解除は健全サイクルのみ)。
     fn recovered(&mut self, now: Duration) {
         self.streak = 0;
         self.recovered_at = Some(now);
     }
+
+    /// リカバリ試行を 1 回消費して試行番号 (1 起点) を払い出す。
+    /// 予算到達後は [`None`] (呼出側は [`LoopStopReason::RecoveryExhausted`] で停止)。
+    /// テレメトリ (通算回数・連続最大値) もここで更新する。
+    fn consume_attempt(&mut self) -> Option<u32> {
+        if self.attempts >= self.max_attempts {
+            return None;
+        }
+        self.attempts = self.attempts.saturating_add(1);
+        self.total_attempts = self.total_attempts.saturating_add(1);
+        self.max_consecutive = self.max_consecutive.max(self.attempts);
+        Some(self.attempts)
+    }
+
+    /// 復帰テレメトリ ([`ProgressReport`] の `recovery_attempts` /
+    /// `max_consecutive_recovery` の元) のスナップショット。
+    fn telemetry(&self) -> RecoveryTelemetry {
+        RecoveryTelemetry {
+            recovery_attempts: self.total_attempts,
+            max_consecutive_recovery: self.max_consecutive,
+        }
+    }
+}
+
+/// リカバリ試行の集計テレメトリ ([`ProgressReport`] の復帰系 2 フィールドの元)。
+///
+/// [`RecoveryGuard::telemetry`] がループ内で随時スナップショットを払出し、
+/// [`PipelineDriver::build_outcome`] が [`ProgressReport`] へ埋め込む。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct RecoveryTelemetry {
+    /// run 通算のリカバリフック起動回数。
+    recovery_attempts: u32,
+    /// 健全サイクルを挟まずに連続したリカバリ試行の最大回数。
+    max_consecutive_recovery: u32,
+}
+
+/// [`PipelineDriver::build_outcome`] へ渡す停止時集計の束。
+///
+/// `per_task_matches` / `started` / `recovery` を 1 つにまとめることで
+/// build_outcome の引数を 7 個以内に保つ (clippy `too_many_arguments` —
+/// [`GoalEvalInputs`] と同じ bundling 方針)。ProgressReport 構築に必要な
+/// 「ループで蓄積した報告コンテキスト」を表す。
+struct OutcomeCtx {
+    /// タスク毎のマッチ回数 (ループで蓄積したものをそのまま移譲)。
+    per_task_matches: Vec<TaskMatchCount>,
+    /// ループ開始時刻 (elapsed_ms 計算の起点)。
+    started: Instant,
+    /// 復帰テレメトリ ([`RecoveryGuard`] のスナップショット)。
+    recovery: RecoveryTelemetry,
+}
+
+impl OutcomeCtx {
+    /// ループの集計値 + guard から報告コンテキストを組み立てる
+    /// (テレメトリは呼出時点の [`RecoveryGuard::telemetry`] スナップショット)。
+    fn new(per_task_matches: Vec<TaskMatchCount>, started: Instant, guard: &RecoveryGuard) -> Self {
+        Self {
+            per_task_matches,
+            started,
+            recovery: guard.telemetry(),
+        }
+    }
+}
+
+/// 1 回のリカバリ試行 ([`PipelineDriver::run_recovery_step`]) の結果。
+enum RecoveryStep {
+    /// hook 成功。streak リセット + 起動猶予タイマー開始済み。ループ継続。
+    Recovered,
+    /// 試行予算到達 ([`RecoveryGuard::consume_attempt`] が [`None`])。
+    /// [`LoopStopReason::RecoveryExhausted`] で停止すべき (環境故障で進行不能)。
+    Exhausted,
+    /// hook が IO エラーを返した。[`LoopStopReason::ExecuteError`] で停止すべき。
+    HookFailed(DeviceError),
+}
+
+/// 統合ループコアの累積状態 (§A C3)。
+///
+/// iterations / fired / per_task_matches / started / guard / recovery_enabled を
+/// 1 つにまとめ、各 step_* helper と [`PipelineDriver::run_recovery_or_stop`] へ
+/// `&mut` で渡す。**driver の self フィールドにしないこと** — ヘルパ群が
+/// `&mut self` (recovery_clock / current 等) を取りつつ state を分離 borrow する
+/// ため (self に置くと二重借用で書けなくなる)。
+struct LoopState {
+    /// 現在の tick 数 (MaxIterations 判定・outcome 記録の元)。
+    iterations: u64,
+    /// 累積発火コマンド。
+    fired: Vec<InputCommand>,
+    /// タスク毎のマッチ回数。
+    per_task_matches: Vec<TaskMatchCount>,
+    /// ループ開始時刻 (elapsed_ms 計算の起点)。
+    started: Instant,
+    /// NoMatch 連続リカバリの状態機械。
+    guard: RecoveryGuard,
+    /// リカバリ有効 (threshold > 0 かつ hook 有り)。record_miss の短絡判定に使う。
+    recovery_enabled: bool,
+}
+
+impl LoopState {
+    fn new(
+        recover_nomatch_threshold: u32,
+        grace: Duration,
+        max_recovery_attempts: u32,
+        recover_present: bool,
+    ) -> Self {
+        Self {
+            iterations: 0,
+            fired: Vec::new(),
+            per_task_matches: Vec::new(),
+            started: Instant::now(),
+            guard: RecoveryGuard::new(recover_nomatch_threshold, grace, max_recovery_attempts),
+            recovery_enabled: recover_nomatch_threshold > 0 && recover_present,
+        }
+    }
+
+    /// 停止 outcome 構築用の報告コンテキスト (per_task_matches を消費して移譲)。
+    fn ctx(&mut self) -> OutcomeCtx {
+        OutcomeCtx::new(
+            std::mem::take(&mut self.per_task_matches),
+            self.started,
+            &self.guard,
+        )
+    }
+
+    /// マッチ系 tick (Fired / NoFire) の共通 prologue: streak リセット + 集計 bump。
+    fn record_match_tick(&mut self, current_before: &str) {
+        self.guard.record_match();
+        bump_task_match(current_before, &mut self.per_task_matches);
+    }
+
+    /// ゴール評価用の入力束 (現在の累積状態の借用スナップショット)。
+    fn goal_eval_inputs(&self) -> GoalEvalInputs<'_> {
+        GoalEvalInputs {
+            iterations: self.iterations,
+            fired_commands: &self.fired,
+            per_task_matches: &self.per_task_matches,
+            started: self.started,
+            recovery: self.guard.telemetry(),
+        }
+    }
+}
+
+/// 1 arm 処理の結果: ループ継続か、完成 [`LoopOutcome`] での停止か。
+enum StepFlow {
+    /// 継続 (interval sleep へ)。
+    Continue,
+    /// 停止 (呼出側がそのまま return する完成 outcome)。
+    Stop(LoopOutcome),
+}
+
+/// マッチ系 arm の種別 (Fired / NoFire)。§A D9 の非対称契約をデータ化:
+/// ログ位置 (Fired は debug → eval、NoFire は eval → debug) と停止種別
+/// (TerminalTask+タスク名 / Stop+"stop") の両方がこの 1 enum で決まる。
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum MatchArm {
+    /// コマンド発火済み。debug は評価**前**、停止は TerminalTask + 現在タスク名。
+    Fired,
+    /// 発火コマンド無し (ClickSelf w/o region 等)。debug は継続確定**後**、
+    /// 停止は Stop + "stop" 固定。
+    NoFire,
+}
+
+/// [`PipelineDriver::step_matched`] への arm 固有入力 (clippy
+/// `too_many_arguments` 回避の bundling — [`GoalEvalInputs`] と同じ方針)。
+/// `just_fired` は NoFire では [`None`]。
+struct MatchStepInput<'a> {
+    /// step 実行前のカレントタスク名 (集計 bump 用)。
+    current_before: &'a str,
+    /// 遷移先タスク名 ([`None`] はパイプライン終端/停止指示)。
+    next_current: Option<String>,
+    /// 実際に発火したコマンド (Fired のみ)。
+    just_fired: Option<InputCommand>,
+    /// ゴール評価へ伝播する直近マッチ情報 (§A D2)。
+    match_info: Option<(String, f32, ScreenRegion)>,
 }
 
 /// ゴール評価用の経過時間計測の抽象(Issue #37 T4)。
@@ -218,6 +441,34 @@ struct GoalEvalInputs<'a> {
     per_task_matches: &'a [TaskMatchCount],
     /// ループ開始時刻。
     started: Instant,
+    /// 復帰テレメトリ (停止時の ProgressReport へ伝播)。
+    recovery: RecoveryTelemetry,
+}
+
+/// goal 活性ループの評価コンテキスト束 (§A C2)。[`GoalMode::Active`] の中身。
+///
+/// `clock` はトレイトオブジェクト (`&mut dyn GoalClock`) で受ける — 公開シグネチャの
+/// `impl GoalClock` はそのまま維持し、ループ内部だけ動的ディスパッチに寄せる
+/// (統合ループコア run_loop_core が Inactive / Active を同一型で扱うための準備)。
+struct GoalLoopCtx<'a> {
+    /// 評価対象ゴール。
+    goal: &'a anaden_core::Goal,
+    /// 経過秒数の供給源 (テストでは FakeClock)。
+    clock: &'a mut dyn GoalClock,
+    /// tick 数と直近マッチの蓄積。
+    goal_ctx: anaden_core::GoalStatusContext,
+}
+
+/// ループのゴール評価モード (§A C2)。
+///
+/// [`GoalMode::Inactive`] は非ゴールループ ([`PipelineDriver::run_loop_with_recovery`])
+/// と完全一致であることを型で強制する — [`PipelineDriver::eval_goal_stop`] は
+/// Inactive を即 [`None`] (tick も clock も進めない) とする契約。
+enum GoalMode<'a> {
+    /// 非ゴールモード。ゴール評価は一切行わない。
+    Inactive,
+    /// ゴール活性モード (評価コンテキスト込み)。
+    Active(GoalLoopCtx<'a>),
 }
 
 /// normalize後1280空間の [`InputCommand`] を、実機生画像（黒帯込み）の座標へ変換する純関数。
@@ -298,6 +549,39 @@ impl Input for anaden_device::Win32InputExecutor {
     }
 }
 
+/// ステップ IO エラーの発生源分類。
+///
+/// [`StepOutcome::Error`] の構造化キー。従来は message 文字列の prefix 一致
+/// (`starts_with("capture")`) でリカバリ可否を判定しており、`verify_capture:` が
+/// 「capture 系」として拾えない・文言変更に脆い問題があった (F3)。分類はこの enum で
+/// 機械的に行い、message 文字列は e2e 出力契約 (人間可読ログ) 専用と分離する。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub enum StepErrorKind {
+    /// サイクル冒頭の画面取得 ([`PipelineDriver::run_once`] の capture) の IO エラー。
+    Capture,
+    /// 入力発火 (execute) の IO エラー。
+    Execute,
+    /// 発火後検証の再 capture ([`PipelineDriver::run_once_verified`]) の IO エラー。
+    VerifyCapture,
+    /// 画面取得・入力以外のステップ内エラー (05-template-cache / F34)。
+    ///
+    /// 現在はテンプレート読込失敗 ([`anaden_vision::TaskDefError::TemplateLoadFailed`]) が
+    /// ここに分類される。テンプレ欠落は設定破損 (恒常故障) のため非リカバリ = 停止系。
+    /// NoMatch (リトライ候補) とは区別される。
+    Other,
+}
+
+/// 画面取得系 IO エラー (capture / verify_capture) = リカバリ対象か。
+///
+/// 画面が取れないのは「ゲームが死んでいる/起動途中」可能性が高い一過状態なので、
+/// `run_loop_with_recovery` / `run_loop_with_goal` の両ループがこの判定を共有して
+/// recovery hook 起動 + 起動猶予 (boot-wait) 継続へ分類する (Issue #210 と同一契約)。
+/// 入力発火系 ([`StepErrorKind::Execute`]) はハードウェア/権限系の恒常故障を含むため
+/// 従来どおり即停止 (fail-closed)。
+pub fn is_recoverable_io_error(kind: StepErrorKind) -> bool {
+    matches!(kind, StepErrorKind::Capture | StepErrorKind::VerifyCapture)
+}
+
 /// 1 サイクルの実行結果。caller([`PipelineDriver::run_loop`]) が継続判定に使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
@@ -312,8 +596,14 @@ pub enum StepOutcome {
     NoFire { next_current: Option<String> },
     /// マッチせず(tick が [`None`])。current 不変。リトライ候補。
     NoMatch,
-    /// capture/execute の IO エラー。
-    Error(String),
+    /// capture/execute/verify_capture の IO エラー。
+    /// `kind` でリカバリ可否を機械分類し ([`is_recoverable_io_error`])、`message` は
+    /// `"capture: ..."` / `"execute: ..."` / `"verify_capture: ..."` の従来文言を維持
+    /// (e2e 出力契約保持)。
+    Error {
+        kind: StepErrorKind,
+        message: String,
+    },
     /// 発火はしたが事後検証で**対象が残存**した(テンプレがまだ高 conf でマッチ)。
     /// アクションが効果を発揮していない疑いが強い「誤成功」状態。
     /// `next_current` は tick 結果の next(検証失敗時は current を巻き戻すので基本 [`None`])。
@@ -371,6 +661,10 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// 猶予判定用の経過時間供給 (Issue #210)。本番は [`SystemRecoveryClock`]、
     /// テストは [`Self::with_recovery_clock`] で決定論的クロックへ差し替える。
     recovery_clock: Box<dyn RecoveryClock>,
+    /// リカバリ試行の予算上限 (02-recovery-budget)。健全サイクルを挟まずに連続した
+    /// 試行がこの回数に達すると [`LoopStopReason::RecoveryExhausted`] で停止する。
+    /// 既定 [`u32::MAX`] (= 上限なし = 従来挙動)。[`Self::with_max_recovery_attempts`] で設定。
+    max_recovery_attempts: u32,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -402,6 +696,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             diag_counter: 0,
             recovery_grace: Duration::ZERO,
             recovery_clock: Box::new(SystemRecoveryClock::new()),
+            max_recovery_attempts: u32::MAX,
         }
     }
 
@@ -453,6 +748,20 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         self
     }
 
+    /// リカバリ試行 (recovery hook 起動) の予算上限を設定する (02-recovery-budget)。
+    ///
+    /// 健全サイクル (テンプレートマッチ成功) を挟まずに連続したリカバリ試行が
+    /// `max_attempts` 回に達すると、次の発火タイミングで hook を呼ばず
+    /// [`LoopStopReason::RecoveryExhausted`] で停止する (永久 NoMatch でのゲーム
+    /// 再起動無限ループ = circuit breaker)。健全サイクルを挟むと試行番号は
+    /// 1 からやり直し、予算も新規エピソードとして数え直す。
+    ///
+    /// 呼ばない場合の既定は [`u32::MAX`] (上限なし = 従来挙動・後方互換)。
+    pub fn with_max_recovery_attempts(mut self, max_attempts: u32) -> Self {
+        self.max_recovery_attempts = max_attempts;
+        self
+    }
+
     /// スケーラへの参照(主にテスト・デバッグ用)。
     pub fn scaler(&self) -> &ScreenScaler {
         &self.scaler
@@ -472,7 +781,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             Ok(img) => img,
             Err(e) => {
                 warn!("pipeline capture error: {e}");
-                return StepOutcome::Error(format!("capture: {e}"));
+                return StepOutcome::Error {
+                    kind: StepErrorKind::Capture,
+                    message: format!("capture: {e}"),
+                };
             }
         };
         let capture_ms = t_cap.elapsed().as_secs_f64() * 1000.0;
@@ -509,8 +821,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         // 事前に採取する(UC-2 last_match の task 名要素)。
         let matched_task_name = self.state.current().to_string();
         let tick = match self.state.tick(&normalized, &self.tasks) {
-            Some(r) => r,
-            None => {
+            Ok(Some(r)) => r,
+            Ok(None) => {
                 debug!(
                     "cycle latency: capture={capture_ms:.2}ms recognize={:.2}ms e2e={:.2}ms (NoMatch) raw={raw_w}x{raw_h} norm={norm_w}x{norm_h}",
                     t_rec.elapsed().as_secs_f64() * 1000.0,
@@ -525,6 +837,16 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 self.save_diagnose_report(&matched_task_name, &normalized);
                 return StepOutcome::NoMatch;
             }
+            // F34 (05-template-cache): テンプレート読込エラーは NoMatch (リトライ候補) と
+            // 区別して停止系エラーにする。従来は run_step が None へ潰すため永久 NoMatch
+            // ループとして観測され、テンプレ欠落が fail-invisible だった。
+            Err(e) => {
+                warn!("template detect error (task '{matched_task_name}'): {e}");
+                return StepOutcome::Error {
+                    kind: StepErrorKind::Other,
+                    message: format!("template: {e}"),
+                };
+            }
         };
         let recognize_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
         // マッチしたテンプレート情報を記録(UC-2 ゴール評価用)。run_loop_with_goal が
@@ -537,7 +859,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             let device_cmd = rescale_command(cmd, self.device_width, &self.last_crop_info);
             if let Err(e) = self.execute_command(&device_cmd).await {
                 warn!("pipeline execute error: {e}");
-                return StepOutcome::Error(format!("execute: {e}"));
+                return StepOutcome::Error {
+                    kind: StepErrorKind::Execute,
+                    message: format!("execute: {e}"),
+                };
             }
             debug!("fired: {:?}", device_cmd);
             debug!(
@@ -585,7 +910,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// - 発火した → 事後検証を実施:
     ///   - テンプレ消失/変化 → [`StepOutcome::Fired`]
     ///   - テンプレ残存(高 conf で再マッチ) → [`StepOutcome::FiredUnverified`](current 巻き戻し済み)
-    ///   - 事後 capture IO エラー → [`StepOutcome::Error`](`"verify_capture: ..."`)
+    ///   - 事後 capture IO エラー → [`StepOutcome::Error`] { kind: [`StepErrorKind::VerifyCapture`], message: `"verify_capture: ..."` }
     pub async fn run_once_verified(&mut self) -> StepOutcome {
         let pre_task = self.state.current().to_string();
         let fired = self.run_once().await;
@@ -610,9 +935,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// 消失なら [`StepOutcome::Fired`] を返す。capture IO エラーは [`StepOutcome::Error`]。
     ///
     /// ここでは [`PipelineState::tick`] を使わず `run_step` を直接呼ぶ(current をこれ以上
-    /// 動かさないため)。`run_step` は `task_name` が見つからない/テンプレ欠落で [`None`]
-    /// を返すが、これは検証上は「対象消失」と同義(発火前はマッチしていたタスクなので、
-    /// 欠落/不明になるケースは実運用上稀。安全側 = 検証成功扱いで Fired)。
+    /// 動かさないため)。`run_step` は `task_name` が見つからない場合は `Ok(None)` を返し、
+    /// これは検証上は「対象消失」と同義(発火前はマッチしていたタスクなので、欠落/不明に
+    /// なるケースは実運用上稀。安全側 = 検証成功扱いで Fired)。テンプレ読込エラーの
+    /// `Err` も同じ扱いだが warn で可視化する (F34)。なおテンプレ自体は run_once の
+    /// detect と同じ前処理済みキャッシュを使うため再読込は発生しない (F19)。
     async fn verify_action_effect(
         &mut self,
         task_name: &str,
@@ -623,14 +950,27 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             Ok(img) => img,
             Err(e) => {
                 warn!("verify capture error: {e}");
-                return StepOutcome::Error(format!("verify_capture: {e}"));
+                return StepOutcome::Error {
+                    kind: StepErrorKind::VerifyCapture,
+                    message: format!("verify_capture: {e}"),
+                };
             }
         };
         // run_once と同じ本番前処理 (normalize_capture・検証も描画領域空間で行う)。
         // CropInfo は検証では発火しないため保存不要。
         let (normalized, _crop_info) = self.scaler.normalize_capture(&screen);
         // run_step を直接呼び、task_name で再認識。マッチ残存 → 対象残存 = 未検証。
-        let still_present = anaden_vision::run_step(&self.tasks, &normalized, task_name).is_some();
+        // F34: run_step はテンプレ読込エラーを Err で返すが、検証時の Err は従来の
+        // 「対象消失」扱い (=Fired) を維持する (発火前はマッチしていたタスクなので
+        // 欠落は実運用上稀。安全側 = 検証成功扱い)。warn で fail-invisible を防ぐ。
+        let still_present = match anaden_vision::run_step(&self.tasks, &normalized, task_name) {
+            Ok(Some(_)) => true,
+            Ok(None) => false,
+            Err(e) => {
+                warn!("verify detect error (task '{task_name}'): {e}");
+                false
+            }
+        };
         if still_present {
             // ガード4: アクション無効(対象残存)時、ANADEN_SNAPSHOT_DIR 設定時に
             // 発火後フレームを PNG 保存(偽成功の原因特定用)。未設定時は no-op。
@@ -786,6 +1126,12 @@ pub enum LoopStopReason {
     /// PC版 Live 実行中の緊急停止経路。`#[derive]` Serialize/Deserialize 付きなので
     /// `interrupted` の snake_case 表現として機械可読(JSON/TOML)に現れる。
     Interrupted,
+    /// リカバリ試行の予算上限到達 (02-recovery-budget)。NoMatch / FiredUnverified /
+    /// 画面取得系エラーで recovery hook を連続起動しても健全サイクル (テンプレート
+    /// マッチ) に戻らず試行上限に達した = 環境故障で進行不能と判断した終端
+    /// (永久 NoMatch での再起動無限ループ = circuit breaker)。
+    /// `recovery_exhausted` の snake_case 表現として JSON/TOML に現れる。
+    RecoveryExhausted,
 }
 
 /// タスク毎のマッチ回数(UC-3 進捗レポート用)。
@@ -813,6 +1159,11 @@ pub struct TaskMatchCount {
 /// - `elapsed_ms`: ループ開始から停止までの推定経過ミリ秒(`Instant` 計測)。
 /// - `terminal_task`: 停止時に到達していたタスク名(終端タスクまたは最終タスク)。
 /// - `reached_goal`: ゴール駆動モードで到達したゴールの記述子。非ゴールモードでは [`None`]。
+/// - `recovery_attempts`: run 通算のリカバリ (ゲーム再起動) 試行回数
+///   (02-recovery-budget。「どれだけ復帰を試みたか」の実態テレメトリ)。
+/// - `max_consecutive_recovery`: 健全サイクルを挟まずに連続したリカバリ試行の最大回数
+///   (大 = 復帰できずにエスカレーションし続けた期間がある。上限到達で
+///   [`LoopStopReason::RecoveryExhausted`] 停止)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProgressReport {
     /// 実行したサイクル数。
@@ -827,6 +1178,21 @@ pub struct ProgressReport {
     pub terminal_task: Option<String>,
     /// 到達ゴール記述子(非ゴールモードでは [`None`])。
     pub reached_goal: Option<String>,
+    /// 停止理由 (`LoopOutcome::reason` と同値・03-report-channel)。
+    ///
+    /// report 単体 (JSON) を消費する CLI/studio が「なぜ止まったか」を
+    /// 読むためのフィールド。`#[serde(default)]` により旧成果物
+    /// (本フィールド無し) は [`None`] 補完で読める。
+    #[serde(default)]
+    pub stop_reason: Option<LoopStopReason>,
+    /// run 通算のリカバリ試行回数 (02-recovery-budget)。
+    /// `#[serde(default)]` により旧成果物 (本フィールド無し) は 0 補完で読める。
+    #[serde(default)]
+    pub recovery_attempts: u32,
+    /// 健全サイクルを挟まずに連続したリカバリ試行の最大回数 (02-recovery-budget)。
+    /// `#[serde(default)]` により旧成果物 (本フィールド無し) は 0 補完で読める。
+    #[serde(default)]
+    pub max_consecutive_recovery: u32,
 }
 
 /// run_loop の結果。
@@ -902,6 +1268,29 @@ pub fn format_progress_report(outcome: &LoopOutcome) -> String {
     lines.join("\n")
 }
 
+/// [`LoopStopReason`] の人間可読ラベル (03-report-channel)。
+///
+/// CLI (`anaden run` の「停止理由:」行) と studio (report.json 由来の表示) を
+/// 繋ぐ単一情報源。studio の stdout 行解析 (`RunStatus::observe` の
+/// `停止理由:` 行マッチ) もこの文言に依存するため、変更時は anaden-studio
+/// (log_status.rs) の出力契約テストを併せて更新すること。
+#[must_use]
+pub fn stop_reason_label(reason: LoopStopReason) -> &'static str {
+    match reason {
+        LoopStopReason::Stop => "Stop アクション到達(正常)",
+        LoopStopReason::TerminalTask => "終端タスク到達(正常)",
+        LoopStopReason::MaxIterations => "最大サイクル到達",
+        LoopStopReason::GoalReached => "宣言的ゴール到達(正常)",
+        LoopStopReason::GoalTimeout => "ゴール未到達タイムアウト(soft failure)",
+        LoopStopReason::Interrupted => "Ctrl+C/SIGINT で中断",
+        LoopStopReason::CaptureError => "キャプチャエラーで停止",
+        LoopStopReason::ExecuteError => "発火エラーで停止",
+        LoopStopReason::RecoveryExhausted => {
+            "リカバリ試行上限到達で停止 (環境故障で進行不能・02-recovery-budget)"
+        }
+    }
+}
+
 /// [`Goal`](`anaden_core::Goal`) の到達記述子(descriptor)を [`StopCondition`] から導出する純関数。
 ///
 /// `evaluate_goal` が `progress_report.reached_goal` へ埋める文字列で、各バリアントを
@@ -965,12 +1354,278 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             .await
     }
 
+    /// リカバリフックを 1 回起動する両ループ共通の実行部 (02-recovery-budget)。
+    ///
+    /// (1) [`RecoveryGuard::consume_attempt`] で試行番号を払い出す。試行番号は健全
+    ///     サイクルで 1 起点へ戻るため、hook 側のエスカレーション (初回 = kill なし
+    ///     起動) が毎エピソード正しく適用される。予算到達時は [`RecoveryStep::Exhausted`]。
+    /// (2) hook へ [`RecoveryContext`] (`attempt` / `streak`) を渡して起動する。
+    ///     成功なら streak リセット + 起動猶予 (grace) タイマー開始、IO エラーなら
+    ///     [`RecoveryStep::HookFailed`]。
+    ///
+    /// 従来は `hook(guard.streak())` の直接呼出と結果分岐が 2 ループ × 3 発火経路
+    /// (NoMatch / FiredUnverified / 画面取得系エラー) の 6 箇所に重複しており、
+    /// ループ間で契約が乖離する温床だった。本メソッドへ集約することで両ループの
+    /// リカバリ契約 (猶予・予算・失敗時停止) を 1 箇所で共有する。
+    async fn run_recovery_step(
+        &mut self,
+        cause: &str,
+        guard: &mut RecoveryGuard,
+        recover: &mut Option<RecoveryHook>,
+    ) -> RecoveryStep {
+        let Some(attempt) = guard.consume_attempt() else {
+            let t = guard.telemetry();
+            warn!(
+                "{cause}; recovery budget exhausted (attempts={}, max consecutive={}) \
+                 -> stopping with RecoveryExhausted",
+                t.recovery_attempts, t.max_consecutive_recovery
+            );
+            return RecoveryStep::Exhausted;
+        };
+        let streak = guard.streak();
+        info!("{cause}; invoking recovery hook (attempt {attempt}, streak {streak})");
+        let Some(hook) = recover.as_mut() else {
+            // 呼出側は recovery_enabled (threshold > 0 かつ hook 有り) で gating して
+            // いるため通常到達しない。到達したら hook 無し = リカバリ不能として
+            // fail-closed (試行番号は消費済みなので黙って継続はしない)。
+            return RecoveryStep::Exhausted;
+        };
+        match hook(RecoveryContext { attempt, streak }).await {
+            Ok(()) => {
+                let recovered_at = self.recovery_clock.elapsed();
+                info!(
+                    "recovery hook succeeded; resetting streak + boot grace {:?} (Issue #210)",
+                    self.recovery_grace
+                );
+                guard.recovered(recovered_at);
+                RecoveryStep::Recovered
+            }
+            Err(e) => RecoveryStep::HookFailed(e),
+        }
+    }
+
+    /// [`Self::run_recovery_step`] を呼び、停止すべき結果なら完成 [`LoopOutcome`] を
+    /// 組み立てる (継続なら [`None`])。NoMatch / FiredUnverified / capture-error の
+    /// 3 arm で共通する RecoveryStep match を 1 箇所に集約する。
+    ///
+    /// 停止 outcome は「この tick は失敗扱い」の慣例どおり `iterations - 1` を
+    /// 記録する (`run_recovery_step` 失敗 tick は進行と数えない)。
+    /// `fired` / `per_task_matches` は停止時のみ `std::mem::take` で消費する。
+    ///
+    /// warn! の位置 (HookFailed arm の 1 回のみ・Exhausted は run_recovery_step
+    /// 内部の warn で済ませる) は集約前の各 arm と同一順序を維持する。
+    async fn run_recovery_or_stop(
+        &mut self,
+        cause: &str,
+        state: &mut LoopState,
+        recover: &mut Option<RecoveryHook>,
+    ) -> Option<LoopOutcome> {
+        match self
+            .run_recovery_step(cause, &mut state.guard, recover)
+            .await
+        {
+            RecoveryStep::Recovered => None,
+            RecoveryStep::Exhausted => Some(self.build_outcome(
+                state.iterations - 1,
+                std::mem::take(&mut state.fired),
+                LoopStopReason::RecoveryExhausted,
+                "recovery_exhausted",
+                state.ctx(),
+            )),
+            RecoveryStep::HookFailed(e) => {
+                warn!("recovery hook failed: {e}");
+                Some(self.build_outcome(
+                    state.iterations - 1,
+                    std::mem::take(&mut state.fired),
+                    LoopStopReason::ExecuteError,
+                    "recovery_failed",
+                    state.ctx(),
+                ))
+            }
+        }
+    }
+
+    /// マッチ系 arm (Fired / NoFire) の共通尾部: ゴール評価 → 継続/停止判定。
+    /// eval より前の副作用 (集計 bump / debug! 等) は呼出側 [`Self::step_matched`]
+    /// の契約順序 (§A D9) に属する — Fired は debug → eval、NoFire は eval → debug。
+    fn eval_then_terminal(
+        &mut self,
+        state: &mut LoopState,
+        goal_mode: &mut GoalMode<'_>,
+        match_info: Option<(String, f32, ScreenRegion)>,
+        next_current: &Option<String>,
+        arm: MatchArm,
+    ) -> StepFlow {
+        if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
+            return StepFlow::Stop(stop);
+        }
+        let Some(_) = next_current else {
+            let (reason, text) = match arm {
+                MatchArm::Fired => (LoopStopReason::TerminalTask, self.current().to_string()),
+                MatchArm::NoFire => (LoopStopReason::Stop, "stop".to_string()),
+            };
+            return StepFlow::Stop(self.build_outcome(
+                state.iterations,
+                std::mem::take(&mut state.fired),
+                reason,
+                &text,
+                state.ctx(),
+            ));
+        };
+        StepFlow::Continue
+    }
+
+    /// マッチ系 arm (Fired / NoFire) 共通の 1 tick 処理。
+    ///
+    /// 副作用順 (§A D3/D9): guard 更新 → 集計 bump/push (Fired のみ push) →
+    /// debug-if-Some (**Fired は eval 前**・eval 停止時も出力済み、NoFire は
+    /// 継続確定後) → ゴール評価 → 停止種別判定。
+    /// [`GoalMode::Inactive`] では eval が即 [`None`] になるため、非ゴール
+    /// ループの旧挙動 (None → 停止 / Some → debug 継続) と完全一致する。
+    /// 差分は [`MatchArm`] 1 値に集約 — 双生児関数を作らない (duplication gate)。
+    fn step_matched(
+        &mut self,
+        state: &mut LoopState,
+        goal_mode: &mut GoalMode<'_>,
+        input: MatchStepInput<'_>,
+        arm: MatchArm,
+    ) -> StepFlow {
+        state.record_match_tick(input.current_before);
+        if let Some(c) = input.just_fired {
+            state.fired.push(c);
+        }
+        if matches!(arm, MatchArm::Fired)
+            && let Some(name) = &input.next_current
+        {
+            debug!("fired, advancing to {}", name);
+        }
+        let flow =
+            self.eval_then_terminal(state, goal_mode, input.match_info, &input.next_current, arm);
+        if matches!(flow, StepFlow::Continue)
+            && matches!(arm, MatchArm::NoFire)
+            && let Some(name) = &input.next_current
+        {
+            debug!("no-fire, transitioning to {}", name);
+        }
+        flow
+    }
+
+    /// NoMatch arm。副作用順 = streak 記録 (`recovery_enabled &&` の短絡維持) →
+    /// ゴール評価 → due なら recovery hook (§A D5: 同 tick での goal 到達は
+    /// hook 発火より優先して停止する)。
+    ///
+    /// `miss_cause` は recovery ログ文言。NoMatch と FiredUnverified (実質
+    /// NoMatch 相当の誤成功 — bump/push のみ追加して本メソッドへ委譲) で
+    /// 文言を変えるため呼出側から渡す。
+    async fn step_no_match(
+        &mut self,
+        state: &mut LoopState,
+        goal_mode: &mut GoalMode<'_>,
+        recover: &mut Option<RecoveryHook>,
+        miss_cause: &'static str,
+        match_info: Option<(String, f32, ScreenRegion)>,
+    ) -> StepFlow {
+        let now = self.recovery_clock.elapsed();
+        let due = state.recovery_enabled && state.guard.record_miss(now);
+        if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
+            return StepFlow::Stop(stop);
+        }
+        if due && let Some(stop) = self.run_recovery_or_stop(miss_cause, state, recover).await {
+            return StepFlow::Stop(stop);
+        }
+        StepFlow::Continue
+    }
+
+    /// FiredUnverified arm (実質 NoMatch 相当の誤成功)。集計 bump/push のみを
+    /// 行い、以降 (streak 記録 → ゴール評価 → due なら recovery hook) は
+    /// [`Self::step_no_match`] に委譲 (§A D6 — cause 文言のみ差し替え)。
+    async fn step_fired_unverified(
+        &mut self,
+        state: &mut LoopState,
+        goal_mode: &mut GoalMode<'_>,
+        recover: &mut Option<RecoveryHook>,
+        current_before: &str,
+        just_fired: Option<InputCommand>,
+        match_info: Option<(String, f32, ScreenRegion)>,
+    ) -> StepFlow {
+        bump_task_match(current_before, &mut state.per_task_matches);
+        if let Some(c) = just_fired {
+            state.fired.push(c);
+        }
+        self.step_no_match(
+            state,
+            goal_mode,
+            recover,
+            "FiredUnverified streak >= threshold",
+            match_info,
+        )
+        .await
+    }
+
+    /// Error arm (§A D7: ゴール評価は一切しない — 引数に goal_mode を取らない
+    /// ことで構造保証。tick も clock も進めない)。
+    ///
+    /// Issue #210: 起動猶予 (boot-wait) 中の capture エラーはゲーム再起動直後の
+    /// 一過状態 (プロセス/ウィンドウ未存在 → GetClientRect 失敗等) として許容し、
+    /// ループを継続する (grace 中は streak 加算も抑制済み)。猶予外の capture
+    /// エラーも、recovery hook が有効なら「ゲームが死んでいる」(初回起動前・
+    /// クラッシュ直後) 可能性が高いため recovery を呼んで grace へ入る
+    /// (issue210-verify で初回起動前 io_error 即死した事例)。recovery 無効・
+    /// 失敗時と execute エラーは従来どおり即停止 (fail-closed)。
+    /// 分類は message 文字列でなく [`is_recoverable_io_error`] (enum 機械判定)
+    /// で行う — verify_capture (発火後検証の再 capture) も画面取得系として
+    /// 同一契約に含める (F1: リカバリ漏れ解消)。hook 起動は
+    /// [`Self::run_recovery_step`] (予算・猶予込みの共通実行部) に集約。
+    async fn step_error(
+        &mut self,
+        state: &mut LoopState,
+        recover: &mut Option<RecoveryHook>,
+        kind: StepErrorKind,
+        message: String,
+    ) -> StepFlow {
+        if !is_recoverable_io_error(kind) {
+            return StepFlow::Stop(self.build_outcome(
+                state.iterations - 1,
+                std::mem::take(&mut state.fired),
+                LoopStopReason::ExecuteError,
+                "io_error",
+                state.ctx(),
+            ));
+        }
+        let now = self.recovery_clock.elapsed();
+        if state.guard.in_grace(now) {
+            warn!("pipeline capture error during boot grace (game restarting): {message}");
+            StepFlow::Continue
+        } else if state.recovery_enabled {
+            info!("capture error outside grace (game presumed dead): {message}");
+            match self
+                .run_recovery_or_stop("capture error outside grace", state, recover)
+                .await
+            {
+                Some(stop) => StepFlow::Stop(stop),
+                None => StepFlow::Continue,
+            }
+        } else {
+            StepFlow::Stop(self.build_outcome(
+                state.iterations - 1,
+                std::mem::take(&mut state.fired),
+                LoopStopReason::CaptureError,
+                "io_error",
+                state.ctx(),
+            ))
+        }
+    }
+
     /// `run_loop` + NoMatch 連続時リカバリフック付き。
     ///
     /// `recover_nomatch_threshold > 0` かつ `recover` が [`Some`] のとき、
-    /// NoMatch が `threshold` 回連続するごとに `recover(current_streak)` を呼ぶ。
-    /// `Ok` なら連続カウンタをリセットしてループ継続。`Err` なら [`LoopStopReason::ExecuteError`]
-    /// で停止(re-launch のプロセス起動失敗等)。`threshold == 0` または `recover == None` なら
+    /// NoMatch が `threshold` 回連続するごとに `recover(RecoveryContext { attempt, streak })`
+    /// を呼ぶ (`attempt` は健全サイクルで 1 に戻る試行番号)。`Ok` なら連続カウンタを
+    /// リセットしてループ継続。`Err` なら [`LoopStopReason::ExecuteError`]
+    /// で停止(re-launch のプロセス起動失敗等)。健全サイクルを挟まずに連続した試行が
+    /// [`Self::with_max_recovery_attempts`] の予算に達したら [`LoopStopReason::RecoveryExhausted`]
+    /// で停止する (circuit breaker・02-recovery-budget)。
+    /// `threshold == 0` または `recover == None` なら
     /// リカバリ無効(通常の [`Self::run_loop`] と等価)。
     ///
     /// # 起動猶予 (boot-wait・Issue #210)
@@ -995,33 +1650,56 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         // 非ゴールモード(後方互換)。run_loop_with_goal(goal=None) からも本メソッドへ委譲される
         // ため、両者を相互再帰させず本メソッド内で完結させる(async fn の再帰は boxing が必要で
         // コストが高い+実装上の理由がない)。ゴール評価付きは run_loop_with_goal を直接呼ぶこと。
-        let mut iterations = 0u64;
-        let mut fired: Vec<InputCommand> = Vec::new();
-        let mut guard = RecoveryGuard::new(recover_nomatch_threshold, self.recovery_grace);
-        let recovery_enabled = recover_nomatch_threshold > 0 && recover.is_some();
-        let started = Instant::now();
-        let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
+        self.run_loop_core(
+            interval,
+            max_iterations,
+            recover_nomatch_threshold,
+            &mut recover,
+            &mut GoalMode::Inactive,
+        )
+        .await
+    }
+
+    /// 統合ループコア (§A C4)。[`Self::run_loop_with_recovery`] (Inactive) と
+    /// [`Self::run_loop_with_goal`] (Active) の共通実装。
+    ///
+    /// 両モードの差分は [`GoalMode`] に集約され、本体はモード非依意 —
+    /// [`Self::eval_goal_stop`] と match_info の take が Inactive で no-op に
+    /// なるため、cancel/MaxIterations 判定 → step 実行 → 5 arm dispatch →
+    /// interval sleep の構造は両公開メソッドで完全に同一。
+    async fn run_loop_core(
+        &mut self,
+        interval: Duration,
+        max_iterations: u64,
+        recover_nomatch_threshold: u32,
+        recover: &mut Option<RecoveryHook>,
+        goal_mode: &mut GoalMode<'_>,
+    ) -> LoopOutcome {
+        let mut state = LoopState::new(
+            recover_nomatch_threshold,
+            self.recovery_grace,
+            self.max_recovery_attempts,
+            recover.is_some(),
+        );
         loop {
             // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
             if self.is_cancelled() {
                 return self.build_outcome(
-                    iterations,
-                    fired,
+                    state.iterations,
+                    std::mem::take(&mut state.fired),
                     LoopStopReason::Interrupted,
                     "interrupted",
-                    per_task_matches,
-                    started,
+                    state.ctx(),
                 );
             }
-            iterations += 1;
-            if iterations > max_iterations {
+            state.iterations += 1;
+            if state.iterations > max_iterations {
                 return self.build_outcome(
-                    iterations - 1,
-                    fired,
+                    state.iterations - 1,
+                    std::mem::take(&mut state.fired),
                     LoopStopReason::MaxIterations,
                     "max_iterations",
-                    per_task_matches,
-                    started,
+                    state.ctx(),
                 );
             }
             let current_before = self.current().to_string();
@@ -1030,184 +1708,77 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             } else {
                 self.run_once().await
             };
-            match step {
+            // UC-2 (TemplateMatch): Fired/NoFire ブランチでは run_once が格納した
+            // self.last_match (task_name, confidence, region) を take() で取り出し
+            // GoalStatusContext::last_match へ伝播させる。NoMatch/FiredUnverified/Error は
+            // テンプレートマッチしていない(または誤成功)なので None を渡す。
+            // (NoFire は ClickSelf w/o region 等の「マッチしたが発火コマンド無」で、tick は
+            //  マッチしているので last_match を伝播する。)
+            // §A D2: take はゴール活性時のみ (Inactive は触らない = 非ゴールループとの完全一致)。
+            let match_info = match (&*goal_mode, &step) {
+                (GoalMode::Active(_), StepOutcome::Fired { .. } | StepOutcome::NoFire { .. }) => {
+                    self.last_match.take()
+                }
+                _ => None,
+            };
+            let flow = match step {
                 StepOutcome::Fired {
                     next_current,
                     fired: just_fired,
-                } => {
-                    guard.record_match();
-                    bump_task_match(&current_before, &mut per_task_matches);
-                    if let Some(c) = just_fired {
-                        fired.push(c);
-                    }
-                    match next_current {
-                        None => {
-                            return self.build_outcome(
-                                iterations,
-                                fired,
-                                LoopStopReason::TerminalTask,
-                                self.current(),
-                                per_task_matches,
-                                started,
-                            );
-                        }
-                        Some(name) => debug!("fired, advancing to {}", name),
-                    }
-                }
-                StepOutcome::NoFire { next_current } => {
-                    guard.record_match();
-                    bump_task_match(&current_before, &mut per_task_matches);
-                    match next_current {
-                        None => {
-                            return self.build_outcome(
-                                iterations,
-                                fired,
-                                LoopStopReason::Stop,
-                                "stop",
-                                per_task_matches,
-                                started,
-                            );
-                        }
-                        Some(name) => debug!("no-fire, transitioning to {}", name),
-                    }
-                }
+                } => self.step_matched(
+                    &mut state,
+                    goal_mode,
+                    MatchStepInput {
+                        current_before: &current_before,
+                        next_current,
+                        just_fired,
+                        match_info,
+                    },
+                    MatchArm::Fired,
+                ),
+                StepOutcome::NoFire { next_current } => self.step_matched(
+                    &mut state,
+                    goal_mode,
+                    MatchStepInput {
+                        current_before: &current_before,
+                        next_current,
+                        just_fired: None,
+                        match_info,
+                    },
+                    MatchArm::NoFire,
+                ),
                 StepOutcome::NoMatch => {
-                    let now = self.recovery_clock.elapsed();
-                    if recovery_enabled && guard.record_miss(now) {
-                        info!(
-                            "NoMatch streak {} >= threshold {}; invoking recovery hook",
-                            guard.streak(),
-                            recover_nomatch_threshold
-                        );
-                        if let Some(hook) = recover.as_mut() {
-                            match hook(guard.streak()).await {
-                                Ok(()) => {
-                                    let recovered_at = self.recovery_clock.elapsed();
-                                    info!(
-                                        "recovery hook succeeded; resetting NoMatch streak \
-                                         + boot grace {:?} (Issue #210)",
-                                        self.recovery_grace
-                                    );
-                                    guard.recovered(recovered_at);
-                                }
-                                Err(e) => {
-                                    warn!("recovery hook failed: {e}");
-                                    return self.build_outcome(
-                                        iterations - 1,
-                                        fired,
-                                        LoopStopReason::ExecuteError,
-                                        "recovery_failed",
-                                        per_task_matches,
-                                        started,
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    self.step_no_match(
+                        &mut state,
+                        goal_mode,
+                        recover,
+                        "NoMatch streak >= threshold",
+                        match_info,
+                    )
+                    .await
                 }
                 StepOutcome::FiredUnverified {
                     next_current: _,
                     fired: just_fired,
                 } => {
-                    bump_task_match(&current_before, &mut per_task_matches);
-                    if let Some(c) = just_fired {
-                        fired.push(c);
-                    }
-                    let now = self.recovery_clock.elapsed();
-                    if recovery_enabled && guard.record_miss(now) {
-                        info!(
-                            "FiredUnverified streak {} >= threshold {}; invoking recovery hook",
-                            guard.streak(),
-                            recover_nomatch_threshold
-                        );
-                        if let Some(hook) = recover.as_mut() {
-                            match hook(guard.streak()).await {
-                                Ok(()) => {
-                                    let recovered_at = self.recovery_clock.elapsed();
-                                    info!(
-                                        "recovery hook succeeded; resetting streak \
-                                         + boot grace {:?} (Issue #210)",
-                                        self.recovery_grace
-                                    );
-                                    guard.recovered(recovered_at);
-                                }
-                                Err(e) => {
-                                    warn!("recovery hook failed: {e}");
-                                    return self.build_outcome(
-                                        iterations - 1,
-                                        fired,
-                                        LoopStopReason::ExecuteError,
-                                        "recovery_failed",
-                                        per_task_matches,
-                                        started,
-                                    );
-                                }
-                            }
-                        }
-                    }
+                    self.step_fired_unverified(
+                        &mut state,
+                        goal_mode,
+                        recover,
+                        &current_before,
+                        just_fired,
+                        match_info,
+                    )
+                    .await
                 }
-                StepOutcome::Error(msg) => {
-                    // Issue #210: 起動猶予 (boot-wait) 中の capture エラーはゲーム再起動
-                    // 直後の一過状態 (プロセス/ウィンドウ未存在 → GetClientRect 失敗等) と
-                    // して許容し、ループを継続する (grace 中は streak 加算も抑制済み)。
-                    // 猶予外の capture エラーも、recovery hook が有効なら「ゲームが死んで
-                    // いる」(初回起動前・クラッシュ直後) 可能性が高いため recovery を呼んで
-                    // grace へ入る (issue210-verify で初回起動前 io_error 即死した事例)。
-                    // recovery 無効・失敗時と execute エラーは従来どおり即停止 (fail-closed)。
-                    if msg.starts_with("capture") {
-                        let now = self.recovery_clock.elapsed();
-                        if guard.in_grace(now) {
-                            warn!(
-                                "pipeline capture error during boot grace (game restarting): {msg}"
-                            );
-                        } else if recovery_enabled {
-                            info!(
-                                "capture error outside grace; invoking recovery hook (game presumed dead): {msg}"
-                            );
-                            if let Some(hook) = recover.as_mut() {
-                                match hook(guard.streak()).await {
-                                    Ok(()) => {
-                                        let recovered_at = self.recovery_clock.elapsed();
-                                        info!(
-                                            "recovery hook succeeded; entering boot grace {:?} (Issue #210)",
-                                            self.recovery_grace
-                                        );
-                                        guard.recovered(recovered_at);
-                                    }
-                                    Err(e) => {
-                                        warn!("recovery hook failed: {e}");
-                                        return self.build_outcome(
-                                            iterations - 1,
-                                            fired,
-                                            LoopStopReason::ExecuteError,
-                                            "recovery_failed",
-                                            per_task_matches,
-                                            started,
-                                        );
-                                    }
-                                }
-                            }
-                        } else {
-                            return self.build_outcome(
-                                iterations - 1,
-                                fired,
-                                LoopStopReason::CaptureError,
-                                "io_error",
-                                per_task_matches,
-                                started,
-                            );
-                        }
-                    } else {
-                        return self.build_outcome(
-                            iterations - 1,
-                            fired,
-                            LoopStopReason::ExecuteError,
-                            "io_error",
-                            per_task_matches,
-                            started,
-                        );
-                    }
+                StepOutcome::Error { kind, message } => {
+                    // §A D7: Error arm はゴール評価なし (tick も clock も進めない)。
+                    self.step_error(&mut state, recover, kind, message).await
                 }
+            };
+            match flow {
+                StepFlow::Continue => {}
+                StepFlow::Stop(outcome) => return outcome,
             }
             // interval 待ちを cancel 通知で即時抜けられるように select! 化。
             // トークン未設定時は cancel 分岐が発火しないので従来の sleep のみ(後方互換)。
@@ -1255,260 +1826,21 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 )
                 .await;
         };
-        // ゴール活性パス。run_loop_with_recovery の本体をインライン展開し、各 tick 後に
-        // evaluate を呼んで GoalReached/GoalTimeout で早期停止する。
-        // (run_loop_with_recovery へ evaluate を埋め込まず別関数に分けたのは、非ゴールパスの
-        //  既存テスト(MaxIterations 等)へ一切影響を与えないため。)
-        let mut iterations = 0u64;
-        let mut fired: Vec<InputCommand> = Vec::new();
-        let mut guard = RecoveryGuard::new(recover_nomatch_threshold, self.recovery_grace);
-        let recovery_enabled = recover_nomatch_threshold > 0 && recover.is_some();
-        let started = Instant::now();
-        let mut per_task_matches: Vec<TaskMatchCount> = Vec::new();
-        let mut goal_ctx = anaden_core::GoalStatusContext::new();
-        loop {
-            // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
-            if self.is_cancelled() {
-                return self.build_outcome(
-                    iterations,
-                    fired,
-                    LoopStopReason::Interrupted,
-                    "interrupted",
-                    per_task_matches,
-                    started,
-                );
-            }
-            iterations += 1;
-            if iterations > max_iterations {
-                return self.build_outcome(
-                    iterations - 1,
-                    fired,
-                    LoopStopReason::MaxIterations,
-                    "max_iterations",
-                    per_task_matches,
-                    started,
-                );
-            }
-            let current_before = self.current().to_string();
-            let step = if self.verify_after_fire {
-                self.run_once_verified().await
-            } else {
-                self.run_once().await
-            };
-            // UC-2 (TemplateMatch): Fired/NoFire ブランチでは run_once が格納した
-            // self.last_match (task_name, confidence, region) を take() で取り出し
-            // GoalStatusContext::last_match へ伝播させる。NoMatch/FiredUnverified/Error は
-            // テンプレートマッチしていない(または誤成功)なので None を渡す。
-            // (NoFire は ClickSelf w/o region 等の「マッチしたが発火コマンド無」で、tick は
-            //  マッチしているので last_match を伝播する。)
-            let match_info: Option<(String, f32, ScreenRegion)> = match &step {
-                StepOutcome::Fired { .. } | StepOutcome::NoFire { .. } => self.last_match.take(),
-                _ => None,
-            };
-            match step {
-                StepOutcome::Fired {
-                    next_current,
-                    fired: just_fired,
-                } => {
-                    guard.record_match();
-                    bump_task_match(&current_before, &mut per_task_matches);
-                    if let Some(c) = just_fired {
-                        fired.push(c);
-                    }
-                    if let Some(name) = &next_current {
-                        debug!("fired, advancing to {}", name);
-                    }
-                    // ゴール評価(tick 数を +1)。GoalReached/GoalTimeout なら即停止。
-                    goal_ctx.tick(match_info);
-                    let elapsed = clock.elapsed_secs();
-                    if let Some(stop) = self.evaluate_goal(
-                        goal_ref,
-                        &goal_ctx,
-                        elapsed,
-                        GoalEvalInputs {
-                            iterations,
-                            fired_commands: &fired,
-                            per_task_matches: &per_task_matches,
-                            started,
-                        },
-                    ) {
-                        return stop;
-                    }
-                    if next_current.is_none() {
-                        return self.build_outcome(
-                            iterations,
-                            fired,
-                            LoopStopReason::TerminalTask,
-                            self.current(),
-                            per_task_matches,
-                            started,
-                        );
-                    }
-                }
-                StepOutcome::NoFire { next_current } => {
-                    guard.record_match();
-                    bump_task_match(&current_before, &mut per_task_matches);
-                    goal_ctx.tick(match_info);
-                    let elapsed = clock.elapsed_secs();
-                    if let Some(stop) = self.evaluate_goal(
-                        goal_ref,
-                        &goal_ctx,
-                        elapsed,
-                        GoalEvalInputs {
-                            iterations,
-                            fired_commands: &fired,
-                            per_task_matches: &per_task_matches,
-                            started,
-                        },
-                    ) {
-                        return stop;
-                    }
-                    if let Some(name) = &next_current {
-                        debug!("no-fire, transitioning to {}", name);
-                    }
-                    if next_current.is_none() {
-                        return self.build_outcome(
-                            iterations,
-                            fired,
-                            LoopStopReason::Stop,
-                            "stop",
-                            per_task_matches,
-                            started,
-                        );
-                    }
-                }
-                StepOutcome::NoMatch => {
-                    let now = self.recovery_clock.elapsed();
-                    let due = recovery_enabled && guard.record_miss(now);
-                    goal_ctx.tick(match_info);
-                    let elapsed = clock.elapsed_secs();
-                    if let Some(stop) = self.evaluate_goal(
-                        goal_ref,
-                        &goal_ctx,
-                        elapsed,
-                        GoalEvalInputs {
-                            iterations,
-                            fired_commands: &fired,
-                            per_task_matches: &per_task_matches,
-                            started,
-                        },
-                    ) {
-                        return stop;
-                    }
-                    if due {
-                        info!(
-                            "NoMatch streak {} >= threshold {}; invoking recovery hook",
-                            guard.streak(),
-                            recover_nomatch_threshold
-                        );
-                        if let Some(hook) = recover.as_mut() {
-                            match hook(guard.streak()).await {
-                                Ok(()) => {
-                                    let recovered_at = self.recovery_clock.elapsed();
-                                    info!(
-                                        "recovery hook succeeded; resetting NoMatch streak \
-                                         + boot grace {:?} (Issue #210)",
-                                        self.recovery_grace
-                                    );
-                                    guard.recovered(recovered_at);
-                                }
-                                Err(e) => {
-                                    warn!("recovery hook failed: {e}");
-                                    return self.build_outcome(
-                                        iterations - 1,
-                                        fired,
-                                        LoopStopReason::ExecuteError,
-                                        "recovery_failed",
-                                        per_task_matches,
-                                        started,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                StepOutcome::FiredUnverified {
-                    next_current: _,
-                    fired: just_fired,
-                } => {
-                    bump_task_match(&current_before, &mut per_task_matches);
-                    if let Some(c) = just_fired {
-                        fired.push(c);
-                    }
-                    let now = self.recovery_clock.elapsed();
-                    let due = recovery_enabled && guard.record_miss(now);
-                    goal_ctx.tick(match_info);
-                    let elapsed = clock.elapsed_secs();
-                    if let Some(stop) = self.evaluate_goal(
-                        goal_ref,
-                        &goal_ctx,
-                        elapsed,
-                        GoalEvalInputs {
-                            iterations,
-                            fired_commands: &fired,
-                            per_task_matches: &per_task_matches,
-                            started,
-                        },
-                    ) {
-                        return stop;
-                    }
-                    if due {
-                        info!(
-                            "FiredUnverified streak {} >= threshold {}; invoking recovery hook",
-                            guard.streak(),
-                            recover_nomatch_threshold
-                        );
-                        if let Some(hook) = recover.as_mut() {
-                            match hook(guard.streak()).await {
-                                Ok(()) => {
-                                    let recovered_at = self.recovery_clock.elapsed();
-                                    info!(
-                                        "recovery hook succeeded; resetting streak \
-                                         + boot grace {:?} (Issue #210)",
-                                        self.recovery_grace
-                                    );
-                                    guard.recovered(recovered_at);
-                                }
-                                Err(e) => {
-                                    warn!("recovery hook failed: {e}");
-                                    return self.build_outcome(
-                                        iterations - 1,
-                                        fired,
-                                        LoopStopReason::ExecuteError,
-                                        "recovery_failed",
-                                        per_task_matches,
-                                        started,
-                                    );
-                                }
-                            }
-                        }
-                    }
-                }
-                StepOutcome::Error(msg) => {
-                    // Issue #210: 起動猶予中の capture エラーは一過状態として許容
-                    // (run_loop_with_recovery と同一契約の詳細はそちらのコメント参照)。
-                    if msg.starts_with("capture") && guard.in_grace(self.recovery_clock.elapsed()) {
-                        warn!("pipeline capture error during boot grace (game restarting): {msg}");
-                    } else {
-                        let reason = if msg.starts_with("capture") {
-                            LoopStopReason::CaptureError
-                        } else {
-                            LoopStopReason::ExecuteError
-                        };
-                        return self.build_outcome(
-                            iterations - 1,
-                            fired,
-                            reason,
-                            "io_error",
-                            per_task_matches,
-                            started,
-                        );
-                    }
-                }
-            }
-            // interval 待ちを cancel 通知で即時抜けられるように select! 化。
-            self.sleep_or_cancelled(interval).await;
-        }
+        // ゴール活性パス。非ゴールループと同一の run_loop_core を使い、
+        // GoalMode::Active の差分 (tick+eval / match_info take) だけ挿動が変わる。
+        let mut goal_mode = GoalMode::Active(GoalLoopCtx {
+            goal: goal_ref,
+            clock: &mut clock,
+            goal_ctx: anaden_core::GoalStatusContext::new(),
+        });
+        self.run_loop_core(
+            interval,
+            max_iterations,
+            recover_nomatch_threshold,
+            &mut recover,
+            &mut goal_mode,
+        )
+        .await
     }
 
     /// ゴールを評価し、終端状態なら停止理由と terminal 文字列を返す。
@@ -1530,6 +1862,27 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 Some((LoopStopReason::GoalTimeout, "goal_timeout"))
             }
         }
+    }
+
+    /// 統合ループコアの 1 tick ゴール評価 (§A D2/D7/D8 担当)。
+    ///
+    /// [`GoalMode::Inactive`] は即 [`None`] — tick も [`GoalClock`] も進めない。
+    /// これにより非ゴールループとの完全一致 (副作用順も含む) を型で保証する
+    /// (Error arm から呼ばれない = D7 は呼出側の構造で担保)。
+    /// [`GoalMode::Active`] は tick (+1) → clock 経過取得 → [`Self::evaluate_goal`]
+    /// の順 (D8: clock は tick 直後に 1 回だけ)。
+    fn eval_goal_stop(
+        &self,
+        mode: &mut GoalMode<'_>,
+        match_info: Option<(String, f32, ScreenRegion)>,
+        inputs: GoalEvalInputs<'_>,
+    ) -> Option<LoopOutcome> {
+        let GoalMode::Active(ctx) = mode else {
+            return None;
+        };
+        ctx.goal_ctx.tick(match_info);
+        let elapsed = ctx.clock.elapsed_secs();
+        self.evaluate_goal(ctx.goal, &ctx.goal_ctx, elapsed, inputs)
     }
 
     /// ゴールを評価し、終端状態なら呼出側がそのまま `return` できる完成 [`LoopOutcome`] を返す。
@@ -1556,8 +1909,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             inputs.fired_commands.to_vec(),
             reason,
             terminal,
-            inputs.per_task_matches.to_vec(),
-            inputs.started,
+            OutcomeCtx {
+                per_task_matches: inputs.per_task_matches.to_vec(),
+                started: inputs.started,
+                recovery: inputs.recovery,
+            },
         );
         // ゴール到達/タイムアウト時、評価対象ゴールの記述子を埋める
         // (CI/studio が「どのゴールで停止したか」を人間可読に追跡するため)。
@@ -1571,8 +1927,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         fired_commands: Vec<InputCommand>,
         reason: LoopStopReason,
         terminal: &str,
-        per_task_matches: Vec<TaskMatchCount>,
-        started: Instant,
+        ctx: OutcomeCtx,
     ) -> LoopOutcome {
         let terminal_task = if terminal.is_empty() {
             None
@@ -1582,11 +1937,16 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let progress_report = ProgressReport {
             iterations,
             fired_count: fired_commands.len() as u64,
-            per_task_matches,
-            elapsed_ms: started.elapsed().as_millis() as u64,
+            per_task_matches: ctx.per_task_matches,
+            elapsed_ms: ctx.started.elapsed().as_millis() as u64,
             terminal_task: terminal_task.clone(),
             // 非ゴールモード。ゴール到達は T4/T5 で run_loop_with_recovery 側が上書きする。
             reached_goal: None,
+            // 停止理由 (03-report-channel)。report 単体の消費者向け。
+            stop_reason: Some(reason.clone()),
+            // 復帰テレメトリ (02-recovery-budget)。両ループが RecoveryGuard から伝播。
+            recovery_attempts: ctx.recovery.recovery_attempts,
+            max_consecutive_recovery: ctx.recovery.max_consecutive_recovery,
         };
         LoopOutcome {
             iterations,
@@ -1920,6 +2280,65 @@ mod tests {
         assert_eq!(driver.current(), "LoadGame");
     }
 
+    /// F34 (05-template-cache): テンプレート読込エラー (欠落) は NoMatch に潰されず
+    /// `StepOutcome::Error { kind: Other, message: "template: ..." }` として区別可能である
+    /// こと。従来は run_step が None へ潰すため NoMatch (リトライ候補) と区別不能
+    /// (fail-invisible) で、テンプレ欠落が永久 NoMatch ループとしてしか観測できなかった。
+    #[tokio::test]
+    async fn run_once_missing_template_returns_template_error_not_nomatch() {
+        let (screen, _tpl) = matched_frame();
+        let frames = frames_of(vec![screen]);
+        let fired = new_fired();
+
+        let task = TaskDef {
+            template: PathBuf::from("/nonexistent/does_not_exist_template.png"),
+            ..click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )
+        };
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![task],
+            2400, // device_width
+            300,
+        );
+
+        let out = driver.run_once().await;
+        match out {
+            StepOutcome::Error { kind, message } => {
+                assert_eq!(
+                    kind,
+                    StepErrorKind::Other,
+                    "template load error must classify as Other (non-recoverable)"
+                );
+                assert!(
+                    message.starts_with("template:"),
+                    "message must use the 'template: ...' convention, got {message:?}"
+                );
+            }
+            other => {
+                panic!("expected Error, got {other:?} (NoMatch would be the old squashed behavior)")
+            }
+        }
+        assert!(
+            fired.lock().expect("fired lock").is_empty(),
+            "no input must fire on template error"
+        );
+    }
+
     #[tokio::test]
     async fn run_once_stop_yields_nofire_none() {
         let (screen, _tpl) = matched_frame();
@@ -2009,7 +2428,10 @@ mod tests {
         );
 
         match driver.run_once().await {
-            StepOutcome::Error(msg) => assert!(msg.starts_with("capture")),
+            StepOutcome::Error { kind, message } => {
+                assert_eq!(kind, StepErrorKind::Capture);
+                assert!(message.starts_with("capture"));
+            }
             other => panic!("expected Error, got {other:?}"),
         }
         assert!(fired.lock().expect("fired lock").is_empty());
@@ -2531,9 +2953,12 @@ mod tests {
     }
 
     /// `RecoveryGuard` 純粋状態機械の遷移 (猶予中加算なし・猶予明け再開・match 解除)。
+    /// 予算は u32::MAX (上限なし) — 本テストは猶予/streak 契約のみ (Issue #210 の
+    /// 既存契約を 1 ビットも変えない)。予算の挙動は
+    /// `recovery_guard_attempt_budget_and_healthy_reset` (02-recovery-budget) が担う。
     #[test]
     fn recovery_guard_grace_and_streak_transitions() {
-        let mut g = RecoveryGuard::new(3, Duration::from_secs(90));
+        let mut g = RecoveryGuard::new(3, Duration::from_secs(90), u32::MAX);
         // 閾値未満では発火しない (streak は加算)。
         assert!(!g.record_miss(Duration::from_secs(0)));
         assert!(!g.record_miss(Duration::from_secs(1)));
@@ -2557,7 +2982,7 @@ mod tests {
         assert!(!g.record_miss(Duration::from_secs(94)));
         assert_eq!(g.streak(), 1, "match 後は猶予解除で即カウント");
         // threshold=0 (リカバリ無効) は常に非発火。
-        let mut z = RecoveryGuard::new(0, Duration::ZERO);
+        let mut z = RecoveryGuard::new(0, Duration::ZERO, u32::MAX);
         assert!(!z.record_miss(Duration::ZERO));
         assert!(!z.record_miss(Duration::ZERO));
     }
@@ -2723,6 +3148,386 @@ mod tests {
             "猶予中の capture エラーは致命扱いにしない (ゲーム再起動の一過状態)"
         );
         assert_eq!(calls.load(Ordering::SeqCst), 1);
+    }
+
+    // ---- (5c) StepOutcome エラーの enum 構造化: 2 ループ間リカバリ契約の統一 ----
+    //
+    // F1 (verify_capture リカバリ漏れ): `run_once_verified` の事後 capture エラーは
+    // message が "verify_capture: ..." で始まるため `starts_with("capture")` が false に
+    // なり、recovery 有効でも ExecuteError 即停止していた。capture と同じ「画面取得系
+    // IO エラー = ゲーム死/起動中の可能性が高い」に分類し、リカバリ契約へ乗せる。
+    //
+    // F2 (--goal 弱体化): `run_loop_with_goal` の Error ブランチは grace 中の warn 継続
+    // しか持たず、grace 外 + recovery_enabled でも hook を起動せず CaptureError 即停止
+    // していた (`run_loop_with_recovery` とコメント上は「同一契約」を宣言しつつ挙動が
+    // 乖離)。両ループで同一の分類・リカバリ契約を保証する。
+
+    /// verify_capture エラー (1 枚目 capture 成功 → fire → 事後 capture が IO Err) が
+    /// recovery_enabled なら recovery hook 起動後にループを継続することを検証 (ループ単位)。
+    /// 既存 `verify_capture_error_returns_error` は run_once 単位の挙動 pin なので、
+    /// ここでループへの伝播を pin する。
+    #[tokio::test]
+    async fn test_verify_capture_error_enters_recovery_path() {
+        let (matched, _tpl) = matched_frame();
+        // 1 枚のみ: c1 の run_once は成功(fire)するが verify capture が "no more frames"。
+        // c2 以降は run_once の capture 自体が失敗する (hook 後の grace 中は warn 継続)。
+        let mut driver = build_grace_driver(
+            frames_of(vec![matched]),
+            Duration::from_secs(90),
+            Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))),
+        )
+        .with_verify(true);
+        let (calls, hook) = counting_hook();
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 8, 2, Some(hook))
+            .await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "verify_capture エラーは recovery 経路へ分類される (ExecuteError 即停止しない)"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "verify_capture エラーが recovery hook を起動する (以降の capture エラーは grace 中)"
+        );
+    }
+
+    /// kind 分類の表駆動単体テスト (F3: 文字列 prefix 一致の解消)。
+    /// 画面取得系 (Capture / VerifyCapture) はリカバリ対象、入力発火系 (Execute) は
+    /// fail-closed。テンプレ読込系 (Other) は設定破損 = 恒常故障のため fail-closed
+    /// (05-template-cache / F34)。この契約が両ループの Error 分岐を決定する。
+    #[test]
+    fn test_step_error_kind_classification() {
+        let cases = [
+            (StepErrorKind::Capture, true),
+            (StepErrorKind::VerifyCapture, true),
+            (StepErrorKind::Execute, false),
+            (StepErrorKind::Other, false),
+        ];
+        for (kind, expected) in cases {
+            assert_eq!(is_recoverable_io_error(kind), expected, "kind={kind:?}");
+        }
+    }
+
+    /// grace 外 capture エラー + recovery_enabled で `run_loop_with_goal` が
+    /// CaptureError 即停止ではなく recovery hook 起動後に再開することを検証
+    /// (`run_loop_with_recovery` の L1157-1198 契約と同一期待)。
+    #[tokio::test]
+    async fn test_goal_loop_capture_error_matches_recovery_contract() {
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_of(vec![]),
+                fail: true,
+            },
+            FakeInput {
+                fired: new_fired(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![],
+            2400,
+            300,
+        )
+        .with_recovery_grace(Duration::from_secs(90))
+        .with_recovery_clock(Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))));
+        let (calls, hook) = counting_hook();
+        let goal = anaden_core::Goal {
+            name: "g-capture-recovery".into(),
+            stop: anaden_core::StopCondition::LoopCount { target: 100 },
+        };
+
+        let outcome = driver
+            .run_loop_with_goal(
+                Duration::ZERO,
+                6,
+                1,
+                Some(hook),
+                Some(&goal),
+                FakeClock::starting_at(0),
+            )
+            .await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "goal loop の grace 外 capture エラーは recovery hook 経路へ分類される (CaptureError 即停止しない)"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "grace 外 capture エラーが recovery hook を起動する (hook 後は grace 中 warn 継続)"
+        );
+    }
+
+    // ---- (5d) 02-recovery-budget: リカバリ試行の circuit breaker ----
+    //
+    // F4 (リカバリ試行に上限なし): 従来は NoMatch が続く限り recovery hook が
+    // max_iterations 到達まで発火し続け、永久 NoMatch 状態でゲーム再起動を
+    // 無限に繰り返した。またフックの試行番号は CLI 側 AtomicU32 の単調カウンタで
+    // 健全サイクル後にリセットされず、即 kill+restart の強いエスカレーションに
+    // なっていた。ここでは (1) 試行上限で停止する契約、(2) 健全サイクルでの
+    // 試行番号リセット、(3) ProgressReport の復帰テレメトリを pin する。
+
+    /// hook へ渡された試行番号 (RecoveryContext.attempt) を記録する recovery hook。
+    fn attempt_recording_hook() -> (Arc<Mutex<Vec<u32>>>, RecoveryHook) {
+        let attempts = Arc::new(Mutex::new(Vec::new()));
+        let sink = attempts.clone();
+        let hook: RecoveryHook = Box::new(move |ctx: RecoveryContext| {
+            let a = sink.clone();
+            Box::pin(async move {
+                a.lock().expect("attempts lock").push(ctx.attempt);
+                Ok(())
+            })
+        });
+        (attempts, hook)
+    }
+
+    /// RED (1): 恒久 NoMatch 状態で recovery hook は `max_recovery_attempts` 回
+    /// (テストでは 3) で頭打ちになり、run は [`LoopStopReason::RecoveryExhausted`]
+    /// で終了する。従来は threshold=3 / max_iters=100 で 33 回発火し続けて
+    /// MaxIterations 停止だった (上限なし = RED)。
+    #[tokio::test]
+    async fn test_recovery_attempts_capped() {
+        let (driver, _fired) = build_nomatch_driver();
+        let mut driver = driver.with_max_recovery_attempts(3);
+        let (attempts, hook) = attempt_recording_hook();
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 100, 3, Some(hook))
+            .await;
+
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::RecoveryExhausted,
+            "上限到達後は MaxIterations ではなく RecoveryExhausted で停止する"
+        );
+        assert_eq!(outcome.terminal, "recovery_exhausted");
+        assert_eq!(
+            attempts.lock().expect("attempts lock").as_slice(),
+            &[1, 2, 3],
+            "hook はエスカレーション 1→2→3 の 3 回で頭打ち。4 回目は起動しない"
+        );
+        // 復帰テレメトリ: 総試行回数と連続最大値が ProgressReport から読める。
+        assert_eq!(outcome.progress_report.recovery_attempts, 3);
+        assert_eq!(outcome.progress_report.max_consecutive_recovery, 3);
+    }
+
+    /// RED (2): recovery 1 回 → マッチ回復 (Fired) → 再 NoMatch のシーケンスで、
+    /// 2 回目のリカバリは attempt=1 (launch_app 段階) からやり直しになる。
+    /// 従来の単調カウンタでは 2 回目が即 kill+restart (attempt=2) になる想定と対照。
+    #[tokio::test]
+    async fn test_recovery_counter_resets_on_healthy_cycle() {
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let (matched, _tpl) = matched_frame();
+        // c1-c3: NoMatch → hook attempt=1 / c4: matched (Fired = 健全サイクル) で
+        // 試行カウンタリセット / c5-c7: NoMatch → hook attempt=1 (2 ではない)。
+        // max_iters=7 で c7 の hook#2 直後に打ち切り (以降のエピソードを切り離す)。
+        let seq: Vec<DynamicImage> = vec![
+            blank.clone(),
+            blank.clone(),
+            blank.clone(),
+            matched,
+            blank.clone(),
+            blank.clone(),
+            blank,
+        ];
+        let frames = frames_of(seq);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames.clone(),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                Some(vec!["LoadGame"]),
+            )],
+            2400,
+            300,
+        );
+
+        let (attempts, hook) = attempt_recording_hook();
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 7, 3, Some(hook))
+            .await;
+
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(
+            attempts.lock().expect("attempts lock").as_slice(),
+            &[1, 1],
+            "健全サイクル (Fired) を挟んだ 2 回目のリカバリは attempt=1 \
+             (launch_app 段階) からやり直しになる"
+        );
+        // テレメトリ: 総試行 2 回・両エピソードとも連続 1 回で復帰。
+        assert_eq!(outcome.progress_report.recovery_attempts, 2);
+        assert_eq!(outcome.progress_report.max_consecutive_recovery, 1);
+        assert!(
+            !outcome.fired_commands.is_empty(),
+            "c4 の matched フレームで 1 回発火している"
+        );
+    }
+
+    /// RED (3): ProgressReport の復帰テレメトリ (recovery_attempts /
+    /// max_consecutive_recovery) が JSON/TOML 経路で直列化され、round-trip する。
+    /// また新フィールド欠落の古い成果物は `#[serde(default)]` で 0 補完される
+    /// (CI/studio の旧デシリアライズ互換)。
+    #[test]
+    fn progress_report_serializes_recovery_telemetry() {
+        let pr = ProgressReport {
+            iterations: 9,
+            fired_count: 1,
+            per_task_matches: vec![],
+            elapsed_ms: 10,
+            terminal_task: None,
+            reached_goal: None,
+            stop_reason: Some(LoopStopReason::MaxIterations),
+            recovery_attempts: 4,
+            max_consecutive_recovery: 2,
+        };
+        // JSON 経路
+        let j = serde_json::to_string(&pr).expect("serialize json");
+        assert!(j.contains("\"recovery_attempts\":4"), "got: {j}");
+        assert!(j.contains("\"max_consecutive_recovery\":2"), "got: {j}");
+        let back: ProgressReport = serde_json::from_str(&j).expect("deserialize json");
+        assert_eq!(back.recovery_attempts, 4);
+        assert_eq!(back.max_consecutive_recovery, 2);
+        // TOML 経路 (対称性担保)
+        let t = toml::to_string(&pr).expect("serialize toml");
+        assert!(t.contains("recovery_attempts = 4"), "got: {t}");
+        assert!(t.contains("max_consecutive_recovery = 2"), "got: {t}");
+        // 古い成果物 (新フィールド無し JSON) からのデシリアライズは 0 補完される。
+        let legacy_json =
+            "{\"iterations\":1,\"fired_count\":0,\"per_task_matches\":[],\"elapsed_ms\":5}";
+        let legacy: ProgressReport = serde_json::from_str(legacy_json).expect("legacy deserialize");
+        assert_eq!(legacy.recovery_attempts, 0, "got: {legacy_json}");
+        assert_eq!(legacy.max_consecutive_recovery, 0, "got: {legacy_json}");
+    }
+
+    /// RED (03-report-channel): `ProgressReport::stop_reason` が JSON 経路で
+    /// round-trip し、新フィールド欠落の旧成果物は None 補完で読める
+    /// (report 単体を消費する CLI/studio のデシリアライズ互換)。
+    #[test]
+    fn progress_report_serializes_stop_reason() {
+        let pr = ProgressReport {
+            iterations: 7,
+            fired_count: 3,
+            per_task_matches: vec![],
+            elapsed_ms: 1200,
+            terminal_task: Some("max_iterations".to_string()),
+            reached_goal: None,
+            stop_reason: Some(LoopStopReason::MaxIterations),
+            recovery_attempts: 0,
+            max_consecutive_recovery: 0,
+        };
+        let j = serde_json::to_string(&pr).expect("serialize json");
+        // enum は #[serde(rename_all = "snake_case")] で機械可読表現になる。
+        assert!(j.contains("\"stop_reason\":\"max_iterations\""), "got: {j}");
+        let back: ProgressReport = serde_json::from_str(&j).expect("deserialize json");
+        assert_eq!(back.stop_reason, Some(LoopStopReason::MaxIterations));
+        // 旧成果物 (本フィールド無し JSON) は None 補完される。
+        let legacy_json =
+            "{\"iterations\":1,\"fired_count\":0,\"per_task_matches\":[],\"elapsed_ms\":5}";
+        let legacy: ProgressReport = serde_json::from_str(legacy_json).expect("legacy deserialize");
+        assert_eq!(legacy.stop_reason, None, "got: {legacy_json}");
+    }
+
+    /// RED (03-report-channel): run loop の停止 outcome が ProgressReport に
+    /// 停止理由を埋め込む (report 単体で「なぜ止まったか」が読める)。
+    /// capture 常時失敗 + recovery 無し → CaptureError で即停止する経路で検証。
+    #[tokio::test]
+    async fn loop_outcome_embeds_stop_reason_in_report() {
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_of(vec![]),
+                fail: true,
+            },
+            FakeInput {
+                fired: new_fired(),
+                fail: false,
+            },
+            PipelineState::new("t"),
+            vec![],
+            1280,
+            300,
+        );
+        let out = driver
+            .run_loop_with_recovery(Duration::ZERO, 3, 1, None)
+            .await;
+        assert_eq!(out.reason, LoopStopReason::CaptureError);
+        assert_eq!(
+            out.progress_report.stop_reason,
+            Some(LoopStopReason::CaptureError)
+        );
+    }
+
+    /// RED (03-report-channel): `stop_reason_label` は全バリアントに空でない
+    /// ラベルを返す。CLI の「停止理由:」行と studio の report 表示の単一情報源。
+    #[test]
+    fn stop_reason_label_covers_all_variants() {
+        let all = [
+            LoopStopReason::Stop,
+            LoopStopReason::TerminalTask,
+            LoopStopReason::MaxIterations,
+            LoopStopReason::CaptureError,
+            LoopStopReason::ExecuteError,
+            LoopStopReason::GoalReached,
+            LoopStopReason::GoalTimeout,
+            LoopStopReason::Interrupted,
+            LoopStopReason::RecoveryExhausted,
+        ];
+        for reason in all {
+            assert!(
+                !stop_reason_label(reason.clone()).is_empty(),
+                "{reason:?} にラベル未定義"
+            );
+        }
+        // studio の stdout 行解析契約 (log_status) が依存する既知値のピン。
+        assert_eq!(
+            stop_reason_label(LoopStopReason::MaxIterations),
+            "最大サイクル到達"
+        );
+        assert_eq!(
+            stop_reason_label(LoopStopReason::GoalReached),
+            "宣言的ゴール到達(正常)"
+        );
+    }
+
+    /// `RecoveryGuard` の試行予算 (circuit breaker) 純粋遷移:
+    /// - `consume_attempt` は予算内で 1 起点の試行番号を返す。
+    /// - hook 成功 (`recovered`) だけでは試行カウンタをリセットしない
+    ///   (ゲーム未復帰ならエスカレーション継続)。
+    /// - 予算到達後は [`None`] (呼出側は RecoveryExhausted で停止)。
+    /// - 健全サイクル (`record_match`) でカウンタは 0 へ戻る。
+    #[test]
+    fn recovery_guard_attempt_budget_and_healthy_reset() {
+        let mut g = RecoveryGuard::new(1, Duration::ZERO, 2);
+        assert!(g.record_miss(Duration::ZERO), "threshold=1 で即 due");
+        assert_eq!(g.consume_attempt(), Some(1));
+        g.recovered(Duration::ZERO);
+        // hook 成功だけではリセットされない (連続故障のエスカレーション)。
+        assert!(g.record_miss(Duration::ZERO));
+        assert_eq!(g.consume_attempt(), Some(2), "連続 2 回目");
+        g.recovered(Duration::ZERO);
+        assert!(g.record_miss(Duration::ZERO));
+        assert_eq!(g.consume_attempt(), None, "予算 2 到達で打ち切り");
+        // 健全サイクルでカウンタは 0 へ戻る (次の故障は新規エピソード)。
+        g.record_match();
+        assert!(g.record_miss(Duration::ZERO));
+        assert_eq!(
+            g.consume_attempt(),
+            Some(1),
+            "健全後に attempt は 1 からやり直し"
+        );
     }
 
     // ---- (6) run_once_verified: アクション後検証 ----
@@ -2897,8 +3702,9 @@ mod tests {
         );
 
         match driver.run_once_verified().await {
-            StepOutcome::Error(msg) => {
-                assert!(msg.starts_with("verify_capture"), "got: {msg}");
+            StepOutcome::Error { kind, message } => {
+                assert_eq!(kind, StepErrorKind::VerifyCapture);
+                assert!(message.starts_with("verify_capture"), "got: {message}");
             }
             other => panic!("expected Error(verify_capture), got {other:?}"),
         }
@@ -3233,6 +4039,9 @@ mod tests {
                 elapsed_ms: 1234,
                 terminal_task: Some("Terminal".to_string()),
                 reached_goal: Some("loop_count=7".to_string()),
+                stop_reason: None,
+                recovery_attempts: 0,
+                max_consecutive_recovery: 0,
             },
         };
         let s = format_progress_report(&outcome);
@@ -3280,6 +4089,9 @@ mod tests {
                 elapsed_ms: 500,
                 terminal_task: Some("Terminal".to_string()),
                 reached_goal: None,
+                stop_reason: None,
+                recovery_attempts: 0,
+                max_consecutive_recovery: 0,
             },
         };
         let s = toml::to_string(&outcome).expect("serialize");
@@ -3302,6 +4114,9 @@ mod tests {
             elapsed_ms: 999,
             terminal_task: Some("A".to_string()),
             reached_goal: Some("template_match conf>=0.85".to_string()),
+            stop_reason: None,
+            recovery_attempts: 0,
+            max_consecutive_recovery: 0,
         };
         let s = toml::to_string(&pr).expect("serialize");
         assert!(s.contains("fired_count = 5"), "got: {s}");
@@ -3330,6 +4145,9 @@ mod tests {
                 elapsed_ms: 4321,
                 terminal_task: Some("GoalTerminal".to_string()),
                 reached_goal: Some("loop_count=5".to_string()),
+                stop_reason: None,
+                recovery_attempts: 0,
+                max_consecutive_recovery: 0,
             },
         };
         let s = serde_json::to_string(&outcome).expect("serialize json");
@@ -3363,6 +4181,9 @@ mod tests {
             elapsed_ms: 1500,
             terminal_task: Some("Boss".to_string()),
             reached_goal: Some("template_match conf>=0.85".to_string()),
+            stop_reason: None,
+            recovery_attempts: 0,
+            max_consecutive_recovery: 0,
         };
         // JSON 経路
         let j = serde_json::to_string(&pr).expect("serialize json");
@@ -3871,6 +4692,7 @@ mod tests {
                     fired_commands: &[],
                     per_task_matches: &[],
                     started,
+                    recovery: RecoveryTelemetry::default(),
                 },
             )
             .expect("expected Some(LoopOutcome) on GoalReached");
@@ -3899,6 +4721,7 @@ mod tests {
                         fired_commands: &[],
                         per_task_matches: &[],
                         started,
+                        recovery: RecoveryTelemetry::default(),
                     },
                 )
                 .is_none(),
@@ -3927,6 +4750,7 @@ mod tests {
                     fired_commands: &[],
                     per_task_matches: &[],
                     started,
+                    recovery: RecoveryTelemetry::default(),
                 },
             )
             .expect("expected Some on timeout reached");
@@ -3950,6 +4774,7 @@ mod tests {
                         fired_commands: &[],
                         per_task_matches: &[],
                         started,
+                        recovery: RecoveryTelemetry::default(),
                     },
                 )
                 .is_none(),
@@ -3987,6 +4812,7 @@ mod tests {
                     fired_commands: &[],
                     per_task_matches: &[],
                     started,
+                    recovery: RecoveryTelemetry::default(),
                 },
             )
             .expect("expected Some on TemplateMatch reached");

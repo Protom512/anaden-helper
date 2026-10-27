@@ -141,6 +141,34 @@ fn workspace_root() -> PathBuf {
 ///
 /// `run` サブコマンド・`--algorithm`/`--target` とその値は位置引数ではない
 /// ためスキップする。
+/// `tok` が pipeline 位置引数候補か (run トークン自身、または run を含む
+/// 引数列の非フラグ トークン)。
+fn is_pipeline_positional(tok: &str, args: &[String]) -> bool {
+    tok == "run" || !tok.starts_with('-') && args.iter().any(|a| a == "run")
+}
+
+/// `tok` が bare name 形式か (パス区切りなし・フラグでない・run ではない)。
+fn is_bare_pipeline_name(tok: &str) -> bool {
+    !tok.starts_with('-') && !tok.contains('/') && !tok.contains('\\') && tok != "run"
+}
+
+/// 位置引数候補トークンを解決済み絶対パスへ置き換える。
+/// テンプレ相対形式 (`templates/pipelines/..`) と bare name のみ対象で、
+/// 解決先がディレクトリ実在のときのみ置換する。
+fn resolve_positional_token(tok: &mut String, root: &Path) {
+    let joined =
+        if tok.starts_with("templates/pipelines/") || tok.starts_with("templates\\pipelines\\") {
+            root.join(tok.as_str())
+        } else if is_bare_pipeline_name(tok) {
+            root.join("templates").join("pipelines").join(tok.as_str())
+        } else {
+            return;
+        };
+    if joined.is_dir() {
+        *tok = joined.to_string_lossy().into_owned();
+    }
+}
+
 #[must_use]
 pub fn resolve_pipeline_arg(args: &[String], root: &Path) -> Vec<String> {
     let mut out = args.to_vec();
@@ -150,28 +178,25 @@ pub fn resolve_pipeline_arg(args: &[String], root: &Path) -> Vec<String> {
             skip_value = false;
             continue;
         }
-        if tok == "run" || !tok.starts_with('-') && args.iter().any(|a| a == "run") {
-            // 位置引数候補。テンプレ相対形式か bare name のみ解決する。
-            if tok.starts_with("templates/pipelines/") || tok.starts_with("templates\\pipelines\\")
-            {
-                let joined = root.join(tok.as_str());
-                if joined.is_dir() {
-                    *tok = joined.to_string_lossy().into_owned();
-                }
-            } else if !tok.starts_with('-')
-                && !tok.contains('/')
-                && !tok.contains('\\')
-                && tok != "run"
-            {
-                let joined = root.join("templates").join("pipelines").join(tok.as_str());
-                if joined.is_dir() {
-                    *tok = joined.to_string_lossy().into_owned();
-                }
-            }
+        if is_pipeline_positional(tok, args) {
+            resolve_positional_token(tok, root);
         } else if tok.starts_with("--") {
             skip_value = true;
         }
     }
+    out
+}
+
+/// strategy 実行の spawn 引数列へ `--report-file <path>` を付与する純関数
+/// (03-report-channel)。
+///
+/// report は studio 管理パスへ書かせ、終了 (Exit イベント) 時に読み取る
+/// (CLI stdout の人間可読日本語行を機械 IF として文字列解析する F11 の解消)。
+#[must_use]
+fn with_report_file_arg(args: &[String], report_path: &Path) -> Vec<String> {
+    let mut out = args.to_vec();
+    out.push("--report-file".to_string());
+    out.push(report_path.to_string_lossy().into_owned());
     out
 }
 
@@ -205,6 +230,52 @@ pub enum RunnerStatus {
 /// 読み取りスレッド → UI 間の bounded channel 容量。
 const LOG_CHANNEL_CAPACITY: usize = 1024;
 
+/// pending レポート (report.json) の種別 (03-report-channel follow-up)。
+///
+/// strategy 実行 (`anaden run`) は `ProgressReport` を、routine 実行
+/// (`anaden routine`) は `RoutineSummary` を書く。spawn 時点で種別が確定
+/// するためフィールドで追跡し、Exit ドレイン時のパース型を切り替える
+/// (JSON 形状からの推測に依らない明示契約)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+enum PendingReportKind {
+    /// `anaden run` の report.json (`ProgressReport`)。
+    #[default]
+    Run,
+    /// `anaden routine` の report.json (`RoutineSummary`)。
+    Routine,
+}
+
+/// Exit ドレインで読み取ったレポート (種別付き)。
+enum LoadedReport {
+    /// strategy 実行の成果物 (`ProgressReport`)。
+    Run(anaden_engine::ProgressReport),
+    /// routine 実行の成果物 (`RoutineSummary`)。
+    Routine(anaden_engine::RoutineSummary),
+}
+
+impl LoadedReport {
+    /// 履歴レコードへ付与する停止理由ラベル (run は stop_reason ラベル・
+    /// routine は全体成否ラベル)。
+    fn stop_reason_label(&self) -> Option<String> {
+        match self {
+            Self::Run(r) => r
+                .stop_reason
+                .clone()
+                .map(anaden_engine::stop_reason_label)
+                .map(str::to_string),
+            Self::Routine(s) => Some(s.outcome_label()),
+        }
+    }
+
+    /// 履歴レコードへ付与する発火回数 (run は fired_count・routine は全ステップ合計)。
+    fn fired_count(&self) -> u64 {
+        match self {
+            Self::Run(r) => r.fired_count,
+            Self::Routine(s) => u64::try_from(s.total_fired).unwrap_or(u64::MAX),
+        }
+    }
+}
+
 /// 起動要求 (Issue #204)。再実行 (`rerun_pipeline`) で引数列を組み立て直す
 /// ため、run-id 込みの SpawnSpec ではなく再生成に必要な入力を保持する。
 ///
@@ -233,27 +304,51 @@ enum RunRequest {
 }
 
 impl RunRequest {
-    /// 要求から (spawn spec, 履歴ラベル, 発行した evidence run-id) を組む。
+    /// 要求から (spawn spec, 履歴ラベル, 発行した evidence run-id, 発行した
+    /// report パスとその種別) を組む。
     ///
     /// evidence run-id はこの関数が spawn のたびに新規発行する
     /// (呼出側で使い回さない — Issue #204)。strategy 実行はラベル・run-id
     /// とも None (履歴ラベルは strategy 選択から採る)。
+    /// report パス (strategy・routine 両方) も spawn のたびに新規発行する
+    /// (03-report-channel。再実行で前回 report を上書きしない)。種別は
+    /// `anaden run` = ProgressReport / `anaden routine` = RoutineSummary。
     fn build_spawn(
         &self,
         program: &str,
         run_id_gen: fn() -> String,
-    ) -> (SpawnSpec, Option<String>, Option<String>) {
+    ) -> (
+        SpawnSpec,
+        Option<String>,
+        Option<String>,
+        Option<PathBuf>,
+        PendingReportKind,
+    ) {
         match self {
-            Self::Strategy { args } => (build_spawn_spec(program, args), None, None),
+            Self::Strategy { args } => {
+                let report = crate::history::new_report_path();
+                let spec = build_spawn_spec(program, &with_report_file_arg(args, &report));
+                (spec, None, None, Some(report), PendingReportKind::Run)
+            }
             Self::Routine {
                 path,
                 name,
                 evidence_enabled,
             } => {
                 let run_id = evidence_enabled.then(run_id_gen);
-                let args = crate::routine_ui::build_routine_args(path, run_id.as_deref());
+                let report = crate::history::new_report_path();
+                let args = with_report_file_arg(
+                    &crate::routine_ui::build_routine_args(path, run_id.as_deref()),
+                    &report,
+                );
                 let label = Some(format!("routine:{name}"));
-                (build_spawn_spec(program, &args), label, run_id)
+                (
+                    build_spawn_spec(program, &args),
+                    label,
+                    run_id,
+                    Some(report),
+                    PendingReportKind::Routine,
+                )
             }
         }
     }
@@ -304,6 +399,14 @@ pub struct PipelineRunnerApp {
     /// (Issue #204: spawn 失敗時の残存 = stale 保持を構造的に排除)。
     /// reset_run_tracking の対象外 (append_history_record が take するまで保持)。
     pending_evidence_run_id: Option<String>,
+    /// 現在実行の run レポート (report.json) パス (03-report-channel)。
+    /// strategy 実行で `--report-file` に渡した studio 管理パス。
+    /// Exit イベント処理 (drain_logs) が読み取って履歴と LogStatus へ
+    /// 反映したのち take で清算する (report を第一ソース化・F11 解消)。
+    pending_report_path: Option<PathBuf>,
+    /// pending レポートの種別 (run = ProgressReport / routine = RoutineSummary)。
+    /// `pending_report_path` と同じライフサイクル (spawn 時設定・清算点でリセット)。
+    pending_report_kind: PendingReportKind,
     /// evidence run-id 生成関数。テストで決定的なタイムスタンプを注入して
     /// 差し替えられる (Issue #204)。既定は実運用用の
     /// [`crate::routine_ui::new_evidence_run_id`]。
@@ -380,6 +483,8 @@ impl PipelineRunnerApp {
             strategy_panel: crate::strategy_ui::StrategyPanel::default(),
             routine_panel: crate::routine_ui::RoutinePanel::default(),
             pending_evidence_run_id: None,
+            pending_report_path: None,
+            pending_report_kind: PendingReportKind::Run,
             run_id_gen: crate::routine_ui::new_evidence_run_id,
             strategy_summary: "戦略未選択".to_string(),
             last_run: None,
@@ -500,13 +605,18 @@ impl PipelineRunnerApp {
         // 前回実行の清算 (履歴へ take されなかった pending の掃き出し —
         // Issue #204: rerun が清算点をバイパスしない単一経路化の要)。
         self.pending_evidence_run_id = None;
-        let (spec, label, evidence_run_id) = request.build_spawn(&self.program, self.run_id_gen);
+        self.pending_report_path = None;
+        self.pending_report_kind = PendingReportKind::Run;
+        let (spec, label, evidence_run_id, report_path, report_kind) =
+            request.build_spawn(&self.program, self.run_id_gen);
         if let Err(e) = self.child.start(&spec, self.log_tx.clone()) {
             self.record_error_line(&e.to_string());
             return;
         }
         self.last_run = Some(request);
         self.pending_evidence_run_id = evidence_run_id;
+        self.pending_report_path = report_path;
+        self.pending_report_kind = report_kind;
         self.run_started_at = Some(unix_now_secs());
         self.run_strategy = label.or_else(|| self.strategy_panel.selection().strategy.clone());
     }
@@ -552,8 +662,11 @@ impl PipelineRunnerApp {
         }
         // ユーザー操作による中止として履歴へ記録（exit code は採取不能扱い）。
         // 自然終了を Exit イベントで既に観測済みなら二重記録しない。
+        // kill された子は report を書かないため pending report も清算する。
         if !self.exit_observed {
-            self.append_history_record(RunOutcome::Cancelled, None);
+            self.pending_report_path = None;
+            self.pending_report_kind = PendingReportKind::Run;
+            self.append_history_record(RunOutcome::Cancelled, None, None);
         }
     }
 
@@ -579,7 +692,8 @@ impl PipelineRunnerApp {
     /// `LogEvent::Exit` を観測した場合:
     /// - exit code を保持し、異常終了（非零 / 不明）なら失敗状態サマリ
     ///   （run_status_summary + エラーログ末尾）を保持する（UC-3）
-    /// - 履歴へ RunRecord を追記する（正常: Success / 非零・不明: Failed）
+    /// - 履歴へ RunRecord を追記する（[`history::classify_outcome`]: exit 0 は
+    ///   report 停止理由ベースで Success / BudgetExhausted、非零・不明は Failed）
     pub fn drain_logs(&mut self) {
         let (_new_lines, observed) = crate::log_view::drain_channel_into(&self.log, &self.log_rx);
         let exit_seen = observed.is_some();
@@ -592,13 +706,63 @@ impl PipelineRunnerApp {
             if failed {
                 self.failure_summary = Some(self.build_failure_summary());
             }
-            // 履歴 Record 追記（正常終了 / 異常終了）。中止は stop_pipeline 側。
-            let outcome = if failed {
-                RunOutcome::Failed
-            } else {
-                RunOutcome::Success
-            };
-            self.append_history_record(outcome, exit_code);
+            // 03-report-channel: run レポート (report.json) を第一ソースとして
+            // 読み込む (読込失敗・未生成 = None なら stdout 解析結果を維持)。
+            let report = self.load_pending_report();
+            match &report {
+                Some(LoadedReport::Run(r)) => {
+                    self.log.with_buf(|b| b.status.apply_report(r));
+                }
+                Some(LoadedReport::Routine(s)) => {
+                    self.log.with_buf(|b| b.status.apply_routine_report(s));
+                }
+                None => {}
+            }
+            // 履歴 Record 追記。成否分類は report 停止理由ベース
+            // (04-studio-maxiters-outcome / F6): exit 0 でも成果ゼロの
+            // MaxIterations 打ち切りは BudgetExhausted として記録する。
+            // routine 実行は no_fire 等の失敗が exit 非零に集約されるため
+            // exit code のみで分類する (report 無しと同一の classify)。
+            // 中止は stop_pipeline 側。
+            let run_report = report.as_ref().and_then(|r| match r {
+                LoadedReport::Run(r) => Some(r),
+                LoadedReport::Routine(_) => None,
+            });
+            let outcome = crate::history::classify_outcome(exit_code, run_report);
+            self.append_history_record(outcome, exit_code, report.as_ref());
+        }
+    }
+
+    /// pending の run/routine レポート (report.json) を読み込む (03-report-channel)。
+    ///
+    /// 種別 (`pending_report_kind`) に応じて `ProgressReport` (strategy 実行) か
+    /// `RoutineSummary` (routine 実行) のどちらかへパースする。
+    /// 未設定 (旧 anaden バイナリ)・不在・破損は [`None`]
+    /// (stdout 行解析 = フォールバック経路を維持)。破損時のみ WARN 行を
+    /// ログへ残し、静黙を避ける。読み取ったパスは take で清算する
+    /// (二重消費・stale 保持の排除 — Issue #204 と同一方針)。
+    fn load_pending_report(&mut self) -> Option<LoadedReport> {
+        let path = self.pending_report_path.take()?;
+        let kind = self.pending_report_kind;
+        let parsed = std::fs::File::open(&path)
+            .map_err(|e| e.to_string())
+            .and_then(|f| match kind {
+                PendingReportKind::Run => serde_json::from_reader(f)
+                    .map(LoadedReport::Run)
+                    .map_err(|e| format!("report.json のパース失敗 ({e})")),
+                PendingReportKind::Routine => serde_json::from_reader(f)
+                    .map(LoadedReport::Routine)
+                    .map_err(|e| format!("report.json のパース失敗 ({e})")),
+            });
+        match parsed {
+            Ok(report) => Some(report),
+            Err(e) => {
+                self.push_log_line(&format!(
+                    "WARN run レポート読込失敗 (stdout 解析にフォールバック): {} {e}",
+                    path.display()
+                ));
+                None
+            }
         }
     }
 
@@ -628,8 +792,18 @@ impl PipelineRunnerApp {
 
     /// 履歴へ RunRecord を追記する（委譲: history.rs）。
     /// routine 実行の evidence run-id を保持していたら record へ付与する。
-    fn append_history_record(&mut self, outcome: RunOutcome, exit_code: Option<i32>) {
+    /// レポート (`report`) が読めていれば停止理由ラベルと発火回数を
+    /// record へ付与する (03-report-channel。run は stop_reason ラベル・
+    /// routine は全体成否ラベル)。
+    fn append_history_record(
+        &mut self,
+        outcome: RunOutcome,
+        exit_code: Option<i32>,
+        report: Option<&LoadedReport>,
+    ) {
         let log_tail = self.log_snapshot.iter().map(|e| e.line.clone()).collect();
+        let stop_reason = report.and_then(LoadedReport::stop_reason_label);
+        let fired_count = report.map(LoadedReport::fired_count);
         let record = RunRecord::new(
             self.run_started_at.unwrap_or(0),
             self.run_strategy.clone().unwrap_or_else(|| "-".to_string()),
@@ -637,7 +811,8 @@ impl PipelineRunnerApp {
             exit_code,
             log_tail,
         )
-        .with_evidence_run_id(self.pending_evidence_run_id.take());
+        .with_evidence_run_id(self.pending_evidence_run_id.take())
+        .with_report_summary(stop_reason, fired_count);
         if let Err(e) = self.history.append(record) {
             self.record_error_line(&format!("履歴の保存に失敗しました: {e}"));
         }
@@ -1058,11 +1233,12 @@ mod tests {
     #[test]
     fn test_build_run_args_field_loop_pc_includes_positional_args() {
         let args = build_run_args(&pipeline_selection("field_loop_pc")).unwrap();
-        // run の位置引数（フラグ以降の非フラグトークン）は pipeline_dir と start_task。
+        // run の位置引数（フラグとその値を除く非フラグトークン）は pipeline_dir と
+        // start_task (--max-iters の値 "10000" はフラグ値のため除外)。
         let positional: Vec<&String> = args
             .iter()
             .enumerate()
-            .filter(|(i, a)| *i > 0 && !a.starts_with("--") && args[*i - 1] != "--algorithm")
+            .filter(|(i, a)| *i > 0 && !a.starts_with("--") && !args[*i - 1].starts_with("--"))
             .map(|(_, a)| a)
             .collect();
         assert_eq!(positional.len(), 2, "args: {args:?}");
@@ -1642,6 +1818,285 @@ mod tests {
             app.history.records()[0].evidence_run_id,
             None,
             "rerun must preserve the evidence-disabled request"
+        );
+    }
+
+    // ---- 03-report-channel: strategy spawn の --report-file 付与 ----
+
+    /// with_report_file_arg: 引数列末尾に `--report-file <path>` が付く。
+    #[test]
+    fn report_file_arg_appended_to_strategy_args() {
+        let args = vec![
+            "run".to_string(),
+            "templates/pipelines/x".to_string(),
+            "T".to_string(),
+        ];
+        let got = with_report_file_arg(&args, Path::new("/tmp/r/report.json"));
+        assert_eq!(got.len(), args.len() + 2);
+        assert_eq!(got[got.len() - 2], "--report-file");
+        assert_eq!(got[got.len() - 1], "/tmp/r/report.json");
+        assert_eq!(&got[..args.len()], &args[..]);
+    }
+
+    /// RunRequest::Strategy の spawn spec に --report-file が含まれ、
+    /// 発行された report パスと一致する (label/run-id は None・種別は Run)。
+    #[test]
+    fn strategy_build_spawn_emits_report_file() {
+        let req = RunRequest::Strategy {
+            args: vec!["run".to_string(), "p".to_string(), "T".to_string()],
+        };
+        let (spec, label, run_id, report, kind) = req.build_spawn("anaden", injected_run_id);
+        assert!(
+            spec.args.contains(&"--report-file".to_string()),
+            "args: {:?}",
+            spec.args
+        );
+        let i = spec.args.iter().position(|a| a == "--report-file").unwrap();
+        let emitted = PathBuf::from(&spec.args[i + 1]);
+        assert_eq!(Some(emitted), report);
+        assert_eq!(kind, PendingReportKind::Run);
+        assert_eq!(label, None);
+        assert_eq!(run_id, None);
+    }
+
+    /// routine 実行も --report-file を付与し、種別は Routine
+    /// (03-report-channel follow-up: studio が routine レポートを読める)。
+    #[test]
+    fn routine_build_spawn_emits_report_file_of_routine_kind() {
+        let dir = tempfile::tempdir().unwrap();
+        let routine_path = dir.path().join("daily.toml");
+        std::fs::write(&routine_path, b"").unwrap();
+        let req = RunRequest::Routine {
+            path: routine_path,
+            name: "daily".to_string(),
+            evidence_enabled: false,
+        };
+        let (spec, label, run_id, report, kind) = req.build_spawn("anaden", injected_run_id);
+        let i = spec
+            .args
+            .iter()
+            .position(|a| a == "--report-file")
+            .expect("--report-file must be in routine args");
+        let emitted = PathBuf::from(&spec.args[i + 1]);
+        assert_eq!(Some(emitted), report);
+        assert_eq!(kind, PendingReportKind::Routine);
+        assert_eq!(label.as_deref(), Some("routine:daily"));
+        assert_eq!(run_id, None);
+    }
+
+    /// Exit イベント観測時、pending の report.json が第一ソースとして
+    /// 履歴レコード (停止理由・発火回数) と LogStatus へ反映される
+    /// (stdout 日本語行マッチはフォールバック)。
+    #[test]
+    fn exit_drain_reads_report_into_status_and_history() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("report.json");
+        std::fs::write(
+            &report_path,
+            r#"{"iterations":42,"fired_count":7,"per_task_matches":[],"elapsed_ms":1000,"terminal_task":"goal_reached","reached_goal":"loop_count=42","stop_reason":"goal_reached","recovery_attempts":0,"max_consecutive_recovery":0}"#,
+        )
+        .unwrap();
+        app.pending_report_path = Some(report_path);
+        app.run_started_at = Some(1);
+        app.run_strategy = Some("field_loop_pc".to_string());
+        // Exit イベント (exit code 0) を直接注入して drain。
+        app.log_tx
+            .send(crate::log_view::LogEvent::Exit(Some(0)))
+            .unwrap();
+        app.drain_logs();
+
+        let record = app.history.records().first().expect("history record");
+        assert_eq!(record.strategy, "field_loop_pc");
+        assert_eq!(
+            record.stop_reason.as_deref(),
+            Some("宣言的ゴール到達(正常)")
+        );
+        assert_eq!(record.fired_count, Some(7));
+        // LogStatus (ステータスバー) も report 由来の値へ更新される。
+        assert_eq!(
+            app.run_status_summary(),
+            "停止 reason=宣言的ゴール到達(正常) iterations=42"
+        );
+        // 読込済み report は再消費されない (take 済み)。
+        assert_eq!(app.pending_report_path, None);
+    }
+
+    /// report が無い (古い anaden バイナリ・書込失敗) 場合は従来経路
+    /// (stdout 解析 + report フィールド None) で履歴が作られる。
+    #[test]
+    fn exit_drain_without_report_falls_back_to_stdout() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        app.pending_report_path = None;
+        app.run_started_at = Some(1);
+        app.run_strategy = Some("field_loop_pc".to_string());
+        app.log_tx
+            .send(crate::log_view::LogEvent::Exit(Some(0)))
+            .unwrap();
+        app.drain_logs();
+
+        let record = app.history.records().first().expect("history record");
+        assert_eq!(record.stop_reason, None);
+        assert_eq!(record.fired_count, None);
+        assert_eq!(app.run_status_summary(), "未実行");
+    }
+
+    // ---- 04-studio-maxiters-outcome: MaxIterations/Success の成否分類 (F6) ----
+
+    /// exit 0 でも report が MaxIterations + fired=0 (成果ゼロ打ち切り) の場合、
+    /// 履歴は BudgetExhausted として記録される (従来は Success = 誤成功)。
+    #[test]
+    fn exit_drain_classifies_budget_exhausted_run() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("report.json");
+        std::fs::write(
+            &report_path,
+            r#"{"iterations":100,"fired_count":0,"per_task_matches":[],"elapsed_ms":100000,"terminal_task":null,"reached_goal":null,"stop_reason":"max_iterations","recovery_attempts":0,"max_consecutive_recovery":0}"#,
+        )
+        .unwrap();
+        app.pending_report_path = Some(report_path);
+        app.run_started_at = Some(1);
+        app.run_strategy = Some("field_loop_pc".to_string());
+        app.log_tx
+            .send(crate::log_view::LogEvent::Exit(Some(0)))
+            .unwrap();
+        app.drain_logs();
+
+        let record = app.history.records().first().expect("history record");
+        assert_eq!(record.outcome, RunOutcome::BudgetExhausted);
+        assert_eq!(record.exit_code, Some(0));
+        assert_eq!(record.stop_reason.as_deref(), Some("最大サイクル到達"));
+        assert_eq!(record.fired_count, Some(0));
+    }
+
+    /// fired>0 の MaxIterations は成果あり扱い — 従来通り Success で記録される。
+    #[test]
+    fn exit_drain_max_iterations_with_fired_is_success() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("report.json");
+        std::fs::write(
+            &report_path,
+            r#"{"iterations":100,"fired_count":7,"per_task_matches":[],"elapsed_ms":100000,"terminal_task":null,"reached_goal":null,"stop_reason":"max_iterations","recovery_attempts":0,"max_consecutive_recovery":0}"#,
+        )
+        .unwrap();
+        app.pending_report_path = Some(report_path);
+        app.run_started_at = Some(1);
+        app.run_strategy = Some("field_loop_pc".to_string());
+        app.log_tx
+            .send(crate::log_view::LogEvent::Exit(Some(0)))
+            .unwrap();
+        app.drain_logs();
+
+        let record = app.history.records().first().expect("history record");
+        assert_eq!(record.outcome, RunOutcome::Success);
+        assert_eq!(record.fired_count, Some(7));
+    }
+
+    // ---- routine レポート読込 (03-report-channel follow-up) ----
+
+    /// routine 実行の Exit ドレイン: RoutineSummary 形式の report.json を
+    /// 種別 (PendingReportKind::Routine) に従って読み、履歴 (全体成否ラベル・
+    /// 合計発火数) と LogStatus (合計サイクル数・成否ラベル) へ反映する。
+    #[test]
+    fn exit_drain_reads_routine_report_into_status_and_history() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("report.json");
+        let completed_step = || anaden_engine::RoutineStepResult {
+            step: "s".to_string(),
+            pipeline_dir: "p".to_string(),
+            status: anaden_engine::StepStatus::Completed(anaden_engine::LoopStopReason::Stop),
+            iterations: 1,
+            fired_count: 2,
+            terminal: "t".to_string(),
+        };
+        let summary = anaden_engine::RoutineSummary {
+            routine: "daily".to_string(),
+            results: vec![completed_step(), completed_step()],
+            total_iterations: 15,
+            total_fired: 4,
+            completed: 2,
+            failed: 0,
+            skipped: 0,
+            aborted: false,
+        };
+        std::fs::write(&report_path, serde_json::to_string(&summary).unwrap()).unwrap();
+        app.pending_report_path = Some(report_path);
+        app.pending_report_kind = PendingReportKind::Routine;
+        app.run_started_at = Some(1);
+        app.run_strategy = Some("routine:daily".to_string());
+        // Exit イベント (exit code 0 = all_ok) を直接注入して drain。
+        app.log_tx
+            .send(crate::log_view::LogEvent::Exit(Some(0)))
+            .unwrap();
+        app.drain_logs();
+
+        let record = app.history.records().first().expect("history record");
+        assert_eq!(record.strategy, "routine:daily");
+        assert_eq!(record.outcome, RunOutcome::Success);
+        assert_eq!(record.stop_reason.as_deref(), Some("routine 完了 (2/2)"));
+        assert_eq!(record.fired_count, Some(4));
+        // LogStatus (ステータスバー) も routine レポート由来の値へ更新される。
+        assert_eq!(
+            app.run_status_summary(),
+            "停止 reason=routine 完了 (2/2) iterations=15"
+        );
+        // 読込済み report は再消費されない (take 済み)。
+        assert_eq!(app.pending_report_path, None);
+    }
+
+    /// routine 失敗 (exit 2) のレポートも読み込まれ、失敗ラベルが履歴へ残る。
+    #[test]
+    fn exit_drain_routine_failure_report_labels_history() {
+        let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
+        let dir = tempfile::tempdir().unwrap();
+        let report_path = dir.path().join("report.json");
+        let step = |status| anaden_engine::RoutineStepResult {
+            step: "s".to_string(),
+            pipeline_dir: "p".to_string(),
+            status,
+            iterations: 1,
+            fired_count: 0,
+            terminal: "t".to_string(),
+        };
+        let summary = anaden_engine::RoutineSummary {
+            routine: "daily".to_string(),
+            results: vec![
+                step(anaden_engine::StepStatus::Failed(
+                    anaden_engine::LoopStopReason::CaptureError,
+                )),
+                step(anaden_engine::StepStatus::Skipped),
+            ],
+            total_iterations: 3,
+            total_fired: 0,
+            completed: 0,
+            failed: 1,
+            skipped: 1,
+            aborted: true,
+        };
+        std::fs::write(&report_path, serde_json::to_string(&summary).unwrap()).unwrap();
+        app.pending_report_path = Some(report_path);
+        app.pending_report_kind = PendingReportKind::Routine;
+        app.run_started_at = Some(1);
+        app.run_strategy = Some("routine:daily".to_string());
+        app.log_tx
+            .send(crate::log_view::LogEvent::Exit(Some(2)))
+            .unwrap();
+        app.drain_logs();
+
+        let record = app.history.records().first().expect("history record");
+        assert_eq!(record.outcome, RunOutcome::Failed);
+        assert_eq!(
+            record.stop_reason.as_deref(),
+            Some("routine 失敗 (failed=1 skipped=1 aborted=true)")
         );
     }
 }

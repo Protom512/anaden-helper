@@ -246,6 +246,90 @@ pub fn extract_stable_tiles(group: &ScreenGroup) -> Vec<TileCandidate> {
     candidates
 }
 
+/// 感度チェックの結果: 自グループ全キャプチャでの最小 confidence と全通過フラグ。
+struct SensitivityCheck {
+    /// 自グループ内の最小 confidence (マッチ失敗があれば [`f32::MAX`] のまま)。
+    min_conf: f32,
+    /// 全キャプチャで閾値以上にマッチしたか。
+    all_pass: bool,
+}
+
+/// 感度チェック: 自グループの全キャプチャで confidence ≥ SENSITIVITY_THRESHOLD
+/// となること。1 枚でも失敗したらそこで打ち切る。
+fn check_sensitivity(
+    candidate: &TileCandidate,
+    own_group: &ScreenGroup,
+    matcher: &TemplateMatcher,
+) -> SensitivityCheck {
+    let mut min_conf = f32::MAX;
+    for capture in &own_group.captures {
+        let Some(m) = matcher.find_best_match(capture, &candidate.image) else {
+            return SensitivityCheck {
+                min_conf,
+                all_pass: false,
+            };
+        };
+        if m.confidence.0 < SENSITIVITY_THRESHOLD {
+            debug!(
+                "Candidate ({}, {}) sensitivity fail: confidence {:.3} < {:.3}",
+                candidate.position.0, candidate.position.1, m.confidence.0, SENSITIVITY_THRESHOLD
+            );
+            return SensitivityCheck {
+                min_conf,
+                all_pass: false,
+            };
+        }
+        min_conf = min_conf.min(m.confidence.0);
+    }
+    SensitivityCheck {
+        min_conf,
+        all_pass: true,
+    }
+}
+
+/// 特異性チェックの結果: 他グループ代表画像での最大 confidence と全通過フラグ。
+struct SpecificityCheck {
+    /// 他グループ代表画像内の最大 confidence。
+    max_conf: f32,
+    /// どのグループでも閾値未満だったか。
+    all_pass: bool,
+}
+
+/// 特異性チェック: 他グループの代表キャプチャ (1 枚目) で
+/// confidence < SPECIFICITY_THRESHOLD となること。
+fn check_specificity(
+    candidate: &TileCandidate,
+    other_groups: &[&ScreenGroup],
+    matcher: &TemplateMatcher,
+) -> SpecificityCheck {
+    let mut max_conf = 0.0f32;
+    for other_group in other_groups {
+        // 各グループの代表画像（1枚目）でチェック
+        let representative = &other_group.captures[0];
+        if let Some(m) = matcher.find_best_match(representative, &candidate.image) {
+            max_conf = max_conf.max(m.confidence.0);
+            if m.confidence.0 >= SPECIFICITY_THRESHOLD {
+                debug!(
+                    "Candidate ({}, {}) specificity fail: confidence {:.3} >= {:.3} on group {}",
+                    candidate.position.0,
+                    candidate.position.1,
+                    m.confidence.0,
+                    SPECIFICITY_THRESHOLD,
+                    other_group.index
+                );
+                return SpecificityCheck {
+                    max_conf,
+                    all_pass: false,
+                };
+            }
+        }
+    }
+    SpecificityCheck {
+        max_conf,
+        all_pass: true,
+    }
+}
+
 /// テンプレート候補を検証する。
 ///
 /// 感度チェック: 自グループの全キャプチャで confidence ≥ SENSITIVITY_THRESHOLD
@@ -264,73 +348,29 @@ pub fn verify_templates(
             break;
         }
 
-        // 感度チェック: 自グループの全キャプチャでマッチ
-        let mut own_min_conf = f32::MAX;
-        let mut own_all_pass = true;
-
-        for capture in &own_group.captures {
-            if let Some(m) = matcher.find_best_match(capture, &candidate.image) {
-                if m.confidence.0 < SENSITIVITY_THRESHOLD {
-                    own_all_pass = false;
-                    debug!(
-                        "Candidate ({}, {}) sensitivity fail: confidence {:.3} < {:.3}",
-                        candidate.position.0,
-                        candidate.position.1,
-                        m.confidence.0,
-                        SENSITIVITY_THRESHOLD
-                    );
-                    break;
-                }
-                own_min_conf = own_min_conf.min(m.confidence.0);
-            } else {
-                own_all_pass = false;
-                break;
-            }
-        }
-
-        if !own_all_pass {
+        let sensitivity = check_sensitivity(&candidate, own_group, matcher);
+        if !sensitivity.all_pass {
             continue;
         }
 
-        // 特異性チェック: 他グループでマッチしないこと
-        let mut other_max_conf = 0.0f32;
-        let mut spec_all_pass = true;
-
-        for other_group in other_groups {
-            // 各グループの代表画像（1枚目）でチェック
-            let representative = &other_group.captures[0];
-            if let Some(m) = matcher.find_best_match(representative, &candidate.image) {
-                if m.confidence.0 >= SPECIFICITY_THRESHOLD {
-                    spec_all_pass = false;
-                    debug!(
-                        "Candidate ({}, {}) specificity fail: confidence {:.3} >= {:.3} on group {}",
-                        candidate.position.0,
-                        candidate.position.1,
-                        m.confidence.0,
-                        SPECIFICITY_THRESHOLD,
-                        other_group.index
-                    );
-                    other_max_conf = other_max_conf.max(m.confidence.0);
-                    break;
-                }
-                other_max_conf = other_max_conf.max(m.confidence.0);
-            }
-        }
-
-        let passed = spec_all_pass;
+        let specificity = check_specificity(&candidate, other_groups, matcher);
+        let passed = specificity.all_pass;
         if passed {
             accepted_count += 1;
             info!(
                 "✅ Template verified: ({}, {}) own_min={:.3} other_max={:.3}",
-                candidate.position.0, candidate.position.1, own_min_conf, other_max_conf
+                candidate.position.0,
+                candidate.position.1,
+                sensitivity.min_conf,
+                specificity.max_conf
             );
         }
 
         verified.push(VerifyResult {
             image: candidate.image,
             position: candidate.position,
-            own_best_confidence: own_min_conf,
-            other_worst_confidence: other_max_conf,
+            own_best_confidence: sensitivity.min_conf,
+            other_worst_confidence: specificity.max_conf,
             passed,
         });
     }

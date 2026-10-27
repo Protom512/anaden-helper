@@ -7,6 +7,9 @@
 //!   (PipelineDriver 駆動・[`PipelineInvoker`] 実装)。
 //! - evidence は既存規約 (`.omc/logs/{run-id}/`) に準拠し
 //!   `routine-summary.txt` + `routine-metadata.json` を永続化する。
+//! - 機械可読レポートは run と対称な既定永続化 (loop 10):
+//!   `<routine_dir>/.anaden-routine/<timestamp>/routine-report.json` +
+//!   `routine.log` (解決は [`crate::run_report::resolve_routine_artifacts`])。
 
 use std::path::{Path, PathBuf};
 
@@ -31,8 +34,9 @@ const RECOVER_NOMATCH_THRESHOLD: u32 = 5;
 /// 実測 (issue210-verify2): grace 90s では タイトル到達 (~2分) に間に合わず
 /// 起動中のゲームが再 kill され続けたため 180s へ拡大。
 const RECOVERY_BOOT_GRACE_SECS: u64 = 180;
-/// 再起動前の既存ゲームプロセス終了待ち上限 (Issue #210: 二重起動防止)。
-const RECOVERY_EXIT_WAIT_SECS: u64 = 15;
+// 再起動前の既存ゲームプロセス終了待ち上限 (Issue #210: 二重起動防止) は
+// main.rs の RECOVERY_EXIT_WAIT_SECS (run と同値) を crate::escalation_recovery_hook
+// 経由で共有する — routine 側には定義を残さない (単一情報源)。
 
 /// `routine` サブコマンド本体。終了コードを返す (呼出元が exit する)。
 ///
@@ -40,15 +44,24 @@ const RECOVERY_EXIT_WAIT_SECS: u64 = 15;
 /// - 0: 全ステップが失敗なく実行完了 ([`RoutineSummary::all_ok`])
 /// - 2: 失敗ステップあり / 中断 (on_failure=stop・割り込み・invoker エラー)。
 ///   MaxIterations 到達かつ fired=0 のステップ (no_fire) も失敗扱い (Issue #210)
-/// - 1: routine 読込・検証失敗等のハードエラー (anyhow Err 経由)
+/// - 1: routine 読込・検証失敗等のハードエラー (anyhow Err 経由)。
+///   レポート書込失敗 (明示 `--report-file`・既定永続化とも) も 1
+///   (fail-closed — 明示指定も既定成果物も黙って捨てない。`run` と同一契約)
 ///
 /// # Errors
 /// routine ファイル読込・検証失敗、evidence ディレクトリ作成失敗等の
 /// ハードエラーを anyhow で返す (panic しない)。
+///
+/// `report_file` は生の CLI フラグ (evidence コマンド全文の再現用)。
+/// `artifacts` は main.rs で解決済みの書込先 (loop 10 既定永続化 —
+/// 明示 `--report-file` 最優先 / 既定 `<routine_dir>/.anaden-routine/<ts>/` /
+/// `--no-persist` で None)。
 pub(crate) async fn run_routine_command(
     routine_path: &Path,
     dry_run: bool,
     evidence_run_id: Option<&str>,
+    report_file: Option<&Path>,
+    artifacts: crate::run_report::RunArtifacts,
 ) -> anyhow::Result<i32> {
     let root = crate::cli_workspace_root();
     let def = load_and_validate(routine_path)?;
@@ -94,7 +107,7 @@ pub(crate) async fn run_routine_command(
     };
     print!("{}", summary.format_text());
 
-    let command = command_line(routine_path, dry_run);
+    let command = command_line(routine_path, dry_run, report_file);
     let exit_code = summary_exit_code(&summary);
     if let Some(dir) = &evidence_dir {
         match write_routine_evidence(dir, &def.name, &command, &summary, exit_code) {
@@ -105,6 +118,14 @@ pub(crate) async fn run_routine_command(
             ),
             Err(e) => warn!("routine evidence 書込失敗: {e}"),
         }
+    }
+    // 機械可読レポート (03-report-channel follow-up / loop 10 既定永続化)。
+    // 書込先は main.rs で解決済みの artifacts.report_path (明示 --report-file
+    // 最優先 / 既定 <routine_dir>/.anaden-routine/<ts>/routine-report.json /
+    // --no-persist で無効)。書込失敗はハードエラー (fail-closed・exit 1)。
+    if let Some(path) = artifacts.report_path.as_ref() {
+        write_routine_report(path, &summary)?;
+        info!("routine レポート永続化: {}", path.display());
     }
     Ok(exit_code)
 }
@@ -123,12 +144,20 @@ async fn ensure_game_open() {
 
 /// evidence ログ冒頭に残すコマンド全文 (生コマンド出力規約)。
 #[must_use]
-pub(crate) fn command_line(routine_path: &Path, dry_run: bool) -> String {
-    format!(
+pub(crate) fn command_line(
+    routine_path: &Path,
+    dry_run: bool,
+    report_file: Option<&Path>,
+) -> String {
+    let mut out = format!(
         "anaden routine {}{}",
         routine_path.display(),
         if dry_run { " --dry-run" } else { "" }
-    )
+    );
+    if let Some(p) = report_file {
+        out.push_str(&format!(" --report-file {}", p.display()));
+    }
+    out
 }
 
 /// サマリ → 終了コードの射影 (純関数・テスト対象)。
@@ -188,6 +217,25 @@ fn run_id_of(dir: &Path) -> String {
     dir.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
+}
+
+/// routine 終了時の機械可読レポート書込 (03-report-channel follow-up)。
+///
+/// 中身は `RoutineSummary` の JSON (run の `run_report::write_report` に対応)。
+/// 親ディレクトリが無ければ作成する。書込 io エラーは呼出元へ伝播し
+/// exit 非ゼロ (fail-closed)。
+///
+/// # Errors
+/// ディレクトリ作成・JSON 化・書込の io エラーを返す (panic しない)。
+pub(crate) fn write_routine_report(path: &Path, summary: &RoutineSummary) -> std::io::Result<()> {
+    if let Some(parent) = path.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        std::fs::create_dir_all(parent)?;
+    }
+    let json = serde_json::to_string_pretty(summary)
+        .map_err(|e| std::io::Error::other(format!("RoutineSummary の JSON 化に失敗: {e}")))?;
+    std::fs::write(path, json)
 }
 
 /// 本番 invoker: 各ステップを PipelineDriver (Win32) でライブ実行する。
@@ -268,39 +316,19 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
         step.name
     );
 
-    // NoMatch リカバリ (ゲーム再起動) — `run` の既定と同じ構成 + Issue #210 対策:
-    // - エスカレーション型 recovery (Issue #210): 1 回目は起動のみ (launch_app =
-    //   kill しない・起動中のゲームを殺さない)、2 回目以降は kill+再起動
-    //   (restart_app = 終了待ち→spawn・ハングゲームの本気回復)。実測
-    //   (issue210-verify2) で「毎回 kill」はタイトル到達前のゲームを殺し続ける
-    //  ことが判明したため、まず起動を待ち、それでも NoMatch が続く時だけ
-    //   kill する。カウントはステップ実行内で単調増加 (マッチで streak は
-    //   リセットされるがカウントは保持 — ハングゲームの反復回復に備える)。
+    // NoMatch リカバリ (ゲーム再起動) — `run` の既定と同じ構成:
+    // - エスカレーション型 recovery は crate::escalation_recovery_hook (run と
+    //   routine の単一実装・Issue #210) を使う。試行番号は engine (RecoveryGuard)
+    //   が供給し、健全サイクル (テンプレートマッチ) で 1 からやり直す
+    //   (02-recovery-budget F4: 単調カウンタによる「即 kill+restart」強化の解消)。
     // - with_recovery_grace: 再起動後の猶予は NoMatch streak を数えない
-    //   (起動猶予・マッチすれば即復帰) → 再起動ストーム防止
+    //   (起動猶予・マッチすれば即復帰) → 再起動ストーム防止。
+    // - with_max_recovery_attempts: 健全サイクルを挟まず連続で再起動しても
+    //   復帰しなければ RecoveryExhausted で打ち切る (run の既定と同値 —
+    //   routine ステップだけ永久再起動し続ける減衰を残さない)。
     let launcher = anaden_device::Win32Launch::default_paths();
-    let recovery: Option<anaden_engine::RecoveryHook> = {
-        let launcher = launcher.clone();
-        let recoveries = std::sync::atomic::AtomicU32::new(0);
-        Some(Box::new(move |_streak| {
-            let l = launcher.clone();
-            let n = recoveries.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
-            Box::pin(async move {
-                if n == 1 {
-                    info!(
-                        "NoMatch 継続(routine): ゲームを起動します (初回・kill なし・Issue #210)"
-                    );
-                    l.launch_app().await
-                } else {
-                    info!(
-                        "NoMatch 継続(routine): ゲームを kill+再起動します ({n} 回目・Issue #210)"
-                    );
-                    l.restart_app(std::time::Duration::from_secs(RECOVERY_EXIT_WAIT_SECS))
-                        .await
-                }
-            })
-        }))
-    };
+    let recovery: Option<anaden_engine::RecoveryHook> =
+        Some(crate::escalation_recovery_hook(launcher, "routine"));
 
     let mut driver = PipelineDriver::new(
         capture,
@@ -314,7 +342,8 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
     // (PR #201 lane2 C-1: driver 既定 false のままでは routine ステップだけ
     //  発火後のテンプレ残存検証が無効になる未文書の減衰だった)。
     .with_verify(true)
-    .with_recovery_grace(std::time::Duration::from_secs(RECOVERY_BOOT_GRACE_SECS));
+    .with_recovery_grace(std::time::Duration::from_secs(RECOVERY_BOOT_GRACE_SECS))
+    .with_max_recovery_attempts(crate::DEFAULT_MAX_RECOVERY_ATTEMPTS);
     Ok(driver
         .run_loop_with_recovery(
             std::time::Duration::from_secs(step.interval),
@@ -420,10 +449,42 @@ mod tests {
     #[test]
     fn command_line_includes_path_and_dry_run_flag() {
         assert_eq!(
-            command_line(Path::new("templates/routines/daily.toml"), false),
+            command_line(Path::new("templates/routines/daily.toml"), false, None),
             "anaden routine templates/routines/daily.toml"
         );
-        assert!(command_line(Path::new("a.toml"), true).ends_with("--dry-run"));
+        assert!(command_line(Path::new("a.toml"), true, None).ends_with("--dry-run"));
+    }
+
+    /// `--report-file` 指定時はコマンド全文にも残る (生コマンド出力規約)。
+    #[test]
+    fn command_line_includes_report_file_flag() {
+        assert_eq!(
+            command_line(
+                Path::new("daily.toml"),
+                false,
+                Some(Path::new("reports/1.json"))
+            ),
+            "anaden routine daily.toml --report-file reports/1.json"
+        );
+    }
+
+    // ---- write_routine_report (report.json 書込の機械可読契約) ----
+
+    /// 書込んだ report.json は `serde_json::from_reader::<RoutineSummary>` で
+    /// 読める (studio 消費契約)。親ディレクトリは自動作成。
+    #[test]
+    fn write_routine_report_roundtrips_routine_summary() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("nested").join("report.json");
+        let s = summary_of(vec![
+            StepStatus::Completed(LoopStopReason::GoalReached),
+            StepStatus::NoFire(LoopStopReason::MaxIterations),
+        ]);
+        write_routine_report(&path, &s).expect("write report");
+        let file = std::fs::File::open(&path).unwrap();
+        let back: RoutineSummary = serde_json::from_reader(file).unwrap();
+        assert_eq!(back, s);
+        assert_eq!(back.failed, 1, "no_fire step must survive roundtrip");
     }
 
     // ---- write_routine_evidence (永続化形式) ----
@@ -524,23 +585,37 @@ mod tests {
     }
 
     /// `run_routine_command` の dry-run 経路が exit 0 で完了する (実機に触れない)。
+    /// レポート書込先が解決されていても dry-run は実行しないため書かない。
     #[tokio::test]
     async fn run_routine_command_dry_run_exits_zero() {
         let path = workspace_root()
             .join("templates")
             .join("routines")
             .join("daily.toml");
-        let code = run_routine_command(&path, true, None)
+        let dir = tempfile::tempdir().unwrap();
+        let report = dir.path().join("report.json");
+        let artifacts = crate::run_report::RunArtifacts {
+            report_path: Some(report.clone()),
+            log_path: None,
+        };
+        let code = run_routine_command(&path, true, None, Some(&report), artifacts)
             .await
             .expect("dry-run must succeed");
         assert_eq!(code, 0);
+        assert!(!report.exists(), "dry-run must not write report.json");
     }
 
     /// 不正 routine の実行経路はハードエラー (Err) で抜ける。
     #[tokio::test]
     async fn run_routine_command_missing_file_is_err() {
-        let result =
-            run_routine_command(Path::new("C:/definitely/not/here/daily.toml"), true, None).await;
+        let result = run_routine_command(
+            Path::new("C:/definitely/not/here/daily.toml"),
+            true,
+            None,
+            None,
+            crate::run_report::RunArtifacts::default(),
+        )
+        .await;
         assert!(result.is_err());
     }
 }

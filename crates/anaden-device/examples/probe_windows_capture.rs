@@ -78,7 +78,7 @@ use windows::Win32::UI::HiDpi::{
     SetProcessDpiAwareness, SetProcessDpiAwarenessContext,
 };
 
-use image::{DynamicImage, ImageBuffer, RgbaImage};
+use image::{DynamicImage, ImageBuffer};
 
 /// PW_RENDERFULLCONTENT = 0x2 (Win8.1+)。GPU 描画含むフルコンテンツをレンダリング。
 const PW_RENDERFULLCONTENT: u32 = 0x2;
@@ -154,59 +154,67 @@ fn main() {
         args.process, args.out, args.lum_threshold
     );
 
-    // (1) プロセス名 -> PID
-    let pid = match find_pid_by_name(&args.process) {
-        Some(p) => {
-            println!("[STEP1] process found: {} -> PID {}", args.process, p);
-            p
-        }
-        None => {
-            // 自動判定不可: ユーザーがタスクマネージャでプロセス名を確認する必要あり。
-            println!("PROCESS_NOT_FOUND");
-            println!(
-                "[FAIL] プロセス \"{}\" が見つかりません。タスクマネージャで正確なプロセス名(大文字小文字含む)を確認してください。",
-                args.process
-            );
-            std::process::exit(2);
-        }
-    };
+    // (1)-(3) プロセス/HWND/クライアント領域を順に解決 (失敗時は各 step 内で
+    // 従来どおりのエラー出力 + exit)。
+    let pid = step_find_pid(&args.process);
+    let hwnd = step_find_visible_hwnd(pid);
+    let (w, h) = step_client_size(hwnd);
 
-    // (2) PID -> 可視トップレベル HWND
-    let hwnd = match find_visible_hwnd_for_pid(pid) {
-        Some(h) => {
-            println!("[STEP2] visible HWND found for PID {}: {:?}", pid, h);
-            h
-        }
-        None => {
-            println!("PROCESS_NOT_FOUND");
-            println!(
-                "[FAIL] PID {} に紐づく可視トップレベルウィンドウが見つかりません。ウィンドウが最小化/非表示の可能性があります。",
-                pid
-            );
-            std::process::exit(2);
-        }
-    };
+    // (4)-(5) PrintWindow 連鎖で RGBA を取り出し DynamicImage へ構築。
+    let dyn_img = step_capture_image(hwnd, w, h);
+    // (6)-(8) 輝度分散 → PNG 保存 → 自動判定 (exit code を確定)。
+    verdict(dyn_img, &args.out, args.lum_threshold);
+}
 
-    // (3) クライアント領域サイズ取得
-    let (w, h) = match client_size(hwnd) {
-        Ok(s) if s.0 > 0 && s.1 > 0 => {
-            println!("[STEP3] client area = {}x{}", s.0, s.1);
-            s
-        }
-        Ok(s) => {
-            println!("CAPTURE_API_FAILED: client area is {}x{} (0x0)", s.0, s.1);
-            println!(
-                "[FAIL] クライアント領域が 0x0 です。ウィンドウが最小化されている可能性があります。"
-            );
-            std::process::exit(3);
-        }
-        Err(code) => {
-            println!("CAPTURE_API_FAILED: GetClientRect GetLastError={}", code);
-            std::process::exit(3);
-        }
+/// (1) プロセス名 → PID。見つからなければユーザー指示を出して exit 2。
+fn step_find_pid(process: &str) -> u32 {
+    // 自動判定不可: ユーザーがタスクマネージャでプロセス名を確認する必要あり。
+    let Some(p) = find_pid_by_name(process) else {
+        println!("PROCESS_NOT_FOUND");
+        println!(
+            "[FAIL] プロセス \"{}\" が見つかりません。タスクマネージャで正確なプロセス名(大文字小文字含む)を確認してください。",
+            process
+        );
+        std::process::exit(2);
     };
+    println!("[STEP1] process found: {} -> PID {}", process, p);
+    p
+}
 
-    // (4) PrintWindow + GDI 連鎖で RGBA ピクセルを取り出す
+/// (2) PID → 可視トップレベル HWND。無ければ exit 2。
+fn step_find_visible_hwnd(pid: u32) -> HWND {
+    let Some(h) = find_visible_hwnd_for_pid(pid) else {
+        println!("PROCESS_NOT_FOUND");
+        println!(
+            "[FAIL] PID {} に紐づく可視トップレベルウィンドウが見つかりません。ウィンドウが最小化/非表示の可能性があります。",
+            pid
+        );
+        std::process::exit(2);
+    };
+    println!("[STEP2] visible HWND found for PID {}: {:?}", pid, h);
+    h
+}
+
+/// (3) クライアント領域サイズ。0x0 / GetClientRect 失敗は exit 3。
+fn step_client_size(hwnd: HWND) -> (u32, u32) {
+    let size = client_size(hwnd).unwrap_or_else(|code| {
+        println!("CAPTURE_API_FAILED: GetClientRect GetLastError={}", code);
+        std::process::exit(3);
+    });
+    if size.0 > 0 && size.1 > 0 {
+        println!("[STEP3] client area = {}x{}", size.0, size.1);
+        return size;
+    }
+    println!(
+        "CAPTURE_API_FAILED: client area is {}x{} (0x0)",
+        size.0, size.1
+    );
+    println!("[FAIL] クライアント領域が 0x0 です。ウィンドウが最小化されている可能性があります。");
+    std::process::exit(3);
+}
+
+/// (4)-(5) PrintWindow + GDI 連鎖で RGBA ピクセルを取り出し [`DynamicImage`] を構築。
+fn step_capture_image(hwnd: HWND, w: u32, h: u32) -> DynamicImage {
     let rgba = match capture_via_printwindow(hwnd, w, h) {
         Ok(buf) => {
             println!(
@@ -223,10 +231,8 @@ fn main() {
             std::process::exit(3);
         }
     };
-
-    // (5) DynamicImage 構築
-    let img: RgbaImage = match ImageBuffer::from_raw(w, h, rgba) {
-        Some(b) => b,
+    match ImageBuffer::from_raw(w, h, rgba) {
+        Some(img) => DynamicImage::ImageRgba8(img),
         None => {
             println!(
                 "CAPTURE_API_FAILED: ImageBuffer::from_raw failed (size mismatch w={} h={})",
@@ -234,41 +240,39 @@ fn main() {
             );
             std::process::exit(3);
         }
-    };
-    let dyn_img = DynamicImage::ImageRgba8(img);
+    }
+}
 
-    // (6) 輝度分散計算
+/// (6)-(8) 輝度分散計算 → PNG 保存 → 自動判定。本プローブの exit code (0/1) を確定する。
+fn verdict(dyn_img: DynamicImage, out: &str, lum_threshold: f64) {
     let variance = luminance_variance(&dyn_img);
     println!("variance={}", variance);
 
-    // (7) PNG 保存(目視確認用)
-    match dyn_img.save(&args.out) {
-        Ok(()) => println!("[STEP6] saved: {}", args.out),
-        Err(e) => eprintln!("[warn] save failed ({}): {}", args.out, e),
+    match dyn_img.save(out) {
+        Ok(()) => println!("[STEP6] saved: {}", out),
+        Err(e) => eprintln!("[warn] save failed ({}): {}", out, e),
     }
-    println!("[MANUAL] 目視してください: {}", args.out);
+    println!("[MANUAL] 目視してください: {}", out);
 
-    // (8) 自動判定
-    if variance >= args.lum_threshold {
+    if variance >= lum_threshold {
         println!(
             "[PASS] キャプチャ分散={:.3} >= 閾値 {:.3} → 黒画面でない(実描画取得成功)",
-            variance, args.lum_threshold
+            variance, lum_threshold
         );
         println!("RESULT=OK_CONTENT_CAPTURED");
         std::process::exit(0);
-    } else {
-        println!(
-            "[FAIL] キャプチャ分散={:.6} < 閾値 {:.3} → 黒画面(GPU描画が取れていない)",
-            variance, args.lum_threshold
-        );
-        println!("RESULT=BLACK_FRAME variance={}", variance);
-        println!(
-            "[HINT] PrintWindow 自体は成功だが GPU 描画が取れていません。\
-             fallback の WGC(Windows.Graphics.Capture) escalate が必要です。\
-             第2段プローブ probe_windows_capture_wgc.rs を参照。"
-        );
-        std::process::exit(1);
     }
+    println!(
+        "[FAIL] キャプチャ分散={:.6} < 閾値 {:.3} → 黒画面(GPU描画が取れていない)",
+        variance, lum_threshold
+    );
+    println!("RESULT=BLACK_FRAME variance={}", variance);
+    println!(
+        "[HINT] PrintWindow 自体は成功だが GPU 描画が取れていません。\
+         fallback の WGC(Windows.Graphics.Capture) escalate が必要です。\
+         第2段プローブ probe_windows_capture_wgc.rs を参照。"
+    );
+    std::process::exit(1);
 }
 
 /// `CreateToolhelp32Snapshot` + `Process32First/Next` で exe 名(小文字比較)から PID を得る。

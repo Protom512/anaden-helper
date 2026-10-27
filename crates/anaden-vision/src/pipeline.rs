@@ -7,7 +7,10 @@
 //! 本スライスの範囲: TOML1ファイル = 平坦な [`TaskDef`]。1ファイル複数タスク（サブテーブル）や
 //! action 実行・next 状態機械・base 継承解決は将来スライス。
 
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::sync::{Arc, LazyLock, Mutex};
+use std::time::SystemTime;
 
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
@@ -16,7 +19,7 @@ use tracing::{debug, warn};
 
 use anaden_core::{MatchConfidence, ScreenRegion};
 
-use crate::ccoeff::CcoeffVisionEngine;
+use crate::ccoeff::{CcoeffVisionEngine, PreparedCcoeff};
 use crate::engine::{SseVisionEngine, VisionEngine};
 use crate::matcher::{MatchResult, TemplateMatcher};
 use crate::template_quality::{needle_exceeds_roi_warning_for_path, unstructured_warning_for_path};
@@ -271,6 +274,12 @@ impl TaskDef {
     /// 戻り値の [`MatchResult::region`] は **入力 screenshot と同じ座標空間**の座標
     /// （[`VisionEngine`] 仕様）。roi 指定時は cropping 後の局所座標 → 画面座標へオフセット戻しする。
     ///
+    /// # テンプレートキャッシュ（05-template-cache / F13/F17/F19）
+    /// disk 読込+デコード、needle の Lanczos3 リサイズ、ccoeff 前処理 (`T'` 計算) は
+    /// [`prepared_template`] の (パス, norm_w, norm_h) キー + mtime 検証キャッシュで
+    /// **初回のみ**実行される。verify_after_fire の再 detect や diagnose も同一キャッシュ
+    /// を通るため、テンプレ読込・リサイズ・前処理が毎サイクル 2 倍化することはない。
+    ///
     /// # 動的スケール（raw-1258 空間 → 正規化後画面）
     /// PC版テンプレート/ROI は raw-1258x708 空間で定義されるが、呼出側が screenshot を
     /// どの寸法に正規化して渡してもよい（黒帯クロップ + normalize 後は 1280x720 等）。
@@ -286,18 +295,7 @@ impl TaskDef {
         screenshot: &DynamicImage,
         template_root: &Path,
     ) -> Result<Option<MatchResult>, TaskDefError> {
-        // 1. テンプレート読込
-        let tpl_path = if self.template.is_absolute() {
-            self.template.clone()
-        } else {
-            template_root.join(&self.template)
-        };
-        let needle = image::open(&tpl_path).map_err(|e| TaskDefError::TemplateLoadFailed {
-            path: tpl_path.clone(),
-            reason: e.to_string(),
-        })?;
-
-        // 2. ROI/needle を正規化後キャプチャ寸法へ動的スケール。
+        // 1+2. ROI/needle を正規化後キャプチャ寸法へ動的スケール。
         //
         // PC版テンプレート/ROI は raw-1258x708 空間で定義されるが、実行時キャプチャは
         // 黒帯クロップ + normalize で 1280x720 等へ変動する。detect シグネチャは不変のまま、
@@ -305,6 +303,15 @@ impl TaskDef {
         // ROI・needle をその空間へ揃える（scale.rs のファクタ API）。
         let norm_w = screenshot.width();
         let norm_h = screenshot.height();
+
+        // テンプレート解決 (キャッシュ): disk 読込 + Lanczos3 リサイズ + ccoeff 前処理は
+        // (パス, norm_w, norm_h) + mtime 検証で初回のみ。読込失敗は TemplateLoadFailed。
+        let tpl_path = if self.template.is_absolute() {
+            self.template.clone()
+        } else {
+            template_root.join(&self.template)
+        };
+        let prepared = prepared_template(&tpl_path, norm_w, norm_h)?;
 
         // ROI cropping（raw-1258 空間 ROI → 正規化後画面の画素座標へスケールして crop）
         // scaled_roi はオフセット戻しにも再利用（局所座標 → 正規化後画面座標）。
@@ -317,17 +324,14 @@ impl TaskDef {
             None => screenshot.clone(),
         };
 
-        // needle も同一ファクタで resize（アスペクト比が異なっても描画領域を揃える）
-        let needle = crate::scale::needle_to_normalized(&needle, norm_w, norm_h);
-
         // 3. algorithm 切替（既存エンジン再利用）
         let thr = MatchConfidence::new(self.threshold);
         let result = match self.algorithm {
             // SseVisionEngine::with_defaults() は閾値0.85固定のため、TaskDef.threshold を
-            // 反映するには threshold_only で構築する。
+            // 反映するには threshold_only で構築する。needle はキャッシュの正規化済みもの。
             Algorithm::Sse => {
                 let m = TemplateMatcher::threshold_only(thr);
-                SseVisionEngine::new(m).match_template(&work, &needle)
+                SseVisionEngine::new(m).match_template(&work, &prepared.needle)
             }
             // CCOEFF も downscale_factor=1（threshold_only 相当）で構築する。
             // 設計案では downscale=2 を想定していたが、Triangle 1/2縮小は周期パターンで
@@ -335,10 +339,10 @@ impl TaskDef {
             // なる（位置非依存の「埋め込めば必ず一致」性質が壊れる）。宣言的タスクでは
             // ユーザが「テンプレを埋めれば確実にマッチする」ことを期待するため、正確性を
             // 優先して downscale=1 とする。全面走査の性能は将来スライスで ROI/解像度前提を
-            // 併用して最適化する。
-            Algorithm::Ccoeff => {
-                CcoeffVisionEngine::threshold_only(thr).match_template(&work, &needle)
-            }
+            // 併用して最適化する。キャッシュの前処理済みテンプレート
+            // (match_template_prepared) を使い `T'` 計算を省略する (F13)。
+            Algorithm::Ccoeff => CcoeffVisionEngine::threshold_only(thr)
+                .match_template_prepared(&work, &prepared.ccoeff),
         };
 
         // 4. ROI オフセット戻し（cropping した場合、局所→正規化後画面座標へ）。
@@ -381,6 +385,136 @@ pub enum TaskDefError {
     /// （[`save_task_def`] / [`save_pipeline_manifest`]）。
     #[error("save failed: {reason}")]
     SaveFailed { reason: String },
+}
+
+// ---- 05-template-cache: PreparedTemplate キャッシュ (F13/F17/F19) ----
+//
+// F13/F17/F19: TaskDef::detect は毎サイクル「テンプレート PNG の disk 読込+デコード →
+// needle の Lanczos3 リサイズ → ccoeff 前処理 (T' 計算)」を繰り返していた。さらに
+// verify_after_fire は同タスクの detect をもう 1 度呼ぶため、これらが毎サイクル 2 倍化する。
+//
+// TemplateCache は (絶対パス, norm_w, norm_h) をキーに前処理済みテンプレートを保持し、
+// ファイル mtime の検証でテンプレ差し替えを反映する。プロセス全体で共有する静的インスタンス
+// (TEMPLATE_CACHE) を使い、detect / run_step (verify 再検出) / diagnose の全経路が同一
+// キャッシュを使う (TaskDef は不変のまま detect シグネチャも不変)。
+
+/// 前処理済みテンプレート 1 エントリ分のデータ。
+///
+/// キャッシュミス時のみ「disk 読込+デコード → [`crate::scale::needle_to_normalized`]
+/// (Lanczos3 リサイズ) → ccoeff 前処理」を実行した結果。SSE 経路は `needle` を、
+/// ccoeff 経路は `ccoeff` を使う (前処理の 1 回化 — F13/F17)。
+pub(crate) struct PreparedTemplate {
+    /// 正規化後 (norm_w x norm_h 空間へリサイズ済み) needle。SSE 経路で使用。
+    pub(crate) needle: DynamicImage,
+    /// ccoeff 前処理済み表現 (luma + T' + denomT)。
+    pub(crate) ccoeff: PreparedCcoeff,
+}
+
+/// キャッシュエントリ。`mtime` はテンプレートファイルの読込時点の更新時刻。
+struct CachedTemplate {
+    mtime: Option<SystemTime>,
+    prepared: Arc<PreparedTemplate>,
+}
+
+/// (絶対パス, norm_w, norm_h) キーの前処理済みテンプレートキャッシュ。
+struct TemplateCache {
+    entries: Mutex<HashMap<(PathBuf, u32, u32), CachedTemplate>>,
+}
+
+impl Default for TemplateCache {
+    fn default() -> Self {
+        Self {
+            entries: Mutex::new(HashMap::new()),
+        }
+    }
+}
+
+impl TemplateCache {
+    /// `path` のテンプレートを `norm_w x norm_h` 空間へ前処理した結果を返す。
+    ///
+    /// キャッシュヒット時は mtime 検証のみ (disk 読込・リサイズ・前処理なし)。
+    /// ミス時のみ disk 読込 + リサイズ + ccoeff 前処理を実行してエントリを載せる。
+    /// 読込失敗は [`TaskDefError::TemplateLoadFailed`] を返し、**エラーはキャッシュしない**
+    /// (次回の呼び出しで再試行する — ファイルが後から配置されるケースを妨げない)。
+    fn get_or_prepare(
+        &self,
+        path: &Path,
+        norm_w: u32,
+        norm_h: u32,
+    ) -> Result<Arc<PreparedTemplate>, TaskDefError> {
+        let key = (path.to_path_buf(), norm_w, norm_h);
+        // ロック取得。poisoned は他スレッドの panic 中にロックが放たれたもので、
+        // マップ内容自体は壊れていないため回復して使う (panic 連鎖を防ぐ)。
+        let mut entries = match self.entries.lock() {
+            Ok(guard) => guard,
+            Err(poisoned) => poisoned.into_inner(),
+        };
+        if let Some(hit) = entries.get(&key) {
+            if mtime_unchanged(path, hit.mtime) {
+                return Ok(hit.prepared.clone());
+            }
+            // テンプレートが差し替えられた → 当該エントリを無効化して再読込。
+            debug!("template cache invalidated (mtime changed): {path:?}");
+            entries.remove(&key);
+        }
+        // キャッシュミス: disk 読込 + Lanczos3 リサイズ + ccoeff 前処理 (1 回だけ実行)。
+        let needle = image::open(path).map_err(|e| TaskDefError::TemplateLoadFailed {
+            path: path.to_path_buf(),
+            reason: e.to_string(),
+        })?;
+        let mtime = file_mtime(path);
+        let normalized = crate::scale::needle_to_normalized(&needle, norm_w, norm_h);
+        let ccoeff = PreparedCcoeff::prepare(&normalized);
+        let prepared = Arc::new(PreparedTemplate {
+            needle: normalized,
+            ccoeff,
+        });
+        entries.insert(
+            key,
+            CachedTemplate {
+                mtime,
+                prepared: prepared.clone(),
+            },
+        );
+        Ok(prepared)
+    }
+}
+
+/// テンプレートファイルの mtime (取得不能な FS では [`None`])。
+fn file_mtime(path: &Path) -> Option<SystemTime> {
+    std::fs::metadata(path).and_then(|m| m.modified()).ok()
+}
+
+/// `path` の現在の mtime がキャッシュ時点のものと一致するか。
+///
+/// メタデータ取得に失敗する (ファイル削除済み等) 場合は**キャッシュを信頼する** —
+/// 読込時点ではファイルが実在したことをキャッシュが保証しており、削除後に disk を見に
+/// 行くと必ず読込失敗になるため (削除後もキャッシュヒットし続ける挙動は
+/// `detect_template_loaded_once_for_repeated_detects` が固定する)。キャッシュ側に mtime
+/// がない (取得不能な FS で読み込んだ) 場合も比較不能のためキャッシュを信頼する。
+fn mtime_unchanged(path: &Path, cached: Option<SystemTime>) -> bool {
+    match (file_mtime(path), cached) {
+        (Some(current), Some(cached)) => current == cached,
+        (None, _) => true,
+        (Some(_), None) => true,
+    }
+}
+
+/// プロセス全体で共有するテンプレートキャッシュ。
+/// detect / verify 再検出 (run_step) / diagnose の全経路が同一キャッシュを使う。
+static TEMPLATE_CACHE: LazyLock<TemplateCache> = LazyLock::new(TemplateCache::default);
+
+/// テンプレートを `(path, norm_w, norm_h)` キーで前処理済みの形に解決する (単一入り口)。
+///
+/// [`TaskDef::detect`] と [`crate::diagnose::diagnose_task`] が使う。エントリの key に
+/// norm 寸法を含むため、異なるキャプチャ寸法 (1280x720 / 1258x708 等) が混在しても
+/// 相互に汚染しない。
+pub(crate) fn prepared_template(
+    path: &Path,
+    norm_w: u32,
+    norm_h: u32,
+) -> Result<Arc<PreparedTemplate>, TaskDefError> {
+    TEMPLATE_CACHE.get_or_prepare(path, norm_w, norm_h)
 }
 
 /// ディレクトリ内の `*.toml` を走査し、各1ファイルを1 [`TaskDef`] として読み込む。
@@ -728,11 +862,13 @@ pub struct StepOutcome {
 
 /// `current_name` の [`TaskDef`] を探して1ステップ実行（detect）する。
 ///
-/// 戻り値 [`Option<StepOutcome>`]:
-/// - `current_name` が `tasks` に無い → `None`（未知タスク名）。
-/// - `detect` がテンプレ読込失敗等の [`Err`] → `None`（`Result` を表面に出さず潰す）。
-/// - `detect` が `Ok(None)`（閾値下・ROI 外）→ `None`。
-/// - `detect` が `Ok(Some(_))` → action（省略時 [`Action::DoNothing`] 補充）+ next で [`StepOutcome`] 構築。
+/// 戻り値 [`Result<Option<StepOutcome>, TaskDefError>`]:
+/// - `current_name` が `tasks` に無い → `Ok(None)`（未知タスク名 = NoMatch 扱い）。
+/// - `detect` が `Ok(None)`（閾値下・ROI 外）→ `Ok(None)`（NoMatch = リトライ候補）。
+/// - `detect` が `Ok(Some(_))` → action（省略時 [`Action::DoNothing`] 補充）+ next で
+///   [`StepOutcome`] 構築して `Ok(Some(_))`。
+/// - `detect` がテンプレ読込失敗等の [`Err`] → そのまま `Err`（F34: NoMatch に潰さず
+///   可視化。caller は NoMatch (リトライ候補) と区別して停止扱い等にできる）。
 ///
 /// 本スライスは「1ステップ」のみ。next への自動遷移ループは caller 側で戻り値の `next` を
 /// 見て次の `current_name` を決める形で実装する（本関数内では行わない）。
@@ -743,24 +879,27 @@ pub fn run_step(
     tasks: &[TaskDef],
     screenshot: &DynamicImage,
     current_name: &str,
-) -> Option<StepOutcome> {
-    let task = tasks.iter().find(|t| t.name == current_name)?;
+) -> Result<Option<StepOutcome>, TaskDefError> {
+    let Some(task) = tasks.iter().find(|t| t.name == current_name) else {
+        return Ok(None);
+    };
     match task.detect(screenshot, Path::new("")) {
         Ok(Some(matched)) => {
             let action = task.action.clone().unwrap_or(Action::DoNothing);
             let next = task.next.clone().unwrap_or_default();
-            Some(StepOutcome {
+            Ok(Some(StepOutcome {
                 matched_task: task.name.clone(),
                 action,
                 next,
                 matched_region: matched.region,
                 matched_confidence: matched.confidence.0,
-            })
+            }))
         }
-        Ok(None) => None, // 閾値下 / ROI 外
-        Err(_e) => {
-            // テンプレ欠落等。tracing::warn 推奨だが、本スライスでは None に潰す。
-            None
+        Ok(None) => Ok(None), // 閾値下 / ROI 外
+        Err(e) => {
+            // F34: テンプレ欠落等の読込エラーは NoMatch と区別して伝える (warn で可視化)。
+            warn!("task '{current_name}' detect failed: {e}");
+            Err(e)
         }
     }
 }
@@ -1493,7 +1632,9 @@ mod tests {
             next: Some(vec!["LoadGame".into()]),
         }];
 
-        let out = run_step(&tasks, &screenshot, "Title").expect("should match");
+        let out = run_step(&tasks, &screenshot, "Title")
+            .expect("run_step ok")
+            .expect("should match");
         assert_eq!(out.matched_task, "Title");
         assert_eq!(out.action, Action::ClickSelf);
         assert_eq!(out.next, vec!["LoadGame".to_string()]);
@@ -1516,7 +1657,9 @@ mod tests {
             next: None,
         }];
 
-        let out = run_step(&tasks, &screenshot, "Title").expect("should match");
+        let out = run_step(&tasks, &screenshot, "Title")
+            .expect("run_step ok")
+            .expect("should match");
         assert_eq!(out.matched_task, "Title");
         assert_eq!(
             out.action,
@@ -1544,8 +1687,11 @@ mod tests {
             next: None,
         }];
 
-        let out = run_step(&tasks, &screenshot, "Title");
-        assert!(out.is_none(), "no needle in screenshot must yield None");
+        let out = run_step(&tasks, &screenshot, "Title").expect("run_step ok");
+        assert!(
+            out.is_none(),
+            "no needle in screenshot must yield Ok(None) (NoMatch)"
+        );
 
         let _ = std::fs::remove_file(&tpl);
     }
@@ -1592,10 +1738,10 @@ mod tests {
             threshold: achievable + 0.05,
             ..probe
         }];
-        let out = run_step(&tasks, &screenshot, "Title");
+        let out = run_step(&tasks, &screenshot, "Title").expect("run_step ok");
         assert!(
             out.is_none(),
-            "threshold above achievable confidence ({achievable}) must yield None"
+            "threshold above achievable confidence ({achievable}) must yield Ok(None)"
         );
     }
 
@@ -1614,17 +1760,168 @@ mod tests {
             next: None,
         }];
 
-        // 存在しないタスク名 → 検索失敗経路
-        let out = run_step(&tasks, &screenshot, "NoSuchTask");
-        assert!(out.is_none(), "unknown task name must yield None");
+        // 存在しないタスク名 → 検索失敗経路 (Ok(None) = NoMatch 扱い)
+        let out = run_step(&tasks, &screenshot, "NoSuchTask").expect("run_step ok");
+        assert!(out.is_none(), "unknown task name must yield Ok(None)");
 
         let _ = std::fs::remove_file(&tpl);
     }
 
+    // ---- 05-template-cache: PreparedTemplate キャッシュ契約 (F13/F17/F19) ----
+    //
+    // F13: テンプレート PNG は毎サイクル disk 読込+デコード+needle リサイズ+ccoeff 前処理
+    // されていた。キャッシュ導入後、同一 TaskDef の detect を複数回 (別フレームインスタンスで)
+    // 呼んでも disk 読込は初回のみであることを検証する。
+    //
+    // 検証手法 (ローダ注入の代わりに決定論的副作用で観測): 初回 detect 後にテンプレート
+    // ファイルを削除する。キャッシュが効いていれば以降の detect は disk を見ずに成功し、
+    // 毎回読み込む実装なら image::open が失敗して Err/None になる (現行実装 = RED)。
+
+    /// F13: 同一 TaskDef の detect 2 回 (別フレーム) でテンプレ disk 読込は 1 回のみ。
     #[test]
-    fn run_step_missing_template_returns_none() {
+    fn detect_template_loaded_once_for_repeated_detects() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let needle = gradient_needle(40, 40);
+        let tpl = write_template(tmp.path(), &needle);
+        // 同一寸法 (norm key 同一)・別インスタンスのフレーム。needle は ROI 内の別位置に埋込。
+        let frame1 = luma_dyn(embed(FULL_W, FULL_H, &needle, 620, 330, 128));
+        let frame2 = luma_dyn(embed(FULL_W, FULL_H, &needle, 560, 360, 128));
+
+        let task = TaskDef {
+            name: "T".into(),
+            state: "T".into(),
+            algorithm: Algorithm::Ccoeff,
+            template: tpl.clone(),
+            roi: Some([520, 320, 240, 120]),
+            threshold: 0.9,
+            base: None,
+            action: None,
+            next: None,
+        };
+
+        let m1 = task
+            .detect(&frame1, tmp.path())
+            .expect("1st detect ok")
+            .expect("1st detect must match");
+        assert!(
+            (618..=622).contains(&m1.region.x),
+            "frame1 match near embed x=620: got {}",
+            m1.region.x
+        );
+
+        // テンプレート削除 = 以降の disk 読込は必ず失敗する環境を作る。
+        std::fs::remove_file(&tpl).expect("remove template file");
+
+        // 2 回目: disk 読込していれば Err。キャッシュヒットなら frame2 の埋込位置にマッチ。
+        let m2 = task
+            .detect(&frame2, tmp.path())
+            .expect("2nd detect must be served from cache (no disk reload)");
+        let m2 = m2.expect("2nd detect must still match from cached template");
+        assert!(
+            (558..=562).contains(&m2.region.x),
+            "frame2 match near its embed x=560 (fresh frame instance): got {}",
+            m2.region.x
+        );
+    }
+
+    /// F13: テンプレートファイルが書き換わった (mtime 変更) 場合はキャッシュを無効化して
+    /// 再読込すること。実行毎読込の現行実装では自明に成立するが、キャッシュ導入が
+    /// 「テンプレ差し替えが反映されない」退化を生まないための無効化契約の固定。
+    #[test]
+    fn detect_cache_invalidated_on_mtime_change() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let needle = gradient_needle(40, 40);
+        let tpl = write_template(tmp.path(), &needle);
+        let frame = luma_dyn(embed(FULL_W, FULL_H, &needle, 620, 330, 128));
+
+        let task = TaskDef {
+            name: "T".into(),
+            state: "T".into(),
+            algorithm: Algorithm::Ccoeff,
+            template: tpl.clone(),
+            roi: Some([520, 320, 240, 120]),
+            threshold: 0.9,
+            base: None,
+            action: None,
+            next: None,
+        };
+
+        // 初回: needle が埋め込まれている → マッチ (キャッシュに載る)。
+        assert!(
+            task.detect(&frame, tmp.path())
+                .expect("1st detect ok")
+                .is_some(),
+            "embedded needle must match on first detect"
+        );
+
+        // mtime 粒度の粗いファイルシステムに備えて少し待ってから書き換える。
+        std::thread::sleep(std::time::Duration::from_millis(20));
+
+        // テンプレートを「frame に埋め込んでいない反転パターン」へ差し替える。
+        let mut inverted = GrayImage::new(40, 40);
+        for y in 0..40 {
+            for x in 0..40 {
+                inverted.put_pixel(x, y, Luma([255 - ((x + y) % 64) as u8]));
+            }
+        }
+        inverted.save(&tpl).expect("save inverted template");
+
+        // 再 detect: mtime 変更を検知して再読込 → 新テンプレでは NoMatch。
+        // キャッシュが古いまま (stale serve) なら埋込 needle にマッチし続けて RED。
+        let m2 = task.detect(&frame, tmp.path()).expect("2nd detect ok");
+        assert!(
+            m2.is_none(),
+            "rewritten template must be reloaded and evaluated (stale cache must not keep matching)"
+        );
+    }
+
+    /// F19: verify_after_fire は同タスクの detect をもう一度呼ぶ (driver が run_step を
+    /// 直接呼ぶ)。この再検出でもテンプレート読込がキャッシュされること (= テンプレ読込・
+    /// リサイズ・前処理が 2 倍化しない) を「テンプレ削除後の再 run_step が依然成功する」
+    /// ことで検証する (現行 = 毎回読込で RED)。
+    #[test]
+    fn run_step_reuses_cached_template_for_verify_recheck() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let needle = gradient_needle(40, 40);
+        let tpl = write_template(tmp.path(), &needle);
+        let frame1 = luma_dyn(embed(FULL_W, FULL_H, &needle, 620, 330, 128));
+        let frame2 = luma_dyn(embed(FULL_W, FULL_H, &needle, 560, 360, 128));
+
+        let tasks = vec![TaskDef {
+            name: "T".into(),
+            state: "T".into(),
+            algorithm: Algorithm::Ccoeff,
+            template: tpl.clone(),
+            roi: Some([520, 320, 240, 120]),
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickSelf),
+            next: None,
+        }];
+
+        // 1 サイクル目 (tick 相当)。
+        let out1 = run_step(&tasks, &frame1, "T").expect("1st run_step must match");
+
+        // テンプレ削除 → verify 相当の再 run_step は disk 読込すれば失敗する。
+        std::fs::remove_file(&tpl).expect("remove template file");
+
+        let out2 = run_step(&tasks, &frame2, "T")
+            .expect("verify-path run_step must reuse the cached template (F19: no reload)");
+        assert!(
+            out2.is_some(),
+            "verify-path run_step must still match from the cached template (F19: no 2x cost)"
+        );
+        let _ = out1;
+    }
+
+    /// F34: detect がテンプレート読込エラー (欠落) のとき run_step はそれを None
+    /// (=NoMatch 扱い) に潰さず [`TaskDefError`] で伝えること。NoMatch (リトライ候補) と
+    /// テンプレ欠落 (設定破損 = 停止すべき) は caller (engine) が異なる扱いをする状態であり、
+    /// 区別不能なまま潰すのは fail-invisible。従来は黙って None に潰していた (= 本テストで固定)。
+    #[test]
+    fn run_step_missing_template_returns_err_not_none() {
         let (screenshot, _tpl) = run_step_setup(true);
-        // template を存在しないパスに → detect が Err → None に潰す
+        // template を存在しないパスに → detect が Err → run_step は Err を伝える
         let tasks = vec![TaskDef {
             name: "Title".into(),
             state: "Title".into(),
@@ -1638,9 +1935,10 @@ mod tests {
         }];
 
         let out = run_step(&tasks, &screenshot, "Title");
+        let err = out.expect_err("missing template must surface Err (not squashed to None)");
         assert!(
-            out.is_none(),
-            "missing template (Err path) must yield None, not propagate Err"
+            matches!(err, TaskDefError::TemplateLoadFailed { .. }),
+            "error kind must be TemplateLoadFailed, got {err:?}"
         );
     }
 

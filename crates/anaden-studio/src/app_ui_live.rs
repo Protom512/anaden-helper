@@ -76,9 +76,14 @@ impl StudioApp {
         ui.heading("anaden-studio");
         ui.label("実演オーサリング");
         ui.separator();
+        self.live_capture_controls(ui);
+        self.live_session_controls(ui);
+        self.live_session_status_and_steps(ui);
+    }
 
-        // -- ライブキャプチャ (作成モードと同じ self.live / target / serial / exe を共有。
-        //    コンパクト版 — 接続チェック等のフル制御は作成タブ) --
+    /// ライブキャプチャ制御セクション (作成モードと同じ self.live / exe を共有。
+    /// コンパクト版 — 接続チェック等のフル制御は作成タブ)。
+    fn live_capture_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("ライブキャプチャ");
         ui.horizontal(|ui| {
             ui.label("取得元:");
@@ -103,8 +108,10 @@ impl StudioApp {
             });
         }
         ui.separator();
+    }
 
-        // -- セッション (名前入力 → 記録開始 → 注入トグル → undo / 保存) --
+    /// セッション操作セクション (名前入力 → 記録開始 → 注入トグル → undo / 保存)。
+    fn live_session_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("セッション");
         let started = self.live_authoring.is_started();
         ui.add_enabled_ui(!started, |ui| {
@@ -144,63 +151,66 @@ impl StudioApp {
             }
         });
         ui.separator();
+    }
 
-        // -- status + セッション警告 (fail-visible) --
+    /// status + セッション警告 (fail-visible) + ステップ一覧 + 未確定ガイド。
+    fn live_session_status_and_steps(&mut self, ui: &mut egui::Ui) {
         ui.label(&self.live_authoring.status);
-        if let Some(session) = self.live_authoring.session() {
-            if !session.warnings().is_empty() {
-                ui.colored_label(
-                    egui::Color32::from_rgb(230, 160, 30),
-                    format!("警告 ({} 件):", session.warnings().len()),
-                );
-                for w in session.warnings() {
-                    ui.small(w);
-                }
+        let Some(session) = self.live_authoring.session() else {
+            return;
+        };
+        if !session.warnings().is_empty() {
+            ui.colored_label(
+                egui::Color32::from_rgb(230, 160, 30),
+                format!("警告 ({} 件):", session.warnings().len()),
+            );
+            for w in session.warnings() {
+                ui.small(w);
             }
-            ui.separator();
+        }
+        ui.separator();
 
-            // -- ステップ一覧 (順番・サムネイル・警告は上の累積リスト参照) --
-            ui.heading(format!("ステップ ({} 件)", session.steps().len()));
-            for (i, step) in session.steps().iter().enumerate() {
-                egui::CollapsingHeader::new(format!("[{}] {}", i + 1, step.task.name))
-                    .default_open(i + 1 == session.steps().len())
-                    .show(ui, |ui| {
-                        if let Some([x, y, w, h]) = step.task.roi {
-                            ui.label(format!("roi: ({x},{y}) {w}x{h}"));
-                        }
-                        ui.label(format!("tap: ({},{})", step.tap.0, step.tap.1));
-                        // テンプレートサムネイル (開いているステップのみ毎フレーム生成)。
-                        let rgba = step.template.to_rgba8();
-                        let size = [rgba.width() as usize, rgba.height() as usize];
-                        let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
-                        let tex = ui.ctx().load_texture(
-                            format!("authored-step-{i}"),
-                            image,
-                            egui::TextureOptions::default(),
-                        );
-                        let scale = thumbnail_scale(size, 160.0);
-                        ui.add(
-                            egui::Image::from_texture(egui::load::SizedTexture::new(
-                                tex.id(),
-                                [size[0] as f32 * scale, size[1] as f32 * scale],
-                            ))
-                            .maintain_aspect_ratio(true),
-                        );
-                    });
+        // -- ステップ一覧 (順番・サムネイル・警告は上の累積リスト参照) --
+        ui.heading(format!("ステップ ({} 件)", session.steps().len()));
+        for (i, step) in session.steps().iter().enumerate() {
+            egui::CollapsingHeader::new(format!("[{}] {}", i + 1, step.task.name))
+                .default_open(i + 1 == session.steps().len())
+                .show(ui, |ui| {
+                    if let Some([x, y, w, h]) = step.task.roi {
+                        ui.label(format!("roi: ({x},{y}) {w}x{h}"));
+                    }
+                    ui.label(format!("tap: ({},{})", step.tap.0, step.tap.1));
+                    // テンプレートサムネイル (開いているステップのみ毎フレーム生成)。
+                    let rgba = step.template.to_rgba8();
+                    let size = [rgba.width() as usize, rgba.height() as usize];
+                    let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
+                    let tex = ui.ctx().load_texture(
+                        format!("authored-step-{i}"),
+                        image,
+                        egui::TextureOptions::default(),
+                    );
+                    let scale = thumbnail_scale(size, 160.0);
+                    ui.add(
+                        egui::Image::from_texture(egui::load::SizedTexture::new(
+                            tex.id(),
+                            [size[0] as f32 * scale, size[1] as f32 * scale],
+                        ))
+                        .maintain_aspect_ratio(true),
+                    );
+                });
+        }
+        // 未確定ジェスチャのガイド。
+        match (session.pending_tap(), session.pending_region()) {
+            (Some(t), None) => {
+                ui.label(format!(
+                    "タップ ({},{}) 記録済み — ドラッグで領域を確定",
+                    t.0, t.1
+                ));
             }
-            // 未確定ジェスチャのガイド。
-            match (session.pending_tap(), session.pending_region()) {
-                (Some(t), None) => {
-                    ui.label(format!(
-                        "タップ ({},{}) 記録済み — ドラッグで領域を確定",
-                        t.0, t.1
-                    ));
-                }
-                (None, Some(r)) => {
-                    ui.label(format!("領域 {r:?} 記録済み — クリックでタップを確定"));
-                }
-                _ => {}
+            (None, Some(r)) => {
+                ui.label(format!("領域 {r:?} 記録済み — クリックでタップを確定"));
             }
+            _ => {}
         }
     }
 
@@ -239,20 +249,32 @@ impl StudioApp {
             height: rect.height(),
         };
         let painter = ui.painter_at(rect);
-        let to_frame = |p: egui::Pos2| -> Option<(u32, u32)> {
-            authoring_coords::widget_to_frame((p.x, p.y), view, frame_dims)
-        };
+        self.live_canvas_interaction(&response, view, frame_dims);
+        self.live_canvas_overlays(&painter, view, frame_dims);
+    }
 
-        // ドラッグ → 認識領域選択 (canvas::show の RoiEdit 更新パターン踏襲)。
+    /// canvas 上の入力処理: ドラッグ → 認識領域選択 (canvas::show の RoiEdit
+    /// 更新パターン踏襲)、ドラッグ確定 → 領域記録、クリック → タップ記録 +
+    /// トグル有効時の実機注入。
+    fn live_canvas_interaction(
+        &mut self,
+        response: &egui::Response,
+        view: ViewRect,
+        frame_dims: (u32, u32),
+    ) {
+        let pointer_frame = |r: &egui::Response| -> Option<(u32, u32)> {
+            r.interact_pointer_pos()
+                .and_then(|p| authoring_coords::widget_to_frame((p.x, p.y), view, frame_dims))
+        };
         {
             let drag = self.live_authoring.region_drag();
             drag.dragging = response.dragged();
             if response.drag_started() {
-                drag.anchor = response.interact_pointer_pos().and_then(to_frame);
+                drag.anchor = pointer_frame(response);
                 drag.current = drag.anchor;
             }
             if response.dragged()
-                && let Some(pos) = response.interact_pointer_pos().and_then(to_frame)
+                && let Some(pos) = pointer_frame(response)
             {
                 drag.current = Some(pos);
             }
@@ -264,19 +286,26 @@ impl StudioApp {
             self.live_authoring
                 .canvas_region([region.x, region.y, region.width, region.height]);
         }
-
         // クリック → タップ記録 + トグル有効時の実機注入。
         if response.clicked()
-            && let Some(pos) = response.interact_pointer_pos().and_then(to_frame)
+            && let Some(pos) = pointer_frame(response)
         {
             let mut injector = self.make_authoring_injector();
             self.live_authoring.canvas_tap(pos, &mut *injector);
         }
+    }
 
-        // ドラッグ中/直近の選択矩形 (黄) — canvas.rs と同じ強調色。
+    /// canvas 上のオーバーレイ描画: ドラッグ中/直近の選択矩形 (黄 — canvas.rs
+    /// と同じ強調色)、未確定の認識領域 (シアン)、未確定のタップ位置 (赤丸)。
+    fn live_canvas_overlays(
+        &mut self,
+        painter: &egui::Painter,
+        view: ViewRect,
+        frame_dims: (u32, u32),
+    ) {
         if let Some(r) = self.live_authoring.region_drag().rect() {
             stroke_frame_rect(
-                &painter,
+                painter,
                 view,
                 frame_dims,
                 (r.x, r.y),
@@ -288,7 +317,7 @@ impl StudioApp {
             // 未確定の認識領域 (シアン)。
             if let Some([x, y, w, h]) = session.pending_region() {
                 stroke_frame_rect(
-                    &painter,
+                    painter,
                     view,
                     frame_dims,
                     (x, y),

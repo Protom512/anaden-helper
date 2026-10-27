@@ -1,0 +1,18 @@
+# マップ移動 (PC版) パイプライン manifest (DEF-006 / ループ 06)。
+# TaskDef (field_hud_top.toml / load_game.toml / tap_to_start.toml) とは
+# 分離された宣言層で、開始タスクとゴール(終端条件)を宣言する。
+# schema 詳細は docs/goal-manifest.md および templates/pipelines/field_loop_pc/pipeline.toml 参照。
+#
+# DEF-006 修正前は manifest が未整備で、studio の開始タスク解決が
+# 「TaskDef TOML の辞書順最初の stem」= field_hud_top を使っていた。
+# 実行契約 (anaden run の t.name == start_task) に合格する TaskDef 名での
+# 明示宣言が必要なため manifest を整備した。
+
+# 最初に実行する TaskDef。tap_to_start.toml の name="TapToStartPc" と一致すること。
+# (field_hud_top でなく tap_to_start 起点: タイトル画面の Tap-to-Start から
+# ロードを経てフィールドへ移動するシナリオのため。)
+start_task = "TapToStartPc"
+
+# goal は無宣言 (= 無限ループ・後方互換形式)。
+# studio から保存すると本ファイルは TaskDef 辞書順でなく manifest の
+# start_task を優先して読み込まれる (scenario_load / spawn_args 同一契約)。

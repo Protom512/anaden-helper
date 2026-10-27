@@ -1,0 +1,16 @@
+---
+config:
+  flowchart:
+    wrappingWidth: 340
+    curve: linear
+  themeVariables:
+    fontSize: "24px"
+---
+flowchart TB
+  raw["生キャプチャ<br/>(黒帯込み)"] --> crop["端から連続する黒行/黒列を除去<br/>crop_to_content_with_info<br/>→ クロップ候補"]
+  crop --> guard{"候補のアスペクトは<br/>16:9 ±5% 以内?<br/>(crop_to_canvas_with_info)"}
+  guard -->|"はい: 真の黒帯"| accept["クロップ受理<br/>1942x1098 (差 0.51%)<br/>normalize 1280x724<br/>roi は正位置"]
+  accept --> match[["MATCH<br/>conf 0.9944"]]
+  guard -->|"いいえ: 内部の黒"| reject["クロップ棄却<br/>元画像全面 1952x1098<br/>normalize 1280x720<br/>(幾何保全)"]
+  reject --> honest["正しい NoMatch<br/>全文探索 best conf 0.2057<br/>< 閾値 0.80"]
+  trap["修正前はこの分岐が無い:<br/>1952x577 (+90.3%) が無条件採用<br/>normalize 1280x378<br/>roi の Y 比 0.53倍で座標系破壊"] -.-> guard

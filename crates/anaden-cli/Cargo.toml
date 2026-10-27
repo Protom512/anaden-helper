@@ -35,6 +35,8 @@ async-trait = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 image = { workspace = true }
 imageproc = { workspace = true }
+# 03-report-channel: run 成果物 (report.json) の機械可読シリアライズ。
+serde_json = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }

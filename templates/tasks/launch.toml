@@ -1,6 +1,7 @@
 # ゲーム起動タスク (Issue #144)。
-# 実行経路: `anaden launch --target windows` standalone サブコマンド
+# 実行経路: `anaden launch` standalone サブコマンド
 # (crates/anaden-cli/src/main.rs Commands::Launch と突合済み)。
+# --target は Issue #188 で CLI フラグが削除されたため引数なし (DEF-005/DEF-007)。
 id = "launch"
 title = "ゲーム起動"
 kind = "launch_subcommand"

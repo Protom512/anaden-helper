@@ -79,7 +79,7 @@ impl StudioApp {
         &self.task_log_snapshot
     }
 
-    /// キューがアクティブ (未完了 = Pending/Running/PausedAfterFailure) か。
+    /// キューがアクティブ (未完了 = Pending/Running/Pause 系) か。
     pub(crate) fn task_queue_active(&self) -> bool {
         self.task_queue
             .as_ref()
@@ -382,38 +382,62 @@ impl StudioApp {
         }
     }
 
-    /// 現在のROI切り出しをテンプレートとして保存する。
-    /// 閾値は識別力があれば正例/負例スコアの中間、なければ 0.9。
-    pub(crate) fn save_current_template(&mut self) {
-        let (Some(img), Some(roi)) = (self.screenshot.clone(), self.roi.rect()) else {
-            return;
-        };
+    /// 保存対象の ROI crop とスコア派生閾値を導出する (スクショ + ROI 確定が前提)。
+    /// 閾値は discrimination があれば正例/負例スコアの中間、なければ 0.9。
+    fn roi_crop_and_threshold(&self) -> Option<(DynamicImage, ScreenRegion, f32)> {
+        let img = self.screenshot.clone()?;
+        let roi = self.roi.rect()?;
         let crop = img.crop_imm(roi.x, roi.y, roi.width, roi.height);
         let threshold = self
             .discrimination
             .as_ref()
             .map(|d| ((d.own_min + d.other_max) / 2.0).clamp(0.5, 0.99))
             .unwrap_or(0.9);
-        let spec = TemplateSpec {
+        Some((crop, roi, threshold))
+    }
+
+    /// 保存結果を status へ反映する (label は「保存」/「pipeline task 保存」)。
+    /// Issue #184: 無構造テンプレート (stddev < 閾値) の fail-visible 警告つき。
+    /// 判定は anaden-vision の単一実装経由。保存自体はブロックしない。
+    fn report_save_status<E: std::fmt::Display>(
+        &mut self,
+        label: &str,
+        result: Result<std::path::PathBuf, E>,
+        crop: &DynamicImage,
+    ) {
+        match result {
+            Ok(p) => {
+                self.status = match library::template_structure_warning(crop) {
+                    Some(warning) => format!("{label}: {} / {warning}", p.display()),
+                    None => format!("{label}: {}", p.display()),
+                };
+            }
+            Err(e) => self.status = format!("{label}失敗: {e}"),
+        }
+    }
+
+    /// 現在のフォーム入力から [`TemplateSpec`] を構築する。
+    /// method は engine_kind に連動（Sse => "sse", Ccoeff => "ccoeff"）—
+    /// library::TemplateSpec の method 文字列仕様と一致。
+    fn current_template_spec(&self, roi: ScreenRegion, threshold: f32) -> TemplateSpec {
+        TemplateSpec {
             name: self.tpl_name.clone(),
             state: STATE_OPTIONS[self.tpl_state_idx].to_string(),
             roi,
             threshold,
-            // engine_kind に連動（Sse => "sse", Ccoeff => "ccoeff"）。
-            // library::TemplateSpec の method 文字列仕様と一致。
             method: self.engine_kind.method_str().to_string(),
-        };
-        match library::save_template(&self.save_dir, &spec, &crop) {
-            Ok(p) => {
-                // Issue #184: 無構造テンプレート (stddev < 閾値) の fail-visible 警告。
-                // 判定は anaden-vision の単一実装経由。保存自体はブロックしない。
-                self.status = match library::template_structure_warning(&crop) {
-                    Some(warning) => format!("保存: {} / {warning}", p.display()),
-                    None => format!("保存: {}", p.display()),
-                };
-            }
-            Err(e) => self.status = format!("保存失敗: {e}"),
         }
+    }
+
+    /// 現在のROI切り出しをテンプレートとして保存する。
+    /// 閾値は識別力があれば正例/負例スコアの中間、なければ 0.9。
+    pub(crate) fn save_current_template(&mut self) {
+        let Some((crop, roi, threshold)) = self.roi_crop_and_threshold() else {
+            return;
+        };
+        let spec = self.current_template_spec(roi, threshold);
+        let result = library::save_template(&self.save_dir, &spec, &crop);
+        self.report_save_status("保存", result, &crop);
     }
 
     /// 現在のスクリーンショットからROI候補を提案する。
@@ -481,7 +505,7 @@ impl StudioApp {
     /// serialize し save_pipeline_task で書き出す。書いた TOML は既存
     /// load_pipeline で読める (roundtrip 検証済み)。
     pub(crate) fn save_current_pipeline_task(&mut self) {
-        let (Some(img), Some(roi)) = (self.screenshot.clone(), self.roi.rect()) else {
+        let Some((crop, roi, threshold)) = self.roi_crop_and_threshold() else {
             self.status = "pipeline task 保存にはスクリーンショットとROI確定が必要です".to_string();
             return;
         };
@@ -490,12 +514,6 @@ impl StudioApp {
         } else {
             self.tpl_name.trim().to_string()
         };
-        let crop = img.crop_imm(roi.x, roi.y, roi.width, roi.height);
-        let threshold = self
-            .discrimination
-            .as_ref()
-            .map(|d| ((d.own_min + d.other_max) / 2.0).clamp(0.5, 0.99))
-            .unwrap_or(0.9);
         let Some(spec) = pipeline_task_spec(
             &name,
             STATE_OPTIONS[self.tpl_state_idx],
@@ -510,17 +528,8 @@ impl StudioApp {
             );
             return;
         };
-        match save_pipeline_task(&self.task_dir, &spec, &crop) {
-            Ok(p) => {
-                // Issue #184: 無構造テンプレート (stddev < 閾値) の fail-visible 警告。
-                // 判定は anaden-vision の単一実装経由。保存自体はブロックしない。
-                self.status = match library::template_structure_warning(&crop) {
-                    Some(warning) => format!("pipeline task 保存: {} / {warning}", p.display()),
-                    None => format!("pipeline task 保存: {}", p.display()),
-                };
-            }
-            Err(e) => self.status = format!("pipeline task 保存失敗: {e}"),
-        }
+        let result = save_pipeline_task(&self.task_dir, &spec, &crop);
+        self.report_save_status("pipeline task 保存", result, &crop);
     }
 
     /// 現在のROI・入力からシナリオ追加候補 (TaskDef + crop PNG) を構築する
