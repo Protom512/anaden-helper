@@ -49,11 +49,18 @@ export function normalizeMutantName(name) {
 
 /**
  * Classifies current survivors against baseline survivors.
- * Matching is per (file, op) class: exact-name matches first, then injective
- * op-matching for the remainder (each baseline survivor matches at most once).
+ * Matching is per (file, op) class, consuming one baseline slot per matched
+ * current survivor: exact-name matches consume their own slot first (the
+ * identically-named baseline entry), then remaining current survivors match
+ * leftover baseline entries in the same class injectively (each baseline
+ * survivor matches at most once).
+ *
+ * Slot consumption by exact matches is load-bearing (Issue #223): without it,
+ * an exact twin leaves its baseline entry "free" for the next current
+ * survivor in the class, letting a genuinely-new mutant borrow it and be
+ * misclassified as equivalent (new-gap undercount — fail-open direction).
  */
 export function reconcile(baselineSurvivors, currentSurvivors) {
-  const byName = new Set(baselineSurvivors.map((s) => s.name));
   const classes = new Map(); // key -> { base: [names...], baseIdx: 0 }
   for (const s of baselineSurvivors) {
     const key = classKey(s.name);
@@ -64,11 +71,20 @@ export function reconcile(baselineSurvivors, currentSurvivors) {
   const equivalent = [];
   const newGap = [];
   for (const s of currentSurvivors) {
-    if (byName.has(s.name)) {
-      exact.push(s);
-      continue;
-    }
     const c = classes.get(classKey(s.name));
+    // Exact-name match: the class contains this exact name. Prefer the
+    // current slot when it lines up (common case: same-name survivors appear
+    // in the same relative order), otherwise swap it to the current position
+    // so it is consumed here rather than stolen by a later survivor.
+    if (c) {
+      const at = c.base.indexOf(s.name, c.baseIdx);
+      if (at !== -1) {
+        [c.base[c.baseIdx], c.base[at]] = [c.base[at], c.base[c.baseIdx]];
+        exact.push(s);
+        c.baseIdx += 1;
+        continue;
+      }
+    }
     if (c && c.baseIdx < c.base.length) {
       equivalent.push({ ...s, matchedBaseline: c.base[c.baseIdx] });
       c.baseIdx += 1;
@@ -84,8 +100,23 @@ const classKey = (name) => {
   return `${file}::${op}`;
 };
 
-/** Self-test: sanity (self-reconciliation → 0 new-gap) + broken variant. */
+/** Self-test: sanity + broken variant + slot-consumption regression (Issue #223). */
 export function selfTest(baselineSurvivors) {
+  // Regression (Issue #223): an exact twin must consume its class slot so a
+  // genuinely-new mutant in the same class cannot borrow it.
+  const base223 = [
+    { name: 'crates/x/src/lib.rs:10:5: replace + with * in f' },
+    { name: 'crates/x/src/lib.rs:20:5: replace + with * in f' },
+  ];
+  const cur223 = [
+    { name: 'crates/x/src/lib.rs:10:5: replace + with * in f' }, // exact twin
+    { name: 'crates/x/src/lib.rs:22:5: replace + with * in g' }, // renamed twin
+    { name: 'crates/x/src/lib.rs:99:9: replace + with * in h' }, // genuinely new
+  ];
+  const r223 = reconcile(base223, cur223);
+  if (r223.exact.length !== 1 || r223.equivalent.length !== 1 || r223.newGap.length !== 1) {
+    return { ok: false, failure: 'slot-consumption', detail: `exact=${r223.exact.length} equivalent=${r223.equivalent.length} newGap=${r223.newGap.length} (expected 1/1/1)` };
+  }
   const sanity = reconcile(baselineSurvivors, baselineSurvivors);
   if (sanity.newGap.length !== 0 || sanity.equivalent.length !== 0) {
     return { ok: false, failure: 'sanity', detail: `newGap=${sanity.newGap.length} equivalent=${sanity.equivalent.length} (expected all exact)` };
