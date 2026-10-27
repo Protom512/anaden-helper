@@ -26,8 +26,7 @@
         "hooks": [
           {
             "type": "command",
-            "if": "Bash(git commit*)",
-            "command": "cd \"$(git rev-parse --show-toplevel 2>/dev/null)\" || exit 0; if ! node scripts/quality/assert_tests_untouched.mjs; then echo \"commit blocked: tests-untouched guard failed (test region touched)\" >&2; exit 2; fi",
+            "command": "c=$(jq -r '.tool_input.command // empty'); echo \"$c\" | grep -qE '(^|[;&|(])[[:space:]]*git([[:space:]]+)commit' || exit 0; cd \"$(git rev-parse --show-toplevel 2>/dev/null)\" || exit 0; if ! node scripts/quality/assert_tests_untouched.mjs; then echo 'commit blocked: tests-untouched guard failed (test region touched)' >&2; exit 2; fi",
             "timeout": 60,
             "statusMessage": "tests-untouched guard"
           }
