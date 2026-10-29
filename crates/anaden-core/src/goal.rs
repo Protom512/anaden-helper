@@ -343,11 +343,11 @@ enum Composition {
 ///
 /// | mode | 判定順 |
 /// |------|--------|
-/// | All | any_not_yet → NotYet → first_failure → Failed → Reached |
-/// | Any | first_failure → Failed → any_reached → Reached → NotYet |
+/// | All | **評価順短絡**: 最初の NotYet または Failed が勝つ (Issue #230 で復元)。全 Reached のみ Reached |
+/// | Any | 全子評価・順序非依存: first_failure → Failed (安全弁) → any_reached → Reached → NotYet |
 ///
-/// [`evaluate`] は純粋関数のため、旧 All 実装の短絡 (NotYet/Failed での
-/// 早期脱出) を解除して全子を評価しても観測可能な差は無い (評価回数のみ)。
+/// All の短絡は観測可能: [Failed, NotYet] の並びで Failed が勝つ (Timeout 安全弁の
+/// 即発火)。短絡解除すると NotYet が常勝ちになり安全弁が遅れる (Issue #230)。
 fn evaluate_composition(
     goal: &Goal,
     ctx: &GoalStatusContext,
@@ -355,9 +355,37 @@ fn evaluate_composition(
     conditions: &[StopCondition],
     mode: Composition,
 ) -> GoalStatus {
+    let label = match mode {
+        Composition::All => "All",
+        Composition::Any => "Any",
+    };
+    if matches!(mode, Composition::All) {
+        let mut failed: Option<GoalReport> = None;
+        for c in conditions {
+            match evaluate_child(c, goal, ctx, elapsed_secs) {
+                GoalStatus::NotYet => return GoalStatus::NotYet,
+                GoalStatus::Failed(report) => {
+                    failed = Some(report);
+                    break;
+                }
+                GoalStatus::Reached(_) => { /* 続行: 全て Reached が必要 */ }
+            }
+        }
+        return match failed {
+            Some(report) => GoalStatus::Failed(make_report(
+                goal,
+                ctx,
+                format!("{label}: child failed ({})", report.reason),
+            )),
+            None => GoalStatus::Reached(make_report(
+                goal,
+                ctx,
+                "All: all children reached".to_string(),
+            )),
+        };
+    }
     let mut first_failure: Option<GoalReport> = None;
     let mut any_reached = false;
-    let mut any_not_yet = false;
     for c in conditions {
         match evaluate_child(c, goal, ctx, elapsed_secs) {
             GoalStatus::Failed(report) => {
@@ -366,15 +394,8 @@ fn evaluate_composition(
                 }
             }
             GoalStatus::Reached(_) => any_reached = true,
-            GoalStatus::NotYet => any_not_yet = true,
+            GoalStatus::NotYet => {}
         }
-    }
-    let label = match mode {
-        Composition::All => "All",
-        Composition::Any => "Any",
-    };
-    if matches!(mode, Composition::All) && any_not_yet {
-        return GoalStatus::NotYet;
     }
     if let Some(report) = first_failure {
         return GoalStatus::Failed(make_report(
@@ -383,16 +404,10 @@ fn evaluate_composition(
             format!("{label}: child failed ({})", report.reason),
         ));
     }
-    match mode {
-        Composition::All => GoalStatus::Reached(make_report(
-            goal,
-            ctx,
-            "All: all children reached".to_string(),
-        )),
-        Composition::Any if any_reached => {
-            GoalStatus::Reached(make_report(goal, ctx, "Any: a child reached".to_string()))
-        }
-        Composition::Any => GoalStatus::NotYet,
+    if any_reached {
+        GoalStatus::Reached(make_report(goal, ctx, "Any: a child reached".to_string()))
+    } else {
+        GoalStatus::NotYet
     }
 }
 
@@ -1087,6 +1102,30 @@ mod tests {
                 conditions: vec![
                     StopCondition::Timeout { secs: 60 },
                     StopCondition::LoopCount { target: 1 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        match evaluate(&goal, &ctx, 70) {
+            GoalStatus::Failed(report) => assert!(report.reason.contains("child failed")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_all_failed_before_not_yet_returns_failed() {
+        // Issue #230 回帰: [Failed, NotYet] の評価順では Failed が勝つ (Timeout 安全弁)。
+        // Timeout(60) @elapsed=70 → Failed が先、LoopCount(100)=NotYet が後。
+        // 短絡解除版 (旧バグ) は any_not_yet 常優先で NotYet を返した。
+        let goal = Goal {
+            name: "and".to_string(),
+            stop: StopCondition::All {
+                conditions: vec![
+                    StopCondition::Timeout { secs: 60 },
+                    StopCondition::LoopCount { target: 100 },
                 ],
             },
         };
