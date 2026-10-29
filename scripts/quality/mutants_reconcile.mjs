@@ -49,14 +49,18 @@ export function normalizeMutantName(name) {
 
 /**
  * Classifies current survivors against baseline survivors.
- * Matching is per (file, op) class, consuming one baseline slot per matched
- * current survivor: exact-name matches consume their own slot first (the
- * identically-named baseline entry), then remaining current survivors match
- * leftover baseline entries in the same class injectively (each baseline
- * survivor matches at most once).
+ * Two-pass matching per (file, op) class, consuming one baseline slot per
+ * matched current survivor:
+ *   Pass 1: exact-name matches consume their identically-named baseline slot
+ *           first — ALL exact matches are processed before any equivalent
+ *           matching, so a genuinely-new mutant that happens to precede its
+ *           exact twin in the current list cannot steal the twin's slot
+ *           (Issue #232; single-pass greedy was order-dependent).
+ *   Pass 2: remaining current survivors match leftover baseline entries in
+ *           their class injectively (each baseline survivor at most once).
  *
  * Slot consumption by exact matches is load-bearing (Issue #223): without it,
- * an exact twin leaves its baseline entry "free" for the next current
+ * an exact twin leaves its baseline entry "free" for another current
  * survivor in the class, letting a genuinely-new mutant borrow it and be
  * misclassified as equivalent (new-gap undercount — fail-open direction).
  */
@@ -70,12 +74,10 @@ export function reconcile(baselineSurvivors, currentSurvivors) {
   const exact = [];
   const equivalent = [];
   const newGap = [];
+  const unmatched = [];
+  // Pass 1: all exact-name matches (order-independent).
   for (const s of currentSurvivors) {
     const c = classes.get(classKey(s.name));
-    // Exact-name match: the class contains this exact name. Prefer the
-    // current slot when it lines up (common case: same-name survivors appear
-    // in the same relative order), otherwise swap it to the current position
-    // so it is consumed here rather than stolen by a later survivor.
     if (c) {
       const at = c.base.indexOf(s.name, c.baseIdx);
       if (at !== -1) {
@@ -85,6 +87,11 @@ export function reconcile(baselineSurvivors, currentSurvivors) {
         continue;
       }
     }
+    unmatched.push(s);
+  }
+  // Pass 2: injective equivalent matching for the remainder.
+  for (const s of unmatched) {
+    const c = classes.get(classKey(s.name));
     if (c && c.baseIdx < c.base.length) {
       equivalent.push({ ...s, matchedBaseline: c.base[c.baseIdx] });
       c.baseIdx += 1;
@@ -100,7 +107,7 @@ const classKey = (name) => {
   return `${file}::${op}`;
 };
 
-/** Self-test: sanity + broken variant + slot-consumption regression (Issue #223). */
+/** Self-test: sanity + broken variant + slot-consumption regressions (#223, #232). */
 export function selfTest(baselineSurvivors) {
   // Regression (Issue #223): an exact twin must consume its class slot so a
   // genuinely-new mutant in the same class cannot borrow it.
@@ -116,6 +123,22 @@ export function selfTest(baselineSurvivors) {
   const r223 = reconcile(base223, cur223);
   if (r223.exact.length !== 1 || r223.equivalent.length !== 1 || r223.newGap.length !== 1) {
     return { ok: false, failure: 'slot-consumption', detail: `exact=${r223.exact.length} equivalent=${r223.equivalent.length} newGap=${r223.newGap.length} (expected 1/1/1)` };
+  }
+  // Regression (Issue #232): exact matches must be classified as exact
+  // regardless of their position relative to other survivors in the current
+  // list (single-pass greedy was order-dependent — a non-exact survivor
+  // preceding its exact twin could steal the twin's slot).
+  // Note: the non-exact survivor (line 5) matching the leftover baseline
+  // entry (line 20) as "equivalent" is by design — class-level matching
+  // cannot distinguish a renamed twin from a genuinely new mutant without
+  // positional evidence.
+  const cur232 = [
+    { name: 'crates/x/src/lib.rs:5:9: replace + with * in g' }, // before twin
+    { name: 'crates/x/src/lib.rs:10:5: replace + with * in f' }, // exact twin
+  ];
+  const r232 = reconcile(base223, cur232);
+  if (r232.exact.length !== 1 || !r232.exact.some((e) => e.name.includes(':10:'))) {
+    return { ok: false, failure: 'order-independence', detail: `exact=${r232.exact.length} (${r232.exact.map((e) => e.name).join(', ')}) — the exact twin at :10 must be classified exact` };
   }
   const sanity = reconcile(baselineSurvivors, baselineSurvivors);
   if (sanity.newGap.length !== 0 || sanity.equivalent.length !== 0) {

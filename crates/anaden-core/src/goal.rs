@@ -360,29 +360,7 @@ fn evaluate_composition(
         Composition::Any => "Any",
     };
     if matches!(mode, Composition::All) {
-        let mut failed: Option<GoalReport> = None;
-        for c in conditions {
-            match evaluate_child(c, goal, ctx, elapsed_secs) {
-                GoalStatus::NotYet => return GoalStatus::NotYet,
-                GoalStatus::Failed(report) => {
-                    failed = Some(report);
-                    break;
-                }
-                GoalStatus::Reached(_) => { /* 続行: 全て Reached が必要 */ }
-            }
-        }
-        return match failed {
-            Some(report) => GoalStatus::Failed(make_report(
-                goal,
-                ctx,
-                format!("{label}: child failed ({})", report.reason),
-            )),
-            None => GoalStatus::Reached(make_report(
-                goal,
-                ctx,
-                "All: all children reached".to_string(),
-            )),
-        };
+        return evaluate_all_in_order(goal, ctx, elapsed_secs, conditions, label);
     }
     let mut first_failure: Option<GoalReport> = None;
     let mut any_reached = false;
@@ -408,6 +386,40 @@ fn evaluate_composition(
         GoalStatus::Reached(make_report(goal, ctx, "Any: a child reached".to_string()))
     } else {
         GoalStatus::NotYet
+    }
+}
+
+/// All (AND) 合成の評価順短絡実装 (Issue #230 で復元)。
+/// 最初に現れた NotYet または Failed が勝つ — Timeout 安全弁の即発火を保証。
+fn evaluate_all_in_order(
+    goal: &Goal,
+    ctx: &GoalStatusContext,
+    elapsed_secs: u64,
+    conditions: &[StopCondition],
+    label: &str,
+) -> GoalStatus {
+    let mut failed: Option<GoalReport> = None;
+    for c in conditions {
+        match evaluate_child(c, goal, ctx, elapsed_secs) {
+            GoalStatus::NotYet => return GoalStatus::NotYet,
+            GoalStatus::Failed(report) => {
+                failed = Some(report);
+                break;
+            }
+            GoalStatus::Reached(_) => { /* 続行: 全て Reached が必要 */ }
+        }
+    }
+    match failed {
+        Some(report) => GoalStatus::Failed(make_report(
+            goal,
+            ctx,
+            format!("{label}: child failed ({})", report.reason),
+        )),
+        None => GoalStatus::Reached(make_report(
+            goal,
+            ctx,
+            "All: all children reached".to_string(),
+        )),
     }
 }
 

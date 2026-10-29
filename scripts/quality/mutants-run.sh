@@ -20,6 +20,14 @@ export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 RETRY_MAX="${RETRY_MAX:-20}"
 BASELINE="${1:-target/quality/mutants-baseline.json}"
 
+# Issue #233: クラッシュ復旧の cleanup_tree が git checkout -- crates で
+# 正当な未コミット変更を破壊しないよう、開始時に crates/ が clean であることを要求。
+if [ -n "$(git status --porcelain crates 2>/dev/null)" ]; then
+  echo "ERROR: crates/ has uncommitted changes — commit or stash before running." >&2
+  git status --porcelain crates | head -5 >&2
+  exit 1
+fi
+
 cleanup_tree() {
   # --in-place 変異ソース残留の復元 + テスト残骸 (engine テストが書く PNG) の削除。
   git checkout -- crates 2>/dev/null || true
