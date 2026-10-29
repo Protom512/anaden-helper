@@ -503,19 +503,23 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') =>
     }
   }
   const preImpl = mode === 'pre-implementation';
-  const hasMismatch = preImpl ? undeclared.length > 0 : (undeclared.length > 0 || missing.length > 0);
+  // Issue #226 (TOCTOU race): pre-implementation チケットは「これから実装する」
+  // files を宣言するため、宣言外の changed files は並行エディタのコミット (外国変更)
+  // の可能性が高い。これを FAIL にすると ticket 作成→dispatch 間の race で
+  // 必ず再起票ループに陥る (#217→#219→#220 の連鎖)。pre-implementation では
+  // undeclared を foreignChanges として報告のみ行い、dispatch 側の判断に委ねる。
+  const foreignChanges = preImpl ? undeclared : [];
+  const hasMismatch = preImpl ? false : (undeclared.length > 0 || missing.length > 0);
   const fail =
     changed.malformed ||
     (declared.malformed && changed.ordered.length > 0) ||
     (declared.ordered.length === 0 && changed.ordered.length > 0) ||
-    // Issue #131: pre-implementation で changed も空なら検証のみチケットとして PASS。
-    (preImpl && declared.ordered.length === 0 && changed.ordered.length > 0) ||
     hasMismatch;
   const parts = [];
-  if (undeclared.length > 0) {
+  if (!preImpl && undeclared.length > 0) {
     parts.push(`undeclared changed files: ${undeclared.join(', ')}`);
   }
-  if (missing.length > 0) {
+  if (missing.length > 0 && !preImpl) {
     parts.push(`declared but unchanged files: ${missing.join(', ')}`);
   }
   if (declared.ordered.length === 0 && changed.ordered.length > 0) {
@@ -527,13 +531,15 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') =>
   if (declared.malformed && changed.ordered.length > 0) {
     parts.push('malformed declaration (fail-closed)');
   }
+  const foreignNote = foreignChanges.length > 0 ? ` [foreign changes: ${foreignChanges.join(', ')} — concurrent editor, not blocking]` : '';
   return {
     verdict: fail ? 'FAIL' : 'PASS',
     declared: declared.ordered,
     changed: changed.ordered,
-    undeclared,
+    undeclared: preImpl ? [] : undeclared,
+    foreignChanges,
     missing,
-    reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : (preImpl && missing.length > 0 ? `ticket-precheck PASS (pre-implementation) — ${missing.length} declared file(s) pending implementation; no undeclared changed files` : 'ticket-precheck PASS — declared files match changed files'),
+    reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : (`ticket-precheck PASS (${mode})${foreignNote}` || (preImpl && missing.length > 0 ? `ticket-precheck PASS (pre-implementation) — ${missing.length} declared file(s) pending implementation` : 'ticket-precheck PASS — declared files match changed files')),
   };
 };
 // canonical: ticket-precheck.js evaluateIssuePremise (verbatim inline copy)。
