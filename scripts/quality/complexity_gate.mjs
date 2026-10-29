@@ -204,7 +204,9 @@ export function* lexRust(src, fromOffset = 0) {
 // Test-region detection
 // ---------------------------------------------------------------------------
 
-const CFG_TEST_ATTR = /^\s*#\[\s*cfg\s*\(\s*(?:test\s*\)|all\s*\(\s*test\s*,)/;
+// Issue #233: all(test, ...) 以外の引数順 (all(windows, test) 等) も test region と
+// 認識する。包含判定なので誤検知方向 (緩め) — 安全側。
+const CFG_TEST_ATTR = /^\s*#\[\s*cfg\s*\(\s*(?:test\s*\)|all\s*\([^)]*\btest\b)/;
 const ATTRIBUTE_LINE = /^\s*#\[.*\]\s*$/;
 const MOD_ITEM = /^\s*(?:pub(?:\([a-z ]+\))?\s+)?mod\s/;
 const FN_ITEM =

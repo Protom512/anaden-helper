@@ -209,3 +209,38 @@ test('benches/ changes are not flagged (out of test scope, not .rs tests)', () =
   });
   assert.equal(code, 0);
 });
+
+test('whole-file deletion of a tests/ file is a violation (Issue #231)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    'deleted file mode 100644',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ /dev/null',
+    '@@ -1,2 +0,0 @@',
+    '-#[test]',
+    '-fn t() {}',
+  ].join('\n');
+  const code = main([], {
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\nfn t() {}\n' },
+    newSources: {},
+  });
+  assert.equal(code, 1);
+});
+
+test('whole-file deletion of a production file is not flagged (Issue #231)', () => {
+  const diff = [
+    'diff --git a/crates/x/src/prod.rs b/crates/x/src/prod.rs',
+    'deleted file mode 100644',
+    '--- a/crates/x/src/prod.rs',
+    '+++ /dev/null',
+    '@@ -1,1 +0,0 @@',
+    '-pub fn p() {}',
+  ].join('\n');
+  const code = main([], {
+    diffText: diff,
+    oldSources: { 'crates/x/src/prod.rs': 'pub fn p() {}\n' },
+    newSources: {},
+  });
+  assert.equal(code, 0);
+});

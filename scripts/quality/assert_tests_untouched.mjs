@@ -50,9 +50,22 @@ export function parseDiff(diffText) {
     if (raw.startsWith('new file mode ')) current.isNew = true;
     if (raw.startsWith('deleted file mode ')) current.isDeleted = true;
     if (raw.startsWith('Binary files ') || raw.startsWith('GIT binary patch')) inHunks = false;
+    // `--- a/<path>` は `+++` より先に現れるため保持しておく (Issue #231:
+    // 削除ファイルは `+++ /dev/null` になり、`---` 側からでないと path が取れない)。
+    const minusMatch = /^--- (?:a\/)?(.+)$/.exec(raw);
+    if (minusMatch && minusMatch[1] !== '/dev/null') {
+      current.oldPath = normalizePath(minusMatch[1]);
+      continue;
+    }
     const plusMatch = /^\+\+\+ (?:b\/)?(.+)$/.exec(raw);
     if (plusMatch && plusMatch[1] !== '/dev/null') {
       current.path = normalizePath(plusMatch[1]);
+      continue;
+    }
+    if (plusMatch && plusMatch[1] === '/dev/null') {
+      // 削除ファイル: tests/ 配下や #[cfg(test)] モジュールの丸ごと削除を
+      // ガードするため path を old 側から復元する。
+      current.path = current.oldPath ?? null;
       continue;
     }
     const hunkMatch = HUNK_HEADER.exec(raw);
