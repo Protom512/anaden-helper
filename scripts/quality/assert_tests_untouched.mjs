@@ -41,32 +41,41 @@ export function parseDiff(diffText) {
   let newCursor = 0;
   for (const raw of String(diffText).split(/\r?\n/)) {
     if (raw.startsWith('diff --git ')) {
-      current = { path: null, isNew: false, isDeleted: false, hunks: [] };
+      current = { path: null, oldPath: null, isNew: false, isDeleted: false, isBinary: false, hunks: [] };
       files.push(current);
       inHunks = false;
       continue;
     }
     if (!current) continue;
-    if (raw.startsWith('new file mode ')) current.isNew = true;
-    if (raw.startsWith('deleted file mode ')) current.isDeleted = true;
-    if (raw.startsWith('Binary files ') || raw.startsWith('GIT binary patch')) inHunks = false;
-    // `--- a/<path>` は `+++` より先に現れるため保持しておく (Issue #231:
-    // 削除ファイルは `+++ /dev/null` になり、`---` 側からでないと path が取れない)。
-    const minusMatch = /^--- (?:a\/)?(.+)$/.exec(raw);
-    if (minusMatch && minusMatch[1] !== '/dev/null') {
-      current.oldPath = normalizePath(minusMatch[1]);
-      continue;
-    }
-    const plusMatch = /^\+\+\+ (?:b\/)?(.+)$/.exec(raw);
-    if (plusMatch && plusMatch[1] !== '/dev/null') {
-      current.path = normalizePath(plusMatch[1]);
-      continue;
-    }
-    if (plusMatch && plusMatch[1] === '/dev/null') {
-      // 削除ファイル: tests/ 配下や #[cfg(test)] モジュールの丸ごと削除を
-      // ガードするため path を old 側から復元する。
-      current.path = current.oldPath ?? null;
-      continue;
+    // Issue #239: hunk 本体内では `---`/`+++` ヘッダマッチを無効化する。
+    // 削除行の内容が `-- select ...` 等で始まると `--- a/...` と誤判定し、
+    // 行番号カウントが 1 つずれて test region 内削除を見逃す。
+    if (!inHunks) {
+      if (raw.startsWith('new file mode ')) current.isNew = true;
+      if (raw.startsWith('deleted file mode ')) current.isDeleted = true;
+      if (raw.startsWith('Binary files ') || raw.startsWith('GIT binary patch')) {
+        current.isBinary = true;
+        // Issue #245: binary 削除も path を復元 (oldPath から) して検出対象に。
+        if (raw.includes(' and /dev/null differ')) current.path = current.oldPath ?? null;
+        continue;
+      }
+      if (raw.startsWith('rename from ')) current.oldPath = normalizePath(raw.slice('rename from '.length));
+      if (raw.startsWith('rename to ')) current.path = normalizePath(raw.slice('rename to '.length));
+      // Issue #231: `--- a/<path>` は `+++` より先に現れるため保持 (削除ファイル対応)。
+      const minusMatch = /^--- (?:a\/)?(.+)$/.exec(raw);
+      if (minusMatch && minusMatch[1] !== '/dev/null') {
+        current.oldPath = normalizePath(minusMatch[1]);
+        continue;
+      }
+      const plusMatch = /^\+\+\+ (?:b\/)?(.+)$/.exec(raw);
+      if (plusMatch && plusMatch[1] !== '/dev/null') {
+        current.path = normalizePath(plusMatch[1]);
+        continue;
+      }
+      if (plusMatch && plusMatch[1] === '/dev/null') {
+        current.path = current.oldPath ?? null;
+        continue;
+      }
     }
     const hunkMatch = HUNK_HEADER.exec(raw);
     if (hunkMatch) {
@@ -174,9 +183,12 @@ export function main(argv = [], opts = {}) {
     for (const file of parseDiff(diffText)) {
       if (!file.path.endsWith('.rs')) continue;
       if (file.hunks.some((h) => h.oldLines.length > 0)) {
-        const show = spawnSync('git', ['-C', root, 'show', `${base}:${file.path}`], { encoding: 'utf8' });
+        // Issue #245: rename+modify の場合、old source は oldPath (元ファイル名)
+        // から取得する。file.path は新しい名前のため git show が失敗する。
+        const oldPath = file.oldPath && file.oldPath !== file.path ? file.oldPath : file.path;
+        const show = spawnSync('git', ['-C', root, 'show', `${base}:${oldPath}`], { encoding: 'utf8' });
         if (show.error || show.status !== 0) {
-          console.error(`tests-untouched: cannot read old version of ${file.path} at ${base}`);
+          console.error(`tests-untouched: cannot read old version of ${oldPath} at ${base}`);
           return 2;
         }
         oldSources[file.path] = show.stdout ?? '';

@@ -58,11 +58,22 @@ export function parseOutcomes(json) {
   const survivors = [];
   let caught = 0;
   let unviable = 0;
+  let missedCount = 0;
+  let timeoutCount = 0;
   for (const entry of json.outcomes) {
     const scenario = entry?.scenario;
     const mutant = scenario && typeof scenario === 'object' ? scenario.Mutant : null;
     if (!mutant) continue; // Baseline entry
-    if (SURVIVING_SUMMARIES.has(entry.summary)) {
+    if (entry.summary === 'MissedMutant') {
+      missedCount += 1;
+      survivors.push({
+        name: mutant.name,
+        package: mutant.package,
+        file: mutant.file,
+        summary: entry.summary,
+      });
+    } else if (entry.summary === 'Timeout') {
+      timeoutCount += 1;
       survivors.push({
         name: mutant.name,
         package: mutant.package,
@@ -91,7 +102,18 @@ export function parseOutcomes(json) {
       `outcomes.json inconsistent: total_mutants=${totals.totalMutants} but entries sum to ${countedTotal}`,
     );
   }
-  if (totals.missed !== null && totals.missed + totals.timeout !== survivors.length) {
+  // Issue #244: missed/timeout を個別に per-entry 数と照合 (両方非 null が前提)。
+  if (totals.missed !== null && totals.missed !== missedCount) {
+    throw new Error(
+      `outcomes.json inconsistent: missed(${totals.missed}) != parsed MissedMutant entries (${missedCount})`,
+    );
+  }
+  if (totals.timeout !== null && totals.timeout !== timeoutCount) {
+    throw new Error(
+      `outcomes.json inconsistent: timeout(${totals.timeout}) != parsed Timeout entries (${timeoutCount})`,
+    );
+  }
+  if (totals.missed !== null && totals.timeout !== null && totals.missed + totals.timeout !== survivors.length) {
     throw new Error(
       `outcomes.json inconsistent: missed(${totals.missed})+timeout(${totals.timeout}) != parsed survivors (${survivors.length})`,
     );

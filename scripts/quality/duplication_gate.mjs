@@ -76,13 +76,14 @@ export function parseSimilarityOutput(text) {
 // ---------------------------------------------------------------------------
 
 /**
- * Returns the matching allowlist entry when the pair's file matches and both
+ * Returns the matching allowlist entry when the pair's file matches (on EITHER
+ * side — Issue #241: similarity-rs may swap a/b order across runs) and both
  * function names appear in the entry's `functions` list, else null.
- * Matching is order-insensitive on the function pair.
  */
 export function isAllowlisted(pair, entries) {
   for (const entry of entries ?? []) {
-    if (normalizePath(entry.file) !== pair.a.file) continue;
+    const entryFile = normalizePath(entry.file);
+    if (entryFile !== pair.a.file && entryFile !== pair.b.file) continue;
     const allowed = new Set(entry.functions ?? []);
     if (allowed.has(pair.a.name) && allowed.has(pair.b.name)) return entry;
   }
@@ -209,6 +210,12 @@ export function main(argv = [], opts = {}) {
       return 2;
     }
     similarityOutput = run.stdout ?? '';
+    // Issue #241: similarity 出力に pair line が 1 件も無い = 出力形式 drift
+    // → 黙って green にしない (fail-open 対策)。
+    if (!similarityOutput.includes('<->')) {
+      console.error(`duplication gate: '${SIMILARITY_BIN} ${SIMILARITY_ARGS.join(' ')}' output contains no pair lines — format drift? (fail-closed)`);
+      return 2;
+    }
   }
 
   let allowlist = opts.allowlist;
