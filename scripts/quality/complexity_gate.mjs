@@ -204,9 +204,31 @@ export function* lexRust(src, fromOffset = 0) {
 // Test-region detection
 // ---------------------------------------------------------------------------
 
-// Issue #233: all(test, ...) 以外の引数順 (all(windows, test) 等) も test region と
-// 認識する。包含判定なので誤検知方向 (緩め) — 安全側。
-const CFG_TEST_ATTR = /^\s*#\[\s*cfg\s*\(\s*(?:test\s*\)|all\s*\([^)]*\btest\b)/;
+// Issue #233/#240: cfg(test), cfg(all(..., test, ...)), cfg(any(..., test, ...))
+// の引数順任意・ネスト括弧対応。文字列リテラル内の "test" は偽陽性の恐れが
+// あるため、`feature = "..."` / `target_os = "..."` 等の文字列値を除去してから
+// 語彙 `test` の存在を判定する。`cfg(test)` 単体は正確一致。
+const stripStringValues = (s) => s.replace(/"[^"]*"/g, '""');
+const cfgContainsTest = (line) => {
+  const header = /^\s*#\[\s*cfg\s*\(\s*/.exec(line);
+  if (!header) return false;
+  const rest = line.slice(header[0].length);
+  // `cfg(test)` 正確一致
+  if (/^test\s*\)/.test(rest)) return true;
+  // `cfg(all(...))` / `cfg(any(...))` — 対応する閉じ括弧まで読む
+  const combo = /^(?:all|any)\s*\(/.exec(rest);
+  if (!combo) return false;
+  let depth = 1;
+  let i = combo[0].length;
+  while (i < rest.length && depth > 0) {
+    if (rest[i] === '(') depth += 1;
+    else if (rest[i] === ')') depth -= 1;
+    i += 1;
+  }
+  const inner = rest.slice(combo[0].length, i - 1);
+  // 文字列値を除去した上で語彙 test の存在を判定
+  return /(?:^|[,\s(])test(?:[,\s)]|$)/.test(stripStringValues(inner));
+};
 const ATTRIBUTE_LINE = /^\s*#\[.*\]\s*$/;
 const MOD_ITEM = /^\s*(?:pub(?:\([a-z ]+\))?\s+)?mod\s/;
 const FN_ITEM =
@@ -229,7 +251,7 @@ export function computeTestRegions(source) {
   const regions = [];
   for (let ln = 0; ln < lines.length; ln += 1) {
     const attrLine = lines[ln];
-    if (!CFG_TEST_ATTR.test(attrLine)) continue;
+    if (!cfgContainsTest(attrLine)) continue;
     const note = /all\s*\(/.test(attrLine) ? 'cfg(all(test,...))' : 'cfg(test)';
     let item = ln + 1;
     while (item < lines.length && isSkippableBetweenAttrAndItem(lines[item])) {

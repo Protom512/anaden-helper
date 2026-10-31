@@ -53,7 +53,7 @@ public static class PeakRssInterop {
     public UIntPtr QuotaNonPagedPoolUsage;
     public UIntPtr PagefileUsage;
     public UIntPtr PeakPagefileUsage;
-    public uint PrivateUsage;
+    public UIntPtr PrivateUsage;
   }
   [DllImport("psapi.dll", SetLastError = true)]
   private static extern bool GetProcessMemoryInfo(IntPtr hProcess, out PROCESS_MEMORY_COUNTERS_EX counters, uint cb);
@@ -111,9 +111,17 @@ for ($i = 0; $i -lt $Repeat; $i++) {
   $proc.Dispose()
 }
 
+# Issue #243: 空配列はエラー、偶数個は中 2 値の平均 (真の中央値)。
 function Get-Median([long[]]$values) {
+  if ($values.Count -eq 0) {
+    throw "Get-Median: empty array (-validate -Repeat >= 1)"
+  }
   $sorted = $values | Sort-Object
-  return $sorted[[int][Math]::Floor($sorted.Count / 2)]
+  $mid = [int][Math]::Floor($sorted.Count / 2)
+  if ($sorted.Count % 2 -eq 1) {
+    return [long]$sorted[$mid]
+  }
+  return [long](($sorted[$mid - 1] + $sorted[$mid]) / 2)
 }
 
 $peakValues = @($runs | ForEach-Object { [long]$_.peakRssBytes })

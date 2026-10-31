@@ -71,7 +71,9 @@ pub enum StopCondition {
         conditions: Vec<StopCondition>,
     },
     /// いずれかの子条件が `Reached` になったら `Reached`（OR 合成）。
-    /// `Failed` と `Reached` が混在する場合は `Reached` を優先（到達可能性優先）。
+    /// **`Failed` 優先（安全弁）**: `Failed` と `Reached` が混在する場合は
+    /// `Failed` を優先（異常を正常で上書きしない — 評価順序非依存。
+    /// `docs/goal-manifest.md` の `EXIT_run_TIMEOUT = 2` に直結）。
     /// 空リストは `validate` で拒否。
     Any {
         /// 合成する子停止条件群。1以上（空は `validate` で拒否）。
@@ -328,7 +330,8 @@ fn make_report(goal: &Goal, ctx: &GoalStatusContext, reason: String) -> GoalRepo
 /// 合成条件の種別 (All = AND / Any = OR)。決定表の違いのみを保持。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Composition {
-    /// AND: 全子 `Reached` のみ `Reached`。`NotYet` が1つでもあれば `NotYet`。
+    /// AND: 全子 `Reached` のみ `Reached`。**評価順短絡**: 最初の `NotYet`
+    /// または `Failed` が勝つ (Issue #230 — Timeout 安全弁の即発火)。
     All,
     /// OR: **Failed 優先（安全弁）** — 子に `Failed` が1つでもあれば `Failed`
     /// （異常を正常で上書きしない — 評価順序に依存しない。
