@@ -5,6 +5,7 @@
 //! Issue #199 で routine (複数 pipeline の連続実行) 系を追加した。
 
 mod diagnostics;
+mod jitter;
 mod pipeline_dir;
 mod pipeline_driver;
 mod pipeline_runner;
@@ -12,12 +13,13 @@ mod routine;
 mod routine_runner;
 
 pub use diagnostics::{diag_report_dir, save_diagnose_report};
+pub use jitter::{Jitter, JitterConfig};
 pub use pipeline_dir::resolve_pipeline_dir;
 pub use pipeline_driver::{
     Capture, GoalClock, Input, LoopOutcome, LoopStopReason, PipelineDriver, ProgressReport,
     RecoveryClock, RecoveryContext, RecoveryHook, StepErrorKind, StepOutcome, SystemClock,
-    SystemRecoveryClock, TaskMatchCount, format_progress_report, is_recoverable_io_error,
-    rescale_command, stop_reason_label,
+    SystemRecoveryClock, TaskMatchCount, VerifyReport, format_progress_report,
+    is_recoverable_io_error, rescale_command, stop_reason_label,
 };
 pub use pipeline_runner::{
     InputCommand, PipelineState, TickResult, action_to_command, advance_next,

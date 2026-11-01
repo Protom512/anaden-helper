@@ -34,6 +34,7 @@ use anaden_core::ScreenRegion;
 use anaden_device::DeviceError;
 use anaden_vision::{BASE_WIDTH, CropInfo, ScreenScaler, TaskDef};
 
+use crate::jitter::Jitter;
 use crate::pipeline_runner::{InputCommand, PipelineState};
 
 /// リカバリフックへ渡す実行コンテキスト (02-recovery-budget)。
@@ -665,6 +666,15 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// 試行がこの回数に達すると [`LoopStopReason::RecoveryExhausted`] で停止する。
     /// 既定 [`u32::MAX`] (= 上限なし = 従来挙動)。[`Self::with_max_recovery_attempts`] で設定。
     max_recovery_attempts: u32,
+    /// ヒューマンライクな入力ゆらぎ (Issue #253)。[`None`] で無効 (従来挙動・後方互換)。
+    /// [`Self::with_jitter`] で設定。タップ座標ジッタ (normalize 後空間) と
+    /// interval ジッタの両方に適用される。シードは [`ProgressReport::jitter_seed`] 経由で
+    /// report.json へ記録される (再現性)。
+    jitter: Option<Jitter>,
+    /// 発火後検証 (run_once_verified) の実績計数 (Issue #260: report.json verify スキーマ)。
+    /// `run_loop_core` 開始時にリセットされ、`verify_action_effect` で加算、
+    /// `build_outcome` が [`ProgressReport::verify`] へ埋め込む。
+    verify_stats: VerifyStats,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -697,6 +707,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             recovery_grace: Duration::ZERO,
             recovery_clock: Box::new(SystemRecoveryClock::new()),
             max_recovery_attempts: u32::MAX,
+            jitter: None,
+            verify_stats: VerifyStats::default(),
         }
     }
 
@@ -759,6 +771,22 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     /// 呼ばない場合の既定は [`u32::MAX`] (上限なし = 従来挙動・後方互換)。
     pub fn with_max_recovery_attempts(mut self, max_attempts: u32) -> Self {
         self.max_recovery_attempts = max_attempts;
+        self
+    }
+
+    /// ヒューマンライクな入力ゆらぎを設定する (Issue #253)。
+    ///
+    /// 呼ばない場合の既定は [`None`] (ジッタ無効 = 従来挙動・後方互換)。
+    /// [`Some`] を渡すと:
+    /// - 発火タップ座標 (normalize 後 1280 空間) に ±`JitterConfig::tap_radius_px` px
+    ///   の一様ジッタ ([`Self::run_once`] の rescale 前に挿入)。
+    /// - ループ間隔に ±`JitterConfig::interval_ratio` のジッタ
+    ///   ([`Self::run_loop_core`] の interval sleep 前)。
+    ///
+    /// シードは [`Jitter::seed`] 経由で [`ProgressReport::jitter_seed`] に記録され、
+    /// 同一シードで実行を完全再現できる (evidence 規約)。
+    pub fn with_jitter(mut self, jitter: Option<Jitter>) -> Self {
+        self.jitter = jitter;
         self
     }
 
@@ -856,6 +884,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
         // 4. rescale + execute（command があれば発火）
         if let Some(cmd) = tick.command {
+            // Issue #253: ジッタは normalize 後空間で適用 (解像度非依存の指ぶれ)。
+            let cmd = match self.jitter.as_mut() {
+                Some(j) => j.jitter_command(cmd),
+                None => cmd,
+            };
             let device_cmd = rescale_command(cmd, self.device_width, &self.last_crop_info);
             if let Err(e) = self.execute_command(&device_cmd).await {
                 warn!("pipeline execute error: {e}");
@@ -946,6 +979,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         just_fired: Option<InputCommand>,
         next_current: Option<String>,
     ) -> StepOutcome {
+        // Issue #260: 検証実行を計数 (report.json の verify.checks)。
+        self.verify_stats.checks += 1;
         let screen = match self.capture.capture().await {
             Ok(img) => img,
             Err(e) => {
@@ -972,6 +1007,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
         };
         if still_present {
+            // Issue #260: 検証失敗 (対象残存 = 誤成功) を計数。
+            self.verify_stats.failed += 1;
             // ガード4: アクション無効(対象残存)時、ANADEN_SNAPSHOT_DIR 設定時に
             // 発火後フレームを PNG 保存(偽成功の原因特定用)。未設定時は no-op。
             self.save_snapshot(task_name, &normalized);
@@ -983,6 +1020,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 fired: just_fired,
             }
         } else {
+            // Issue #260: 検証成功 (対象消失 = 効果発揮) を計数。
+            self.verify_stats.passed += 1;
             StepOutcome::Fired {
                 next_current,
                 fired: just_fired,
@@ -1193,6 +1232,52 @@ pub struct ProgressReport {
     /// `#[serde(default)]` により旧成果物 (本フィールド無し) は 0 補完で読める。
     #[serde(default)]
     pub max_consecutive_recovery: u32,
+    /// ヒューマンライクな入力ゆらぎのシード (Issue #253)。
+    ///
+    /// ジッタ無効 run では [`None`] (`skip_serializing_if` でフィールド自体を出力しない)。
+    /// 有効 run では必ず記録され、同一シードでゆらぎ列を完全再現できる (evidence 規約)。
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub jitter_seed: Option<u64>,
+    /// 発火後検証 (run_once_verified) の実績 (Issue #260: report.json verify スキーマ)。
+    ///
+    /// E2E の「タップ効果」判定 (fired → 事後 capture → 変化検出) を run レポートが
+    /// 機械可読に持つ。旧成果物 (本フィールド無し) は default 補完で読める。
+    #[serde(default)]
+    pub verify: VerifyReport,
+}
+
+/// 発火後検証の実績サマリ (report.json の `verify` セクション・Issue #260)。
+///
+/// - `enabled`: run の検証設定 (`with_verify`)。
+/// - `checks`: 事後検証を実施した回数 (発火成功後に検証 capture を行った回数)。
+/// - `passed`: 検証成功 (発火後フレームで対象消失 = 効果発揮)。
+/// - `failed`: 検証失敗 (対象残存 = 誤成功。FiredUnverified 相当)。
+///
+/// `checks == passed + failed` が不変量 (検証実施は必ずどちらかに分類される)。
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
+pub struct VerifyReport {
+    /// 検証が有効だったか。
+    #[serde(default)]
+    pub enabled: bool,
+    /// 事後検証を実施した回数。
+    #[serde(default)]
+    pub checks: u64,
+    /// 検証成功回数 (対象消失)。
+    #[serde(default)]
+    pub passed: u64,
+    /// 検証失敗回数 (対象残存 = 誤成功)。
+    #[serde(default)]
+    pub failed: u64,
+}
+
+/// driver 内部の verify 実績計数 (build_outcome で [`VerifyReport`] へ変換)。
+///
+/// `enabled` は driver の `verify_after_fire` フラグから取るため持たない。
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+struct VerifyStats {
+    checks: u64,
+    passed: u64,
+    failed: u64,
 }
 
 /// run_loop の結果。
@@ -1681,6 +1766,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             self.max_recovery_attempts,
             recover.is_some(),
         );
+        // Issue #260: verify 実績計数は run毎にリセット (前回 run の累積を引き継がない)。
+        self.verify_stats = VerifyStats::default();
         loop {
             // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
             if self.is_cancelled() {
@@ -1782,7 +1869,12 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
             // interval 待ちを cancel 通知で即時抜けられるように select! 化。
             // トークン未設定時は cancel 分岐が発火しないので従来の sleep のみ(後方互換)。
-            self.sleep_or_cancelled(interval).await;
+            // Issue #253: ジッタ有効時は毎サイクル interval に ±ratio のゆらぎを加える。
+            let wait = match self.jitter.as_mut() {
+                Some(j) => j.jitter_interval(interval),
+                None => interval,
+            };
+            self.sleep_or_cancelled(wait).await;
         }
     }
 
@@ -1947,6 +2039,15 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             // 復帰テレメトリ (02-recovery-budget)。両ループが RecoveryGuard から伝播。
             recovery_attempts: ctx.recovery.recovery_attempts,
             max_consecutive_recovery: ctx.recovery.max_consecutive_recovery,
+            // ジッタのシード (Issue #253)。無効 run では None (フィールド自体を出力しない)。
+            jitter_seed: self.jitter.as_ref().map(Jitter::seed),
+            // 発火後検証の実績 (Issue #260: report.json verify スキーマ)。
+            verify: VerifyReport {
+                enabled: self.verify_after_fire,
+                checks: self.verify_stats.checks,
+                passed: self.verify_stats.passed,
+                failed: self.verify_stats.failed,
+            },
         };
         LoopOutcome {
             iterations,
@@ -3384,6 +3485,8 @@ mod tests {
     #[test]
     fn progress_report_serializes_recovery_telemetry() {
         let pr = ProgressReport {
+            jitter_seed: None,
+            verify: Default::default(),
             iterations: 9,
             fired_count: 1,
             per_task_matches: vec![],
@@ -3419,6 +3522,8 @@ mod tests {
     #[test]
     fn progress_report_serializes_stop_reason() {
         let pr = ProgressReport {
+            jitter_seed: None,
+            verify: Default::default(),
             iterations: 7,
             fired_count: 3,
             per_task_matches: vec![],
@@ -4024,6 +4129,8 @@ mod tests {
             terminal: "Terminal".to_string(),
             reason: LoopStopReason::TerminalTask,
             progress_report: ProgressReport {
+                jitter_seed: None,
+                verify: Default::default(),
                 iterations: 7,
                 fired_count: 2,
                 per_task_matches: vec![
@@ -4080,6 +4187,8 @@ mod tests {
             terminal: "Terminal".to_string(),
             reason: LoopStopReason::TerminalTask,
             progress_report: ProgressReport {
+                jitter_seed: None,
+                verify: Default::default(),
                 iterations: 3,
                 fired_count: 1,
                 per_task_matches: vec![TaskMatchCount {
@@ -4105,6 +4214,8 @@ mod tests {
     #[test]
     fn progress_report_is_serializable() {
         let pr = ProgressReport {
+            jitter_seed: None,
+            verify: Default::default(),
             iterations: 10,
             fired_count: 5,
             per_task_matches: vec![TaskMatchCount {
@@ -4136,6 +4247,8 @@ mod tests {
             terminal: "GoalTerminal".to_string(),
             reason: LoopStopReason::GoalReached,
             progress_report: ProgressReport {
+                jitter_seed: None,
+                verify: Default::default(),
                 iterations: 5,
                 fired_count: 1,
                 per_task_matches: vec![TaskMatchCount {
@@ -4172,6 +4285,8 @@ mod tests {
     #[test]
     fn progress_report_is_json_serializable_with_reached_goal() {
         let pr = ProgressReport {
+            jitter_seed: None,
+            verify: Default::default(),
             iterations: 8,
             fired_count: 3,
             per_task_matches: vec![TaskMatchCount {
@@ -6117,5 +6232,145 @@ mod tests {
                     .unwrap_or(false)
             })
             .and_then(|e| std::fs::read_to_string(e.path()).ok())
+    }
+
+    // ===== Issue #253: ジッタ (tap / interval) と Issue #260: verify スキーマ =====
+
+    /// 1 fire で終端する driver (next 空 = TerminalTask) を構築。
+    /// frames は呼出側で制御 (検証フレームを含めるかで passed/failed が変わる)。
+    fn build_single_fire_driver(
+        frames: Vec<DynamicImage>,
+    ) -> (
+        PipelineDriver<FakeCapture, FakeInput>,
+        Arc<Mutex<Vec<InputCommand>>>,
+    ) {
+        let fired = new_fired();
+        let driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_of(frames),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(140, 65, 48, 36),
+                },
+                Some(vec![]), // next 空 = 終端 → 1 fire で TerminalTask 停止
+            )],
+            FULL_W,
+            300,
+        );
+        (driver, fired)
+    }
+
+    /// ジッタ有効時、発火タップ座標は非ジッタ時の中心から radius 内 (デバイス空間で
+    /// ±3px ≒ normalize 空間 ±3px × 1258/1280) に収まり、かつ少なくとも一度は動く。
+    /// シードは ProgressReport.jitter_seed に記録される。
+    #[tokio::test]
+    async fn jitter_shifts_fired_tap_within_radius_and_records_seed() {
+        let raw = luma_dyn(raw_feature());
+        // ベースライン (ジッタ無効): 中心固定タップ。
+        let (mut plain, plain_fired) = build_single_fire_driver(vec![raw.clone(), raw.clone()]);
+        let plain_outcome = plain.run_loop(Duration::ZERO, 5).await;
+        let (px, py) = match plain_fired.lock().expect("lock").as_slice() {
+            [InputCommand::Tap { x, y }, ..] => (*x, *y),
+            other => panic!("expected tap, got {other:?}"),
+        };
+        assert!(
+            plain_outcome.progress_report.jitter_seed.is_none(),
+            "jitter disabled run must not record a seed"
+        );
+
+        // ジッタ有効 (固定シード): 同一フレーム列で座標が radius 内で動く。
+        let seed = 20261102u64;
+        let (mut jit, jit_fired) = build_single_fire_driver(vec![raw.clone(), raw]);
+        jit = jit.with_jitter(Some(Jitter::new(seed)));
+        let outcome = jit.run_loop(Duration::ZERO, 5).await;
+        let fired = jit_fired.lock().expect("lock").clone();
+        assert_eq!(fired.len(), 1, "single-fire driver must fire exactly once");
+        let InputCommand::Tap { x, y } = fired[0] else {
+            panic!("expected tap");
+        };
+        let dx = (x as i64 - i64::from(px)).abs();
+        let dy = (y as i64 - i64::from(py)).abs();
+        assert!(dx <= 3, "x jitter {dx} exceeds radius (plain={px}, got={x})");
+        assert!(dy <= 3, "y jitter {dy} exceeds radius (plain={py}, got={y})");
+        assert!(
+            (dx, dy) != (0, 0),
+            "jitter must displace the tap at least once for seed {seed}"
+        );
+        assert_eq!(
+            outcome.progress_report.jitter_seed,
+            Some(seed),
+            "seed must be recorded in progress_report"
+        );
+    }
+
+    /// 検証成功 (発火後フレームで対象消失): verify { checks:1, passed:1, failed:0 }。
+    #[tokio::test]
+    async fn verify_report_counts_pass_when_target_disappears() {
+        let raw = luma_dyn(raw_feature());
+        let blank = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
+        let (mut d, _) = build_single_fire_driver(vec![raw, blank]);
+        d = d.with_verify(true);
+        let outcome = d.run_loop(Duration::ZERO, 5).await;
+        let v = &outcome.progress_report.verify;
+        assert!(v.enabled, "verify must be reported as enabled");
+        assert_eq!(v.checks, 1, "exactly one post-fire check");
+        assert_eq!(v.passed, 1);
+        assert_eq!(v.failed, 0);
+        assert_eq!(
+            v.checks,
+            v.passed + v.failed,
+            "invariant checks==passed+failed"
+        );
+    }
+
+    /// 検証失敗 (発火後も対象残存 = 誤成功): verify { checks:1, passed:0, failed:1 }。
+    /// FiredUnverified はループ継続するため、以降フレーム枯渇で CaptureError 停止も許容。
+    #[tokio::test]
+    async fn verify_report_counts_fail_when_target_persists() {
+        let raw = luma_dyn(raw_feature());
+        let (mut d, _) = build_single_fire_driver(vec![raw.clone(), raw]);
+        d = d.with_verify(true);
+        let outcome = d.run_loop(Duration::ZERO, 5).await;
+        let v = &outcome.progress_report.verify;
+        assert_eq!(v.checks, 1, "exactly one post-fire check");
+        assert_eq!(v.passed, 0);
+        assert_eq!(v.failed, 1, "persistent target must count as verify failure");
+    }
+
+    /// 検証無効 run: verify.enabled == false で計数 0 (後方互換)。
+    #[tokio::test]
+    async fn verify_report_disabled_when_verify_off() {
+        let raw = luma_dyn(raw_feature());
+        let (mut d, _) = build_single_fire_driver(vec![raw.clone(), raw]);
+        let outcome = d.run_loop(Duration::ZERO, 5).await;
+        let v = &outcome.progress_report.verify;
+        assert!(!v.enabled);
+        assert_eq!((v.checks, v.passed, v.failed), (0, 0, 0));
+    }
+
+    /// 旧 report.json (jitter_seed / verify フィールド無し) は default 補完で読める
+    /// (03-report-channel の後方互換契約 — 旧成果物の再消費を壊さない)。
+    #[test]
+    fn progress_report_deserializes_legacy_json_without_new_fields() {
+        let legacy = serde_json::json!({
+            "iterations": 3,
+            "fired_count": 1,
+            "per_task_matches": [],
+            "elapsed_ms": 500,
+            "terminal_task": null,
+            "reached_goal": null
+        });
+        let pr: ProgressReport = serde_json::from_value(legacy).expect("legacy report must parse");
+        assert_eq!(pr.iterations, 3);
+        assert!(pr.jitter_seed.is_none());
+        assert_eq!(pr.verify, VerifyReport::default());
     }
 }

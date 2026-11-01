@@ -117,6 +117,14 @@ enum Commands {
         /// テンプレ消失/領域マッチ変化)で判定する。明示的に無効化する場合のみ `false` を指定。
         #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
         verify_after_fire: bool,
+        /// ヒューマンライクな入力ゆらぎ (タップ ±3px / interval ±15%) を有効化する
+        /// (Issue #253)。シードは時刻由来で毎回変わり、report.json に記録される。
+        #[arg(long)]
+        jitter: bool,
+        /// `--jitter` の乱数シードを固定する (再現実行)。指定時は jitter は自動有効。
+        /// 同一シード + 同一タスク列で同一のゆらぎ列を完全再現できる。
+        #[arg(long)]
+        jitter_seed: Option<u64>,
         /// 宣言的ゴールをインライン TOML で指定(Issue #37 T4 option B)。
         ///
         /// `--goal-file` とは排他。未指定時は `<pipeline_dir>/pipeline.toml`
@@ -484,6 +492,7 @@ async fn run_pipeline_live(
     recover_grace_secs: u64,
     max_recovery_attempts: u32,
     verify_after_fire: bool,
+    jitter_seed: Option<u64>,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
     evidence_dir: Option<&Path>,
@@ -519,6 +528,7 @@ async fn run_pipeline_live(
         recover_grace_secs,
         max_recovery_attempts,
         verify_after_fire,
+        jitter_seed,
         goal,
         cancel_token,
         evidence_dir,
@@ -549,6 +559,7 @@ async fn run_with_windows(
     recover_grace_secs: u64,
     max_recovery_attempts: u32,
     verify_after_fire: bool,
+    jitter_seed: Option<u64>,
     goal: Option<Goal>,
     cancel_token: CancellationToken,
     evidence_dir: Option<&Path>,
@@ -648,6 +659,13 @@ async fn run_with_windows(
 
     let interval_dur = Duration::from_secs(interval);
 
+    // Issue #253: ジッタ有効化。シードは report.json (progress_report.jitter_seed) に
+    // 記録され、同一シードでゆらぎ列を再現できる。
+    let jitter = jitter_seed.map(|seed| {
+        info!("jitter 有効: seed={seed} (tap ±3px / interval ±15%)");
+        anaden_engine::Jitter::new(seed)
+    });
+
     // UC-2 E2E 証跡: デコレータは driver 構築時にのみ capture を消費するため、
     // ここで evidence 有無を分岐する (if-let 2 分岐で driver 構築が重複するのを
     // 避けるため、enum 風に Option<PathBuf> を move で判定)。
@@ -662,6 +680,7 @@ async fn run_with_windows(
                 300,
             )
             .with_verify(verify_after_fire)
+            .with_jitter(jitter.clone())
             .with_cancel(cancel_token)
             .with_recovery_grace(recovery_grace)
             .with_max_recovery_attempts(max_recovery_attempts),
@@ -684,6 +703,7 @@ async fn run_with_windows(
                 300,
             )
             .with_verify(verify_after_fire)
+            .with_jitter(jitter)
             .with_cancel(cancel_token)
             .with_recovery_grace(recovery_grace)
             .with_max_recovery_attempts(max_recovery_attempts),
@@ -715,6 +735,7 @@ async fn run_with_windows(
     _recover_grace_secs: u64,
     _max_recovery_attempts: u32,
     _verify_after_fire: bool,
+    _jitter_seed: Option<u64>,
     _goal: Option<Goal>,
     _cancel_token: CancellationToken,
     _evidence_dir: Option<&Path>,
@@ -1009,6 +1030,8 @@ async fn main() -> Result<()> {
             recover_grace_secs,
             max_recovery_attempts,
             verify_after_fire,
+            jitter,
+            jitter_seed,
             goal,
             goal_file,
             evidence_run_id,
@@ -1052,6 +1075,17 @@ async fn main() -> Result<()> {
             // spawn_ctrl_c_listener を起動し、driver へ .with_cancel(token) 配線する。
             // トークン発火で driver は LoopStopReason::Interrupted(exit 2) で安全停止する。
             let cancel_token = CancellationToken::new();
+            // Issue #253: --jitter 単独は時刻由来シード、--jitter-seed 指定時は固定シード。
+            // 解決済みシードは report.json の progress_report.jitter_seed に記録される。
+            let jitter_on = jitter || jitter_seed.is_some();
+            let resolved_jitter_seed = jitter_on.then(|| {
+                jitter_seed.unwrap_or_else(|| {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|d| d.as_nanos() as u64)
+                        .unwrap_or(0)
+                })
+            });
             run_pipeline_live(
                 &pipeline_dir,
                 &start_task,
@@ -1066,6 +1100,7 @@ async fn main() -> Result<()> {
                 recover_grace_secs,
                 max_recovery_attempts,
                 verify_after_fire,
+                resolved_jitter_seed,
                 parsed_goal,
                 cancel_token,
                 evidence_ctx.as_ref().map(|(_, d)| d.as_path()),

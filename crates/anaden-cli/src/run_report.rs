@@ -173,6 +173,8 @@ mod tests {
             terminal: "max_iterations".to_string(),
             reason: LoopStopReason::MaxIterations,
             progress_report: ProgressReport {
+                jitter_seed: None,
+                verify: Default::default(),
                 iterations: 7,
                 fired_count: 3,
                 per_task_matches: vec![],

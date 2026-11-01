@@ -425,6 +425,8 @@ mod tests {
             terminal: "term".to_string(),
             reason,
             progress_report: crate::ProgressReport {
+                jitter_seed: None,
+                verify: Default::default(),
                 iterations,
                 fired_count: fired as u64,
                 per_task_matches: vec![],
