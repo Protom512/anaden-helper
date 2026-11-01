@@ -637,10 +637,13 @@ fn is_pipeline_manifest_path(path: &Path) -> bool {
 /// # confidence = 0.85
 /// # または
 /// # Timeout = { secs = 3600 }        # UC-3: 指定秒数経過で停止
+///
+/// watch = ["levelup_popup", "close_btn"]  # 省略可: 常時監視 (interrupt) タスク名 (Issue #252)
 /// ```
 ///
-/// `start_task` は必須。`goals` は `[[goal]]` 配列（0個以上）。未知フィールドは
-/// `deny_unknown_fields` で拒否される（typo 回帰防止）。
+/// `start_task` は必須。`goals` は `[[goal]]` 配列（0個以上）。`watch` はタスク名の
+/// 文字列配列（0個以上・driver が毎 tick current タスクより先に評価する）。
+/// 未知フィールドは `deny_unknown_fields` で拒否される（typo 回帰防止）。
 ///
 /// # Goal バリアントの意味
 ///
@@ -661,6 +664,18 @@ pub struct PipelineManifest {
     /// `goal` 行自体を出力しない（無宣言 = 無限ループの手書き後方互換形式）。
     #[serde(default, rename = "goal", skip_serializing_if = "Vec::is_empty")]
     pub goals: Vec<anaden_core::Goal>,
+    /// 常時監視 (interrupt) タスク名のリスト (Issue #252)。TOML では
+    /// `watch = ["task-a", "task-b"]` 文字列配列で宣言する。
+    ///
+    /// driver ([`anaden_engine::PipelineDriver`]) は毎 tick、current タスクの
+    /// 評価より**先に**これらをチェックし、マッチしたらその action を発火して
+    /// tick を終了する (current は進まない = 本流を壊さずポップアップを閉じる)。
+    /// レベルアップ・実績・クロノス石・アップデート告知等の不定期ポップアップ
+    /// ハンドリングを各 pipeline の FSM から分離するための宣言 (MAA の
+    /// interrupt 相当)。空の場合は従来挙動 (watch なし・後方互換)。
+    /// 保存時、空なら `watch` 行自体を出力しない。
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub watch: Vec<String>,
 }
 
 /// パイプラインディレクトリ内の慣例パス `pipeline.toml` を manifest として読み込む。
@@ -4968,6 +4983,7 @@ mod tests {
     fn save_pipeline_manifest_roundtrips_through_load() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let manifest = PipelineManifest {
+            watch: Vec::new(),
             start_task: "Farm".into(),
             goals: vec![
                 anaden_core::Goal {
@@ -4994,6 +5010,7 @@ mod tests {
     fn save_pipeline_manifest_empty_goals_omits_goal_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let manifest = PipelineManifest {
+            watch: Vec::new(),
             start_task: "TapBottom".into(),
             goals: Vec::new(),
         };
@@ -5013,6 +5030,7 @@ mod tests {
     fn save_pipeline_manifest_writes_goal_array_table_rename() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let manifest = PipelineManifest {
+            watch: Vec::new(),
             start_task: "TapBottom".into(),
             goals: vec![anaden_core::Goal {
                 name: "farm50".into(),
@@ -5032,12 +5050,89 @@ mod tests {
         );
     }
 
+    /// `watch` (常時監視 interrupt タスク名・Issue #252) が文字列配列として
+    /// パースされること。
+    #[test]
+    fn manifest_parses_watch_task_names() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "TapBottom"
+            watch = ["levelup_popup", "close_btn"]
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        assert_eq!(
+            manifest.watch,
+            vec!["levelup_popup".to_string(), "close_btn".to_string()],
+            "watch must parse as a string array"
+        );
+    }
+
+    /// `watch` 未宣言の manifest は空 Vec (従来挙動・後方互換)。
+    #[test]
+    fn manifest_without_watch_defaults_to_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "TapBottom"
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        assert!(manifest.watch.is_empty());
+    }
+
+    /// watch 空 manifest は `watch` 行自体を書き出さない (手書き後方互換形式)。
+    #[test]
+    fn save_pipeline_manifest_empty_watch_omits_watch_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = PipelineManifest {
+            watch: Vec::new(),
+            start_task: "TapBottom".into(),
+            goals: Vec::new(),
+        };
+        save_pipeline_manifest(&manifest, tmp.path()).expect("save");
+        let content =
+            fs::read_to_string(tmp.path().join(PIPELINE_MANIFEST_FILENAME)).expect("read");
+        assert!(
+            !content.contains("watch"),
+            "watch key must be omitted:\n{content}"
+        );
+    }
+
+    /// watch 付き manifest の保存 → 再読込 往復 (文字列配列形式で書き出される)。
+    #[test]
+    fn save_pipeline_manifest_watch_roundtrips() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = PipelineManifest {
+            watch: vec!["levelup_popup".into(), "close_btn".into()],
+            start_task: "TapBottom".into(),
+            goals: Vec::new(),
+        };
+        save_pipeline_manifest(&manifest, tmp.path()).expect("save");
+        let content =
+            fs::read_to_string(tmp.path().join(PIPELINE_MANIFEST_FILENAME)).expect("read");
+        assert!(
+            content.contains("watch = ["),
+            "watch must serialize as string array:\n{content}"
+        );
+        let back = load_pipeline_manifest(tmp.path()).expect("reload");
+        assert_eq!(back, manifest);
+    }
+
     /// 存在しないディレクトリへの manifest 保存は SaveFailed (fail-closed)。
     #[test]
     fn save_pipeline_manifest_missing_dir_errors() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let err = save_pipeline_manifest(
             &PipelineManifest {
+                watch: Vec::new(),
                 start_task: "X".into(),
                 goals: Vec::new(),
             },
