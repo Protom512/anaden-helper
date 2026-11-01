@@ -473,6 +473,8 @@ mod tests {
         fired: u64,
     ) -> anaden_engine::ProgressReport {
         anaden_engine::ProgressReport {
+            jitter_seed: None,
+            verify: Default::default(),
             iterations: 10,
             fired_count: fired,
             per_task_matches: vec![],

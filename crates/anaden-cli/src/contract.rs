@@ -499,6 +499,8 @@ mod tests {
             terminal: "goal_timeout".to_string(),
             reason: anaden_engine::LoopStopReason::GoalTimeout,
             progress_report: anaden_engine::ProgressReport {
+                jitter_seed: None,
+                verify: Default::default(),
                 iterations: 4,
                 fired_count: 0,
                 per_task_matches: vec![],

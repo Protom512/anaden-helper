@@ -264,6 +264,8 @@ mod tests {
     #[test]
     fn status_report_overrides_stdout_parsed_values() {
         let report = anaden_engine::ProgressReport {
+            jitter_seed: None,
+            verify: Default::default(),
             iterations: 9,
             fired_count: 2,
             per_task_matches: vec![],
