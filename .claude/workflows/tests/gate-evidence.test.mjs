@@ -1,11 +1,3 @@
-// TDD tests for the S2 evidence-collector gate wiring (Issue #68 Task 3).
-// Same extraction pattern as release-precheck.test.mjs: the workflow script is
-// not an importable module, so we eval the marker-delimited pure block that
-// ships in feature-pipeline.js. Done-evaluation semantics themselves are
-// covered by done-evidence.test.mjs (Task 1); this file covers Task 3:
-// normalizeGateEvidence (agent-output transport) + source wiring invariants.
-//
-// Run: node --test .claude/workflows/tests/gate-evidence.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -25,8 +17,6 @@ assert.ok(end > begin, 'feature-pipeline.js contains gate-evidence-end marker af
 const block = src.slice(begin + BEGIN.length, end);
 const api = new Function(`${block}; return { GATE_EVIDENCE_STATUS_FAILED, GATE_EVIDENCE_SCHEMA, normalizeGateEvidence };`)();
 
-// ── normalizeGateEvidence: structured-first, JSON-string tolerant ──
-
 test('normalize: structured object passes through with defaults', () => {
   const e = api.normalizeGateEvidence({
     buildExitCode: 0, nextestExitCode: 0, passed: 890, failed: 0,
@@ -38,8 +28,6 @@ test('normalize: structured object passes through with defaults', () => {
   assert.equal(e.toolMissing, false);
   assert.equal(e.runTimestamp, '2026-08-24T00:00:00+09:00');
 });
-
-// ── Issue #97 UC-3: runTimestamp in schema + normalize ──
 
 test('schema: runTimestamp is a required string field (UC-3)', () => {
   assert.equal(api.GATE_EVIDENCE_SCHEMA.properties.runTimestamp.type, 'string');
@@ -82,8 +70,6 @@ test('normalize: toolMissing preserved for disambiguation', () => {
   assert.equal(e.tool, 'cargo-nextest');
 });
 
-// ── tool-missing vs tests-failed disambiguation flows through evaluateDoneEvidence ──
-
 test('evaluate (via done-evidence block): tool-missing reason is distinct from tests-failed', () => {
   const db = src.slice(src.indexOf('// [done-evidence-begin]') + '// [done-evidence-begin]'.length, src.indexOf('// [done-evidence-end]'));
   const done = new Function(`${db}; return { evaluateDoneEvidence, formatEvidenceForReviewers };`)();
@@ -94,8 +80,6 @@ test('evaluate (via done-evidence block): tool-missing reason is distinct from t
   assert.equal(tool.done, false);
   assert.equal(tool.reason, 'tool-missing');
 });
-
-// ── wiring structure assertions (source-level invariants) ──
 
 test('wiring: evidence agent spawned with gate:evidence label, sonnet, Commit Gate phase', () => {
   assert.match(src, /label:\s*'gate:evidence'/, 'gate:evidence label');
@@ -128,9 +112,6 @@ test('wiring: evidence blob injected into reviewer prompts (both routes)', () =>
 });
 
 test('wiring: agent prompt demands fresh worktree checkout and both cargo commands', () => {
-  // anchor は S2 gate collector 固有の文面に固定 (Issue #104 が Implement に
-  // "DEPENDENCY EVIDENCE COLLECTOR" を追加し、旧 anchor 'EVIDENCE COLLECTOR'
-  // の最初の出現がそちらに変わるため — 意図は S2 collector の検証で不変)。
   const evPromptIdx = src.indexOf('EVIDENCE COLLECTOR (S2');
   assert.ok(evPromptIdx >= 0, 'evidence agent prompt present');
   const promptSlice = src.slice(evPromptIdx, evPromptIdx + 4000);

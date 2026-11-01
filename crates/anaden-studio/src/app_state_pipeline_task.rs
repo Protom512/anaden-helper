@@ -1,12 +1,3 @@
-//! pipeline task の構築・保存 (Issue #175: app_state.rs 分割)。
-//!
-//! 作成タブ (Authoring) の入力 (ROI/スコア/アクション) から pipeline task
-//! (anaden_vision::TaskDef) を構築する ([`PipelineActionKind`] /
-//! [`pipeline_task_spec`]) と、TOML + テンプレート PNG としてディレクトリへ
-//! 保存する ([`save_pipeline_task`]) を定義する。StudioApp 本体は
-//! [`crate::app_state_core`]、呼び出し元互換の re-export は
-//! [`crate::app_state`] (facade)。
-
 use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
@@ -14,20 +5,14 @@ use image::DynamicImage;
 use anaden_core::ScreenRegion;
 use anaden_vision::{Action, Algorithm};
 
-/// pipeline task の認識成功時アクション種別 (UI コンボ選択用)。
-/// anaden_vision::Action の作成タブで扱う部分集合。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineActionKind {
-    /// マッチ位置をクリック (`click_self`)。
     ClickSelf,
-    /// 何もしない (`do_nothing`)。
     DoNothing,
-    /// 停止 (`stop`)。
     Stop,
 }
 
 impl PipelineActionKind {
-    /// UI コンボ表示ラベル (グリフ確認済み・豆腐なし)。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -37,7 +22,6 @@ impl PipelineActionKind {
         }
     }
 
-    /// ラベル → 種別。UI の選択状態復元用。未知ラベルは None (fail-closed)。
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
@@ -48,7 +32,6 @@ impl PipelineActionKind {
         }
     }
 
-    /// anaden_vision::Action へ変換。
     fn to_action(self) -> Action {
         match self {
             Self::ClickSelf => Action::ClickSelf,
@@ -58,10 +41,6 @@ impl PipelineActionKind {
     }
 }
 
-/// 作成タブの入力 (ROI/スコア) から pipeline task (anaden_vision::TaskDef) を構築する。
-///
-/// `method` は engine_kind.method_str ("sse"/"ccoeff") を想定。未知文字列は
-/// None (fail-closed。黙って既定方式へフォールバックしない)。
 #[must_use]
 pub fn pipeline_task_spec(
     name: &str,
@@ -89,10 +68,6 @@ pub fn pipeline_task_spec(
     })
 }
 
-/// pipeline task を TOML + テンプレート PNG としてディレクトリへ保存する。
-///
-/// 出力: `<dir>/<name>.toml` + `<dir>/<name>.png`。既存 `load_pipeline`
-/// (anaden-vision) でそのまま読み込める形式 (`templates/pipelines/<pipeline>/` 互換)。
 pub fn save_pipeline_task(
     dir: &Path,
     spec: &anaden_vision::TaskDef,
@@ -115,10 +90,6 @@ mod tests {
     use super::*;
     use image::Luma;
 
-    // ---- Issue #139 T5: UC-3 作成タブ → pipeline task TOML 保存 ----
-
-    /// pipeline_task_spec は有効な方式文字列から TaskDef を構築する。
-    /// engine_kind.method_str ("sse"/"ccoeff") がそのまま使える。
     #[test]
     fn pipeline_task_spec_builds_from_method_str() {
         let roi = ScreenRegion::new(10, 20, 30, 40);
@@ -152,7 +123,6 @@ mod tests {
         assert_eq!(sse.action, Some(anaden_vision::Action::DoNothing));
     }
 
-    /// 未知の方式文字列は None (fail-closed。黙って sse にフォールバックしない)。
     #[test]
     fn pipeline_task_spec_rejects_unknown_method() {
         assert!(
@@ -168,9 +138,6 @@ mod tests {
         );
     }
 
-    /// save_pipeline_task が書いた TOML は既存 load_pipeline で読み込める (roundtrip)。
-    /// 作成タブで保存した task が実行パイプライン (anaden-cli) からそのまま
-    /// 使えることの結合保証。
     #[test]
     fn save_pipeline_task_roundtrips_through_load_pipeline() {
         let dir = tempfile::tempdir().unwrap();
@@ -197,7 +164,6 @@ mod tests {
         assert_eq!(tasks[0].action, Some(anaden_vision::Action::ClickSelf));
     }
 
-    /// action 種別の label ラウンドトリップ (UI コンボ用)。
     #[test]
     fn pipeline_action_kind_labels_roundtrip() {
         for k in [

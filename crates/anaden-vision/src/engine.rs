@@ -1,42 +1,25 @@
-//! 認識エンジンの抽象化（Strategy パターン）。
-//!
-//! `VisionEngine` trait でテンプレートマッチ方式を差し替え可能にする。
-//! 現状は `SseVisionEngine`（imageproc の正規化SSE）のみ。
-//! 将来の CCOEFF 実装や opencv バックエンドもこの trait 配下に追加できる
-//! （Wiki [[Vision-Engine-Design]] / [[OpenCV-Integration]] 参照）。
-
 use image::{DynamicImage, GrayImage};
 
 use crate::matcher::{MatchResult, TemplateMatcher};
 
-/// テンプレートマッチ認識エンジンの抽象インターフェース。
-///
-/// GUI（anaden-studio）と実行エンジン（anaden-engine）の両方がこの trait を通じて
-/// 認識を行うことで、マッチ方式の差し替えが上位層に影響しない。
 pub trait VisionEngine: Send + Sync {
-    /// 最も信頼度の高いマッチを1件返す。閾値未満・テンプレートが大きすぎる場合は `None`。
     fn match_template(&self, haystack: &DynamicImage, needle: &DynamicImage)
     -> Option<MatchResult>;
 
-    /// マッチスコアの全体マップ（ヒートマップ用）。テンプレートが大きすぎる場合は `None`。
     fn score_map(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<GrayImage>;
 
-    /// 閾値を超える全マッチを信頼度降順で返す。
     fn match_all(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Vec<MatchResult>;
 }
 
-/// imageproc 正規化SSE による実装（現行デフォルト）。
 pub struct SseVisionEngine {
     matcher: TemplateMatcher,
 }
 
 impl SseVisionEngine {
-    /// 指定マッチャーでラップする。
     pub fn new(matcher: TemplateMatcher) -> Self {
         Self { matcher }
     }
 
-    /// デフォルト設定（閾値85%、1/2ダウンスケール）で作成する。
     pub fn with_defaults() -> Self {
         Self::new(TemplateMatcher::with_defaults())
     }
@@ -106,7 +89,6 @@ mod tests {
             .score_map(&haystack, &needle)
             .expect("score map should exist");
 
-        // ダウンスケール1（threshold_only）なので (100-20+1)^2
         assert_eq!(map.dimensions(), (81, 81));
     }
 

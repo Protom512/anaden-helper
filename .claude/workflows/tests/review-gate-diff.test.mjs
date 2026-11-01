@@ -1,11 +1,3 @@
-// TDD tests for Issue #78 (Task 3): review-gate Analyze phase must fetch the
-// working-tree diff (R8 pattern from feature-pipeline.js) and inject it into
-// reviewer prompts; MANDATORY checks must include `git --no-pager diff HEAD`
-// with findings file/line cross-checked against the diff; functional reviewer
-// findings schema must require the `file` field.
-// Source-scan pattern — the workflow script is not importable.
-//
-// Run: node --test .claude/workflows/tests/review-gate-diff.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -16,7 +8,6 @@ const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'review-gate.
 const src = readFileSync(wfPath, 'utf8');
 const helperSrc = readFileSync(join(dirname(wfPath), 'review-gate-diff.js'), 'utf8');
 
-// Extract the full agent(...) call body containing a given label.
 function reviewerBody(label) {
   const idx = src.indexOf(label);
   if (idx < 0) return null;

@@ -1,8 +1,3 @@
-// Regression test for Issue #63 Task 3: TeamDelete cleanup bug.
-// feature-pipeline.js's runReleaseReviewViaTeam finally-block called TeamDelete()
-// with no arguments, so teams were never deleted (TeamDelete requires team_name).
-// This is a source-level test because the workflow script is not importable.
-// Run: node --test .claude/workflows/tests/team-cleanup.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';

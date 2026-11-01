@@ -1,0 +1,8 @@
+name      = "HardRowDetectPc"
+state     = "ad_select_pc"
+algorithm = "ccoeff"
+template  = "hard_row.png"
+roi       = [896, 318, 225, 53]
+threshold = 0.85
+action    = { type = "do_nothing" }
+next      = []

@@ -1,20 +1,3 @@
-// TDD tests for Issue #97 UC-2: 過去実行の照合 (runTimestamp lookup helper).
-//
-// Layers:
-//  (a) drift guard — feature-pipeline.js must contain the inline
-//      [run-metadata-lookup-begin]/[end] marker block (same pattern as
-//      gate-diff-kind-wiring.test.mjs)
-//  (b) behavior — inline helper extracted and eval'd:
-//      - buildRunTimestampIndex: run-metadata.json の runTimestamp を索引化
-//      - メタデータ欠損ディレクトリ (run-metadata.json 無し / JSON 破損 /
-//        runTimestamp フィールド無し) は 'unknown' に fail-closed 分類
-//      - matchRunByTimestamp: ISO 8601 runTimestamp から runId を照合
-//  (c) real-world — 既存の .omc/logs/ 実ディレクトリ (issue95-p008-verification
-//      等メタデータ無し) が unknown に分類されることを検証
-//  (d) docs — .claude/rules/pipeline-evidence-verification.md が runTimestamp
-//      を evidence 形式要件として言及していること
-//
-// Run: node --test .claude/workflows/tests/run-metadata.test.mjs
 import { existsSync, readdirSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -37,14 +20,10 @@ function loadInlineHelper() {
   )();
 }
 
-// ── (a) drift guard: marker block ──
-
 test('drift guard: feature-pipeline contains inline run-metadata-lookup marker block', () => {
   assert.ok(fpSrc.includes('run-metadata-lookup-begin'));
   assert.ok(fpSrc.includes('run-metadata-lookup-end'));
 });
-
-// ── (b) behavior ──
 
 test('buildRunTimestampIndex indexes runTimestamp from run-metadata entries', () => {
   const { buildRunTimestampIndex } = loadInlineHelper();
@@ -107,8 +86,6 @@ test('matchRunByTimestamp returns null for unknown or unmatched timestamp', () =
   assert.equal(matchRunByTimestamp(index, null), null);
 });
 
-// ── (c) real-world: existing .omc/logs dirs without metadata → unknown ──
-
 test('real-world: existing .omc/logs run dirs without run-metadata.json classify as unknown', () => {
   const { RUN_TIMESTAMP_UNKNOWN, buildRunTimestampIndex } = loadInlineHelper();
   const logsDir = join(repoRoot, '.omc', 'logs');
@@ -124,22 +101,18 @@ test('real-world: existing .omc/logs run dirs without run-metadata.json classify
       try {
         metadata = JSON.parse(readFileSync(metaPath, 'utf8'));
       } catch {
-        metadata = null; // corrupt JSON → fail-closed unknown
+        metadata = null;
       }
     }
     return { runId, metadata };
   });
   const index = buildRunTimestampIndex(entries);
-  // 既存ログの少なくとも1つはメタデータ無し → unknown になること (2026-08-28 時点で
-  // issue95-p008-verification 等は全てメタデータ無し)。
   const unknownRuns = [...index.values()].filter((e) => e.runTimestamp === RUN_TIMESTAMP_UNKNOWN);
   assert.ok(
     unknownRuns.length > 0,
     'existing metadata-less log dirs (e.g. issue95-p008-verification) must classify as unknown'
   );
 });
-
-// ── (e) UC-1 wiring: runId/runTimestamp generated before Coordinate + haiku persister ──
 
 test('UC-1 wiring: runTimestamp/runId generated before phase(Coordinate)', () => {
   const coordIdx = fpSrc.indexOf("phase('Coordinate')");
@@ -160,14 +133,11 @@ test('UC-1 wiring: persister writes .omc/logs/{runId}/run-metadata.json', () => 
     fpSrc.includes('.omc/logs/${runId}/run-metadata.json'),
     'persister target path uses .omc/logs/{runId}/run-metadata.json'
   );
-  // P-005 (2026-08-21 + 2026-08-30 再発): haiku は GLM backend で Unknown Model 400 → sonnet。
   assert.ok(
     fpSrc.includes("label: 'run:persist-run-metadata', phase: 'Request', model: 'sonnet'"),
     'persister uses sonnet in Request phase (P-005: haiku is Unknown-Model-400 on GLM backend)'
   );
 });
-
-// ── (f) UC-1 behavior: buildRunMetadata / isIso8601WithTimezone ──
 
 function loadRunMetadataHelpers() {
   const beginMarker = fpSrc.indexOf('[run-metadata-begin]');
@@ -181,7 +151,6 @@ function loadRunMetadataHelpers() {
   )();
 }
 
-// 正常系: ISO 8601 (タイムゾーン付き) 検証
 test('isIso8601WithTimezone accepts Z / +HH:MM / -HH:MM forms', () => {
   const { isIso8601WithTimezone } = loadRunMetadataHelpers();
   assert.equal(isIso8601WithTimezone('2026-08-28T10:00:00Z'), true);
@@ -222,7 +191,6 @@ test('buildRunMetadata normal case: full valid input yields no errors', () => {
   });
 });
 
-// エッジケース: 欠損フィールド / 不正値 → fail-closed (errors 列挙 + value=null)
 test('buildRunMetadata edge: missing fields are reported individually', () => {
   const { buildRunMetadata } = loadRunMetadataHelpers();
   const result = buildRunMetadata({});
@@ -270,8 +238,6 @@ test('buildRunMetadata edge: non-string runId / title rejected', () => {
   assert.ok(buildRunMetadata({ ...base, runId: 123, title: 't' }).errors.some((e) => e.startsWith('runId:')));
   assert.ok(buildRunMetadata({ ...base, runId: 'run-1', title: null }).errors.some((e) => e.startsWith('title:')));
 });
-
-// ── (d) docs: runTimestamp recorded as evidence form requirement ──
 
 test('docs: pipeline-evidence-verification.md mentions runTimestamp as evidence requirement', () => {
   const doc = readFileSync(join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md'), 'utf8');

@@ -1,25 +1,3 @@
-// ─────────────────────────────────────────────────────────────────────────────
-// TeamCreate-based Commit Gate protocol (Issue #63 Task 2 — DESIGN)
-// ─────────────────────────────────────────────────────────────────────────────
-// Commit Gate 6レーンを TeamCreate teammate として spawn し、verdict を
-// SendMessage で集約し、CONSENSUS JUDGE を team-lead 側で実行するプロトコル。
-//
-// 【状態: 設計のみ・未接続】CTO Estimate DEFER (2026-08-20) により、以下の
-// wiring conditions が全て満たされるまで feature-pipeline.js の現行
-// `parallel()` + StructuredOutput 経路は変更しない:
-//
-// wiringConditions:
-//   1. Task 1 (独立 issue): workflow スクリプトサンドボックスから TeamCreate /
-//      SendMessage が実際に呼び出せることが実証されていること。
-//   2. 定量メリット: 現行 parallel() 実装の Commit Gate 所要時間を実測し、
-//      TeamCreate 化で 30% 以上のウォールクロック短縮が立証されること。
-//   3. verdict 伝達は構造化 (JSON envelope) を維持すること。プレーンテキスト
-//      parse への後退は 3/3 GO 判定の信頼性を損なうため不可 — 本プロトコルの
-//      第1経路は JSON envelope、テキスト parse (R6) は最終フォールバックのみ。
-//
-// verdictTransport: structured-first (JSON envelope), R6 keyword text parse as
-// last-resort fallback only.
-// ─────────────────────────────────────────────────────────────────────────────
 
 export const PROTOCOL_SPEC = {
   id: 'team-gate-protocol',
@@ -27,7 +5,7 @@ export const PROTOCOL_SPEC = {
   phase: 'design (not wired)',
   verdictTransport:
     'structured-first: SendMessage body carries a fenced JSON envelope (GATE_VERDICT_JSON); R6 lenient keyword text parse is the last-resort fallback only',
-  lanes: 6, // reliability / performance / extensibility / governance / security / integration
+  lanes: 6,
   lifecycle: [
     'TeamCreate(team_name: "commit-gate-<run-id>")',
     'spawn 6 gate reviewers as teammates (names: gate-reliability ... gate-integration)',
@@ -49,33 +27,16 @@ export const PROTOCOL_SPEC = {
 
 const VERDICT_ENUM = ['GO', 'NO-GO', 'CONDITIONAL'];
 
-// ── diff-kind lane short-circuit (Issue #95 / P-008 T3) ──
-
 const CANONICAL_GATE_LANES = [
   'reliability', 'performance', 'extensibility', 'governance', 'security', 'integration',
 ];
 
-/**
- * Resolve the active gate lane set from the diff kind classification
- * (gate-diff-kind.js). Pure function — never throws.
- *
- * - 'docs-only': short-circuit to a governance-centered 1-2 lane subset
- *   (governance always kept + one code-adjacent lane). Never zero lanes
- *   (approver condition on T3).
- * - 'code' / 'mixed' / unknown / malformed: full lanes (fail-closed default —
- *   an unclassifiable diff can never skip review lanes).
- *
- * @param {{diffKind?: unknown, dimensions?: unknown}} input
- * @returns {{lanes: string[], shortCircuited: boolean, reason: string}}
- */
 export function resolveGateLanes({ diffKind, dimensions } = {}) {
   const full = Array.isArray(dimensions) && dimensions.length > 0
     ? dimensions.map(String)
     : CANONICAL_GATE_LANES;
   const keep = (keys) => {
     const lanes = full.filter((k) => keys.includes(k));
-    // fail-closed: if the configured subset matches nothing (unknown dimension
-    // set), keep the full set rather than collapsing to zero lanes.
     return lanes.length > 0 ? lanes : full;
   };
   if (diffKind === 'docs-only') {
@@ -84,8 +45,6 @@ export function resolveGateLanes({ diffKind, dimensions } = {}) {
   return { lanes: full, shortCircuited: false, reason: `diff-kind:${diffKind === 'code' || diffKind === 'mixed' ? diffKind : 'unknown(full,fail-closed)'}` };
 }
 
-// ── structured envelope parse (preferred transport) ──
-
 function coerceVerdict(raw) {
   if (typeof raw !== 'string') return null;
   const upper = raw.toUpperCase();
@@ -93,12 +52,6 @@ function coerceVerdict(raw) {
   return VERDICT_ENUM.includes(upper) ? upper : null;
 }
 
-/**
- * Parse a teammate's SendMessage body for the structured verdict envelope.
- * Preferred path: a fenced ```json (or bare) JSON object matching V_SCHEMA
- * {verdict, dimension, findings, summary}. Returns the coerced review object,
- * or null when no valid envelope is present (caller then falls back to R6).
- */
 export function parseStructuredEnvelope(text, dimension) {
   if (typeof text !== 'string' || text.length === 0) return null;
   const fenced = text.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
@@ -123,13 +76,6 @@ export function parseStructuredEnvelope(text, dimension) {
   };
 }
 
-// ── R6 lenient text fall-back (word-boundary keyword parse) ──
-
-/**
- * Parse a verdict keyword from free text. NO-GO/NOGO are tested before GO so a
- * "NO-GO" never false-matches GO; \b prevents GOOD/GOING false positives.
- * Returns 'GO' | 'NO-GO' | 'CONDITIONAL' or null.
- */
 export function parseVerdictText(text) {
   if (typeof text !== 'string') return null;
   const m = text.match(/\b(?:VERDICT:\s*)?(NO-GO|NOGO|CONDITIONAL|GO)\b/i);
@@ -137,15 +83,6 @@ export function parseVerdictText(text) {
   return coerceVerdict(m[1]);
 }
 
-// ── deterministic aggregation (pre-verdict for the CONSENSUS JUDGE) ──
-
-/**
- * Aggregate 6 gate reviews into a deterministic pre-verdict the team-lead
- * attaches to the CONSENSUS JUDGE prompt. Semantics identical to the current
- * pipeline: ANY NO-GO (with critical finding, when findings are available)
- * → NO-GO; any missing/null lane → INCOMPLETE (never synthesize from partial
- * evidence); all GO → GO; CONDITIONAL left for the judge.
- */
 export function aggregateGateVerdicts(reviews, opts = {}) {
   const expected = opts.expectedDimensions ?? 6;
   const list = Array.isArray(reviews) ? reviews : [];
@@ -174,13 +111,6 @@ export function aggregateGateVerdicts(reviews, opts = {}) {
   return { preVerdict: 'CONDITIONAL', blocking: [], missing: [] };
 }
 
-// ── R9 retry planning (maintained on the teammate protocol) ──
-
-/**
- * Given per-dimension results (envelope-parsed or null) and the set of lanes
- * already retried (R9, opus), plan the next action per null lane:
- * first null → retry (once); still-null-after-retry → R6 text fallback lane.
- */
 export function planRetry(dimensions, results, opts = {}) {
   const retried = new Set(opts.retried || []);
   const retry = [];
@@ -194,15 +124,6 @@ export function planRetry(dimensions, results, opts = {}) {
   return { retry, fallback };
 }
 
-// ── teammate prompt builders ──
-
-/**
- * Spawn prompt for one gate-reviewer teammate. Invariants:
- * - R8 diff-inject: the dimension prompt already embeds the working-tree diff.
- * - Structured-first transport: the reply MUST carry a GATE_VERDICT_JSON envelope.
- * - R6 maintained: if the envelope cannot be produced, a final verdict keyword
- *   (GO / NO-GO / CONDITIONAL) must appear somewhere in the text reply.
- */
 export function buildReviewerTeammatePrompt({ key, dimensionPrompt, teamLead = 'team-lead' }) {
   return `${dimensionPrompt}
 
@@ -221,11 +142,6 @@ GATE_VERDICT_JSON
 （VERDICT: プレフィックス任意・大小問わず。team-lead 側で lenient parse される）。`;
 }
 
-/**
- * Prompt for the CONSENSUS JUDGE step, executed on the team-lead side after all
- * envelopes are aggregated. The deterministic aggregate pre-verdict is attached
- * so the judge can confirm or overturn it with explicit reasoning.
- */
 export function buildConsensusJudgePrompt(reviews, aggregate) {
   return `CONSENSUS JUDGE (team-lead 側で実行 — Issue #63 Task 2).
 
@@ -246,17 +162,6 @@ Provide: verdict matrix / blocking issues / judgment calls / follow-up items /
 final verdict (GO or NO-GO) / commit message + body if GO.`;
 }
 
-/**
- * Pure route decision for the team vs fall-back branching (Issue #63 Task 6).
- * Mirrors the availability gate in feature-pipeline.js runReleaseReviewViaTeam:
- * the team lane is used only when every required team primitive is callable;
- * otherwise (or when TeamCreate itself fails) the route degrades to the
- * R6-hardened parallel() fall-back path. Never throws.
- *
- * @param {Record<string, unknown>|null|null} globals - harness-provided primitives
- * @param {{teamCreateError?: unknown}} [opts] - captured TeamCreate failure, if any
- * @returns {{route: 'team'|'fallback', reason: string}}
- */
 export function decideReviewRoute(globals, opts = {}) {
   const required = ['TeamCreate', 'SendMessage', 'TaskCreate', 'TaskList', 'TaskUpdate'];
   const g = globals && typeof globals === 'object' ? globals : {};

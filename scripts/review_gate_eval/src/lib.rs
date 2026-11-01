@@ -1,18 +1,7 @@
-//! review-gate 定量評価: メトリクス集計ライブラリ (issue #76 Task 3)
-//!
-//! Task 1 の golden dataset (既知問題の正解リスト) と Task 2 の実行結果
-//! (reviewer 指摘 + コンセンサス判定) を入力とし、PR ごと / 全体の
-//! (1) recall, (2) 偽陽性率 (N 付き・Wilson 95% CI), (3) コンセンサス妥当性
-//! (混同行列) を集計する。
-//!
-//! 設計方針:
-//! - 分母が 0 のレートは点推定せず `None` を返す (estimate 承認条件)。
-//! - `matched_golden` が正解リストに存在しない ID を参照する場合は集計エラー。
 
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
-/// 正解 (golden) 問題: PR 本文/comments から客観的ルールで抽出された既知問題。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct GoldenIssue {
     pub pr: u64,
@@ -20,28 +9,17 @@ pub struct GoldenIssue {
     pub description: String,
 }
 
-/// review-gate レビュアーの指摘 1 件。
-/// `matched_golden` は評価者が正解問題と対応づけた場合のみ `Some(golden_id)`。
-///
-/// #80 拡張: `confidence` (LLM 判定の自己申告信頼度 0.0-1.0) と
-/// `command_results` (clippy/nextest の決定論的成否) を追加。
-/// いずれも旧 results.json との後方互換のため `#[serde(default)]` を付ける。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Finding {
     pub pr: u64,
     pub reviewer: String,
     pub matched_golden: Option<String>,
-    /// レビュアーの自己申告信頼度。旧データでは欠損 (`None`)。
     #[serde(default)]
     pub confidence: Option<f64>,
-    /// clippy / nextest の決定論的成否。旧データでは欠損 (`None`)。
-    /// 欠損 (`None`) と失敗 (`Some(.. CommandStatus::Fail ..)`) は区別される。
     #[serde(default)]
     pub command_results: Option<CommandResults>,
 }
 
-/// 個別コマンドの成否。欠損 (未実施/旧データ) は `None` で表現し、
-/// スキーマデフォルトの欠損が暗黙に成功扱いにならないよう `Option` で包む。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct CommandResults {
     #[serde(default)]
@@ -51,8 +29,6 @@ pub struct CommandResults {
 }
 
 impl CommandResults {
-    /// 決定論的チェックのいずれかが明示的に失敗している場合に true。
-    /// 欠損 (`None`) は失敗扱いにしない (強制 NO-GO は明示的 Fail のみ)。
     #[must_use]
     pub fn any_fail(&self) -> bool {
         self.clippy == Some(CommandStatus::Fail) || self.nextest == Some(CommandStatus::Fail)
@@ -66,49 +42,35 @@ pub enum CommandStatus {
     Fail,
 }
 
-/// レビュアー 1 名の判定 (コンセンサス割れ記録用)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct ReviewerJudgment {
     pub reviewer: String,
     pub verdict: Verdict,
-    /// 自己申告 confidence (0.0-1.0)。欠損可。
     #[serde(default)]
     pub confidence: Option<f64>,
-    /// critical finding を含むか。critical は単独 NO-GO (veto) となる。
     #[serde(default)]
     pub has_critical: bool,
 }
 
-/// コンセンサスの割れ情報: 各レビュアー判定と決着方式。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct SplitInfo {
     pub judgments: Vec<ReviewerJudgment>,
-    /// critical finding による単独 NO-GO (veto) が発動したか。
     #[serde(default)]
     pub veto_activated: bool,
-    /// 決定論的コマンド失敗による強制 NO-GO が発動したか (#80 承認条件)。
     #[serde(default)]
     pub command_fail_forced_nogo: bool,
 }
 
-/// コンセンサスの決着方式。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "SCREAMING_SNAKE_CASE")]
 pub enum DecisionMethod {
-    /// 全員 GO (割れなし)。
     UnanimousGo,
-    /// majority 決着 (過半数 GO)。
     Majority,
-    /// critical finding による単独 veto。
     CriticalVeto,
-    /// 決定論的コマンド失敗による強制 NO-GO (veto と同格)。
     CommandFail,
 }
 
 impl SplitInfo {
-    /// 判定集合から決着方式を導出する。
-    /// 優先順位: CommandFail > CriticalVeto > Majority/UnanimousGo。
-    /// command fail は LLM 判定と二重カウントせず最優先で強制 NO-GO とする。
     #[must_use]
     pub fn decision_method(&self) -> DecisionMethod {
         if self.command_fail_forced_nogo {
@@ -129,10 +91,6 @@ impl SplitInfo {
         }
     }
 
-    /// 決着方式から導かれる実効 verdict。
-    /// - CommandFail / CriticalVeto: NoGo (強制)
-    /// - UnanimousGo: Go
-    /// - Majority: 過半数 GO なら Go、それ以外は NoGo
     #[must_use]
     pub fn effective_verdict(&self) -> Verdict {
         match self.decision_method() {
@@ -155,17 +113,12 @@ impl SplitInfo {
     }
 }
 
-/// QC Manager のコンセンサス判定と実際の帰結。
-/// #80 拡張: `split_info` (各レビュアー判定・confidence・veto/majority 決着方式) を追加。
-/// 旧データとの後方互換のため `#[serde(default)]` を付ける。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsensusRecord {
     pub pr: u64,
     pub verdict: Verdict,
     pub merged: bool,
-    /// マージ後に判明した問題の issue/issue-comment 識別子。
     pub post_merge_issue_ids: Vec<String>,
-    /// コンセンサスの割れ情報。旧データでは欠損 (`None`)。
     #[serde(default)]
     pub split_info: Option<SplitInfo>,
 }
@@ -184,7 +137,6 @@ pub struct EvalInput {
     pub consensus: Vec<ConsensusRecord>,
 }
 
-/// recall: 検出された正解問題の割合 (正解は PR 単位で一意に数える)。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct Recall {
     pub total_golden: u64,
@@ -200,14 +152,12 @@ impl Recall {
         }
     }
 
-    /// 分母 0 では呼ばないこと (テスト専用の利便メソッド)。
     #[must_use]
     pub fn recall(&self) -> f64 {
         self.recall_opt().unwrap_or(f64::NAN)
     }
 }
 
-/// 偽陽性率: 正解に対応しない指摘の割合。必ず N とともに報告する。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct FpRate {
     #[serde(rename = "n")]
@@ -237,13 +187,11 @@ impl FpRate {
         }
     }
 
-    /// 分母 0 では呼ばないこと (テスト専用の利便メソッド)。
     #[must_use]
     pub fn rate(&self) -> f64 {
         self.rate_opt().unwrap_or(f64::NAN)
     }
 
-    /// Wilson score interval (95%)。N が小さい PR での点推定のみの報告を避けるため。
     pub fn wilson_95(&self) -> Result<Option<(f64, f64)>, EvalError> {
         self.validate()?;
         let n = self.total_findings;
@@ -261,25 +209,17 @@ impl FpRate {
         Ok(Some((lo, hi)))
     }
 
-    /// レポート要件: N が必ず併記される構造であることの明示的チェック。
     pub fn n_included_in_report(&self) -> bool {
-        true // struct フィールド total_findings を必ず serde で出力するため常に true
+        true
     }
 }
 
-/// コンセンサス妥当性の混同行列。
-/// actual = post_merge_issue_ids が空でない (マージ後に問題が判明した) PR。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct ConsensusValidity {
-    /// NoGo 判定 & 実際に問題あり (正当なブロック)。
     pub tp: u64,
-    /// NoGo 判定 & 問題なし (保守的すぎ / 偽ブロック)。
     pub fp: u64,
-    /// Go 判定 & 問題なし (正当な通過)。
     pub tn: u64,
-    /// Go 判定 & 問題あり (見逃し)。
     pub false_negatives: u64,
-    /// NoGo なのにマージされた PR (プロセス逸脱の列挙用)。
     pub nogo_merged_prs: Vec<ConsensusRecord>,
 }
 
@@ -293,7 +233,6 @@ impl ConsensusValidity {
         }
     }
 
-    /// 分母 0 では呼ばないこと (テスト専用の利便メソッド)。
     #[must_use]
     pub fn accuracy(&self) -> f64 {
         self.accuracy_opt().unwrap_or(f64::NAN)
@@ -341,22 +280,16 @@ pub enum EvalError {
     },
 }
 
-/// 集計本体。入力の整合性 (golden 外 ID 参照) を検証してからメトリクスを算出する。
-///
-/// # Errors
-/// - 指摘の `matched_golden` が golden dataset に存在しない ID を参照する場合
 pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
     let golden_ids: HashSet<&str> = input.golden_issues.iter().map(|g| g.id.as_str()).collect();
     for f in &input.findings {
         if let Some(id) = &f.matched_golden {
-            // golden dataset が空の場合は突合不能のため検証をスキップ (分母0は集計側で None 化)
             if !golden_ids.is_empty() && !golden_ids.contains(id.as_str()) {
                 return Err(EvalError::UnknownGoldenId(id.clone()));
             }
         }
     }
 
-    // --- recall (PR 単位で一意な golden を分母に) ---
     let mut per_pr: HashMap<u64, PrRecall> = HashMap::new();
     for g in &input.golden_issues {
         per_pr.entry(g.pr).or_insert(PrRecall {
@@ -385,11 +318,9 @@ pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
     let total_golden: u64 = recall_per_pr.iter().map(|r| r.total_golden).sum();
     let detected_golden: u64 = recall_per_pr.iter().map(|r| r.detected_golden).sum();
 
-    // --- false positive rate ---
     let total_findings = input.findings.len() as u64;
     let false_positives = total_findings - detected_ids.len() as u64;
 
-    // --- consensus confusion matrix ---
     let mut cv = ConsensusValidity {
         tp: 0,
         fp: 0,
@@ -399,9 +330,6 @@ pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
     };
     for r in &input.consensus {
         let has_problem = !r.post_merge_issue_ids.is_empty();
-        // #80: split_info が存在する場合は majority/critical-veto/command-fail による
-        // effective_verdict を優先する (旧 AND コンセンサスの偽ブロック構造の解消)。
-        // 欠損 (旧データ) は従来どおり verdict フィールドで集計。
         let effective = r
             .split_info
             .as_ref()
@@ -447,7 +375,6 @@ mod tests {
         }
     }
 
-    // --- UC-1: 全 reviewer GO → GO ---
     #[test]
     fn uc1_unanimous_go_yields_go() {
         let split = SplitInfo {
@@ -463,14 +390,13 @@ mod tests {
         assert_eq!(split.effective_verdict(), Verdict::Go);
     }
 
-    // --- UC-2: 1名が低confidence NO-GO、コマンド成否正常、critical なし → majority で GO ---
     #[test]
     fn uc2_low_confidence_single_nogo_resolved_by_majority_go() {
         let split = SplitInfo {
             judgments: vec![
                 judgment("arch", Verdict::Go, Some(0.9)),
                 judgment("func", Verdict::Go, Some(0.8)),
-                judgment("maint", Verdict::NoGo, Some(0.3)), // 低confidence NO-GO
+                judgment("maint", Verdict::NoGo, Some(0.3)),
             ],
             veto_activated: false,
             command_fail_forced_nogo: false,
@@ -479,11 +405,10 @@ mod tests {
         assert_eq!(split.effective_verdict(), Verdict::Go);
     }
 
-    // --- エッジケース: critical finding 1件 → 単独 NO-GO (veto) ---
     #[test]
     fn critical_finding_alone_triggers_veto_nogo() {
         let mut maint = judgment("maint", Verdict::Go, Some(0.9));
-        maint.has_critical = true; // GO 判定でも critical は veto
+        maint.has_critical = true;
         let split = SplitInfo {
             judgments: vec![
                 judgment("arch", Verdict::Go, Some(0.9)),
@@ -497,7 +422,6 @@ mod tests {
         assert_eq!(split.effective_verdict(), Verdict::NoGo);
     }
 
-    // --- 承認条件: command fail は veto と同格の強制 NO-GO として記録され決定論的に決まる ---
     #[test]
     fn command_fail_forces_nogo_even_with_unanimous_go() {
         let split = SplitInfo {
@@ -513,7 +437,6 @@ mod tests {
         assert_eq!(split.effective_verdict(), Verdict::NoGo);
     }
 
-    // --- 欠損 (missing) は fail と区別され、暗黙に pass/fail 扱いにしない ---
     #[test]
     fn missing_command_results_do_not_count_as_fail_or_pass() {
         let missing = CommandResults {
@@ -535,7 +458,6 @@ mod tests {
         assert!(!all_pass.any_fail());
     }
 
-    // --- serde 後方互換: 旧形式 (confidence/command_results/split_info なし) が parsable ---
     #[test]
     fn old_schema_json_still_parses_with_defaults() {
         let old_finding = r#"{"pr":1,"reviewer":"arch","matched_golden":null}"#;
@@ -550,7 +472,6 @@ mod tests {
         assert_eq!(r.verdict, Verdict::Go);
     }
 
-    // --- 新フィールドの round-trip ---
     #[test]
     fn new_schema_round_trips() {
         let record = ConsensusRecord {
@@ -572,7 +493,6 @@ mod tests {
         assert_eq!(back.verdict, Verdict::NoGo);
     }
 
-    // --- majority 割れ (1 GO / 2 NO-GO) は NO-GO ---
     #[test]
     fn majority_minority_go_is_nogo() {
         let split = SplitInfo {
@@ -587,7 +507,6 @@ mod tests {
         assert_eq!(split.effective_verdict(), Verdict::NoGo);
     }
 
-    // --- Finding の command_results が fail を明示的に保持する ---
     #[test]
     fn finding_command_results_fail_is_distinct_from_missing() {
         let f: Finding = serde_json::from_str(
@@ -601,7 +520,6 @@ mod tests {
         assert_eq!(f.confidence, Some(0.5));
     }
 
-    // --- split_info 付きレコードが aggregate() を通過する (混同行列への影響なし) ---
     #[test]
     fn aggregate_accepts_records_with_split_info() {
         let input = EvalInput {

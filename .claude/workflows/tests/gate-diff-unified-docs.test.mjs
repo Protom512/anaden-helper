@@ -1,14 +1,3 @@
-// TDD tests for Issue #102 T6: documentation applied-notes.
-//  (a) S2-GATE-FALSE-POSITIVE-FIX-PROPOSAL.md must carry an Issue #102
-//      "applied" block of the same shape as the FP-1 P-007/#91 note:
-//      an "適用済み" quote block referencing Issue #102, the deterministic
-//      fallback chain, gate-diff.json persistence, and the approval trail
-//      (estimate approval condition per the approval-conditions contract).
-//  (b) .claude/rules/pipeline-evidence-verification.md §2 must reference the
-//      gate-diff.json persistence (single source of truth snapshot) instead
-//      of saying the fix is merely documented in the S2 proposal.
-//
-// Run: node --test .claude/workflows/tests/gate-diff-unified-docs.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';

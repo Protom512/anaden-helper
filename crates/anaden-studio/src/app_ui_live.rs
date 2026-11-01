@@ -1,15 +1,3 @@
-//! StudioApp の実演オーサリングモード本体描画 (Issue #190 Shard 2/3)。
-//!
-//! ドメイン状態は [`crate::authoring_ui::AuthoringPanel`] (egui 非依存)・
-//! 座標変換は [`crate::authoring_coords`]・モードディスパッチは
-//! [`crate::app_state::StudioApp::render_body`]。本モジュールは配線のみ:
-//!
-//! - フレーム供給: 既存ライブキャプチャ (`self.live`) の最新フレームを正規化して
-//!   `screenshot` へ置くと同時にセッションへ push する (新規 capture スレッド無し)。
-//! - ライブビュー: クリック → タップ記録 + トグル有効時の入力注入・
-//!   ドラッグ → 認識領域選択 ([`crate::canvas::show`] の選択パターン踏襲)。
-//! - ステップリスト・undo・保存 (警告表示付き)。
-
 use std::sync::Arc;
 
 use eframe::egui;
@@ -22,11 +10,7 @@ use crate::authoring_ui::UnavailableAuthoringInjector;
 use crate::source::LiveCapture;
 
 impl StudioApp {
-    /// 実演オーサリングモードの本体を描画する (render_body の dispatch 先)。
     pub(crate) fn render_live_authoring(&mut self, ui: &mut egui::Ui) {
-        // ライブキャプチャの最新フレーム取り込み (作成モードと同一経路・共有 1 スレッド)。
-        // 正規化して screenshot へ置くと同時にオーサリングセッションへ供給し、
-        // 生キャプチャ寸法 (= PC版クライアント領域寸法) も注入座標変換用に記録する。
         if let Some(live) = &self.live
             && let Some(frame) = live.latest()
         {
@@ -38,7 +22,6 @@ impl StudioApp {
                 .push_frame(&normalized, Some(client_dims));
         }
 
-        // 左サイドパネル: キャプチャ制御 + セッション + ステップ一覧。
         egui::Panel::left("live_authoring_controls")
             .resizable(true)
             .default_size(320.0)
@@ -46,16 +29,11 @@ impl StudioApp {
                 self.live_authoring_side(ui);
             });
 
-        // 中央: ライブビュー (クリック/ドラッグのジェスチャ受付)。
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.live_authoring_canvas(ui);
         });
     }
 
-    /// 実演オーサリング用の入力注入器を作る。
-    ///
-    /// Windows ビルドのみ実注入 (SendInput)。非 Windows ビルドは常にエラーを返す
-    /// スタブ (fail-visible)。Issue #188 で Android 取得元は削除済み。
     fn make_authoring_injector(&self) -> Box<dyn AuthoringInputInjector> {
         #[cfg(windows)]
         {
@@ -71,7 +49,6 @@ impl StudioApp {
         }
     }
 
-    /// 左サイドパネル (キャプチャ制御・セッション操作・ステップ一覧)。
     fn live_authoring_side(&mut self, ui: &mut egui::Ui) {
         ui.heading("anaden-studio");
         ui.label("実演オーサリング");
@@ -81,8 +58,6 @@ impl StudioApp {
         self.live_session_status_and_steps(ui);
     }
 
-    /// ライブキャプチャ制御セクション (作成モードと同じ self.live / exe を共有。
-    /// コンパクト版 — 接続チェック等のフル制御は作成タブ)。
     fn live_capture_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("ライブキャプチャ");
         ui.horizontal(|ui| {
@@ -110,7 +85,6 @@ impl StudioApp {
         ui.separator();
     }
 
-    /// セッション操作セクション (名前入力 → 記録開始 → 注入トグル → undo / 保存)。
     fn live_session_controls(&mut self, ui: &mut egui::Ui) {
         ui.heading("セッション");
         let started = self.live_authoring.is_started();
@@ -153,7 +127,6 @@ impl StudioApp {
         ui.separator();
     }
 
-    /// status + セッション警告 (fail-visible) + ステップ一覧 + 未確定ガイド。
     fn live_session_status_and_steps(&mut self, ui: &mut egui::Ui) {
         ui.label(&self.live_authoring.status);
         let Some(session) = self.live_authoring.session() else {
@@ -170,7 +143,6 @@ impl StudioApp {
         }
         ui.separator();
 
-        // -- ステップ一覧 (順番・サムネイル・警告は上の累積リスト参照) --
         ui.heading(format!("ステップ ({} 件)", session.steps().len()));
         for (i, step) in session.steps().iter().enumerate() {
             egui::CollapsingHeader::new(format!("[{}] {}", i + 1, step.task.name))
@@ -180,7 +152,6 @@ impl StudioApp {
                         ui.label(format!("roi: ({x},{y}) {w}x{h}"));
                     }
                     ui.label(format!("tap: ({},{})", step.tap.0, step.tap.1));
-                    // テンプレートサムネイル (開いているステップのみ毎フレーム生成)。
                     let rgba = step.template.to_rgba8();
                     let size = [rgba.width() as usize, rgba.height() as usize];
                     let image = egui::ColorImage::from_rgba_unmultiplied(size, rgba.as_raw());
@@ -199,7 +170,6 @@ impl StudioApp {
                     );
                 });
         }
-        // 未確定ジェスチャのガイド。
         match (session.pending_tap(), session.pending_region()) {
             (Some(t), None) => {
                 ui.label(format!(
@@ -214,7 +184,6 @@ impl StudioApp {
         }
     }
 
-    /// 中央ライブビュー (クリック = タップ + 注入 / ドラッグ = 認識領域)。
     fn live_authoring_canvas(&mut self, ui: &mut egui::Ui) {
         let (Some(tex), Some(img)) = (&self.screenshot_tex, &self.screenshot) else {
             ui.heading("「ライブ開始」でキャプチャを始めてください");
@@ -224,7 +193,6 @@ impl StudioApp {
         let frame_dims = (w, h);
         let avail = ui.available_size();
         let aspect = w as f32 / h as f32;
-        // アスペクト比を保って available size に収める (canvas.rs と同一式)。
         let mut display = avail;
         if display.x / display.y > aspect {
             display.x = display.y * aspect;
@@ -253,9 +221,6 @@ impl StudioApp {
         self.live_canvas_overlays(&painter, view, frame_dims);
     }
 
-    /// canvas 上の入力処理: ドラッグ → 認識領域選択 (canvas::show の RoiEdit
-    /// 更新パターン踏襲)、ドラッグ確定 → 領域記録、クリック → タップ記録 +
-    /// トグル有効時の実機注入。
     fn live_canvas_interaction(
         &mut self,
         response: &egui::Response,
@@ -279,14 +244,12 @@ impl StudioApp {
                 drag.current = Some(pos);
             }
         }
-        // ドラッグ確定 (リリース) → セッションへ領域を記録。
         if response.drag_stopped()
             && let Some(region) = self.live_authoring.region_drag().rect()
         {
             self.live_authoring
                 .canvas_region([region.x, region.y, region.width, region.height]);
         }
-        // クリック → タップ記録 + トグル有効時の実機注入。
         if response.clicked()
             && let Some(pos) = pointer_frame(response)
         {
@@ -295,8 +258,6 @@ impl StudioApp {
         }
     }
 
-    /// canvas 上のオーバーレイ描画: ドラッグ中/直近の選択矩形 (黄 — canvas.rs
-    /// と同じ強調色)、未確定の認識領域 (シアン)、未確定のタップ位置 (赤丸)。
     fn live_canvas_overlays(
         &mut self,
         painter: &egui::Painter,
@@ -314,7 +275,6 @@ impl StudioApp {
             );
         }
         if let Some(session) = self.live_authoring.session() {
-            // 未確定の認識領域 (シアン)。
             if let Some([x, y, w, h]) = session.pending_region() {
                 stroke_frame_rect(
                     painter,
@@ -325,7 +285,6 @@ impl StudioApp {
                     egui::Color32::CYAN,
                 );
             }
-            // 未確定のタップ位置 (赤丸)。
             if let Some((tx, ty)) = session.pending_tap() {
                 let c = authoring_coords::frame_to_widget((tx, ty), view, frame_dims);
                 painter.circle_stroke(
@@ -338,7 +297,6 @@ impl StudioApp {
     }
 }
 
-/// フレームピクセル座標 2 点で囲む矩形をウィジェット上に描く (オーバーレイ共通)。
 fn stroke_frame_rect(
     painter: &egui::Painter,
     view: ViewRect,
@@ -357,7 +315,6 @@ fn stroke_frame_rect(
     );
 }
 
-/// サムネイルの表示倍率 (長辺を `max_edge` ポイントに収める)。
 fn thumbnail_scale(size: [usize; 2], max_edge: f32) -> f32 {
     let long = size[0].max(size[1]) as f32;
     if long <= 0.0 {
@@ -376,7 +333,6 @@ mod tests {
     use crate::app_state::AppMode;
     use image::{DynamicImage, GrayImage, Luma};
 
-    /// 構造あり合成フレーム (Shard 1 テスト流用)。
     fn gradient_frame(w: u32, h: u32, seed: u32) -> DynamicImage {
         let mut img = GrayImage::new(w, h);
         for y in 0..h {
@@ -388,7 +344,6 @@ mod tests {
         DynamicImage::ImageLuma8(img)
     }
 
-    /// ヘッドレス egui コンテキスト内に子 Ui を作る (app_ui_body テスト流用)。
     fn child_ui(ctx: &egui::Context) -> egui::Ui {
         egui::Ui::new(
             ctx.clone(),
@@ -400,8 +355,6 @@ mod tests {
         )
     }
 
-    /// スクリーンショット + セッション開始 + 未確定ジェスチャ (領域のみ) の状態で
-    /// ライブビュー描画 (オーバーレイ含む) がパニックせず完了すること。
     #[test]
     fn render_live_authoring_with_frame_and_pending_gestures_completes() {
         let ctx = egui::Context::default();
@@ -418,7 +371,6 @@ mod tests {
         ));
         app.set_mode(AppMode::LiveAuthoring);
 
-        // 2 パス描画 (テクスチャ生成パス + 描画パス)。
         for _ in 0..2 {
             ctx.begin_pass(egui::RawInput::default());
             app.render_modebar(&mut child_ui(&ctx));
@@ -427,7 +379,6 @@ mod tests {
         }
     }
 
-    /// thumbnail_scale: 長辺を max_edge へ縮め、小さい画像は等倍のまま。
     #[test]
     fn thumbnail_scale_fits_long_edge() {
         assert!((thumbnail_scale([320, 60], 160.0) - 0.5).abs() < 1e-6);

@@ -1,19 +1,3 @@
-// TDD tests for Issue #95 (P-008) T4b/T4c: feature-pipeline.js wiring.
-//
-// Layers (same structure as tests/gate-commit-range-diff.test.mjs):
-//  (b) drift guard — inlined diff-kind helpers in feature-pipeline.js must
-//      behave identically to the canonical gate-diff-kind.js module
-//      (ESM imports are rejected by the Workflow runtime, so the pipeline
-//      script inlines a copy; tests compare input/output pairs against the
-//      canonical module, not just source text)
-//  (c) short-circuit lane accounting — with a docs-only diff the expected
-//      lane count must be derived from the active lane set (never a
-//      hard-coded 6), and the aggregate must not report MISSING for lanes
-//      that were intentionally short-circuited
-//  (extra) dead-path removal — the legacy SR-3 `.md`-only isDocsOnly const
-//      (L171-177 pre-T3) must be gone (approver condition on T3)
-//
-// Run: node --test .claude/workflows/tests/gate-diff-kind-wiring.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -23,8 +7,6 @@ import { classifyDiffKind, isDocsPath } from '../gate-diff-kind.js';
 
 const wfDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fpSrc = readFileSync(join(wfDir, 'feature-pipeline.js'), 'utf8');
-
-// ── (b) drift guard: inline copy vs canonical module ──
 
 test('drift guard: feature-pipeline contains an inline gate-diff-kind marker block', () => {
   assert.ok(
@@ -36,7 +18,6 @@ test('drift guard: feature-pipeline contains an inline gate-diff-kind marker blo
 test('drift guard: inlined isDocsPath/classifyDiffKind match canonical behavior', () => {
   const beginMarker = fpSrc.indexOf('gate-diff-kind-begin');
   const end = fpSrc.indexOf('gate-diff-kind-end');
-  // Slice from AFTER the begin-marker line (markers are comment lines) to BEFORE the end-marker line.
   const begin = fpSrc.indexOf('\n', beginMarker) + 1;
   const endCut = fpSrc.lastIndexOf('\n', end);
   assert.ok(begin > 0 && end > begin, 'inline gate-diff-kind block markers present');
@@ -91,12 +72,7 @@ test('drift guard: inline copy is actually wired (classifyDiffKind called near t
   assert.ok(callCount >= 2, `classifyDiffKind must be invoked (found ${callCount} occurrences incl. definition)`);
 });
 
-// ── (c) short-circuit lane accounting ──
-
 test('short-circuit: expected lane count resolved dynamically, not hard-coded GATE_DIMENSIONS.length', () => {
-  // Both the polling loop and the aggregate must use the active lane count
-  // (docs-only short-circuit removes lanes; a stale 6 would mark them MISSING
-  // and false-fire gate-incomplete).
   const aggIdx = fpSrc.indexOf('aggregateGateReviews(gateReviews');
   assert.ok(aggIdx > 0, 'unified aggregate call exists');
   const aggCall = fpSrc.slice(aggIdx, fpSrc.indexOf(')', aggIdx));
@@ -109,8 +85,6 @@ test('short-circuit: expected lane count resolved dynamically, not hard-coded GA
     `unified aggregate must use the active lane count (found: ${aggCall.trim()})`
   );
 
-  // polling loop: `new Array(GATE_DIMENSIONS.length).fill(null)` must also
-  // resolve dynamically.
   const pollIdx = fpSrc.indexOf('new Array(');
   assert.ok(pollIdx > 0, 'polling loop allocation exists');
   const alloc = fpSrc.slice(pollIdx, fpSrc.indexOf(')', pollIdx));
@@ -121,11 +95,6 @@ test('short-circuit: expected lane count resolved dynamically, not hard-coded GA
 });
 
 test('short-circuit: aggregate treats only truly-run lanes as expected (behavioral, canonical aggregateGateReviews contract)', () => {
-  // Extract the inlined aggregateGateReviews + normalizeGateReview from
-  // feature-pipeline.js and verify that when fewer lanes are expected
-  // (docs-only short-circuit), complete collections are not INCOMPLETE.
-  // Comments are stripped so the eval never sees stray identifiers, and the
-  // block is bounded at the R6 fall-back close so no top-level `await` leaks in.
   const begin = fpSrc.indexOf('const normalizeGateReview');
   const end = fpSrc.indexOf('[gate-team-end]');
   assert.ok(begin > 0 && end > begin, 'aggregateGateReviews inline block found');
@@ -139,31 +108,26 @@ test('short-circuit: aggregate treats only truly-run lanes as expected (behavior
 
   const lane = (verdict) => ({ verdict, dimension: 'x', findings: [], summary: '' });
 
-  // 4/4 expected (2 lanes short-circuited away) => complete GO, no MISSING
   const agg4 = inline.aggregateGateReviews([lane('GO'), lane('GO'), lane('GO'), lane('GO')], 4);
   assert.equal(agg4.preVerdict, 'GO');
   assert.equal(agg4.complete, true);
   assert.deepEqual(agg4.missing, []);
 
-  // null beyond expected count (never ran) must not flip a complete gate
   const agg4b = inline.aggregateGateReviews(
     [lane('GO'), lane('GO'), lane('GO'), lane('GO'), null, null], 4
   );
   assert.notEqual(agg4b.preVerdict, 'INCOMPLETE');
   assert.equal(agg4b.complete, true);
 
-  // a missing lane INSIDE the expected set still blocks (fail-closed kept)
   const aggMissing = inline.aggregateGateReviews([lane('GO'), null, lane('GO'), lane('GO')], 4);
   assert.equal(aggMissing.preVerdict, 'INCOMPLETE');
   assert.equal(aggMissing.complete, false);
 
-  // short-circuit with a NO-GO still NO-GO (never under-review)
   const aggNoGo = inline.aggregateGateReviews([lane('GO'), lane('NO-GO'), lane('GO'), lane('GO')], 4);
   assert.equal(aggNoGo.preVerdict, 'NO-GO');
 });
 
 test('short-circuit: docs-only keeps governance lane + at least one code-adjacent lane (never zero)', () => {
-  // Approver condition: never collapse to zero lanes.
   const scIdx = fpSrc.indexOf("classifyDiffKind");
   assert.ok(scIdx > 0, 'classifyDiffKind wired');
   const after = fpSrc.slice(scIdx, scIdx + 6000);
@@ -181,8 +145,6 @@ test('short-circuit: docs-only keeps governance lane + at least one code-adjacen
   );
 });
 
-// ── (extra) dead-path removal: legacy isDocsOnly const must be gone ──
-
 test('legacy dead isDocsOnly (.md-only) const removed (T3 approver condition)', () => {
   const legacy = fpSrc.match(/const isDocsOnly\b/g);
   assert.equal(legacy, null, 'legacy isDocsOnly const must be removed, not left beside the new path');
@@ -190,19 +152,18 @@ test('legacy dead isDocsOnly (.md-only) const removed (T3 approver condition)', 
   assert.equal(endsWithMd, null, 'the `.md`-only every() check must not remain');
 });
 
-// ── (d) short-circuit rationale persistence (Issue #95 P-008 T3c) ──
-// Evidence は自己申告不可 (.claude/rules/pipeline-evidence-verification.md):
-// short-circuit 判定根拠 (classification / basis files / treeHash) は
-// .omc/logs/{run-id}/ への永続ログとして残す。
-
 test('T3c: short-circuit rationale persisted to .omc/logs/{run-id}/diff-kind-short-circuit.json', () => {
   const persistIdx = fpSrc.indexOf('diff-kind-short-circuit.json');
   assert.ok(persistIdx > 0, 'dedicated persistence log file name present');
-  const around = fpSrc.slice(persistIdx - 3500, persistIdx + 500);
-  assert.ok(around.includes('.omc/logs/'), 'log dir .omc/logs/ referenced');
-  assert.ok(/classification|diffKind/.test(around), 'classification recorded');
-  assert.ok(/basisFiles|changedFilesArr/.test(around), 'basis files recorded');
-  assert.ok(around.includes('treeHash'), 'treeHash recorded (tree identity of the classified diff)');
+  const persistBlock = fpSrc.slice(persistIdx - 600, persistIdx + 600);
+  assert.ok(persistBlock.includes('.omc/logs/'), 'log dir .omc/logs/ referenced');
+  assert.ok(persistBlock.includes('diffKindRationale'), 'rationale object persisted');
+  const basisIdx = fpSrc.indexOf('const buildDiffKindRationale');
+  assert.ok(basisIdx > 0, 'rationale builder defined');
+  const rationaleBlock = fpSrc.slice(basisIdx, basisIdx + 1600);
+  assert.ok(/classification|diffKind/.test(rationaleBlock), 'classification recorded');
+  assert.ok(rationaleBlock.includes('basisFiles'), 'basis files recorded');
+  assert.ok(rationaleBlock.includes('treeHash'), 'treeHash recorded (tree identity of the classified diff)');
 });
 
 test('T3d: team-gate-protocol exposes resolveGateLanes for dynamic lane resolution', async () => {
@@ -214,7 +175,6 @@ test('T3d: team-gate-protocol exposes resolveGateLanes for dynamic lane resoluti
   assert.ok(docs.shortCircuited === true);
   assert.ok(docs.lanes.includes('governance'), 'governance kept');
   assert.ok(docs.lanes.length >= 1 && docs.lanes.length <= 2, 'governance-centered 1-2 lanes');
-  // unknown kind -> full lanes, fail-closed
   assert.equal(tgp.resolveGateLanes({ diffKind: 'bogus', dimensions: full }).lanes.length, 6);
 });
 
@@ -229,28 +189,16 @@ test('T3d: aggregateGateVerdicts accepts explicit expectedDimensions (docs-only 
   assert.equal(r.missing.length, 0);
 });
 
-// ── (e) Issue #97 Task 3: runTimestamp injection (traceability) ──
-// 全永続 JSON (.omc/logs/{run-id}/ 配下) と reviewer prompt から runTimestamp
-// が参照可能であること。runId は run 開始時の共有値 (diff-kind 用に個別生成しない)。
-
 test('T3(#97): diffKindRationale records the shared run-level runId + runTimestamp', () => {
-  // TDZ 修正後、rationale は builder (buildDiffKindRationale) 経由で構築される。
-  // 実体のフィールド定義は builder 内にあるため、そちらを検証対象とする。
   const rIdx = fpSrc.indexOf('const buildDiffKindRationale');
   assert.ok(rIdx > 0, 'buildDiffKindRationale definition exists');
   const block = fpSrc.slice(rIdx, rIdx + 900);
   assert.ok(/runTimestamp/.test(block), 'runTimestamp field present in diffKindRationale builder');
-  // builder は ACTIVE_GATE_DIMENSIONS 確定後に適用されること (TDZ-safe ordering)
   const applyIdx = fpSrc.indexOf('const diffKindRationale = buildDiffKindRationale()');
   const lanesIdx = fpSrc.indexOf('const ACTIVE_GATE_DIMENSIONS');
   assert.ok(applyIdx > lanesIdx, 'diffKindRationale built after ACTIVE_GATE_DIMENSIONS (TDZ-safe)');
   assert.ok(/runId/.test(block), 'runId field present in diffKindRationale');
-  // runId must reference the shared run-level const, not a locally re-generated id
   assert.ok(!/diffKindRunId/.test(fpSrc), 'per-file diffKindRunId (separate run dir) must be removed — persist under the shared run dir');
-  // persistence path must use the shared runId dir so all JSONs co-locate.
-  // Search ALL occurrences (Issue #102 added the gate-diff builder above, which
-  // can shift the window of the first hit — the actual persister prompt is the
-  // occurrence prefixed with the .omc/logs/ path in an EVIDENCE PERSISTER agent).
   const occurrences = [...fpSrc.matchAll(/diff-kind-short-circuit\.json/g)].map((m) => m.index);
   assert.ok(occurrences.length > 0, 'diff-kind persistence log file name present');
   const usesSharedRunId = occurrences.some(
@@ -279,7 +227,6 @@ test('T3(#97): formatEvidenceForReviewers surfaces runTimestamp (fail-closed unk
 });
 
 test('T3(#97): release-review reviewer prompts (team + fallback) reference the run timestamp', () => {
-  // both the team-path reviewerPrompt and the fallback parallel() prompt
   const teamPrompt = fpSrc.indexOf('const reviewerPrompt = (lens, i) =>');
   assert.ok(teamPrompt > 0, 'team-path reviewer prompt exists');
   const teamBlock = fpSrc.slice(teamPrompt, teamPrompt + 700);

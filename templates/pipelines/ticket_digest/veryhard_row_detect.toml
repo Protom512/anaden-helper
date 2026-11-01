@@ -1,0 +1,8 @@
+name      = "VeryHardRowDetectPc"
+state     = "ad_select_pc"
+algorithm = "ccoeff"
+template  = "veryhard_row.png"
+roi       = [896, 487, 235, 53]
+threshold = 0.85
+action    = { type = "do_nothing" }
+next      = []

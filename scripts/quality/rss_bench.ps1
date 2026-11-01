@@ -1,22 +1,3 @@
-# Peak-RSS benchmark for a single command (Issue #214, Phase 0 / T5).
-#
-# Windows-deterministic memory metric: Start-Process -PassThru, wait for exit,
-# read PeakWorkingSet64 (peak working set = peak RSS for our purposes).
-# fuel/perf are unavailable on this toolchain (rustc 1.95 stable has no
-# -Zfuel; perf is Linux-only), so peak RSS is the primary deterministic gate
-# metric, with wall time as a secondary (noisy) signal.
-#
-# Usage:
-#   powershell -NoProfile -ExecutionPolicy Bypass -File scripts/quality/rss_bench.ps1 `
-#     -Command <exe> -Arguments routine,<toml>,--dry-run -WorkingDirectory <repo> `
-#     -Repeat 5 -JsonOut target/quality/bench/rss-<name>.json
-#
-# Notes:
-# - Arguments must not contain spaces (Start-Process -ArgumentList quoting
-#   limitation; bench workloads in this repo satisfy this).
-# - Exit codes: 0 = all runs exited 0; 1 = at least one run exited non-zero
-#   (report is still written — a failing workload must not look like a clean
-#   bench); 2 = tool error (timeout / spawn failure, fail-closed).
 param(
   [Parameter(Mandatory = $true)][string]$Command,
   [string[]]$Arguments = @(),
@@ -30,13 +11,6 @@ param(
 $runs = New-Object System.Collections.Generic.List[object]
 $anyFailed = $false
 
-# NOTE (Windows PowerShell 5.1 reality, probed 2026-10-17):
-# - Start-Process -PassThru drops the process handle on exit -> ExitCode and
-#   PeakWorkingSet64 come back null.
-# - Even with System.Diagnostics.Process directly, .PeakWorkingSet64 returns
-#   null on 5.1 once the process has exited.
-# => Query peak working set ourselves via GetProcessMemoryInfo on the handle
-#    we own. The handle stays valid after exit until Dispose.
 Add-Type -TypeDefinition @"
 using System;
 using System.Runtime.InteropServices;
@@ -84,7 +58,6 @@ for ($i = 0; $i -lt $Repeat; $i++) {
     Write-Error "spawn failed: $Command ($($_.Exception.Message))"
     exit 2
   }
-  # Drain pipes asynchronously so a chatty child cannot deadlock on full buffers.
   $outTask = $proc.StandardOutput.ReadToEndAsync()
   $errTask = $proc.StandardError.ReadToEndAsync()
   if (-not $proc.WaitForExit($TimeoutSec * 1000)) {
@@ -111,7 +84,6 @@ for ($i = 0; $i -lt $Repeat; $i++) {
   $proc.Dispose()
 }
 
-# Issue #243: 空配列はエラー、偶数個は中 2 値の平均 (真の中央値)。
 function Get-Median([long[]]$values) {
   if ($values.Count -eq 0) {
     throw "Get-Median: empty array (-validate -Repeat >= 1)"
@@ -147,8 +119,6 @@ if ($JsonOut) {
   $jsonOutFull = [System.IO.Path]::GetFullPath([Environment]::ExpandEnvironmentVariables($JsonOut))
   $jsonDir = Split-Path -Parent $jsonOutFull
   if (-not (Test-Path $jsonDir)) { New-Item -ItemType Directory -Path $jsonDir -Force | Out-Null }
-  # WriteAllText = UTF-8 WITHOUT BOM. Set-Content -Encoding UTF8 on PS 5.1
-  # emits a BOM, which breaks JSON.parse consumers downstream.
   [System.IO.File]::WriteAllText($jsonOutFull, $json)
   Write-Output "rss_bench: wrote $jsonOutFull"
 } else {

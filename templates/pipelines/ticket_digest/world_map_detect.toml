@@ -1,0 +1,8 @@
+name      = "WorldMapDetectPc"
+state     = "world_map_pc"
+algorithm = "ccoeff"
+template  = "world_map_title.png"
+roi       = [340, 4, 578, 56]
+threshold = 0.85
+action    = { type = "do_nothing" }
+next      = []

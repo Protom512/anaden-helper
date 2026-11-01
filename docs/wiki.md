@@ -278,7 +278,7 @@ cargo run --bin anaden-studio
 - **クライアント寸法**: **1258×708 RAW 空間**（DPI スケーリング非依存）。
 - **キャプチャ**: `windows-rs` による `PrintWindow`（GDI / D3D11）。
 - **入力送信**: `SendInput` によるマウス合成入力。
-- **アンチチート（wfsdrv）**: PC 版では `PrintWindow` / `SendInput` はブロックされず正常動作することを確認済み。
+- **アンチチート（wfsdrv）**: PC 版では `PrintWindow` / `SendInput` はブロックされず正常動作する。キャプチャは 2026-10-31 の実機 3 run（`device_width=1484`）、入力は **2026-11-01 の実機検証 (Issue #260)** — `SendInput` タップでメニューが開き、前後キャプチャの差分 (changed_frac 0.1497) で機械判定した。それ以前の「確認済み」は日付・証跡を欠く主張だったため、本項を実測に置き換えた。
 - **起動**: `Launcher.exe` 経由でプロセス監視。
 
 ### パフォーマンス実測（1ループ 1秒以内達成）

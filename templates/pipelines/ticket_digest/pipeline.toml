@@ -1,0 +1,10 @@
+
+start_task = "AdSelectDetectPc"
+
+[[goal]]
+name = "ad_select_reached"
+[goal.stop.Any]
+conditions = [
+  { TemplateMatch = { task = "AdSelectDetectPc", confidence = 0.85 } },
+  { Timeout = { secs = 600 } },
+]

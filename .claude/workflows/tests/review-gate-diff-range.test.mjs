@@ -1,9 +1,3 @@
-// TDD tests for Issue #91 Task T1: buildCommitRangeDiffInput —
-// commit-range-diff fallback logic (S2-FP-1). Prefers working-tree diff when
-// non-empty, falls back to HEAD~1..HEAD (merge-base variant configurable),
-// else returns {mode:'fail-closed'}. Includes tree-hash capture in evidence.
-//
-// Run: node --test .claude/workflows/tests/review-gate-diff-range.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import {
@@ -110,9 +104,6 @@ test('whitespace-only diff is treated as empty (fail-closed)', () => {
   });
   assert.equal(out.mode, 'fail-closed');
 });
-
-// ── Issue #102 T5: buildUnifiedGateDiff merge-base / intent-to-add / 429
-//    placeholder cases (deterministic fallback chain, UC-1) ──
 
 test('unified: merge-base fallback when working-tree and HEAD~1..HEAD are both empty', () => {
   const out = buildUnifiedGateDiff({

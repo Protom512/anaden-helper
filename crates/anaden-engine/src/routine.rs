@@ -1,141 +1,73 @@
-//! Routine 定義スキーマ + loader + バリデーション (Issue #199)。
-//!
-//! routine = 複数 pipeline を1日のルーチンとして連続実行する宣言的定義。
-//! `templates/routines/<name>.toml` に pipeline 列 (各ステップ: pipeline_dir /
-//! start_task / max_iters / interval / on_failure) を記述し、
-//! [`load_routine`] + [`RoutineDef::validate`] で fail-closed 検証してから
-//! [`crate::routine_runner::run_routine`] へ渡す。
-//!
-//! スキーマは既存宣言層 (Goal の `deny_unknown_fields`・StrategyDef の
-//! pipeline_dir/start_task 文字列) と同じ形式慣行に従う。
-
 use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 use thiserror::Error;
 
-/// [`RoutineStep::max_iters`] の既定値 (`run` サブコマンドの既定と同一)。
 pub const DEFAULT_STEP_MAX_ITERS: u64 = 100;
-/// [`RoutineStep::interval`] の既定値 (秒・`run` サブコマンドの既定と同一)。
 pub const DEFAULT_STEP_INTERVAL_SECS: u64 = 1;
 
-/// routine 定義の読込・検証エラー (fail-closed・panic しない)。
 #[derive(Debug, Clone, Error)]
 pub enum RoutineError {
-    /// routine ファイルの読込失敗 (存在しない・権限等)。
     #[error("routine ファイル読込失敗 {path}: {reason}")]
-    ReadFailed {
-        /// 読込を試みた routine ファイルパス。
-        path: PathBuf,
-        /// io エラー文言。
-        reason: String,
-    },
-    /// routine TOML のパース失敗 (構文・未知フィールド・型不一致)。
+    ReadFailed { path: PathBuf, reason: String },
     #[error("routine TOML パース失敗 {path}: {reason}")]
-    ParseFailed {
-        /// パース対象の routine ファイルパス。
-        path: PathBuf,
-        /// toml エラー文言。
-        reason: String,
-    },
-    /// steps が空 (ルーチンとして実行する pipeline が無い)。
+    ParseFailed { path: PathBuf, reason: String },
     #[error("routine '{name}' の steps が空です: 少なくとも1ステップ必要です")]
-    EmptySteps {
-        /// routine 名。
-        name: String,
-    },
-    /// ステップの pipeline_dir が実在ディレクトリに解決できない。
+    EmptySteps { name: String },
     #[error("ステップ '{step}' の pipeline_dir が見つかりません: {dir} (root={root})")]
     PipelineDirNotFound {
-        /// ステップ名。
         step: String,
-        /// 解決できなかった pipeline_dir 文字列。
         dir: String,
-        /// 解決基準に使った workspace ルート。
         root: PathBuf,
     },
-    /// pipeline ディレクトリの読込 (TaskDef ロード) 自体が失敗。
     #[error("ステップ '{step}' の pipeline 読込失敗 {dir}: {reason}")]
     PipelineLoadFailed {
-        /// ステップ名。
         step: String,
-        /// pipeline ディレクトリ。
         dir: PathBuf,
-        /// load_pipeline のエラー文言。
         reason: String,
     },
-    /// start_task が pipeline の TaskDef に存在しない。
     #[error(
         "ステップ '{step}' の start_task '{start_task}' が pipeline {dir} に存在しません \
          (利用可能: {available})"
     )]
     StartTaskNotFound {
-        /// ステップ名。
         step: String,
-        /// 指定された開始タスク名。
         start_task: String,
-        /// pipeline ディレクトリ。
         dir: PathBuf,
-        /// pipeline 内の実在タスク名一覧 (カンマ区切り)。
         available: String,
     },
-    /// ステップパラメータの値が不正 (interval=0 等)。
     #[error("ステップ '{step}' の {field} が不正です: {reason}")]
     BadParam {
-        /// ステップ名。
         step: String,
-        /// 不正なフィールド名。
         field: &'static str,
-        /// 理由。
         reason: String,
     },
-    /// routine 名が空。
     #[error("routine 名が空です")]
     EmptyName,
-    /// ステップ実行時の異常 (pipeline 解決・デバイス構築・実行開始の失敗)。
     #[error("ステップ '{step}' の実行に失敗: {reason}")]
-    InvocationFailed {
-        /// ステップ名。
-        step: String,
-        /// 異常の内容。
-        reason: String,
-    },
-    /// ステップ名が空。
+    InvocationFailed { step: String, reason: String },
     #[error("{index} 番目のステップ名が空です")]
-    EmptyStepName {
-        /// ステップの位置 (0-origin)。
-        index: usize,
-    },
+    EmptyStepName { index: usize },
 }
 
-/// ステップ失敗時の継続ポリシー。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum OnFailure {
-    /// 即座に routine 全体を中止 (残りステップは Skipped)。既定。
     #[default]
     Stop,
-    /// 当該ステップを失敗扱いのままスキップし、次ステップへ継続。
     Skip,
 }
 
-/// routine の1ステップ (= pipeline 実行1回)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutineStep {
-    /// ステップの表示名 (サマリ・履歴で参照)。
     pub name: String,
-    /// `anaden run` 相当の pipeline ディレクトリ (workspace ルート相対 or 絶対)。
     pub pipeline_dir: String,
-    /// 開始タスク名 (pipeline の TaskDef `name` と一致必須)。
     pub start_task: String,
-    /// 最大サイクル数。既定 [`DEFAULT_STEP_MAX_ITERS`]。
     #[serde(default = "default_max_iters")]
     pub max_iters: u64,
-    /// ループ間隔 (秒)。既定 [`DEFAULT_STEP_INTERVAL_SECS`]。
     #[serde(default = "default_interval")]
     pub interval: u64,
-    /// 失敗時ポリシー。既定 [`OnFailure::Stop`]。
     #[serde(default)]
     pub on_failure: OnFailure,
 }
@@ -148,21 +80,13 @@ fn default_interval() -> u64 {
     DEFAULT_STEP_INTERVAL_SECS
 }
 
-/// routine 定義 (TOML 1:1)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RoutineDef {
-    /// routine 名 (evidence・履歴の識別子)。
     pub name: String,
-    /// 順次実行する pipeline 列。
     pub steps: Vec<RoutineStep>,
 }
 
-/// routine TOML ファイルを読み込む (検証は別途 [`RoutineDef::validate`] で)。
-///
-/// # Errors
-/// ファイル読込失敗は [`RoutineError::ReadFailed`]、TOML パース失敗
-/// (構文エラー・未知フィールド・型不一致) は [`RoutineError::ParseFailed`]。
 pub fn load_routine(path: &Path) -> Result<RoutineDef, RoutineError> {
     let content = std::fs::read_to_string(path).map_err(|e| RoutineError::ReadFailed {
         path: path.to_path_buf(),
@@ -175,18 +99,6 @@ pub fn load_routine(path: &Path) -> Result<RoutineDef, RoutineError> {
 }
 
 impl RoutineDef {
-    /// 定義を fail-closed 検証する。
-    ///
-    /// 検証項目:
-    /// - name / 各 step name が空でない
-    /// - steps が空でない
-    /// - 各ステップの pipeline_dir が解決可能で、[`anaden_vision::load_pipeline`]
-    ///   で TaskDef がロード可能 (空 pipeline も不可)
-    /// - start_task がロードした TaskDef の `name` に存在
-    /// - interval / max_iters が 1 以上
-    ///
-    /// # Errors
-    /// 上記いずれかの違反を [`RoutineError`] で返す (最初の違反で即時中断)。
     pub fn validate(&self, root: &Path) -> Result<(), RoutineError> {
         if self.name.trim().is_empty() {
             return Err(RoutineError::EmptyName);
@@ -220,7 +132,6 @@ impl RoutineDef {
     }
 }
 
-/// 1ステップ分の pipeline 参照整合性を検証する (`validate` の内部実装)。
 fn validate_step(step: &RoutineStep, root: &Path) -> Result<(), RoutineError> {
     let dir = crate::pipeline_dir::resolve_pipeline_dir(Path::new(&step.pipeline_dir), root)
         .ok_or_else(|| RoutineError::PipelineDirNotFound {
@@ -261,7 +172,6 @@ fn validate_step(step: &RoutineStep, root: &Path) -> Result<(), RoutineError> {
 mod tests {
     use super::*;
 
-    /// workspace ルート (anaden-engine manifest から 2 階層上昇)。
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -273,8 +183,6 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         path
     }
-
-    // ---- parse / defaults ----
 
     #[test]
     fn parse_valid_routine_applies_defaults() {
@@ -374,8 +282,6 @@ mod tests {
             .expect_err("missing file");
         assert!(matches!(err, RoutineError::ReadFailed { .. }), "{err}");
     }
-
-    // ---- validation (fail-closed) ----
 
     #[test]
     fn validate_empty_steps_is_error() {
@@ -484,8 +390,6 @@ mod tests {
         ));
     }
 
-    /// 実在 pipeline 2つ (login → nav_to_field_pc) を参照する routine が
-    /// 実 workspace ルートで検証を通る (UC-1 の headless 検証)。
     #[test]
     fn validate_real_two_step_routine_on_real_root() {
         let def = RoutineDef {
@@ -513,7 +417,6 @@ mod tests {
             .expect("real routine validates");
     }
 
-    /// templates/routines/daily.toml (サンプル) が実ルートで load + validate を通る。
     #[test]
     fn sample_daily_toml_loads_and_validates() {
         let path = workspace_root()

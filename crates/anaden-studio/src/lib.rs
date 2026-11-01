@@ -1,10 +1,3 @@
-//! anaden-studio ライブラリ部。
-//!
-//! 元々 bin 専用クレートだったが、Issue #83 UC-3 異常系ヘッドレス統合テスト
-//! (`tests/pipeline_error_paths_tests.rs`) から state machine モジュールを
-//! 参照するため、モジュール群を lib として公開する。GUI のエントリポイント
-//! (main / eframe 起動 / フォント登録) は main.rs に残る。
-
 pub mod app;
 pub mod app_state;
 pub mod app_state_connection;

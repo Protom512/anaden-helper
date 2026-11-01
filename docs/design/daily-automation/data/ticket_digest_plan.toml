@@ -1,0 +1,35 @@
+
+
+
+
+
+
+
+
+version = 1
+
+
+on_ticket_empty = "stop"
+
+
+auto_buy_key_with_stone = false
+
+[[entry]]
+dungeon = "ミグランス城"
+difficulty = "VH"
+priority = 1
+note = "アルド天冥 / VH報酬枠=天"
+
+[[entry]]
+dungeon = "ゼノ・ドメイン"
+difficulty = "VH"
+priority = 2
+note = "リィカ天冥"
+
+[[entry]]
+dungeon = "次元戦艦"
+difficulty = "VH"
+priority = 3
+note = "ヘレナ冥 / VH報酬枠=天"
+
+

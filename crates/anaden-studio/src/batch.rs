@@ -1,9 +1,3 @@
-//! バッチ評価と混同行列（純関数・テスト対象）。
-//!
-//! テンプレートライブラリ全体をラベル付きテスト画像群に対して一括評価し、
-//! 「真の状態 × 予測状態」の混同行列とテンプレート別の感度/特異性を算出する。
-//! 決定規則は「最もスコアの高いテンプレートの状態（閾値以上）。なければ unknown」。
-
 use std::collections::BTreeSet;
 use std::path::Path;
 use std::sync::Arc;
@@ -15,48 +9,38 @@ use anaden_vision::VisionEngine;
 
 use crate::library::TemplateSpec;
 
-/// 評価済みテンプレート（仕様 + 画像）。
 pub struct LoadedTemplate {
     pub spec: TemplateSpec,
     pub image: DynamicImage,
 }
 
-/// テスト画像とその真のラベル。
 pub struct TestImage {
     pub true_label: String,
     pub image: Arc<DynamicImage>,
 }
 
-/// テンプレート別の評価レポート。
 #[derive(Debug, Clone)]
 pub struct TemplateReport {
     pub name: String,
     pub state: String,
-    pub sensitivity: f32, // 正例(同状態)でマッチした割合
-    pub specificity: f32, // 負例(別状態)でマッチしなかった割合
+    pub sensitivity: f32,
+    pub specificity: f32,
 }
 
-/// 混同行列の評価結果。
 #[derive(Debug, Clone)]
 pub struct ConfusionMatrix {
-    /// ラベル一覧（整列済み、unknown 含む）。行列の軸順序に対応。
     pub labels: Vec<String>,
-    /// `matrix[true_index][predicted_index]` の件数。
     pub matrix: Vec<Vec<usize>>,
-    /// テンプレート別レポート。
     pub per_template: Vec<TemplateReport>,
-    /// 評価したテスト画像総数。
     pub total: usize,
 }
 
 impl ConfusionMatrix {
-    /// ラベルのインデックスを返す（無ければ None）。
     #[allow(dead_code)]
     pub fn index_of(&self, label: &str) -> Option<usize> {
         self.labels.iter().position(|l| l == label)
     }
 
-    /// 正答率（対角成分 / 総数）。
     pub fn accuracy(&self) -> f32 {
         if self.total == 0 {
             return 0.0;
@@ -74,7 +58,6 @@ impl ConfusionMatrix {
     }
 }
 
-/// ラベル集合 (テンプレート状態 ∪ テスト真ラベル ∪ {unknown}) を昇順で返す。
 fn collect_labels(templates: &[LoadedTemplate], tests: &[TestImage]) -> Vec<String> {
     let mut label_set: BTreeSet<String> = BTreeSet::new();
     for t in templates {
@@ -87,8 +70,6 @@ fn collect_labels(templates: &[LoadedTemplate], tests: &[TestImage]) -> Vec<Stri
     label_set.into_iter().collect()
 }
 
-/// 各テスト画像 × 各テンプレートのスコア列 (`[test][template]`) を計算する。
-/// マッチ失敗 (IO 等) は 0.0 扱い。
 fn score_matrix(
     engine: &dyn VisionEngine,
     templates: &[LoadedTemplate],
@@ -110,7 +91,6 @@ fn score_matrix(
         .collect()
 }
 
-/// 最高スコアのテンプレート状態を予測ラベルとする。閾値未満は `unknown`。
 fn predict_label(scores: &[f32], templates: &[LoadedTemplate], threshold: f32) -> String {
     scores
         .iter()
@@ -120,8 +100,6 @@ fn predict_label(scores: &[f32], templates: &[LoadedTemplate], threshold: f32) -
         .unwrap_or_else(|| "unknown".to_string())
 }
 
-/// クラス別の (総数, マッチ数) を集計する。`positive == true` は正例
-/// (真ラベル == テンプレート状態)、`false` は負例 (真ラベル != 状態)。
 fn class_counts(
     tests: &[TestImage],
     per_image_scores: &[Vec<f32>],
@@ -145,8 +123,6 @@ fn class_counts(
     (total, matched)
 }
 
-/// テンプレート別の感度/特異性レポート。各テンプレートを閾値判定にかけ、
-/// 正例 (同状態) は tp/pos、負例 (別状態) は fp/neg に集計する。
 fn per_template_reports(
     templates: &[LoadedTemplate],
     tests: &[TestImage],
@@ -174,10 +150,6 @@ fn per_template_reports(
     per_template
 }
 
-/// テンプレート群をテスト画像群に対して一括評価し混同行列を構築する。
-///
-/// `engine` は閾値0（常に最良スコアを返す）を想定。`threshold` は
-/// 「マッチとみなす」決定閾値。
 pub fn evaluate(
     engine: &dyn VisionEngine,
     templates: &[LoadedTemplate],
@@ -207,11 +179,6 @@ pub fn evaluate(
     }
 }
 
-/// 混同行列（グリッド + テンプレート別レポート）を描画する。
-///
-/// Issue #119 の単一ウィンドウ統合 GUI 向けに、StudioApp から独立して
-/// 埋め込み可能な公開描画 API として切り出した。任意の親 `egui::Ui` 内に
-/// 描画できる（パネル占有はしない）。
 pub fn render_confusion_matrix(ui: &mut egui::Ui, cm: &ConfusionMatrix) {
     ui.heading(format!("混同行列（正答率 {:.1}%）", cm.accuracy() * 100.0));
     ui.label(format!(
@@ -272,7 +239,6 @@ pub fn render_confusion_matrix(ui: &mut egui::Ui, cm: &ConfusionMatrix) {
         });
 }
 
-/// ライブラリディレクトリから評価用テンプレート（TOML + PNG）を読み込む。
 pub fn load_templates_for_eval(base_dir: &Path) -> Vec<LoadedTemplate> {
     let mut out = Vec::new();
     let Ok(state_dirs) = std::fs::read_dir(base_dir) else {
@@ -305,7 +271,6 @@ pub fn load_templates_for_eval(base_dir: &Path) -> Vec<LoadedTemplate> {
     out
 }
 
-/// テストディレクトリ（`<dir>/<label>/*.png`）からテストセットを読み込む。
 pub fn load_test_set(test_dir: &Path) -> Vec<TestImage> {
     let mut out = Vec::new();
     let Ok(label_dirs) = std::fs::read_dir(test_dir) else {
@@ -386,7 +351,6 @@ mod tests {
 
     #[test]
     fn single_template_predicts_own_state_and_unknown_for_others() {
-        // テンプレ: 黒四角 → title。白画面にはマッチしない（scoring テストで確認済み <0.5）
         let templates = vec![LoadedTemplate {
             spec: spec("black", "title"),
             image: black_template(),
@@ -416,7 +380,6 @@ mod tests {
             spec: spec("black", "title"),
             image: black_template(),
         }];
-        // 白画面に黒テンプレ → 低スコア → 閾値超えず unknown
         let tests = vec![TestImage {
             true_label: "field".into(),
             image: Arc::new(DynamicImage::ImageLuma8(GrayImage::from_pixel(
@@ -428,7 +391,6 @@ mod tests {
         let cm = evaluate(&engine(), &templates, &tests, 0.99);
         let unk = cm.index_of("unknown").unwrap();
         let field = cm.index_of("field").unwrap();
-        // 真field → 予測unknown
         assert_eq!(cm.matrix[field][unk], 1);
     }
 
@@ -438,7 +400,6 @@ mod tests {
             spec: spec("black", "title"),
             image: black_template(),
         }];
-        // 正例2枚(黒四角含む) + 負例1枚(白)
         let tests = vec![
             TestImage {
                 true_label: "title".into(),

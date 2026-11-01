@@ -1,36 +1,18 @@
-//! 設定保存 (settings) コア実装 (Issue #83)。
-//!
-//! 対象戦略・主要オプションの選択状態を TOML ファイルへ保存/読込する。
-//! egui 非依存のピュアなモジュールで、GUI からはこの API 経由で利用する。
-//!
-//! - 保存形式: TOML (`serde` + 既存 `toml` 依存)
-//! - 破損時フォールバック (UC-2): 読込失敗・パース失敗時は既定値を返す
-//! - パス解決: CWD 相対ではなく安定した設定ディレクトリ
-//!   (環境変数 `ANADEN_STUDIO_CONFIG_DIR` 上書き可)。
-
 use std::io;
 use std::path::Path;
 use std::path::PathBuf;
 
 use anaden_strategies::StrategySelection;
 
-/// 設定ファイル名。
 const SETTINGS_FILE: &str = "settings.toml";
-/// 設定ディレクトリ上書き用環境変数。
 const CONFIG_DIR_ENV: &str = "ANADEN_STUDIO_CONFIG_DIR";
 
-/// anaden-studio の永続設定。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct StudioSettings {
-    /// 選択中の戦略とオプション状態。
     pub selection: StrategySelection,
 }
 
 impl StudioSettings {
-    /// 指定パスへ TOML 形式で保存する。
-    ///
-    /// # Errors
-    /// ファイル作成/書込に失敗した場合 `io::Error` を返す。
     pub fn save(&self, path: &Path) -> io::Result<()> {
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent)?;
@@ -39,10 +21,6 @@ impl StudioSettings {
         std::fs::write(path, toml_str)
     }
 
-    /// 指定パスから読み込む。
-    ///
-    /// - ファイル不存在・破損 (UC-2) は既定値フォールバック (`Ok(default)`)
-    /// - ただし IO エラーとパースエラーを区別できるよう `LoadOutcome` を返す
     pub fn load(path: &Path) -> LoadOutcome {
         match std::fs::read_to_string(path) {
             Ok(text) => match from_toml(&text) {
@@ -54,17 +32,13 @@ impl StudioSettings {
     }
 }
 
-/// 読込結果。破損/不在時に GUI 側で通知できるようフォールバック理由を保持する。
 #[derive(Debug, PartialEq)]
 pub enum LoadOutcome {
-    /// 正常に読み込めた。
     Loaded(StudioSettings),
-    /// ファイル不在または破損のため既定値へフォールバック (UC-2)。
     Fallback,
 }
 
 impl LoadOutcome {
-    /// 読込済み設定を取り出す。フォールバック時は既定値を返す。
     #[must_use]
     pub fn into_settings_or_default(self) -> StudioSettings {
         match self {
@@ -74,34 +48,20 @@ impl LoadOutcome {
     }
 }
 
-/// TOML 文字列へシリアライズする。失敗時 (シリアライズ不能) は空文字列。
 fn to_toml(settings: &StudioSettings) -> String {
     toml::to_string_pretty(settings).unwrap_or_default()
 }
 
-/// TOML 文字列からデシリアライズする。
 fn from_toml(text: &str) -> Option<StudioSettings> {
     toml::from_str(text).ok()
 }
 
-/// 安定した設定ディレクトリを解決する。
-///
-/// 解決順:
-/// 1. 環境変数 `ANADEN_STUDIO_CONFIG_DIR` (明示上書き)
-/// 2. プラットフォーム標準のユーザ設定ディレクトリ配下の `anaden-studio`
-///    - Windows: `%APPDATA%\anaden-studio`
-///    - それ以外: `$XDG_CONFIG_HOME/anaden-studio` または `~/.config/anaden-studio`
-///
-/// CWD 相対にはならない (インストール済みバイナリ実行ケースの条件)。
 #[must_use]
 pub fn resolve_config_dir() -> PathBuf {
     let env_dir = std::env::var_os(CONFIG_DIR_ENV).filter(|v| !v.is_empty());
     resolve_config_dir_with_override(env_dir.as_deref())
 }
 
-/// テスト・組み込み用途向け: 環境変数上書き値を明示的に渡す解決本体。
-///
-/// CWD 相対にはならない (上書き値・プラットフォーム解決とも絶対パス前提)。
 #[must_use]
 pub fn resolve_config_dir_with_override(env_dir: Option<&std::ffi::OsStr>) -> PathBuf {
     if let Some(dir) = env_dir
@@ -112,39 +72,25 @@ pub fn resolve_config_dir_with_override(env_dir: Option<&std::ffi::OsStr>) -> Pa
     platform_config_dir().unwrap_or_else(|| PathBuf::from(".anaden-studio"))
 }
 
-/// 設定ファイルのフルパスを解決する。
 #[must_use]
 pub fn settings_file_path() -> PathBuf {
     resolve_config_dir().join(SETTINGS_FILE)
 }
 
-/// 設定タブの状態（Issue #125 shard 3: runner 履歴ペイン埋め込みから独立タブ化）。
-///
-/// 保存/読込の実行結果表示（SettingsStatus は history_ui の型を再利用せず
-/// settings.rs を egui 非依存のまま保つため、等価な独自 enum を持つ）。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub enum SettingsTabStatus {
-    /// 成功 (対象ファイルパス)。
     Ok(PathBuf),
-    /// 失敗 (ユーザー表示用メッセージ)。UC-2: 失敗しても GUI は継続。
     Err(String),
-    /// 未実施。
     #[default]
     None,
 }
 
-/// 設定タブの保存/読込ロジック（egui 非依存・ヘッドレステスト可能）。
-///
-/// runner はこの型を保持し、設定タブ・履歴ペイン双方の設定操作を
-/// 単一ロジックへ集約する（二重実装の回避）。
 #[derive(Debug, Default, PartialEq)]
 pub struct SettingsTab {
-    /// 直近の設定 I/O 結果。
     status: SettingsTabStatus,
 }
 
 impl SettingsTab {
-    /// 現在の選択を指定パスへ保存する。結果は `status` へ記録される。
     pub fn save(&mut self, selection: &StrategySelection, path: &Path) {
         let settings = StudioSettings {
             selection: selection.clone(),
@@ -155,10 +101,6 @@ impl SettingsTab {
         };
     }
 
-    /// 指定パスから読み込み、戦略選択へ復元する。
-    ///
-    /// ファイル不在・破損 (UC-2) はエラー扱いにせず Ok(None)。
-    /// 復元した選択を返す（呼び出し側が StrategyPanel へ反映）。
     pub fn load(&mut self, path: &Path) -> Option<StrategySelection> {
         match StudioSettings::load(path) {
             LoadOutcome::Loaded(s) => {
@@ -166,21 +108,18 @@ impl SettingsTab {
                 Some(s.selection)
             }
             LoadOutcome::Fallback => {
-                // ファイル不在・破損は初回起動相当 (UC-2): 既定値フォールバック。
                 self.status = SettingsTabStatus::Ok(path.to_path_buf());
                 None
             }
         }
     }
 
-    /// 直近の I/O 結果。
     #[must_use]
     pub fn status(&self) -> &SettingsTabStatus {
         &self.status
     }
 }
 
-/// プラットフォーム標準のユーザ設定ディレクトリ (存在しない環境では None)。
 fn platform_config_dir() -> Option<PathBuf> {
     if let Some(appdata) = std::env::var_os("APPDATA")
         && !appdata.is_empty()
@@ -218,16 +157,11 @@ impl<'de> serde::Deserialize<'de> for StudioSettings {
     }
 }
 
-/// 設定パスの UI 表示文字列（設定タブのパス表示・純関数）。
 #[must_use]
 pub fn settings_path_display(path: &Path) -> String {
     format!("設定ファイル: {}", path.display())
 }
 
-/// 読込結果の通知文字列（UC-2 フォールバック通知・純関数）。
-///
-/// - 読込成功: 通常の完了通知
-/// - フォールバック: ファイル不在・破損時に既定値へフォールバックした旨
 #[must_use]
 pub fn load_outcome_notice(outcome: &LoadOutcome) -> String {
     match outcome {
@@ -351,8 +285,6 @@ mod tests {
     fn resolve_config_dir_respects_env_override_not_cwd() {
         let dir = tempfile::tempdir().unwrap();
         let dir2 = tempfile::tempdir().unwrap();
-        // edition 2024 では set_var が unsafe なため、上書き値注入版で検証する。
-        // CWD ではなく指定 dir 側へ解決されることを検証。
         let resolved = resolve_config_dir_with_override(Some(dir.path().as_os_str()));
         let resolved2 = resolve_config_dir_with_override(Some(dir2.path().as_os_str()));
         assert_eq!(resolved, dir.path().join("anaden-studio"));
@@ -363,8 +295,6 @@ mod tests {
     #[test]
     fn env_override_empty_is_ignored() {
         let resolved = resolve_config_dir_with_override(Some(std::ffi::OsStr::new("")));
-        // 空文字上書きは無視されプラットフォーム解決へフォールバック。
-        // テスト環境 (Windows CI 含む) では絶対パスになることを確認。
         assert!(resolved.is_absolute() || cfg!(not(any(windows, unix))));
     }
 
@@ -377,10 +307,6 @@ mod tests {
         assert_eq!(path, dir.path().join("anaden-studio").join(SETTINGS_FILE));
     }
 
-    // ---- T4: 実在 PC 版 2 パイプラインの選択戦略 TOML roundtrip ----
-
-    /// 実在 PC 版 2 パイプラインのそれぞれで save → load が戦略 id を保存すること
-    /// (Issue #188 で android 版 4 戦略を削除)。
     #[test]
     fn roundtrip_preserves_each_of_two_real_pc_pipeline_strategies() {
         for id in ["field_loop_pc", "nav_to_field_pc"] {
@@ -402,7 +328,6 @@ mod tests {
         }
     }
 
-    /// TOML 本文に選択戦略 id が現れる（人間可読・デバッグ容易性）。
     #[test]
     fn saved_toml_contains_selected_pipeline_id() {
         let dir = tempfile::tempdir().unwrap();
@@ -418,7 +343,6 @@ mod tests {
         assert!(text.contains(r#"strategy = "nav_to_field_pc""#), "{text}");
     }
 
-    /// 選択戦略がカタログの実在 PC 版 2 パイプラインのいずれかと整合する。
     #[test]
     fn loaded_selection_validates_against_builtin_catalog() {
         let catalog = anaden_strategies::StrategyCatalog::builtin();
@@ -431,8 +355,6 @@ mod tests {
         }
     }
 
-    /// 旧形式（fishing 等・実在しない戦略）の設定もフォールバックせず
-    /// 読み込める（フォワード互換。検証は UI 側で行う）。
     #[test]
     fn roundtrip_of_legacy_unknown_strategy_still_loads() {
         let dir = tempfile::tempdir().unwrap();

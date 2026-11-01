@@ -1,10 +1,3 @@
-// TDD tests for Issue #99 Task 4: Implementation Engineer テンプレート分岐.
-// estimate task の metadata.lane ('release'|'merge') で明示的に分岐し、
-// merge 前提タスクには TDD テンプレートでなく実態調査型プロンプトを適用。
-// パターンマッチ (operator-gated 判定で起きた偽陽性と同種) を使わない。
-// lane metadata 欠損・不正値は fail-closed (TDD テンプレートへ黙墜ちしない)。
-//
-// Run: node --test .claude/workflows/tests/implement-lane-template.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -34,8 +27,6 @@ test('markers exist and pure block evaluates', () => {
   assert.equal(typeof api.buildEngineerPrompt, 'function');
 });
 
-// ── resolveImplementLane: 明示的 lane 判定 (パターンマッチ禁止) ──
-
 test("lane 'merge' → investigation mode", () => {
   const r = loadApi().resolveImplementLane({ id: '1', metadata: { lane: 'merge' } });
   assert.deepEqual(r, { mode: 'investigation', lane: 'merge' });
@@ -50,8 +41,6 @@ test("lane 'tdd' → tdd mode (明示的な TDD 宣言)", () => {
   const r = loadApi().resolveImplementLane({ id: '1', metadata: { lane: 'tdd' } });
   assert.deepEqual(r, { mode: 'tdd', lane: 'tdd' });
 });
-
-// ── fail-closed: metadata 欠損・不正値は TDD へ黙墜ちしない (approval 条件) ──
 
 test('metadata missing → fail-closed, NOT tdd default', () => {
   for (const task of [{ id: '1' }, { id: '1', metadata: undefined }, { id: '1', metadata: null }]) {
@@ -82,8 +71,6 @@ test('task null/malformed → fail-closed', () => {
     assert.equal(r.reason, 'missing-lane-metadata');
   }
 });
-
-// ── buildEngineerPrompt: テンプレート内容 ──
 
 test('investigation prompt: PR 状態確認・trunk-membership・merge/close 判定を含み TDD 指示を含まない', () => {
   const api = loadApi();
@@ -124,14 +111,9 @@ test('fail-closed → buildEngineerPrompt は null (prompt 黙墜ち防止)', ()
   assert.equal(p, null);
 });
 
-// ── wiring: pipeline の engineer dispatch が分岐を使っている ──
-
 test('wiring: implement phase が resolveImplementLane を dispatch 前に呼ぶ', () => {
   const implIdx = src.indexOf('engineer:${task.id}');
   assert.ok(implIdx > 0, 'engineer agent call present');
-  // 位置窓 (旧: label 直前 3000 文字) は Issue #104 dependency-readiness wiring
-  // (lane-gate と dispatch の間に挿入) で距離が伸びるため、呼び出し位置の
-  // index 順序で直接検証する (anchor を call-site 文字列に固定 — より厳密)。
   const laneCallIdx = src.indexOf('resolveImplementLane(task)');
   const promptCallIdx = src.indexOf('buildEngineerPrompt(laneResult, task, ticket, approval)');
   assert.ok(laneCallIdx > 0, 'resolveImplementLane call present');
@@ -143,7 +125,6 @@ test('wiring: lane-missing はタスク結果として fail-closed 報告され�
   assert.match(src, /status: 'lane-missing'/);
 });
 
-// ── Issue #106: estimate schema が metadata.lane を要求 (循環 lane-missing 解消) ──
 test('tech-lead:estimate schema requires tasks[].metadata.lane (Issue #106)', () => {
   const at = src.indexOf("label: 'tech-lead:estimate'");
   assert.ok(at > 0, 'estimate agent call exists');

@@ -1,17 +1,3 @@
-//! pipeline 制御ライブラリ層(anaden_cli_contract::pipeline)の契約テスト。
-//!
-//! シャード2 (Issue #83): GUI(anaden-studio)から pipeline を開始/停止するための
-//! in-process 制御インターフェースの検証。デバイス I/O は行わない
-//! (mock driver + 実 pipeline TOML fixture)。
-//!
-//! 孤立防止・二重起動防止は in-process 方式(shard1 決定)で担保する:
-//! - 二重起動防止: `PipelineController::try_start` は実行中 `Err(AlreadyRunning)`。
-//! - 孤立防止: pipeline は controller が spawn した tokio task として同じプロセス内で
-//!   動くため、GUI プロセスが落ちれば必ず道連れになる(子プロセス孤立は構造的に発生しない)。
-//!
-//! Issue #188: RunOptions から target/serial/capture/input (Android 経路) は削除済み
-//! (PC 版 Win32 固定)。旧 target/capture/input 系テストは削除した。
-
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -23,13 +9,9 @@ use tokio_util::sync::CancellationToken;
 #[allow(clippy::expect_used)]
 mod tests {}
 
-/// テスト用 pipeline ディレクトリ(templates/pipelines/field_loop_pc は画像テンプレートを
-/// 参照するため、ここでは load だけで動かない。実行テストには mock driver を使う)。
 fn field_loop_pc_dir() -> PathBuf {
     PathBuf::from("../../templates/pipelines/field_loop_pc")
 }
-
-// ---- RunOptions::validate (純粋・device-free) ----
 
 #[test]
 fn validate_rejects_empty_start_task() {
@@ -91,8 +73,6 @@ fn validate_checks_start_task_exists_in_pipeline() {
 fn valid_opts() -> RunOptions {
     RunOptions {
         pipeline_dir: field_loop_pc_dir(),
-        // templates/pipelines/field_loop_pc/tap_bottom.toml の TaskDef name と一致
-        // させること(validate は load_pipeline の TaskDef.name と照合する)。
         start_task: "TapBottomStablePc".to_string(),
         algorithm: None,
         interval_secs: 1,
@@ -107,9 +87,6 @@ fn valid_opts() -> RunOptions {
     }
 }
 
-// ---- PipelineController: 開始/停止/状態 (mock driver, device-free) ----
-
-/// controller へ注入する「一定時間後に MaxIterations で完了する」mock 実行関数。
 fn slow_then_max_iters(
     opts: RunOptions,
     cancel: CancellationToken,
@@ -117,7 +94,6 @@ fn slow_then_max_iters(
     Box<dyn std::future::Future<Output = Result<anaden_engine::LoopOutcome, anyhow::Error>> + Send>,
 > {
     Box::pin(async move {
-        // キャンセルまたは固定時間で完了。
         tokio::select! {
             _ = cancel.cancelled() => {}
             _ = tokio::time::sleep(Duration::from_millis(200)) => {}
@@ -160,7 +136,6 @@ async fn controller_initial_state_is_idle() {
 async fn controller_rejects_second_start_while_running() {
     let ctrl = PipelineController::new();
     let opts = valid_opts();
-    // start 前に validate を通す前提(opts は valid fixture)。
     let jh1 = ctrl
         .try_start(opts.clone(), immediate_cancel_outcome)
         .unwrap();
@@ -168,7 +143,6 @@ async fn controller_rejects_second_start_while_running() {
         .try_start(opts.clone(), slow_then_max_iters)
         .unwrap_err();
     assert!(err.is_already_running(), "got: {err:?}");
-    // 1 本目を完了させて後始末。
     ctrl.cancel().await;
     let _ = jh1.await;
     assert_eq!(ctrl.state(), RunState::Finished);
@@ -193,11 +167,9 @@ async fn controller_stop_transitions_to_finished_with_interrupted_reason() {
 async fn controller_can_restart_after_finish() {
     let ctrl = PipelineController::new();
     let opts = valid_opts();
-    // 1 回目: 即完了。
     let jh = ctrl.try_start(opts.clone(), slow_then_max_iters).unwrap();
     let outcome = jh.await.unwrap().unwrap();
     assert_eq!(outcome.reason, anaden_engine::LoopStopReason::MaxIterations);
-    // Running → Finished への反映。
     for _ in 0..50 {
         if ctrl.state() == RunState::Finished {
             break;
@@ -205,7 +177,6 @@ async fn controller_can_restart_after_finish() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert_eq!(ctrl.state(), RunState::Finished);
-    // 2 回目: 再開できる(二重起動防止は実行中のみ)。
     let jh2 = ctrl
         .try_start(opts.clone(), immediate_cancel_outcome)
         .unwrap();

@@ -1,0 +1,8 @@
+name      = "AdSelectDetectPc"
+state     = "ad_select_pc"
+algorithm = "ccoeff"
+template  = "ad_select_title.png"
+roi       = [492, 37, 272, 51]
+threshold = 0.85
+action    = { type = "do_nothing" }
+next      = []

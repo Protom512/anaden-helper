@@ -1,19 +1,6 @@
-// TDD tests for Issue #95 (P-008) T2: file ownership map + per-lane diff slice.
-//
-// gate-diff-kind.js additionally exposes:
-//   ALL_LANES            — the 6 gate dimension keys of feature-pipeline.js
-//   lanesForFile(path)   — owning lanes for one changed path (fail-closed:
-//                          unknown path -> ALL_LANES, never under-review)
-//   sliceDiffForLanes(diff, lanes) — per-lane unified-diff slice keyed by
-//                          lane; files outside the lane's ownership are NOT
-//                          injected into that lane
-//
-// Run: node --test .claude/workflows/tests/gate-lane-ownership.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { ALL_LANES, lanesForFile, sliceDiffForLanes } from '../gate-diff-kind.js';
-
-// ── ALL_LANES ──
 
 test('ALL_LANES covers the 6 gate dimensions of feature-pipeline.js', () => {
   assert.deepEqual([...ALL_LANES].sort(), [
@@ -25,8 +12,6 @@ test('ALL_LANES covers the 6 gate dimensions of feature-pipeline.js', () => {
     'security',
   ]);
 });
-
-// ── ownership map ──
 
 test('crates/** -> code lanes including extensibility (no silent under-review)', () => {
   const lanes = lanesForFile('crates/anaden-cli/src/main.rs');
@@ -52,8 +37,6 @@ test('unknown path / empty / non-string -> ALL_LANES (fail-closed)', () => {
 test('backslash paths normalized like isDocsPath', () => {
   assert.deepEqual(lanesForFile('scripts\\run.sh'), ['governance', 'integration']);
 });
-
-// ── sliceDiffForLanes ──
 
 const SAMPLE_DIFF = [
   'diff --git a/crates/foo/src/lib.rs b/crates/foo/src/lib.rs',

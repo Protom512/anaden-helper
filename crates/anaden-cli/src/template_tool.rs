@@ -1,15 +1,5 @@
-//! テンプレート抽出・マッチング検証ツール。
-//!
-//! 使い方:
-//! ```text
-//!   cargo run --bin anaden-tool -- extract <screenshot> <x> <y> <w> <h> <output>
-//!   cargo run --bin anaden-tool -- match <screenshot> <template> <threshold>
-//!   cargo run --bin anaden-tool -- detect <screenshot> [--templates <dir>]
-//!   cargo run --bin anaden-tool -- run-pipeline <screenshot> <pipeline_dir> <start_task> [--algorithm sse|ccoeff]
-//! ```
-//!
-//! (Issue #188: ADB 経路の capture / launch / record / explore サブコマンドは
-//!  Android サポート削除に伴い廃止)
+mod plan_data;
+mod plan_tool;
 
 use std::path::PathBuf;
 
@@ -24,58 +14,54 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    // (Issue #188: Android (ADB) 経路の Capture / Explore / Launch / Record
-    //  サブコマンドは削除済み)
-    /// スクリーンショットからテンプレート領域を抽出する
     Extract {
-        /// 元画像パス
         screenshot: PathBuf,
-        /// X座標
         x: u32,
-        /// Y座標
         y: u32,
-        /// 幅
         width: u32,
-        /// 高さ
         height: u32,
-        /// 出力先パス
         output: PathBuf,
     },
-    /// テンプレートマッチングのテスト（単一テンプレート）
     Match {
-        /// スクリーンショット画像
         screenshot: PathBuf,
-        /// テンプレート画像
         template: PathBuf,
-        /// 信頼度閾値 (0.0〜1.0)
         #[arg(default_value_t = 0.95)]
         threshold: f32,
-        /// ダウンスケール倍率（例: 4 で 1/4 に縮小してマッチング）
         #[arg(short, long, default_value_t = 4)]
         scale: u32,
     },
-    /// 全テンプレートで投票判定（SceneDetector を使用）
     Detect {
-        /// スクリーンショット画像
         screenshot: PathBuf,
-        /// テンプレートディレクトリ
         #[arg(short, long, default_value = "./templates/scenes")]
         templates: PathBuf,
-        /// 信頼度閾値
         #[arg(short = 'c', long, default_value_t = 0.85)]
         threshold: f32,
     },
-    /// 宣言的パイプラインを1ステップ実行（認識→コマンド表示→次タスク）。発火しない。
     RunPipeline {
-        /// スクリーンショット画像（元解像度PNG）
         screenshot: PathBuf,
-        /// `*.toml` を格納したパイプラインディレクトリ
         pipeline_dir: PathBuf,
-        /// 開始タスク名（PipelineState の初期 current）
         start_task: String,
-        /// algorithm 上書き（`sse` または `ccoeff`）。未指定時は TOML の algorithm を尊重
         #[arg(short, long)]
         algorithm: Option<String>,
+    },
+    PlanTenmei {
+        #[arg(required = true)]
+        chars: Vec<String>,
+        #[arg(short, long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/ad_tenmei.toml"))]
+        data: PathBuf,
+        #[arg(long, default_value = "VH")]
+        difficulty: plan_data::Difficulty,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
+    PlanExpand {
+        plan: PathBuf,
+        #[arg(short, long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/ad_tenmei.toml"))]
+        data: PathBuf,
+        #[arg(short, long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../templates/pipelines/ticket_digest"))]
+        pipeline: PathBuf,
+        #[arg(short, long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -120,7 +106,6 @@ fn main() -> anyhow::Result<()> {
             );
             println!("Scale:      1/{}", scale);
 
-            // ダウンスケール
             let haystack = haystack_orig.resize_exact(
                 haystack_orig.width() / scale,
                 haystack_orig.height() / scale,
@@ -154,7 +139,6 @@ fn main() -> anyhow::Result<()> {
                 imageproc::template_matching::MatchTemplateMethod::SumOfSquaredErrorsNormalized,
             );
 
-            // 最小値（最良マッチ）を見つける
             let mut best_x = 0u32;
             let mut best_y = 0u32;
             let mut best_sse = f32::MAX;
@@ -170,7 +154,6 @@ fn main() -> anyhow::Result<()> {
                 }
             }
 
-            // 元の解像度の座標に逆変換
             let orig_x = best_x * scale;
             let orig_y = best_y * scale;
             let confidence = 1.0 - best_sse;
@@ -214,12 +197,27 @@ fn main() -> anyhow::Result<()> {
                 algorithm.as_deref(),
             )?;
         }
+        Commands::PlanTenmei {
+            chars,
+            data,
+            difficulty,
+            out,
+        } => {
+            plan_tool::run_plan_tenmei(&chars, &data, difficulty, out.as_deref())?;
+        }
+        Commands::PlanExpand {
+            plan,
+            data,
+            pipeline,
+            out,
+        } => {
+            plan_tool::run_plan_expand(&plan, &data, &pipeline.to_string_lossy(), out.as_deref())?;
+        }
     }
 
     Ok(())
 }
 
-/// `detect` サブコマンド: 全テンプレートで投票判定
 fn run_detect(
     screenshot_path: &PathBuf,
     template_dir: &PathBuf,
@@ -233,7 +231,6 @@ fn run_detect(
         screenshot_path
     );
 
-    // テンプレート読み込み
     let mut store = anaden_vision::TemplateStore::new();
     if template_dir.exists() {
         let count = store.load_from_directory(template_dir)?;
@@ -249,7 +246,6 @@ fn run_detect(
     let detector = anaden_vision::SceneDetector::with_defaults(store);
     let threshold_conf = anaden_core::MatchConfidence::new(threshold);
 
-    // 各テンプレートの個別マッチ結果を表示
     println!("\n── 個別テンプレート結果 ──");
     for template in detector.template_list() {
         let best = detector.match_single_template(&screenshot, template);
@@ -271,7 +267,6 @@ fn run_detect(
         }
     }
 
-    // 投票判定結果
     let state = detector.detect_state(&screenshot);
     println!("\n── 投票判定結果 ──");
     println!("  判定: {:?}", state);
@@ -280,20 +275,12 @@ fn run_detect(
     Ok(())
 }
 
-/// `run-pipeline` サブコマンド: 宣言的パイプラインを1ステップ実行。
-///
-/// 範囲: 1ステップのみ。`tick` は1回呼んで結果を表示して終了（ライブループ・発火しない）。
-/// screenshot は engine live 経路 (`PipelineDriver::run_once`) と同一の本番前処理
-/// `ScreenScaler::normalize_capture` (黒帯クロップ [キャンバス アスペクト保護付き] →
-/// 幅1280正規化) を通してから tick に渡す (Issue #212: 前処理の単一化。
-/// `TaskDef::detect` は roi を正規化後画面の画素座標として crop する前提のため)。
 fn run_pipeline(
     screenshot_path: &PathBuf,
     pipeline_dir: &PathBuf,
     start_task: &str,
     algorithm_override: Option<&str>,
 ) -> anyhow::Result<()> {
-    // algorithm 上書き文字列を Algorithm へ解決（未指定・不正値は None）
     let override_algo: Option<anaden_vision::Algorithm> = match algorithm_override {
         Some("sse") => Some(anaden_vision::Algorithm::Sse),
         Some("ccoeff") => Some(anaden_vision::Algorithm::Ccoeff),
@@ -303,7 +290,6 @@ fn run_pipeline(
         None => None,
     };
 
-    // 1. スクリーンショット読込 + 本番前処理 (engine live 経路と同一・Issue #212)
     let raw = image::open(screenshot_path)
         .map_err(|e| anyhow::anyhow!("スクリーンショット読込失敗 {:?}: {e}", screenshot_path))?;
     let (orig_w, orig_h) = (raw.width(), raw.height());
@@ -324,7 +310,6 @@ fn run_pipeline(
         norm_h,
     );
 
-    // 2. パイプライン読込
     let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
         .map_err(|e| anyhow::anyhow!("パイプライン読込失敗 {:?}: {e}", pipeline_dir))?;
     println!(
@@ -334,7 +319,6 @@ fn run_pipeline(
         start_task,
     );
 
-    // algorithm 上書き: start_task の TaskDef.algorithm を差し替え
     if let Some(algo) = override_algo {
         for t in tasks.iter_mut() {
             if t.name == start_task {
@@ -343,7 +327,6 @@ fn run_pipeline(
         }
     }
 
-    // 3. 1ステップ実行。tick は内部で current を next へ更新するため、表示用に退避。
     let mut state = anaden_engine::PipelineState::new(start_task);
     let before = state.current().to_string();
     match state.tick(&screenshot, &tasks) {
@@ -367,7 +350,6 @@ fn run_pipeline(
                 before,
             );
         }
-        // F34 (05-template-cache): テンプレート読込エラーは非マッチと区別して可視化する。
         Err(e) => {
             println!("⚠️ テンプレートエラー: {before}: {e}");
             anyhow::bail!("template error in task '{before}': {e}");

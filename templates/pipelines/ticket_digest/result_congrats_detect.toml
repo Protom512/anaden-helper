@@ -1,0 +1,8 @@
+name      = "ResultCongratsDetectPc"
+state     = "ad_result_pc"
+algorithm = "ccoeff"
+template  = "result_congrats.png"
+roi       = [345, 80, 270, 70]
+threshold = 0.85
+action    = { type = "do_nothing" }
+next      = []

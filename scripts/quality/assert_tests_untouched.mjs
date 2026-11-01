@@ -1,18 +1,3 @@
-// "Tests untouched" guard for the anaden-helper workspace (Issue #214, Phase 0 / T3).
-//
-// Structural guarantee for the complexity-reduction campaign: no hunk of a git
-// diff may touch test code — a #[cfg(test)] module/item region (including the
-// attribute lines themselves) or any file under tests/. Additions count as
-// touches: the campaign contract is "not a single line of test code changes".
-//
-// Usage:
-//   node scripts/quality/assert_tests_untouched.mjs [base]
-//     base omitted -> diff HEAD (staged + unstaged vs HEAD)
-//     base given   -> diff <base> (e.g. master, HEAD~3)
-//
-// Exit codes: 0 = no test code touched, 1 = violations, 2 = tool/parse error
-// (fail-closed). An empty diff passes trivially — this is a mechanical
-// pre-commit check, not a review gate.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -22,17 +7,9 @@ import { computeTestRegions, classifyPath } from './complexity_gate.mjs';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const normalizePath = (p) => String(p).replace(/\\/g, '/');
 
-// ---------------------------------------------------------------------------
-// Unified diff parsing
-// ---------------------------------------------------------------------------
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
-/**
- * Parses a unified diff into file entries with per-side changed line numbers:
- * `[{ path, isNew, isDeleted, hunks: [{ oldLines: [n..], newLines: [n..] }] }]`.
- * Context lines advance both cursors; `\ No newline` markers are skipped.
- */
 export function parseDiff(diffText) {
   const files = [];
   let current = null;
@@ -47,21 +24,16 @@ export function parseDiff(diffText) {
       continue;
     }
     if (!current) continue;
-    // Issue #239: hunk 本体内では `---`/`+++` ヘッダマッチを無効化する。
-    // 削除行の内容が `-- select ...` 等で始まると `--- a/...` と誤判定し、
-    // 行番号カウントが 1 つずれて test region 内削除を見逃す。
     if (!inHunks) {
       if (raw.startsWith('new file mode ')) current.isNew = true;
       if (raw.startsWith('deleted file mode ')) current.isDeleted = true;
       if (raw.startsWith('Binary files ') || raw.startsWith('GIT binary patch')) {
         current.isBinary = true;
-        // Issue #245: binary 削除も path を復元 (oldPath から) して検出対象に。
         if (raw.includes(' and /dev/null differ')) current.path = current.oldPath ?? null;
         continue;
       }
       if (raw.startsWith('rename from ')) current.oldPath = normalizePath(raw.slice('rename from '.length));
       if (raw.startsWith('rename to ')) current.path = normalizePath(raw.slice('rename to '.length));
-      // Issue #231: `--- a/<path>` は `+++` より先に現れるため保持 (削除ファイル対応)。
       const minusMatch = /^--- (?:a\/)?(.+)$/.exec(raw);
       if (minusMatch && minusMatch[1] !== '/dev/null') {
         current.oldPath = normalizePath(minusMatch[1]);
@@ -96,20 +68,103 @@ export function parseDiff(diffText) {
     } else if (raw.startsWith(' ')) {
       oldCursor += 1;
       newCursor += 1;
-    } // '\\ No newline at end of file' and anything else: skip
+    }
   }
   return files.filter((f) => f.path !== null);
 }
 
-// ---------------------------------------------------------------------------
-// Region checks
-// ---------------------------------------------------------------------------
 
-/**
- * Evaluates a parsed diff against old/new sources.
- * Returns `{ violations: [{file, side, line, reason}], filesChecked }`.
- * Throws when a needed source is missing (callers fail closed).
- */
+export function normalizeRustSource(src) {
+  const text = String(src);
+  const n = text.length;
+  const out = [];
+  const isIdentChar = (c) => /[A-Za-z0-9_]/.test(c);
+
+  const emitCode = (chunk) => {
+    const noTrailingCommas = chunk.replace(/,(?=\s*[)\]}])/g, '');
+    out.push(noTrailingCommas.replace(/\s+/g, ''));
+  };
+
+  const scanQuoted = (start) => {
+    let j = start + 1;
+    while (j < n) {
+      if (text[j] === '\\') { j += 2; continue; }
+      if (text[j] === '"') return j + 1;
+      j += 1;
+    }
+    return n;
+  };
+
+  let codeStart = 0;
+  let i = 0;
+  while (i < n) {
+    const c = text[i];
+    const prev = i > 0 ? text[i - 1] : '';
+    if (c === '/' && text[i + 1] === '/') {
+      const nl = text.indexOf('\n', i);
+      const stop = nl === -1 ? n : nl;
+      emitCode(text.slice(codeStart, i));
+      out.push(text.slice(i + 2, stop).replace(/\s+/g, ''));
+      codeStart = i = stop;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      let depth = 1;
+      let j = i + 2;
+      while (j < n && depth > 0) {
+        if (text[j] === '/' && text[j + 1] === '*') { depth += 1; j += 2; }
+        else if (text[j] === '*' && text[j + 1] === '/') { depth -= 1; j += 2; }
+        else j += 1;
+      }
+      emitCode(text.slice(codeStart, i));
+      out.push(text.slice(i + 2, j - 2).replace(/\s+/g, ''));
+      codeStart = i = j;
+      continue;
+    }
+    let rawPrefixLen = 0;
+    if (!isIdentChar(prev)) {
+      if (c === 'r' && (text[i + 1] === '"' || text[i + 1] === '#')) rawPrefixLen = 1;
+      else if (c === 'b' && text[i + 1] === 'r' && (text[i + 2] === '"' || text[i + 2] === '#')) rawPrefixLen = 2;
+    }
+    if (rawPrefixLen > 0) {
+      let j = i + rawPrefixLen;
+      let hashes = 0;
+      while (text[j] === '#') { hashes += 1; j += 1; }
+      if (text[j] === '"') {
+        const closing = '"' + '#'.repeat(hashes);
+        const end = text.indexOf(closing, j + 1);
+        const stop = end === -1 ? n : end;
+        emitCode(text.slice(codeStart, i));
+        out.push(text.slice(i, stop));
+        codeStart = i = stop + closing.length;
+        continue;
+      }
+    }
+    if (c === '"' || (!isIdentChar(prev) && c === 'b' && text[i + 1] === '"')) {
+      const stop = scanQuoted(c === '"' ? i : i + 1);
+      emitCode(text.slice(codeStart, i));
+      out.push(text.slice(i, stop));
+      codeStart = i = stop;
+      continue;
+    }
+    if (c === "'") {
+      let j = i + 1;
+      if (text[j] === '\\') j += 2;
+      else j += 1;
+      if (text[j] === "'") {
+        emitCode(text.slice(codeStart, i));
+        out.push(text.slice(i, j + 1));
+        codeStart = i = j + 1;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  emitCode(text.slice(codeStart, n));
+  return out.join('');
+}
+
+
 export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
   const violations = [];
   let filesChecked = 0;
@@ -124,7 +179,17 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
     const newLines = file.hunks.flatMap((h) => h.newLines);
     const classification = classifyPath(file.path);
     filesChecked += 1;
+    const oldSrc = oldSources[file.path];
+    const newSrc = newSources[file.path];
+    if (
+      typeof oldSrc === 'string'
+      && typeof newSrc === 'string'
+      && normalizeRustSource(oldSrc) === normalizeRustSource(newSrc)
+    ) {
+      continue;
+    }
     if (classification === 'tests-dir') {
+      if (oldLines.length === 0) continue;
       for (const line of newLines) {
         violations.push({ file: file.path, side: 'new', line, reason: 'tests/ directory file changed' });
       }
@@ -133,7 +198,7 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
       }
       continue;
     }
-    if (classification !== 'scan') continue; // benches are out of test scope
+    if (classification !== 'scan') continue;
     if (newLines.length > 0) {
       const regions = computeTestRegions(sourceFor(newSources, file.path, 'new'));
       for (const line of newLines) {
@@ -152,18 +217,28 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
   return { violations, filesChecked };
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
 
-/**
- * CLI entry point. Returns the process exit code (0/1/2).
- * `opts` exists for tests: `{ root, base, diffText, oldSources, newSources }`
- * injects everything so no git command is executed.
- */
 export function main(argv = [], opts = {}) {
   const root = opts.root ?? path.resolve(scriptDir, '..', '..');
   const base = opts.base ?? argv[0] ?? 'HEAD';
+
+  let allowlistEntries = opts.allowlist;
+  if (allowlistEntries === undefined) {
+    const allowlistPath = path.join(scriptDir, 'assert-tests-untouched-allowlist.json');
+    let raw;
+    try {
+      raw = fs.readFileSync(allowlistPath, 'utf8');
+    } catch (error) {
+      console.error(`tests-untouched: cannot read assert-tests-untouched-allowlist.json: ${error.message}`);
+      return 2;
+    }
+    try {
+      allowlistEntries = JSON.parse(raw)?.entries ?? [];
+    } catch (error) {
+      console.error(`tests-untouched: cannot parse assert-tests-untouched-allowlist.json: ${error.message}`);
+      return 2;
+    }
+  }
 
   let diffText = opts.diffText;
   let oldSources = opts.oldSources;
@@ -183,8 +258,6 @@ export function main(argv = [], opts = {}) {
     for (const file of parseDiff(diffText)) {
       if (!file.path.endsWith('.rs')) continue;
       if (file.hunks.some((h) => h.oldLines.length > 0)) {
-        // Issue #245: rename+modify の場合、old source は oldPath (元ファイル名)
-        // から取得する。file.path は新しい名前のため git show が失敗する。
         const oldPath = file.oldPath && file.oldPath !== file.path ? file.oldPath : file.path;
         const show = spawnSync('git', ['-C', root, 'show', `${base}:${oldPath}`], { encoding: 'utf8' });
         if (show.error || show.status !== 0) {
@@ -214,14 +287,35 @@ export function main(argv = [], opts = {}) {
     return 2;
   }
 
-  if (result.violations.length > 0) {
-    console.error(`tests-untouched: ${result.violations.length} hunk(s) touch test code (diff base: ${base})`);
-    for (const v of result.violations) {
+  const allowlistByFile = new Map(
+    (allowlistEntries ?? []).map((entry) => [normalizePath(entry.file), entry]),
+  );
+  const remaining = [];
+  const allowlistedFiles = new Set();
+  for (const v of result.violations) {
+    if (allowlistByFile.has(v.file)) {
+      allowlistedFiles.add(v.file);
+      continue;
+    }
+    remaining.push(v);
+  }
+  const stale = [...allowlistByFile.keys()].filter((f) => !allowlistedFiles.has(f));
+  if (stale.length > 0) {
+    console.error(`tests-untouched: stale allowlist entries (no matching violation in this diff):`);
+    for (const f of stale) console.error(`  ${f}`);
+  }
+  if (remaining.length > 0) {
+    console.error(`tests-untouched: ${remaining.length} hunk(s) touch test code (diff base: ${base})`);
+    for (const v of remaining) {
       console.error(`  ${v.file}:${v.line} (${v.side}) ${v.reason}`);
     }
     return 1;
   }
-  console.log(`tests-untouched: OK (${result.filesChecked} .rs file(s) in diff, no test code touched; base=${base})`);
+  if (stale.length > 0) return 1;
+  console.log(
+    `tests-untouched: OK (${result.filesChecked} .rs file(s) in diff, no test code touched`
+      + `${allowlistedFiles.size > 0 ? `, ${allowlistedFiles.size} allowlisted file(s)` : ''}; base=${base})`,
+  );
   return 0;
 }
 

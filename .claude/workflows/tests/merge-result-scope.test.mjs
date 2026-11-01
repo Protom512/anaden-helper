@@ -2,14 +2,6 @@ import { readFileSync } from 'node:fs';
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 
-// P-006 (cycle-20): mergeResult hoist regression lock.
-// cycle-20 (#69/PR #70): `let mergeResult` was declared inside the
-// `else { ... }` block but referenced by the final return *outside* it —
-// the workflow completed a real merge then died with
-// ReferenceError: mergeResult is not defined. This test locks the fix:
-// exactly one top-level declaration, none inside the else block, and the
-// final return still references it.
-
 const src = readFileSync(new URL('../feature-pipeline.js', import.meta.url), 'utf8');
 
 test('mergeResult is declared exactly once at top level (hoisted, P-006)', () => {
@@ -18,7 +10,6 @@ test('mergeResult is declared exactly once at top level (hoisted, P-006)', () =>
 });
 
 test('no mergeResult declaration remains inside the Phase-7 else block', () => {
-  // The Phase 7 header must NOT be followed by a declaration (the old bug shape).
   const phase7 = src.indexOf('Phase 7: Merge & Close');
   assert.ok(phase7 > 0, 'Phase 7 header not found');
   const window = src.slice(phase7, phase7 + 400);

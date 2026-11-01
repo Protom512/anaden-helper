@@ -1,21 +1,3 @@
-// TDD tests for Issue #99 Task 3: feature-pipeline.js precheck wiring.
-//
-// Wiring contract:
-//  (a) Request phase 直後・Estimate 前に evaluateTicketPrecheck が実行される
-//      (slice source order: 'pm-ticket-files-end' marker -> precheck block ->
-//      'phase(\'Estimate\')')
-//  (b) FAIL 時は status 'precheck-failed' で short-circuit (resolveReleaseAbort
-//      と同型の resumable status — snapshot branch はまだ無いので ticket/理由を返す)
-//  (c) PASS 時は slice メタデータ (changedCrates / diffKind) が Estimate と
-//      Gate プロンプトへ注入される
-//  (d) GATE_DIMENSIONS lane 選択が precheck 生成メタデータ (diff 実測値) で
-//      上書きされる — 手動 changedCrates 導出は deriveSliceMetadata に置換
-//  (e) evidence: .omc/logs/{run-id}/ticket-precheck.json へ永続化
-//  (f) fail-closed: ticket.files 未宣言 + diff 非空 → FAIL (UC-2 系)
-//  (g) UC-3: commit-range fallback — working tree clean かつ commit-range
-//      diff 非空を precheck が受け取る経路が存在する
-//
-// Run: node --test .claude/workflows/tests/ticket-precheck-wiring.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -28,8 +10,6 @@ import {
 
 const wfDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fpSrc = readFileSync(join(wfDir, 'feature-pipeline.js'), 'utf8');
-
-// ── (a) wiring position: Request 直後・Estimate 前 ──
 
 test('wiring position: precheck block sits between pm-ticket-files-end and phase(Estimate)', () => {
   const pmEnd = fpSrc.indexOf('[pm-ticket-files-end]');
@@ -63,8 +43,6 @@ test('wiring: deriveSliceMetadata defined inline and used to derive crates/diffK
   assert.match(block, /diffKind/, 'diffKind derived from metadata');
 });
 
-// ── (b) FAIL short-circuit: status 'precheck-failed' ──
-
 test('FAIL short-circuit: status precheck-failed returned before Estimate', () => {
   const precheckBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
   const estimatePhase = fpSrc.indexOf("phase('Estimate')");
@@ -79,18 +57,14 @@ test('FAIL short-circuit is a return (resumable status, resolveReleaseAbort と�
   const precheckBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
   const estimatePhase = fpSrc.indexOf("phase('Estimate')");
   const block = fpSrc.slice(precheckBegin, estimatePhase);
-  // Use the LAST occurrence — the actual return object (earlier ones are comments).
   const failIdx = block.lastIndexOf("'precheck-failed'");
   assert.ok(failIdx > 0, "status 'precheck-failed' literal present");
-  // The FAIL return must carry the status literal inside its object.
   const failBlock = block.slice(Math.max(0, failIdx - 300), failIdx + 300);
   assert.ok(failBlock.includes('return {'),
     'return statement carries the precheck-failed status');
   assert.match(block.slice(failIdx, failIdx + 600), /reason|undeclared|missing/,
     'FAIL return includes reason/mismatch details');
 });
-
-// ── (c) PASS: slice metadata injected into Estimate/Gate prompts ──
 
 test('PASS injection: slice metadata referenced by Estimate prompt', () => {
   const estIdx = fpSrc.indexOf('You are the Tech Lead.');
@@ -101,9 +75,6 @@ test('PASS injection: slice metadata referenced by Estimate prompt', () => {
 });
 
 test('PASS injection: precheck-derived changedCrates feeds gate lanes (manual derivation replaced)', () => {
-  // The legacy manual derivation (post-resolve-scope .filter(f => f.startsWith('crates/')))
-  // must be replaced by precheck metadata. GATE_DIFF_KIND_LANES must consume the
-  // precheck-overridden diffKind.
   const legacy = fpSrc.match(
     /changedCrates\s*=\s*\(scopeResult[\s\S]{0,400}?startsWith\('crates\/'\)/
   );
@@ -116,8 +87,6 @@ test('PASS injection: precheck-derived changedCrates feeds gate lanes (manual de
     'lane selection reads the precheck-derived diffKind');
 });
 
-// ── (d) behavior: inline copies must match canonical ticket-precheck.js ──
-
 test('drift guard: inline evaluateTicketPrecheck matches canonical module', () => {
   const beginMarker = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
   const begin = fpSrc.indexOf('\n', beginMarker) + 1;
@@ -127,38 +96,27 @@ test('drift guard: inline evaluateTicketPrecheck matches canonical module', () =
   const inlineSrc = fpSrc
     .slice(begin, end)
     .replace(/^\s*\/\/.*$/gm, '');
-  // Strip the trailing runtime wiring (agent call / returns) — keep only the
-  // pure function definitions by extracting from 'function' to the closing of
-  // deriveSliceMetadata. The block must define classifyDiffKind-reusing helpers.
   assert.match(inlineSrc, /function evaluateTicketPrecheckInline|const evaluateTicketPrecheck/, 'pure fn defined');
 
   const fnStart = inlineSrc.search(/(?:function evaluateTicketPrecheckInline|const evaluateTicketPrecheck)\s*[=(]/);
   assert.ok(fnStart >= 0, 'pure function start found');
-  // eval the pure-function region: from fnStart to the deriveSliceMetadata close.
-  // We look for the end by evaluating progressively — simpler: require the block
-  // contains both pure fns and eval the whole stripped source in a Function that
-  // tolerates later runtime statements is unsafe; instead extract helper fns.
   const helpersMatch = inlineSrc.match(/function normalizePath[\s\S]*?\n}\nfunction toNormalizedSet[\s\S]*?\n}\n/);
   assert.ok(helpersMatch, 'normalizePath + toNormalizedSet helpers inlined');
 });
 
 test('behavior: FAIL verdict produced for undeclared changed files (canonical semantics exercised via inline call shape)', () => {
-  // The inline call must pass (ticket.files, combined changed files) in that order.
   const blockBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
   const blockEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
   const block = fpSrc.slice(blockBegin, blockEnd).replace(/^\s*\/\/.*$/gm, '');
   const call = block.match(/evaluateTicketPrecheck(?:Inline)?\(\s*([^,)]+),\s*([^)]+)\)/);
   assert.ok(call, 'evaluateTicketPrecheck call site found');
   assert.match(call[1], /ticket\.files|declaredFiles/, 'first arg is ticket-declared files');
-  // second arg must be a combined changed list (working tree + untracked + commit-range fallback)
   assert.match(
     block,
     /precheckChangedFiles|combinedChanged|commitRangeFiles|rangeFiles/,
     'combined changed-files list (incl. commit-range fallback) built before the call'
   );
 });
-
-// ── (e) evidence persistence ──
 
 test('evidence: precheck verdict persisted to .omc/logs/{run-id}/ticket-precheck.json', () => {
   const persistIdx = fpSrc.indexOf('ticket-precheck.json');
@@ -169,8 +127,6 @@ test('evidence: precheck verdict persisted to .omc/logs/{run-id}/ticket-precheck
   assert.match(around, /verdict/, 'verdict recorded in persisted JSON');
 });
 
-// ── (g) UC-3: commit-range fallback path exists in precheck scope resolver ──
-
 test('UC-3: precheck scope resolver includes commit-range fallback for clean working tree', () => {
   const blockBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
   const blockEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
@@ -178,8 +134,6 @@ test('UC-3: precheck scope resolver includes commit-range fallback for clean wor
   assert.match(block, /HEAD~1\.\.HEAD|commit-range|merge-base/,
     'commit-range fallback (HEAD~1..HEAD / merge-base) collected by precheck scope resolver');
 });
-
-// ── canonical module still green under the wiring contract ──
 
 test('canonical: UC-2 fail-closed semantics unchanged (undeclared file FAILs)', () => {
   const r = evaluateTicketPrecheck(['a.rs'], ['a.rs', 'b.js']);
@@ -190,8 +144,6 @@ test('canonical: UC-2 fail-closed semantics unchanged (undeclared file FAILs)', 
   assert.equal(m.diffKind, 'mixed');
 });
 
-// ── (e-extra) treeHash persistence (pipeline-evidence-verification.md §2) ──
-
 test('evidence: treeHash recorded in persisted ticket-precheck.json (vacuous-PASS detection)', () => {
   const blockBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
   const blockEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
@@ -199,14 +151,9 @@ test('evidence: treeHash recorded in persisted ticket-precheck.json (vacuous-PAS
   assert.ok(blockBegin > 0 && blockEnd > blockBegin, 'wiring block present');
   assert.match(block, /git write-tree/, 'scope resolver collects git write-tree output');
   assert.match(block, /treeHash/, 'treeHash carried into persisted JSON');
-  // fail-closed: missing treeHash must not be silently empty/green
   const guard = block.match(/treeHash[\s\S]{0,200}unknown/s);
   assert.ok(guard, 'missing treeHash falls back to explicit unknown (fail-closed)');
 });
-
-// ── Issue #109 Task 2: issue-premise precheck wiring (Request→Estimate) ──
-// stale (closed+merged issue) / duplicate (open PR) dispatch を機械検出して
-// Estimate 以降の dispatch を拒否する。fail-closed: gh 失敗は FAIL verdict。
 
 test('issuePremise wiring: marker block sits inside ticket-precheck wiring, before Estimate', () => {
   const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
@@ -224,7 +171,6 @@ test('issuePremise wiring: inline pure fn evaluates gh/git/PR evidence', () => {
   const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
   const end = fpSrc.indexOf('[issue-premise-wiring-end]');
   const block = fpSrc.slice(begin, end);
-  // 定義は前方 [ticket-premise] 一元化ブロック内 (二重宣言解消後)。両方を検証:
   assert.match(fpSrc, /const evaluateIssuePremise/, 'evaluateIssuePremise defined inline (unified block)');
   assert.match(block, /evaluateIssuePremise\(\{/, 'evaluateIssuePremise invoked with object evidence');
   assert.match(block, /gh issue view/, 'gh issue view (state/closedAt) collected');
@@ -261,20 +207,12 @@ test('issuePremise wiring: fail-closed — gh failure surfaces as FAIL via malfo
   const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
   const end = fpSrc.indexOf('[issue-premise-wiring-end]');
   const block = fpSrc.slice(begin, end);
-  // wiring must guard missing/unfetchable evidence and pass it through the
-  // pure fn (which fails-closed on malformed input), never bypass it.
   assert.match(block, /issueState/, 'issueState field mapped from gh evidence');
   assert.match(block, /linkedBranchesContainIssue/, 'linkedBranchesContainIssue field mapped');
   assert.match(block, /openPRs/, 'openPRs field mapped');
   const bypass = block.match(/verdict\s*=\s*'PASS'/);
   assert.equal(bypass, null, 'no hardcoded PASS bypass of evaluateIssuePremise');
 });
-
-// ── Issue #150 Task 2: continuation subject-PR duplicate-exemption wiring ──
-// PM チケットの ticketKind / subjectPrNumber を evaluateIssuePremise へ配線し、
-// continuation チケットが自分の subject open PR で duplicate 判定されて
-// 自己 BLOCK する (wf_704cd835-cbd 再現) のを解消する。例外適用の判定根拠は
-// evidence JSON へ永続し機械検証可能にする (自己申告不可)。
 
 test('issuePremise wiring (#150): call site passes ticket.ticketKind and ticket.subjectPrNumber', () => {
   const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
@@ -289,13 +227,6 @@ test('issuePremise wiring (#150): call site passes ticket.ticketKind and ticket.
 });
 
 test('issuePremise wiring (#150): schema-null subjectPrNumber normalized to undefined at wiring boundary', () => {
-  // PM schema declares subjectPrNumber optional with type ['number','string','null']:
-  // null is the structured-output "value absent" representation. Passing it raw
-  // would treat every field-omitting ticket as "declared-but-malformed" and
-  // unconditionally FAIL (false fail-closed — the exact Issue #131 family bug
-  // this fix targets). The wiring must map null -> undefined (= declared-absent
-  // = legacy behavior). Non-null malformed values still reach the pure fn and
-  // FAIL there — no fail-open.
   const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
   const end = fpSrc.indexOf('[issue-premise-wiring-end]');
   const block = fpSrc.slice(begin, end);
@@ -318,10 +249,6 @@ test('PM schema (#150): optional subjectPrNumber declared, required array unchan
     /subjectPrNumber:\s*\{\s*type:\s*\['number',\s*'string',\s*'null'\]\s*\}/,
     'subjectPrNumber property declared with type [number, string, null]'
   );
-  // required MUST stay exactly the Issue #104 shape — pm-ticket-files.test.mjs
-  // anchors this regex (undeclared/unmodifiable file). subjectPrNumber is
-  // OPTIONAL only; new-implementation and branch-only continuation tickets
-  // legitimately omit it.
   assert.match(
     block,
     /required:\s*\['title',\s*'priority',\s*'summary',\s*'files',\s*'ticketKind'\]/,
@@ -335,7 +262,6 @@ test('PM prompt (#150): continuation branch instructs returning subject open PR 
   const begin = fpSrc.indexOf('// [pm-ticket-files-begin]');
   const end = fpSrc.indexOf('// [pm-ticket-files-end]');
   const block = fpSrc.slice(begin, end);
-  // The instruction lives in the isBacklogPick (continuation/"next") branch.
   const branchAt = block.indexOf('${isBacklogPick');
   assert.ok(branchAt > 0, 'continuation branch found in PM prompt');
   const branch = block.slice(branchAt, branchAt + 3000);

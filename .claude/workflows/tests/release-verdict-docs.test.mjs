@@ -1,18 +1,3 @@
-// TDD tests for Issue #152 Task 4: documentation reconciliation (FP-2 applied note).
-//  (a) S2-GATE-FALSE-POSITIVE-FIX-PROPOSAL.md FP-2 must carry an "applied (Issue #152)"
-//      status of the same shape as the FP-1 P-007/#91 note: an 適用済み quote block
-//      referencing Issue #152, the actually implemented verdict-persistence mechanism
-//      (PR review COMMENT with a leading machine-readable VERDICT line,
-//      .omc/logs/{run-id}/release-review-verdicts.md, gate-verdicts.json, and
-//      consensus-actual-verdict interpolation in the release prompt), the wiring
-//      tests, and the approval trail.
-//  (b) .claude/rules/pipeline-evidence-verification.md §1.1 must add a
-//      Release Review verdict / Commit Gate verdict row (PR review COMMENT or the
-//      persisted verdict files) and codify that the release prompt gate description
-//      must interpolate the consensus actual verdicts — fixed strings like
-//      "all GO" are forbidden unless every lane is actually GO.
-//
-// Run: node --test .claude/workflows/tests/release-verdict-docs.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -29,12 +14,9 @@ const rules = readFileSync(
   'utf8',
 );
 
-// FP-2 section slice: between the FP-2 and FP-3 headings (FP-1's applied block
-// must not satisfy FP-2 assertions).
 const fp2 =
   s2doc.split('## FP-2:')[1]?.split('## FP-3:')[0] ??
   assert.fail('S2 doc must have an FP-2 section followed by an FP-3 section');
-// §1.1 slice: between the 1.1 and 1.2 headings.
 const sect11 =
   rules.split('### 1.1')[1]?.split('### 1.2')[0] ??
   assert.fail('rules doc must have a §1.1 section followed by §1.2');

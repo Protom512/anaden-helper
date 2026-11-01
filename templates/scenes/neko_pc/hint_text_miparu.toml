@@ -1,0 +1,8 @@
+name      = "NekoHintMiparuPc"
+state     = "neko_diary_pc"
+algorithm = "ccoeff"
+template  = "hint_text_miparu.png"
+roi       = [566, 148, 132, 62]
+threshold = 0.90
+action    = { type = "do_nothing" }
+next      = []

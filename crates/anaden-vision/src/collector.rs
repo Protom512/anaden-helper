@@ -1,96 +1,51 @@
-//! 探索的テンプレート自動収集エンジン。
-//!
-//! キャプチャした画面画像をグループ化し、安定領域をテンプレートとして抽出し、
-//! 厳格な検証（感度＋特異性）を通過したものだけを保存する。
-//!
-//! ## 設計方針: 確認不当（誤検出）を防ぐ
-//!
-//! 1. テンプレート候補は **自分の画面で常にマッチ** すること（感度 ≥ 0.90）
-//! 2. テンプレート候補は **別の画面で絶対にマッチしない** こと（特異性 < 0.70）
-//! 3. 両方を満たしたものだけがテンプレートとして採用される
-
 use image::{DynamicImage, GrayImage};
 use tracing::{debug, info, warn};
 
 use crate::matcher::TemplateMatcher;
 
-// ─── 定数 ───
-
-/// 類似度閾値: この値以上なら同じグループ（同じ画面状態）
 const SAME_GROUP_THRESHOLD: f32 = 0.95;
 
-/// 類似度閾値: この値未満なら別グループ（画面が変わった）
 const DIFF_GROUP_THRESHOLD: f32 = 0.80;
 
-/// グループ化に使うダウンスケール倍率
 const GROUP_COMPARE_DOWNSCALE: u32 = 16;
 
-/// 安定タイル抽出の最小グループサイズ（これ未満のキャプチャ数はスキップ）
 const MIN_GROUP_SIZE: usize = 3;
 
-/// タイルのサイズ（幅、高さ）
 const TILE_SIZE: u32 = 150;
 
-/// タイルのステップ（オーバーラップ量 = TILE_SIZE - TILE_STEP）
 const TILE_STEP: u32 = 75;
 
-/// 安定と判定するピクセル分散の閾値（0-255 のスケール）
 const STABLE_VARIANCE_THRESHOLD: f32 = 15.0;
 
-/// 感度チェック: 自グループで最低この信頼度が必要
 const SENSITIVITY_THRESHOLD: f32 = 0.90;
 
-/// 特異性チェック: 他グループでこの信頼度未満である必要がある
 const SPECIFICITY_THRESHOLD: f32 = 0.70;
 
-/// グループあたりの最大テンプレート数
 const MAX_TEMPLATES_PER_GROUP: usize = 5;
 
-// ─── データ構造 ───
-
-/// 同じ画面状態のキャプチャ群。
 #[derive(Debug)]
 pub struct ScreenGroup {
-    /// グループ内のキャプチャ画像
     pub captures: Vec<DynamicImage>,
-    /// グループのインデックス（0始まり）
     pub index: usize,
 }
 
-/// テンプレート候補のタイル。
 #[derive(Debug)]
 pub struct TileCandidate {
-    /// タイル画像
     pub image: DynamicImage,
-    /// 元画像上の位置 (x, y)
     pub position: (u32, u32),
-    /// 安定性スコア（分散の逆数。高いほど安定）
     pub stability: f32,
-    /// エッジ密度（高いほど識別的）
     pub edge_density: f32,
 }
 
-/// テンプレートの検証結果。
 #[derive(Debug)]
 pub struct VerifyResult {
-    /// テンプレート画像
     pub image: DynamicImage,
-    /// 元画像上の位置
     pub position: (u32, u32),
-    /// 自グループでの最低信頼度
     pub own_best_confidence: f32,
-    /// 他グループでの最高信頼度
     pub other_worst_confidence: f32,
-    /// 検証通過かどうか
     pub passed: bool,
 }
 
-// ─── 公開API ───
-
-/// 2つの画像の類似度を計算する（0.0〜1.0）。
-///
-/// ダウンスケールしてグレースケール変換後、
-/// 平均絶対誤差（MAE）を計算し `1.0 - mae/255` で類似度とする。
 pub fn compute_similarity(img1: &DynamicImage, img2: &DynamicImage) -> f32 {
     let w = (img1.width().max(img2.width()) / GROUP_COMPARE_DOWNSCALE).max(1);
     let h = (img1.height().max(img2.height()) / GROUP_COMPARE_DOWNSCALE).max(1);
@@ -120,10 +75,6 @@ pub fn compute_similarity(img1: &DynamicImage, img2: &DynamicImage) -> f32 {
     1.0 - (mae / 255.0)
 }
 
-/// キャプチャ画像のストリームをグループ化する。
-///
-/// 連続する画像の類似度が高い（同じ画面）ものを同じグループにまとめる。
-/// 画面が変わると新しいグループが開始される。
 pub fn group_captures(captures: Vec<DynamicImage>) -> Vec<ScreenGroup> {
     if captures.is_empty() {
         return vec![];
@@ -140,20 +91,15 @@ pub fn group_captures(captures: Vec<DynamicImage>) -> Vec<ScreenGroup> {
         let sim = compute_similarity(last_img, img);
 
         if sim >= SAME_GROUP_THRESHOLD {
-            // 同じ画面 → 現在のグループに追加
             groups.last_mut().unwrap().captures.push(img.clone());
         } else if sim < DIFF_GROUP_THRESHOLD {
-            // 明確に別の画面 → 新グループ
             let new_index = groups.len();
             groups.push(ScreenGroup {
                 captures: vec![img.clone()],
                 index: new_index,
             });
         } else {
-            // 境界付近: 直前のグループが1枚だけなら上書き、
-            // 複数枚あれば遷移中として新しいグループ
             if groups.last().unwrap().captures.len() <= 1 {
-                // 直前も1枚しかない → 遷移中のフレーム。現在のグループを上書き
                 groups.last_mut().unwrap().captures.clear();
                 groups.last_mut().unwrap().captures.push(img.clone());
             } else {
@@ -166,7 +112,6 @@ pub fn group_captures(captures: Vec<DynamicImage>) -> Vec<ScreenGroup> {
         }
     }
 
-    // インデックスを再採番
     for (i, g) in groups.iter_mut().enumerate() {
         g.index = i;
     }
@@ -185,10 +130,6 @@ pub fn group_captures(captures: Vec<DynamicImage>) -> Vec<ScreenGroup> {
     groups
 }
 
-/// グループから安定したテンプレート候補を抽出する。
-///
-/// 画面をオーバーラップ付きタイルに分割し、
-/// グループ内全キャプチャでピクセル分散が低い（安定した）タイルを候補とする。
 pub fn extract_stable_tiles(group: &ScreenGroup) -> Vec<TileCandidate> {
     if group.captures.len() < MIN_GROUP_SIZE {
         debug!(
@@ -203,12 +144,10 @@ pub fn extract_stable_tiles(group: &ScreenGroup) -> Vec<TileCandidate> {
     let ref_img = &group.captures[0];
     let (img_w, img_h) = (ref_img.width(), ref_img.height());
 
-    // グレースケールに変換
     let grays: Vec<GrayImage> = group.captures.iter().map(|img| img.to_luma8()).collect();
 
     let mut candidates: Vec<TileCandidate> = Vec::new();
 
-    // タイルグリッドを走査
     let mut y = 0u32;
     while y + TILE_SIZE <= img_h {
         let mut x = 0u32;
@@ -230,7 +169,6 @@ pub fn extract_stable_tiles(group: &ScreenGroup) -> Vec<TileCandidate> {
         y += TILE_STEP;
     }
 
-    // エッジ密度順 → 安定性順でソート（識別的で安定なものを優先）
     candidates.sort_by(|a, b| {
         b.edge_density
             .partial_cmp(&a.edge_density)
@@ -246,16 +184,11 @@ pub fn extract_stable_tiles(group: &ScreenGroup) -> Vec<TileCandidate> {
     candidates
 }
 
-/// 感度チェックの結果: 自グループ全キャプチャでの最小 confidence と全通過フラグ。
 struct SensitivityCheck {
-    /// 自グループ内の最小 confidence (マッチ失敗があれば [`f32::MAX`] のまま)。
     min_conf: f32,
-    /// 全キャプチャで閾値以上にマッチしたか。
     all_pass: bool,
 }
 
-/// 感度チェック: 自グループの全キャプチャで confidence ≥ SENSITIVITY_THRESHOLD
-/// となること。1 枚でも失敗したらそこで打ち切る。
 fn check_sensitivity(
     candidate: &TileCandidate,
     own_group: &ScreenGroup,
@@ -287,16 +220,11 @@ fn check_sensitivity(
     }
 }
 
-/// 特異性チェックの結果: 他グループ代表画像での最大 confidence と全通過フラグ。
 struct SpecificityCheck {
-    /// 他グループ代表画像内の最大 confidence。
     max_conf: f32,
-    /// どのグループでも閾値未満だったか。
     all_pass: bool,
 }
 
-/// 特異性チェック: 他グループの代表キャプチャ (1 枚目) で
-/// confidence < SPECIFICITY_THRESHOLD となること。
 fn check_specificity(
     candidate: &TileCandidate,
     other_groups: &[&ScreenGroup],
@@ -304,7 +232,6 @@ fn check_specificity(
 ) -> SpecificityCheck {
     let mut max_conf = 0.0f32;
     for other_group in other_groups {
-        // 各グループの代表画像（1枚目）でチェック
         let representative = &other_group.captures[0];
         if let Some(m) = matcher.find_best_match(representative, &candidate.image) {
             max_conf = max_conf.max(m.confidence.0);
@@ -330,10 +257,6 @@ fn check_specificity(
     }
 }
 
-/// テンプレート候補を検証する。
-///
-/// 感度チェック: 自グループの全キャプチャで confidence ≥ SENSITIVITY_THRESHOLD
-/// 特異性チェック: 他グループの代表キャプチャで confidence < SPECIFICITY_THRESHOLD
 pub fn verify_templates(
     candidates: Vec<TileCandidate>,
     own_group: &ScreenGroup,
@@ -386,10 +309,6 @@ pub fn verify_templates(
     verified
 }
 
-/// 全グループに対してテンプレート抽出＋検証を実行する。
-///
-/// 返り値: (グループインデックス, 検証結果) のリスト。
-/// 検証通過したものだけが含まれる。
 pub fn collect_templates(groups: &[ScreenGroup]) -> Vec<(usize, Vec<VerifyResult>)> {
     let matcher = TemplateMatcher::with_defaults();
     let mut results = Vec::new();
@@ -436,23 +355,15 @@ pub fn collect_templates(groups: &[ScreenGroup]) -> Vec<(usize, Vec<VerifyResult
     results
 }
 
-// ─── 内部関数 ───
-
-/// タイルの安定性とエッジ密度を計算する。
-///
-/// 安定性: グループ内全キャプチャ間でのピクセル分散の逆。
-/// エッジ密度: 隣接ピクセル差分の平均（高いほど識別的）。
 fn compute_tile_metrics(grays: &[GrayImage], x: u32, y: u32, size: u32) -> (f32, f32) {
     let n = grays.len() as f32;
     if n < MIN_GROUP_SIZE as f32 {
         return (0.0, 0.0);
     }
 
-    // 各ピクセル位置の分散を計算
     let mut total_variance: f32 = 0.0;
     let mut pixel_count: u32 = 0;
 
-    // エッジ密度（代表画像=最初の画像で計算）
     let mut edge_sum: f32 = 0.0;
     let ref_gray = &grays[0];
 
@@ -461,7 +372,6 @@ fn compute_tile_metrics(grays: &[GrayImage], x: u32, y: u32, size: u32) -> (f32,
             let gx = x + px;
             let gy = y + py;
 
-            // 分散計算
             let mut sum: f32 = 0.0;
             let mut sum_sq: f32 = 0.0;
             for gray in grays {
@@ -473,7 +383,6 @@ fn compute_tile_metrics(grays: &[GrayImage], x: u32, y: u32, size: u32) -> (f32,
             let variance = (sum_sq / n) - (mean * mean);
             total_variance += variance;
 
-            // エッジ密度（水平・垂直勾配の平均）
             if px > 0 && py > 0 {
                 let curr = ref_gray.get_pixel(gx, gy)[0] as f32;
                 let left = ref_gray.get_pixel(gx - 1, gy)[0] as f32;
@@ -491,14 +400,12 @@ fn compute_tile_metrics(grays: &[GrayImage], x: u32, y: u32, size: u32) -> (f32,
         f32::MAX
     };
 
-    // 安定性: 分散が低いほど安定
     let stability = if avg_variance < STABLE_VARIANCE_THRESHOLD {
         1.0 / (1.0 + avg_variance)
     } else {
-        0.0 // 分散が大きすぎる → 不安定
+        0.0
     };
 
-    // エッジ密度（0-255 スケール）
     let edge_density = if pixel_count > 0 {
         edge_sum / pixel_count as f32 / 255.0
     } else {
@@ -507,8 +414,6 @@ fn compute_tile_metrics(grays: &[GrayImage], x: u32, y: u32, size: u32) -> (f32,
 
     (stability, edge_density)
 }
-
-// ─── テスト ───
 
 #[cfg(test)]
 mod tests {
@@ -596,25 +501,19 @@ mod tests {
 
     #[test]
     fn extract_stable_tiles_from_uniform_group() {
-        // 全く同じ画像（真っ白）のグループ → 全ピクセル分散ゼロ → 安定
         let mut captures = Vec::new();
         for _ in 0..5 {
             captures.push(white_image(600, 270));
         }
         let group = ScreenGroup { captures, index: 0 };
         let _tiles = extract_stable_tiles(&group);
-        // 真っ白画像はエッジ密度がほぼゼロなので、候補が少ないはず
-        // （edge_density > 0.01 の条件で除外される）
-        // これは期待される動作: 真っ白な領域はテンプレートとして役に立たない
     }
 
     #[test]
     fn extract_stable_tiles_with_content() {
-        // 異なる内容のタイルを含む画像
         let mut captures = Vec::new();
         for _ in 0..5 {
             let mut img = RgbImage::new(300, 200);
-            // 左上に黒い四角（安定した特徴）
             for y in 10..60 {
                 for x in 10..60 {
                     img.put_pixel(x, y, image::Rgb([0, 0, 0]));
@@ -624,7 +523,6 @@ mod tests {
         }
         let group = ScreenGroup { captures, index: 0 };
         let tiles = extract_stable_tiles(&group);
-        // 黒い四角を含むタイルが候補として抽出されるはず
         assert!(
             !tiles.is_empty(),
             "Group with stable content should produce tile candidates"
@@ -633,7 +531,6 @@ mod tests {
 
     #[test]
     fn verify_rejects_template_matching_other_group() {
-        // グループA: 黒画像
         let group_a = ScreenGroup {
             captures: vec![
                 black_image(300, 200),
@@ -642,7 +539,6 @@ mod tests {
             ],
             index: 0,
         };
-        // グループB: 白画像
         let group_b = ScreenGroup {
             captures: vec![
                 white_image(300, 200),
@@ -654,7 +550,6 @@ mod tests {
 
         let matcher = TemplateMatcher::threshold_only(MatchConfidence::new(0.5));
 
-        // グループAの黒いタイル候補
         let candidate = TileCandidate {
             image: black_image(50, 50),
             position: (0, 0),
@@ -664,7 +559,6 @@ mod tests {
 
         let results = verify_templates(vec![candidate], &group_a, &[&group_b], &matcher);
 
-        // 黒いタイルは白い画像にマッチしない → 特異性OK → 通過するはず
         assert_eq!(results.len(), 1, "Should have 1 result");
         assert!(
             results[0].passed,

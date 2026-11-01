@@ -1,12 +1,3 @@
-//! StudioApp 本体・モード・エンジン種別・定数 (Issue #175: app_state.rs 分割)。
-//!
-//! GUI 全体状態 [`StudioApp`] (構造体 + 構築) とモード ([`AppMode`])・
-//! マッチエンジン種別 (EngineKind・pub(crate)) およびテンプレート保存・
-//! ヒートマップ計算の定数を定義する。接続状態は [`crate::app_state_connection`]、
-//! pipeline task 構築・保存は [`crate::app_state_pipeline_task`]。
-//! UI 描画 impl は app_ui 系、状態操作 impl (キュー実行・ファイル入出力) は
-//! app.rs に置く。呼び出し元互換の re-export は [`crate::app_state`] (facade)。
-
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::mpsc::{self, Receiver, SyncSender};
@@ -28,51 +19,31 @@ use crate::scoring::Discrimination;
 use crate::source::LiveCapture;
 use crate::tasks::QueueExec;
 
-/// ヒートマップ計算用のダウンスケール倍率。
-/// imageproc の match_template は O(W·H·w·h) の総当たりのため、フル解像度では重い。
-/// 4倍縮小で速度と位置精度を両立する（位置精度 ±4px）。
 pub(crate) const HEATMAP_DOWNSCALE: u32 = 4;
 
-/// Tasks ペインのログチャネル容量 (reader スレッド try_send / UI 毎フレーム drain)。
-/// runner.rs の LOG_CHANNEL_CAPACITY と同値 (bounded・best-effort 破棄契約)。
 const TASK_LOG_CHANNEL_CAPACITY: usize = 1024;
 
-/// テンプレート保存時の状態選択肢。TemplateStore の parse_state_from_dir_name と整合。
 pub(crate) const STATE_OPTIONS: &[&str] = &[
     "title", "field", "loading", "battle", "fishing", "menu", "dialog", "unknown",
 ];
 
-/// tpl_name 未入力時のフォールバック・フォーム初期値として使う既定テンプレート/
-/// task 名 (Issue #180 minor-7)。パイプラインノード命名規約
-/// ([`crate::scenario_load::task_name_issue`]: PascalCase 強制・連番禁止・
-/// 過汎用名禁止) に適合する値であること (app.rs のテストで機械保証)。
 pub(crate) const DEFAULT_TEMPLATE_NAME: &str = "MyFirstTapPc";
 
-/// GUI のモード。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum AppMode {
-    /// テンプレート作成（ROI選択＋識別力評価）。
     Authoring,
-    /// 実演オーサリング (Issue #190: ライブビューでタップ/領域を積み上げて
-    /// シナリオ化 + トグル制御の実機入力注入)。
     LiveAuthoring,
-    /// バッチ評価（混同行列）。
     Batch,
 }
 
-/// 識別力評価に使うマッチエンジン。コンボでライブ切替する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub(crate) enum EngineKind {
-    /// imageproc 正規化SSE（絶対輝度差）。現行ベースライン。
     Sse,
-    /// TM_CCOEFF_NORMED（輝度シフトにロバスト）。
     #[default]
     Ccoeff,
 }
 
 impl EngineKind {
-    /// TemplateSpec.method / 実行エンジンの方式文字列へ変換する。
-    /// library::TemplateSpec の method 文字列仕様（"sse" / "ccoeff"）と完全一致。
     pub(crate) fn method_str(self) -> &'static str {
         match self {
             EngineKind::Sse => "sse",
@@ -81,100 +52,48 @@ impl EngineKind {
     }
 }
 
-/// GUI 全体の状態。
-///
-/// フィールドは sibling モジュール (app.rs / app_ui.rs) の impl から直接
-/// 操作するため `pub(crate)`。クレート外へは漏らさない。
 pub struct StudioApp {
-    /// 編集中のスクリーンショット。
     pub(crate) screenshot: Option<Arc<DynamicImage>>,
-    /// スクリーンショットの表示用テクスチャ。
     pub(crate) screenshot_tex: Option<egui::TextureHandle>,
-    /// ドラッグROI編集状態。
     pub(crate) roi: RoiEdit,
-    /// 最後にスコア計算したROI（変化検出用）。
     pub(crate) scored_roi: Option<ScreenRegion>,
-    /// 正例画像（同じ画面状態）。フォルダ単位で読込。
     pub(crate) positives: Vec<Arc<DynamicImage>>,
-    /// 負例画像（別画面状態）。
     pub(crate) negatives: Vec<Arc<DynamicImage>>,
-    /// 直近の識別力評価結果。
     pub(crate) discrimination: Option<Discrimination>,
-    /// 現在選択中のエンジン種別（コンボで切替）。engine 再構築の基。
     pub(crate) engine_kind: EngineKind,
-    /// 認識エンジン（閾値0・1/2ダウンスケールで生スコアを高速に返す）。
     pub(crate) engine: Box<dyn VisionEngine>,
-    /// ヒートマップ計算用エンジン（閾値0・1/4ダウンスケールでスコアマップ全体を算出）。
     pub(crate) heatmap_engine: Box<dyn VisionEngine>,
-    /// ヒートマップテクスチャ（ROI解放時に更新）。
     pub(crate) heatmap_tex: Option<egui::TextureHandle>,
-    /// ヒートマップが対応する探索領域（元画像座標）。
     pub(crate) heatmap_search: ScreenRegion,
-    /// テンプレートの最良マッチ位置（元画像座標・ROI解放時に更新）。
     pub(crate) best_match: Option<ScreenRegion>,
-    /// 保存時のテンプレート名入力。空欄時は [`DEFAULT_TEMPLATE_NAME`]
-    /// (命名規約適合) を採用する。
     pub(crate) tpl_name: String,
-    /// 保存時の状態選択（STATE_OPTIONS のインデックス）。
     pub(crate) tpl_state_idx: usize,
-    /// テンプレート保存先ディレクトリ。
     pub(crate) save_dir: PathBuf,
-    /// 現在のモード。
     pub(crate) mode: AppMode,
-    /// バッチ評価のテストフォルダ（`<dir>/<label>/*.png`）。
     pub(crate) test_dir: PathBuf,
-    /// バッチ評価の決定閾値。
     pub(crate) batch_threshold: f32,
-    /// バッチ評価結果。
     pub(crate) batch_result: Option<ConfusionMatrix>,
-    /// PC版(Windows)バックエンドの対象 exe 名。
-    /// (Issue #188 で取得元 target フィールドは Windows 固定化に伴い削除)
     pub(crate) win_exe: String,
-    /// ライブキャプチャ（稼働中のみ）。
     pub(crate) live: Option<LiveCapture>,
-    /// 720p 基準への解像度正規化スケーラ（TASK-009）。
     pub(crate) scaler: ScreenScaler,
-    /// ROI自動提案の候補リスト（ROI候補ボタン押下で生成）。
     pub(crate) proposals: Vec<Proposal>,
-    /// ROI候補提案の計算中フラグ（別スレッドで propose 実行中）。
     pub(crate) proposing: bool,
-    /// 別スレッドでの propose 計算結果を受信する channel。
-    /// 計算未依頼時・受信済み時は空（Option で所有権の有無を表現）。
     pub(crate) proposal_rx: Option<Receiver<Vec<Proposal>>>,
-    /// ステータスメッセージ。
     pub(crate) status: String,
-    /// 接続状態 (実機/プロセス検出チェック結果)。Issue #139 T3。
     pub(crate) connection: ConnectionStatus,
-    /// pipeline task 保存先ディレクトリ (UC-3: 作成タブ → pipeline TOML 保存)。
     pub(crate) task_dir: PathBuf,
-    /// pipeline task の認識成功時アクション選択 (UC-3)。
     pub(crate) task_action: PipelineActionKind,
-    /// シナリオ作成パネル (Issue #160 T3: UC-1/UC-2 Authoring 埋め込み)。
-    /// ドメインは scenario_ui、ここは配線のみ。
     pub(crate) scenario: crate::scenario_ui::ScenarioPanel,
-    /// 実演オーサリングパネル (Issue #190 Shard 2/3)。ドメインは authoring_ui
-    /// (純モデル) + authoring_coords (座標変換)、描画は app_ui_live。
     pub(crate) live_authoring: crate::authoring_ui::AuthoringPanel,
-    /// MAA 型タスク一覧の定義リスト (Issue #144)。None = 未読込。
     pub(crate) task_defs: Option<crate::tasks::TaskListState>,
-    /// チェック順逐次実行キューの状態機械 (Issue #154 Shard 1)。None = 未開始。
     pub(crate) task_queue: Option<QueueExec>,
-    /// Tasks ペイン専有の子プロセス管理 (runner とは独立・Issue #154 Shard 1)。
     pub(crate) task_child: ChildProcess,
-    /// Tasks ペイン専有のログバッファ (reader → channel → drain)。
     pub(crate) task_log: SharedLogBuffer,
-    /// ログイベント送信口 (stdout/stderr reader 接続・キュー実行で再利用)。
     pub(crate) task_log_tx: SyncSender<LogEvent>,
-    /// ログイベント受信口 (毎フレーム drain・Exit 観測がキュー進行の契機)。
     pub(crate) task_log_rx: Receiver<LogEvent>,
-    /// UI 描画用ログスナップショット (drain 毎に更新)。
     pub(crate) task_log_snapshot: Vec<LogEntry>,
-    /// スナップショット差分更新用の改訂番号キャッシュ (Issue #160 UC-5:
-    /// 新着行のないフレームの全行 clone を回避。LogBuffer::revision と比較)。
     pub(crate) task_log_revision: u64,
-    /// ログの自動スクロール追従 (log_view.rs の純ロジック再用・UC-4)。
     pub(crate) task_scroll: AutoScrollFollow,
-    /// anaden CLI 実行ファイル (spawn 時の program)。
     pub(crate) anaden_program: String,
 }
 
@@ -184,11 +103,6 @@ impl Default for StudioApp {
     }
 }
 
-/// PC版(Windows)バックエンドの既定 exe 名を返す。
-///
-/// Windows ビルドでは anaden-device の DEFAULT_PROCESS_NAME("AnotherEden.exe") を使い、
-/// Linux ビルドでは同定数が存在しないため同一の固定文字列を使う(Linux では windows
-/// バックエンドが選択できないので実行されることはなく、GUI 表示用の初期値のみ)。
 fn default_win_exe() -> String {
     #[cfg(windows)]
     {
@@ -201,12 +115,8 @@ fn default_win_exe() -> String {
 }
 
 impl StudioApp {
-    /// CLI 指定の exe を初期値として StudioApp を構築する。
-    /// (Issue #188 で target は Windows 固定化 — 引数は廃止。exe 未指定時は既定 exe 名)
     pub fn with_initial_target(exe: Option<String>) -> Self {
-        // engine は engine_kind（デフォルト CCOEFF）から構築。閾値0・ダウンスケール2。
         let default_kind = EngineKind::default();
-        // Tasks ペイン専有のログチャネル (reader try_send / UI drain)。
         let (task_log_tx, task_log_rx) = mpsc::sync_channel::<LogEvent>(TASK_LOG_CHANNEL_CAPACITY);
         Self {
             screenshot: None,

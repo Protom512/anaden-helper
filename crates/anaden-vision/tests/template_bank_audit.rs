@@ -1,34 +1,8 @@
-//! テンプレートバンク一括監査 (Issue #187 提案 1・2 + Issue #192 幅 fit)。
-//!
-//! Issue #184 (PR #186) の Release Review lane3 がバンク内 PNG を一括スキャンし、
-//! 無構造 (恒久 NoMatch) テンプレート (android 版 bottom_stable.png — stddev 2.89。
-//! Issue #188 で資産ごと削除済み) を発見した。#184 で導入した loader warn は
-//! 実行時にしか火かないため、CI で常時実行される **監査テスト** として資産側の
-//! 品質を固定する:
-//!
-//! - 参照抽出: `templates/pipelines/**/*.toml` + `templates/scenes/**/*.toml` の各
-//!   TOMLから template 参照を parse する (TaskDef schema の `template` キー、
-//!   または旧 schema sidecar の `<stem>.png` 慣例) → 実在 PNG を解決。
-//! - 各 PNG の輝度 stddev を [`anaden_vision::template_luma_stddev`] (Issue #184 の
-//!   単一実装) で測定し、stddev < [`anaden_vision::TEMPLATE_MIN_LUMA_STDDEV`] の
-//!   無構造テンプレートを検出する。
-//! - allowlist ([`KNOWN_UNSTRUCTURED`]) 外に無構造テンプレートがあれば FAIL する
-//!   (テスト失敗時に検出リストを表示)。逆に allowlist 登録済みテンプレートが
-//!   再撮影などで構造を取り戻した場合も FAIL させ、allowlist の陳腐化を検出する。
-//! - 全参照の needle 寸法が検出 ROI に収まるかを [`anaden_vision::needle_fits_roi`]
-//!   (Issue #187 の単一実装) で検証する (Issue #192: `nav_to_field_pc/load_game.toml`
-//!   の旧 roi 60x60 vs needle 120x120 が PR #191 lane1 で発見された検出漏れを閉じる)。
-//! - 全件一覧 (パス・stddev) と統計 (件数・最小 stddev) を stdout へ出力し、
-//!   レポートを `target/template-bank-audit-report.txt` へ書き出す (コミットされない
-//!   ビルド産物置き場。実行の evidence は「テスト green + 本レポート」)。
-
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
 use anaden_vision::{TEMPLATE_MIN_LUMA_STDDEV, needle_fits_roi, template_luma_stddev};
 
-/// 監査対象のテンプレートバンクルート (workspace `templates/`)。
-/// anaden-vision クレート (crates/anaden-vision) からは `../../templates`。
 fn templates_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -36,28 +10,12 @@ fn templates_root() -> PathBuf {
         .join("templates")
 }
 
-/// 既知の無構造テンプレート (監査 allowlist)。templates/ ルート相対・
-/// フォワードスラッシュ形式で指定する。
-///
-/// 登録条件: (1) stddev < 閾値で恒久 NoMatch が確定済み、(2) 当面の再生成が不可能。
-///
-/// 現在は空 — Issue #184 lane3 が発見した android 版 bottom_stable.png は Issue #188
-/// でテンプレート資産ごと削除した (allowlist からも除去。監査テストの stale 検出が
-/// 削除を強制した)。
 const KNOWN_UNSTRUCTURED: &[&str] = &[];
 
-/// 監査対象バンクの件数下限。参照抽出やパス解決のバグでスキャンが空になった場合の
-/// 偽 green (vacuous pass) を防ぐ fail-closed (pipeline-evidence-verification.md)。
-/// 現行バンクは 26 件 (2026-09 実測 — Issue #188 で android 版資産を削除し 31 → 26)。
-/// 大幅な減はバンク破壊を疑う。
 const MIN_AUDITED_TEMPLATES: usize = 25;
 
-/// 幅 fit 監査の対象参照数下限 (Issue #192)。stddev 監査の件数下限と同じ fail-closed
-/// 目的。現行は 33 参照 (2026-09 実測 — 共有 PNG を参照単位に数える。PNG 単位の
-/// 26 件より多い。Issue #188 で android 版 5 参照を削除し 38 → 33)。
 const MIN_AUDITED_REFERENCES: usize = 32;
 
-/// `dir` 以下の `*.toml` を再帰的に収集する (決定論的のためソート済みを返す)。
 fn collect_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;
@@ -76,11 +34,6 @@ fn collect_toml_files(dir: &Path, out: &mut Vec<PathBuf>) {
     }
 }
 
-/// パスを字句正規化する (`.`/`..` 成分の解決。symlink 解決はしない)。
-///
-/// `pipelines/fishing/../field_loop_pc/hud_tr.png` のような `..` 参照を
-/// `pipelines/field_loop_pc/hud_tr.png` へ畳み、同一物理 PNG の重複エントリを
-/// 防ぐ (共有参照は 1 エントリに集約する監査の契約)。
 fn normalize_lexical(path: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in path.components() {
@@ -97,22 +50,6 @@ fn normalize_lexical(path: &Path) -> PathBuf {
     out
 }
 
-/// TOML 1ファイルから template 参照 (実在する PNG パス + 検出 ROI) を抽出する。
-///
-/// - TaskDef schema (`templates/pipelines/*`, `scenes/{field_pc,menu_pc,title_pc}`):
-///   `template = "..."` キーを TOML 親ディレクトリ基準で解決する (`../` 参照含む)。
-///   検出 ROI はトップレベルの `roi = [x, y, w, h]` (inline `action.roi` はタップ矩形で
-///   検出 ROI ではないため対象外)。未宣言なら `None` (全面走査)。
-/// - 旧 schema (`scenes/{field,menu}` の `method=` + `[roi]` テーブル): `template`
-///   キーを持たないため、TemplateStore の sidecar 慣例 `<stem>.png` (同一ディレクトリ)
-///   を実在する場合に限り採用する。ROI は `[roi]` テーブル (x/y/width/height) から
-///   `[x, y, w, h]` 配列へ読み替える。
-/// - どちらも解決できなければ `None` (`pipeline.toml` manifest・template 未宣言 等)。
-///
-/// `template` キーが存在するのに参照先 PNG が存在しない場合と、`roi` が解釈不能な
-/// 形 (4 要素非負整数配列でも旧 schema テーブルでもない) の場合は panic する
-/// (dangling 参照・malformed roi = detect 時エラーになる実害のある資産欠陥。
-/// 監査は fail-loud)。
 fn template_ref(toml_path: &Path) -> Option<(PathBuf, Option<[u32; 4]>)> {
     let content = std::fs::read_to_string(toml_path)
         .unwrap_or_else(|e| panic!("read {}: {e}", toml_path.display()));
@@ -131,7 +68,6 @@ fn template_ref(toml_path: &Path) -> Option<(PathBuf, Option<[u32; 4]>)> {
         );
         return Some((resolved, roi));
     }
-    // 旧 schema sidecar: <stem>.png が同ディレクトリにあれば参照とみなす。
     let stem = toml_path.file_stem()?.to_str()?;
     let sidecar = toml_path
         .parent()
@@ -144,15 +80,6 @@ fn template_ref(toml_path: &Path) -> Option<(PathBuf, Option<[u32; 4]>)> {
     }
 }
 
-/// parse 済み TOML から検出 ROI を抽出する (無ければ `None` = 全面走査)。
-///
-/// 対応形式 (いずれも非負整数であること):
-/// - TaskDef schema: トップレベル `roi = [x, y, w, h]` (4 要素配列)。
-/// - 旧 schema: `[roi]` テーブルの `x` / `y` / `width` / `height`。
-///
-/// `roi` キーが存在するのにどちらの形式にも解釈できない場合は panic (fail-loud)。
-/// `action = { type = "click_rect", roi = [...] }` の inline roi はタップ矩形のため
-/// トップレベル `roi` の取得には影響しない (`value.get("roi")` はテーブル直下のみ参照)。
 fn detection_roi(value: &toml::Value, toml_path: &Path) -> Option<[u32; 4]> {
     let raw = value.get("roi")?;
     if let Some(arr) = raw.as_array() {
@@ -166,7 +93,6 @@ fn detection_roi(value: &toml::Value, toml_path: &Path) -> Option<[u32; 4]> {
                 toml_path.display()
             )
         });
-        // Err 側が Vec を返すため所有権を失わず panic メッセージに使える。
         match <[u32; 4]>::try_from(nums) {
             Ok(slice) => return Some(slice),
             Err(nums) => panic!(
@@ -197,26 +123,13 @@ fn detection_roi(value: &toml::Value, toml_path: &Path) -> Option<[u32; 4]> {
     );
 }
 
-/// 1 参照 (TOML → PNG) の監査情報 (Issue #192: roi 幅 fit 検証のため roi を保持)。
 struct TemplateRef {
-    /// 参照元 TOML (templates/ ルート相対・フォワードスラッシュ)。
     toml_rel: String,
-    /// 参照先 PNG (同上)。複数 TOML から共有参照される場合がある。
     png_rel: String,
-    /// 検出 ROI (`[x, y, w, h]`)。TOML ごとに異なりうる。未宣言なら `None` (全面走査)。
     roi: Option<[u32; 4]>,
 }
 
-/// バンク内の全 template 参照一覧 (Issue #192: stddev 監査と同じ抽出経路を使い、
-/// 二重実装による監査対象の drift を防ぐ)。
-///
-/// 参照は (TOML, PNG) 単位で保持する — 共有 PNG (version_label は 3 TOML から参照) でも
-/// roi は消費者ごとに検証する必要があるため重複排除しない (needle/roi 幅 fit は
-/// 参照単位の不変条件)。
 fn audited_references() -> Vec<TemplateRef> {
-    // root を正規化してから使う (CARGO_MANIFEST_DIR/../../templates の `..` 成分が
-    // 残ると、normalize_lexical 済みの参照解決パスと strip_prefix できず
-    // 絶対パスがキーに漏れ、allowlist/重複排除が壊れる)。
     let root = normalize_lexical(&templates_root());
     let mut tomls = Vec::new();
     for seg in ["pipelines", "scenes"] {
@@ -247,16 +160,12 @@ fn audited_references() -> Vec<TemplateRef> {
     refs
 }
 
-/// 参照されている全テンプレート PNG の「templates/ ルート相対パス → stddev」一覧。
-///
-/// 複数 TOML から共有参照される PNG (例: scenes/title_pc/version_label.png は 3 TOML
-/// から参照) は 1 エントリに重複排除する。
 fn audited_templates() -> BTreeMap<String, f32> {
     let root = normalize_lexical(&templates_root());
     let mut bank: BTreeMap<String, f32> = BTreeMap::new();
     for r in audited_references() {
         if bank.contains_key(&r.png_rel) {
-            continue; // 共有参照の重複排除 (測定済み)
+            continue;
         }
         let png = root.join(&r.png_rel);
         let img =
@@ -267,8 +176,6 @@ fn audited_templates() -> BTreeMap<String, f32> {
     bank
 }
 
-/// stddev 一覧レポート (全件 + 統計 + allowlist 状態) を構築して返す。
-/// stdout 出力と target/ 書き出しの両方で使う単一情報源。
 fn build_report(bank: &BTreeMap<String, f32>) -> String {
     let mut report = String::new();
     report.push_str(&format!(
@@ -292,9 +199,6 @@ fn build_report(bank: &BTreeMap<String, f32>) -> String {
     report
 }
 
-/// 監査レポートを `target/template-bank-audit-report.txt` へ書き出す (best-effort)。
-/// target/ は .gitignore 済み (コミットされない)。書き出し失敗は eprintln で明示
-/// するがテストは fail させない — evidence の本体は stdout 一覧とテスト green。
 fn persist_report(report: &str) {
     let target = PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -307,11 +211,6 @@ fn persist_report(report: &str) {
     }
 }
 
-/// 一括監査 (Issue #187 提案 1): 参照抽出 → stddev 測定 → 全件一覧と統計の出力。
-///
-/// カバレッジ下限 (fail-closed) を検証し、レポートを stdout + target/ へ出力する。
-/// 無構造検出の合否は `referenced_bank_has_no_unstructured_outside_allowlist` が担う
-/// (本テストは統計の取得と永続化が責務)。
 #[test]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]
@@ -330,8 +229,6 @@ fn audit_report_covers_referenced_template_bank() {
         MIN_AUDITED_TEMPLATES,
         bank.keys().collect::<Vec<_>>()
     );
-    // 最小 stddev は無構造テンプレ (allowlist) を除けば閾値超過であることを統計として
-    // 明示 (合否の詳細は allowlist テストで担保)。
     let min_structured = bank
         .iter()
         .filter(|(rel, _)| !KNOWN_UNSTRUCTURED.contains(&rel.as_str()))
@@ -345,12 +242,6 @@ fn audit_report_covers_referenced_template_bank() {
     );
 }
 
-/// 無構造テンプレート検出 (Issue #187 提案 2): stddev < 閾値のテンプレートは
-/// [`KNOWN_UNSTRUCTURED`] (allowlist) に登録されたもののみ許容する。
-///
-/// - allowlist 外の無構造 = 新規欠陥資産 → FAIL (検出リストを表示)。
-/// - allowlist 登録済みなのに構造を取り戻した (再撮影された) = stale エントリ →
-///   FAIL (allowlist からの削除を促す。stddev も表示して再撮影の確認を容易にする)。
 #[test]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]
@@ -363,7 +254,6 @@ fn referenced_bank_has_no_unstructured_outside_allowlist() {
         .map(|(rel, _)| rel)
         .collect();
 
-    // (1) allowlist 外の無構造は FAIL (検出リスト付き)。
     let unexpected: Vec<&String> = unstructured
         .iter()
         .copied()
@@ -382,9 +272,6 @@ fn referenced_bank_has_no_unstructured_outside_allowlist() {
             .collect::<Vec<_>>()
     );
 
-    // (2) allowlist 内の全エントリが実在し、かつ今も無構造であること (stale 検出)。
-    //     再撮影で構造を取り戻したテンプレートが allowlist に残ると「恒久 NoMatch
-    //     資産がある」という誤った申告になるため、削除を強制する。
     for entry in KNOWN_UNSTRUCTURED {
         match bank.get(*entry) {
             None => panic!(
@@ -402,21 +289,6 @@ fn referenced_bank_has_no_unstructured_outside_allowlist() {
     }
 }
 
-/// needle/roi 幅 fit 監査 (Issue #192): 全参照の needle PNG 寸法がその消費者 TOML の
-/// 検出 ROI に収まること。
-///
-/// needle が ROI より大きいと [`anaden_vision::needle_fits_roi`] の契約どおり cropping
-/// 済み haystack 内に needle が置けず恒久 NoMatch になる。実例:
-/// - Issue #182: 再生成 version_label 138x20 vs 旧 roi 幅 121 (テンプレ差し替えと roi
-///   更新の片側化。PR #183 で解消)。
-/// - Issue #192: `nav_to_field_pc/load_game.toml` の旧 roi [140,60,60,60] (Issue #13 の
-///   20:9 自己クロップ暫定値) vs needle title_logo_corner.png 120x120 (PR #47 が
-///   [624,263,120,120] で再クロップした際に消費者 roi を対更新せず)。PR #191 lane1
-///   が発見 — stddev 監査 (Issue #187) は needle の品質しか見ず roi との整合は
-///   検証していなかったため、本テストで参照単位の fit を機械検出する。
-///
-/// 判定は loader warn・GUI 保存経路と同じ単一実装 [`anaden_vision::needle_fits_roi`]
-/// を使う (二重実装禁止)。roi 未宣言 (`None`) = 全面走査のため常に fit。
 #[test]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]

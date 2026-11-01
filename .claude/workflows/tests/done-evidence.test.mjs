@@ -1,8 +1,3 @@
-// TDD tests for the S2 Done-evidence pure block (Issue #68 Task 1).
-// Same extraction pattern as release-precheck.test.mjs: eval the
-// marker-delimited pure block shipped in feature-pipeline.js.
-//
-// Run: node --test .claude/workflows/tests/  (or node this file)
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -27,9 +22,6 @@ const GOOD = {
   buildExitCode: 0, nextestExitCode: 0,
   passed: 120, failed: 0, skipped: 3,
   checkoutClean: true, collectedAt: '2026-08-24T00:00:00Z',
-  // Issue #97 UC-3: runTimestamp = pipeline run 開始時刻 (run metadata)。
-  // collectedAt (採取時刻) とは別物 — build/test の freshness 判定は collectedAt、
-  //「どの run の evidence か」の traceability は runTimestamp。
   runTimestamp: '2026-08-24T00:00:00Z',
 };
 
@@ -62,7 +54,6 @@ test('missing each required field → done=false, reason=missing-evidence (runTi
       throw new Error(`field ${k}: expected missing-evidence, got ${JSON.stringify(r)}`);
     }
   }
-  // runTimestamp 欠損は専用 reason (UC-3)
   const input = { ...GOOD };
   delete input.runTimestamp;
   const r = api.evaluateDoneEvidence(input);
@@ -118,8 +109,6 @@ test('negative / non-number counts → missing-evidence', () => {
   if (r.reason !== 'missing-evidence') throw new Error('non-number failed');
 });
 
-// ── Issue #97 UC-3: runTimestamp fail-closed ──
-
 test('missing runTimestamp → done=false, reason=missing-run-timestamp (UC-3 fail-closed)', () => {
   const input = { ...GOOD };
   delete input.runTimestamp;
@@ -134,8 +123,6 @@ test('empty-string runTimestamp → missing-run-timestamp (UC-3 fail-closed)', (
 });
 
 test('runTimestamp precedence: beats build-failed but not field-missing (documented order)', () => {
-  // runTimestamp 欠損は 'missing-run-timestamp' 固有 reason で報告される。
-  // 他の必須フィールド欠損 (missing-evidence) があればそちらが優先される。
   const r = api.evaluateDoneEvidence({ ...GOOD, runTimestamp: '', buildExitCode: 1 });
   if (r.reason !== 'missing-run-timestamp') throw new Error(JSON.stringify(r));
   const r2 = api.evaluateDoneEvidence({ ...GOOD, runTimestamp: '', passed: null });
@@ -159,7 +146,6 @@ test('formatEvidenceForReviewers produces capped plain-text blob', () => {
   if (blob.includes('x'.repeat(2001))) throw new Error('outputTail must be capped');
   if (!blob.includes('120') || !blob.includes('build exit=0')) throw new Error('blob must include pass count and exit codes');
   if (!blob.includes('collectedAt')) throw new Error('blob must include collectedAt');
-  // null evidence → explicit not-collected marker (fail-closed messaging)
   const missing = api.formatEvidenceForReviewers(null);
   if (!/not collected|missing/i.test(missing)) throw new Error('null evidence must say missing');
 });

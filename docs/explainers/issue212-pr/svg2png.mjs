@@ -1,6 +1,3 @@
-// figure-check が生成した Mermaid SVG を PNG にする (gh pr create --attach 用。
-// GitHub の添付アップロードは SVG を画像として受け付けないため)。
-//   node svg2png.mjs figures/xxx.svg out.png
 import { readFileSync } from 'node:fs';
 import { pathToFileURL } from 'node:url';
 import { chromium } from 'playwright';

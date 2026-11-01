@@ -1,16 +1,3 @@
-//! `anaden routine` サブコマンド (Issue #199): 複数 pipeline の連続実行。
-//!
-//! - 定義読込 + fail-closed 検証は [`anaden_engine::load_routine`] /
-//!   [`RoutineDef::validate`] へ委譲 (engine が単一情報源)。
-//! - `--dry-run` は検証 + ステップ表示のみ (デバイスに触れない)。
-//! - 実行は [`anaden_engine::run_routine`] + [`Win32RoutineInvoker`]
-//!   (PipelineDriver 駆動・[`PipelineInvoker`] 実装)。
-//! - evidence は既存規約 (`.omc/logs/{run-id}/`) に準拠し
-//!   `routine-summary.txt` + `routine-metadata.json` を永続化する。
-//! - 機械可読レポートは run と対称な既定永続化 (loop 10):
-//!   `<routine_dir>/.anaden-routine/<timestamp>/routine-report.json` +
-//!   `routine.log` (解決は [`crate::run_report::resolve_routine_artifacts`])。
-
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
@@ -21,41 +8,11 @@ use anaden_engine::{
     resolve_pipeline_dir, run_routine,
 };
 
-/// routine summary の evidence ファイル名。
 pub const ROUTINE_SUMMARY_FILE: &str = "routine-summary.txt";
-/// routine メタデータ JSON の evidence ファイル名。
 pub const ROUTINE_META_FILE: &str = "routine-metadata.json";
-/// NoMatch リカバリ発火の連続回数閾値 (`run` の既定と同一)。
 const RECOVER_NOMATCH_THRESHOLD: u32 = 5;
-/// リカバリ (ゲーム再起動) 後の起動猶予 (boot-wait) 秒数 (Issue #210)。
-///
-/// 再起動 → タイトル到達には分単位かかるため、この期間は NoMatch streak を
-/// 数えない (再起動ストーム防止)。テンプレートがマッチすれば即座に通常動作へ復帰。
-/// 実測 (issue210-verify2): grace 90s では タイトル到達 (~2分) に間に合わず
-/// 起動中のゲームが再 kill され続けたため 180s へ拡大。
 const RECOVERY_BOOT_GRACE_SECS: u64 = 180;
-// 再起動前の既存ゲームプロセス終了待ち上限 (Issue #210: 二重起動防止) は
-// main.rs の RECOVERY_EXIT_WAIT_SECS (run と同値) を crate::escalation_recovery_hook
-// 経由で共有する — routine 側には定義を残さない (単一情報源)。
 
-/// `routine` サブコマンド本体。終了コードを返す (呼出元が exit する)。
-///
-/// 終了コード契約:
-/// - 0: 全ステップが失敗なく実行完了 ([`RoutineSummary::all_ok`])
-/// - 2: 失敗ステップあり / 中断 (on_failure=stop・割り込み・invoker エラー)。
-///   MaxIterations 到達かつ fired=0 のステップ (no_fire) も失敗扱い (Issue #210)
-/// - 1: routine 読込・検証失敗等のハードエラー (anyhow Err 経由)。
-///   レポート書込失敗 (明示 `--report-file`・既定永続化とも) も 1
-///   (fail-closed — 明示指定も既定成果物も黙って捨てない。`run` と同一契約)
-///
-/// # Errors
-/// routine ファイル読込・検証失敗、evidence ディレクトリ作成失敗等の
-/// ハードエラーを anyhow で返す (panic しない)。
-///
-/// `report_file` は生の CLI フラグ (evidence コマンド全文の再現用)。
-/// `artifacts` は main.rs で解決済みの書込先 (loop 10 既定永続化 —
-/// 明示 `--report-file` 最優先 / 既定 `<routine_dir>/.anaden-routine/<ts>/` /
-/// `--no-persist` で None)。
 pub(crate) async fn run_routine_command(
     routine_path: &Path,
     dry_run: bool,
@@ -77,7 +34,6 @@ pub(crate) async fn run_routine_command(
         return Ok(0);
     }
 
-    // evidence 採取先 (無効 run-id は warn のみで継続 — `run` と同一契約)。
     let evidence_dir = evidence_run_id.and_then(|rid| {
         match crate::e2e::e2e_run_dir(&root.join(".omc").join("logs"), rid) {
             Some(dir) => {
@@ -91,13 +47,9 @@ pub(crate) async fn run_routine_command(
         }
     });
 
-    // 起動保証は routine 冒頭で1回のみ (各ステップは起動保証を呼ばない)。
     ensure_game_open().await;
 
     let invoker = Win32RoutineInvoker::new(root.clone());
-    // Ctrl+C 協調的キャンセル: シグナル受信で routine 全体を中止する
-    // (`run` の CancellationToken 配線と同旨。future を drop して driver ループを
-    // 中断するため、実行中ステップはその場で打ち切り・ゲーム側へ影響しない)。
     let summary = tokio::select! {
         _ = tokio::signal::ctrl_c() => {
             warn!("Ctrl+C 受信: routine を中止します");
@@ -119,10 +71,6 @@ pub(crate) async fn run_routine_command(
             Err(e) => warn!("routine evidence 書込失敗: {e}"),
         }
     }
-    // 機械可読レポート (03-report-channel follow-up / loop 10 既定永続化)。
-    // 書込先は main.rs で解決済みの artifacts.report_path (明示 --report-file
-    // 最優先 / 既定 <routine_dir>/.anaden-routine/<ts>/routine-report.json /
-    // --no-persist で無効)。書込失敗はハードエラー (fail-closed・exit 1)。
     if let Some(path) = artifacts.report_path.as_ref() {
         write_routine_report(path, &summary)?;
         info!("routine レポート永続化: {}", path.display());
@@ -130,8 +78,6 @@ pub(crate) async fn run_routine_command(
     Ok(exit_code)
 }
 
-/// ゲーム起動保証 (routine 冒頭 1 回)。失敗・タイムアウトは warn のみで続行
-/// (`run` の soft-fail 契約と同一)。
 async fn ensure_game_open() {
     match crate::ensure_open_outcome(std::time::Duration::from_secs(30)).await {
         Ok(outcome) => info!(
@@ -142,7 +88,6 @@ async fn ensure_game_open() {
     }
 }
 
-/// evidence ログ冒頭に残すコマンド全文 (生コマンド出力規約)。
 #[must_use]
 pub(crate) fn command_line(
     routine_path: &Path,
@@ -160,21 +105,11 @@ pub(crate) fn command_line(
     out
 }
 
-/// サマリ → 終了コードの射影 (純関数・テスト対象)。
 #[must_use]
 pub(crate) fn summary_exit_code(summary: &RoutineSummary) -> i32 {
     if summary.all_ok() { 0 } else { 2 }
 }
 
-/// routine evidence を `.omc/logs/{run-id}/` へ永続化する。
-///
-/// - `routine-summary.txt`: コマンド全文 + routine 名 + ステップ別/合計サマリ
-///   (生コマンド出力 + 機械可読な集計行)。
-/// - `routine-metadata.json`: runId / runTimestamp / command / 集計 / exitCode /
-///   recordedAtUnix (e2e メタデータと同じ手書き JSON 形式)。
-///
-/// # Errors
-/// ファイル作成・書込の io エラーを返す (panic しない)。
 pub(crate) fn write_routine_evidence(
     dir: &Path,
     routine_name: &str,
@@ -212,21 +147,12 @@ pub(crate) fn write_routine_evidence(
     Ok((summary_path, meta_path))
 }
 
-/// evidence ディレクトリ名 (= run-id) を取り出す (メタデータの runId 用)。
 fn run_id_of(dir: &Path) -> String {
     dir.file_name()
         .map(|n| n.to_string_lossy().into_owned())
         .unwrap_or_default()
 }
 
-/// routine 終了時の機械可読レポート書込 (03-report-channel follow-up)。
-///
-/// 中身は `RoutineSummary` の JSON (run の `run_report::write_report` に対応)。
-/// 親ディレクトリが無ければ作成する。書込 io エラーは呼出元へ伝播し
-/// exit 非ゼロ (fail-closed)。
-///
-/// # Errors
-/// ディレクトリ作成・JSON 化・書込の io エラーを返す (panic しない)。
 pub(crate) fn write_routine_report(path: &Path, summary: &RoutineSummary) -> std::io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -238,9 +164,7 @@ pub(crate) fn write_routine_report(path: &Path, summary: &RoutineSummary) -> std
     std::fs::write(path, json)
 }
 
-/// 本番 invoker: 各ステップを PipelineDriver (Win32) でライブ実行する。
 pub(crate) struct Win32RoutineInvoker {
-    /// pipeline_dir 解決基準の workspace ルート。
     root: PathBuf,
 }
 
@@ -273,12 +197,6 @@ impl PipelineInvoker for Win32RoutineInvoker {
     }
 }
 
-/// 1ステップを Win32 バックエンドで実行する (`run_with_windows` の routine 版)。
-///
-/// `run` サブコマンドの経路 (`run_pipeline_live`) には引数フラグ (algorithm 上書き・
-/// goal・verify 等) が直結しており契約保持のため再利用しない。本関数は routine
-/// ステップの宣言 (pipeline_dir/start_task/interval/max_iters) のみから driver を
-/// 構築する (起動保証は routine 冒頭で済み)。
 #[cfg(windows)]
 async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, RoutineError> {
     use anaden_engine::{PipelineDriver, PipelineState};
@@ -302,7 +220,6 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
 
     let capture = anaden_device::Win32Capture::default_process();
     let input = anaden_device::Win32InputExecutor::new(anaden_device::DEFAULT_PROCESS_NAME);
-    // device_width は初回 capture で実測 (PC 版は生サイズ 1258 想定・手動指定なし)。
     let probe = capture
         .capture()
         .await
@@ -316,16 +233,6 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
         step.name
     );
 
-    // NoMatch リカバリ (ゲーム再起動) — `run` の既定と同じ構成:
-    // - エスカレーション型 recovery は crate::escalation_recovery_hook (run と
-    //   routine の単一実装・Issue #210) を使う。試行番号は engine (RecoveryGuard)
-    //   が供給し、健全サイクル (テンプレートマッチ) で 1 からやり直す
-    //   (02-recovery-budget F4: 単調カウンタによる「即 kill+restart」強化の解消)。
-    // - with_recovery_grace: 再起動後の猶予は NoMatch streak を数えない
-    //   (起動猶予・マッチすれば即復帰) → 再起動ストーム防止。
-    // - with_max_recovery_attempts: 健全サイクルを挟まず連続で再起動しても
-    //   復帰しなければ RecoveryExhausted で打ち切る (run の既定と同値 —
-    //   routine ステップだけ永久再起動し続ける減衰を残さない)。
     let launcher = anaden_device::Win32Launch::default_paths();
     let recovery: Option<anaden_engine::RecoveryHook> =
         Some(crate::escalation_recovery_hook(launcher, "routine"));
@@ -338,9 +245,6 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
         device_width,
         300,
     )
-    // 誠実検証は `run` サブコマンドの既定 (true) と同一にする
-    // (PR #201 lane2 C-1: driver 既定 false のままでは routine ステップだけ
-    //  発火後のテンプレ残存検証が無効になる未文書の減衰だった)。
     .with_verify(true)
     .with_recovery_grace(std::time::Duration::from_secs(RECOVERY_BOOT_GRACE_SECS))
     .with_max_recovery_attempts(crate::DEFAULT_MAX_RECOVERY_ATTEMPTS);
@@ -354,7 +258,6 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
         .await)
 }
 
-/// 非 Windows ビルド向けフォールバック (コンパイルエラー回避・実行は fail)。
 #[cfg(not(windows))]
 async fn run_step_live(step: &RoutineStep, _root: &Path) -> Result<LoopOutcome, RoutineError> {
     Err(RoutineError::InvocationFailed {
@@ -365,7 +268,6 @@ async fn run_step_live(step: &RoutineStep, _root: &Path) -> Result<LoopOutcome, 
     })
 }
 
-/// routine 読込 + fail-closed 検証 (dry-run・実行経路共通の前段)。
 pub(crate) fn load_and_validate(routine_path: &Path) -> anyhow::Result<RoutineDef> {
     let root = crate::cli_workspace_root();
     let def = anaden_engine::load_routine(routine_path)?;
@@ -412,8 +314,6 @@ mod tests {
         }
     }
 
-    // ---- summary_exit_code (終了コード契約) ----
-
     #[test]
     fn exit_code_zero_when_all_completed() {
         let s = summary_of(vec![
@@ -444,8 +344,6 @@ mod tests {
         assert_eq!(summary_exit_code(&skipped), 2);
     }
 
-    // ---- command_line ----
-
     #[test]
     fn command_line_includes_path_and_dry_run_flag() {
         assert_eq!(
@@ -455,7 +353,6 @@ mod tests {
         assert!(command_line(Path::new("a.toml"), true, None).ends_with("--dry-run"));
     }
 
-    /// `--report-file` 指定時はコマンド全文にも残る (生コマンド出力規約)。
     #[test]
     fn command_line_includes_report_file_flag() {
         assert_eq!(
@@ -468,10 +365,6 @@ mod tests {
         );
     }
 
-    // ---- write_routine_report (report.json 書込の機械可読契約) ----
-
-    /// 書込んだ report.json は `serde_json::from_reader::<RoutineSummary>` で
-    /// 読める (studio 消費契約)。親ディレクトリは自動作成。
     #[test]
     fn write_routine_report_roundtrips_routine_summary() {
         let dir = tempfile::tempdir().unwrap();
@@ -486,8 +379,6 @@ mod tests {
         assert_eq!(back, s);
         assert_eq!(back.failed, 1, "no_fire step must survive roundtrip");
     }
-
-    // ---- write_routine_evidence (永続化形式) ----
 
     #[test]
     fn evidence_files_contain_command_summary_and_metadata() {
@@ -528,8 +419,6 @@ mod tests {
         }
     }
 
-    // ---- dry-run 経路 (実機非依存・実 routine ファイル検証) ----
-
     fn workspace_root() -> PathBuf {
         crate::cli_workspace_root()
     }
@@ -564,7 +453,6 @@ mod tests {
         assert!(text.contains("start=TapToStartPc"), "{text}");
     }
 
-    /// 不正 routine (不明 start_task) は dry-run でも fail-closed に Err。
     #[test]
     fn dry_run_rejects_unknown_start_task_fail_closed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -584,8 +472,6 @@ mod tests {
         assert!(format!("{err}").contains("GhostTask"), "{err}");
     }
 
-    /// `run_routine_command` の dry-run 経路が exit 0 で完了する (実機に触れない)。
-    /// レポート書込先が解決されていても dry-run は実行しないため書かない。
     #[tokio::test]
     async fn run_routine_command_dry_run_exits_zero() {
         let path = workspace_root()
@@ -605,7 +491,6 @@ mod tests {
         assert!(!report.exists(), "dry-run must not write report.json");
     }
 
-    /// 不正 routine の実行経路はハードエラー (Err) で抜ける。
     #[tokio::test]
     async fn run_routine_command_missing_file_is_err() {
         let result = run_routine_command(

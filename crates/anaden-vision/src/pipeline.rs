@@ -1,12 +1,3 @@
-//! 宣言的TOMLパイプライン。1つのTOMLファイル = 1つの認識タスク。
-//!
-//! TASK-008 の最初の縦スライス。テンプレート画像・ROI・閾値・アルゴリズム・状態キーを
-//! TOMLで宣言し、コード変更なしで認識タスクを定義・実行できる。
-//! Wiki [[Declarative-Tasks-Design]] の具装化。action/next/base は前方互換の Option で保持する。
-//!
-//! 本スライスの範囲: TOML1ファイル = 平坦な [`TaskDef`]。1ファイル複数タスク（サブテーブル）や
-//! action 実行・next 状態機械・base 継承解決は将来スライス。
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -24,71 +15,26 @@ use crate::engine::{SseVisionEngine, VisionEngine};
 use crate::matcher::{MatchResult, TemplateMatcher};
 use crate::template_quality::{needle_exceeds_roi_warning_for_path, unstructured_warning_for_path};
 
-/// 認識アルゴリズム。TOML の `algorithm` 文字列（`sse`/`ccoeff`）から解決する。
-///
-/// Wiki 設計の `AlgorithmType`（match_template/ocr/feature/just_return）のうち、
-/// 本スライスは既存2エンジンで実現可能な `sse`/`ccoeff` のみ。未知値はロード時エラー。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Algorithm {
-    /// imageproc 正規化SSE（[`crate::engine::SseVisionEngine`]）。
     Sse,
-    /// OpenCV 互換 TM_CCOEFF_NORMED（[`crate::ccoeff::CcoeffVisionEngine`]）。
     Ccoeff,
 }
 
-/// MAA `ProcessTaskAction`（AsstTypes.h:492-518）準拠の認識成功時アクション。
-///
-/// 本スライスでは「指示を値として表現」するまで。実際の tap/swipe 発火は範囲外
-/// （[`crate`] 外のデバイス実行層で [`anaden_core`] の入力型へ変換して発火させる）。
-///
-/// TOML ではテーブル `[action]`（`type` キー必須）で記述する。MAA の `get_action_type` と同様、
-/// 未知の `type` 文字列はロード時（[`load_pipeline`] の `toml::from_str`）エラーになる。
-///
-/// ```toml
-/// [action]
-/// type = "click_self"
-/// ```
-///
-/// 引数なしバリアント（`click_self`/`do_nothing`/`stop`）は `type` だけのテーブル。
-/// 引数付きバリアントは `roi`/`from`/`to`（[`ScreenRegion`] = `[x,y,width,height]` 整数配列）を持つ。
-///
-/// # `deny_unknown_fields` の実装上の注意
-/// serde の内部タグ付き enum（`#[serde(tag = "type")]`）では `deny_unknown_fields` が
-/// **未知フィールドを黙許する** 既知の制限がある（serde は `Content` バッファに取り込むため
-/// フィールド名を検証できない）。そのため `Action` の [`Deserialize`] は手動実装とし、
-/// `type` を取り出した残りテーブルを各バリアント構造体（`deny_unknown_fields` 付き）で
-/// 厳密に検証する。これにより未知 `type`・必須フィールド欠落・未知フィールド過剰の
-/// いずれもロード時 [`TaskDefError::ParseFailed`] となる。
-///
-/// 注: anaden-core の `InputAction` はデバイス実行用の別型（Tap/Swipe/LongPress 等）で、
-/// MAA 宣言的 Action とは責務が違うため本 enum は pipeline 内に新設する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// マッチしたテンプレート位置（[`MatchResult::region`]）をクリック。
     ClickSelf,
-    /// 静的に指定した矩形をクリック（MAA `specificRect` 相当）。
     ClickRect {
-        /// クリック対象矩形。720p（幅1280）基準 `[x, y, width, height]`。
         roi: ScreenRegion,
     },
-    /// 指定2点間をスワイプ（`special_params[0]`=duration は将来スライス）。
     Swipe {
-        /// スワイプ開始点。720p 基準 `[x, y, width, height]`。
         from: ScreenRegion,
-        /// スワイプ終点。720p 基準 `[x, y, width, height]`。
         to: ScreenRegion,
     },
-    /// 何もしない（MAA では action 省略/空文字列と同等）。
     DoNothing,
-    /// 現在のタスクフローを停止（将来: `NodeStatus::Interrupted` に伝播）。
     Stop,
 }
-
-// ---- Action の Deserialize 手動実装（deny_unknown_fields を確実に効かせる）----
-//
-// `type` キーでバリアントを分岐し、残りのキーを各バリアント構造体で検証する。
-// 各構造体に `deny_unknown_fields` を付け、未知フィールドを拒否する。
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,7 +49,6 @@ struct SwipeDef {
     to: ScreenRegion,
 }
 
-/// 引数なしバリアント用。`deny_unknown_fields` で `type` 以外の過剰キーを拒否する。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BareActionDef {}
@@ -115,7 +60,6 @@ impl<'de> Deserialize<'de> for Action {
     {
         use serde::de::Error;
 
-        // 一旦 toml::Value 相当の汎用 map として受ける（`type` を先読みするため）。
         let raw = toml::Value::deserialize(deserializer)?;
         let table = raw
             .as_table()
@@ -126,8 +70,6 @@ impl<'de> Deserialize<'de> for Action {
             .and_then(|v| v.as_str())
             .ok_or_else(|| D::Error::custom("action requires a string `type` field"))?;
 
-        // `type` 以外のキーだけを持つ部分テーブルを構築し、各バリアント構造体で検証。
-        // （`type` を取り除かないと deny_unknown_fields が `type` を未知フィールドとして弾く）
         let mut rest = toml::value::Table::new();
         for (k, v) in table {
             if k != "type" {
@@ -175,14 +117,6 @@ impl<'de> Deserialize<'de> for Action {
     }
 }
 
-/// 保存形式を手書き TOML と機械一致させるための [`Serialize`] 手動実装。
-///
-/// derive は `roi`/`from`/`to` を ScreenRegion 構造体テーブル（`[action.roi]` の
-/// `x`/`y`/`width`/`height`）として書き出すが、手書き TaskDef は serde の
-/// seq 形式受容（`visit_seq`）を利用した `[x, y, width, height]` 配列
-/// （`action = { type = "click_rect", roi = [900, 466, 30, 30] }`）で書かれている。
-/// 本実装は配列形式で書き出し、[`save_task_def`] の出力が既存手書き TaskDef と
-/// `toml::Value` として完全一致することを保証する（AC-1/AC-4 の土台）。
 impl Serialize for Action {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -190,7 +124,6 @@ impl Serialize for Action {
     {
         use serde::ser::SerializeMap;
 
-        /// ScreenRegion を `[x, y, width, height]` 配列として直列化するヘルパ。
         struct RoiArray(ScreenRegion);
 
         impl Serialize for RoiArray {
@@ -226,40 +159,22 @@ impl Serialize for Action {
     }
 }
 
-/// 1つの宣言的認識タスク。
-///
-/// 1ファイル1タスク構成（[`load_pipeline`] はディレクトリ内 `*.toml` を各1タスクとして集約）。
-/// 将来の action/next/base 継承拡張に備え、これらは `Option` で前方互換を持たせる。
-/// 本スライスの [`TaskDef::detect`] は action/next/base を **使わない**（パースして保持するだけ）。
-// PartialEq は UC-4 (Issue #160 Shard 5) のロスレス往復検証 (load -> save -> load
-// の意味比較) 用の trait 追加のみ。serde schema・直列化形式は不変。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskDef {
-    /// タスク名（= 識別子）。
     pub name: String,
-    /// 紐付ける状態キー（文字列）。GameState enum 直結は本スライス外。後段マッパが解決する。
     pub state: String,
-    /// 認識アルゴリズム。
     pub algorithm: Algorithm,
-    /// テンプレート画像パス。相対パスは TOML ファイルの親ディレクトリ基準
-    /// （[`load_pipeline`] で絶対パスに解決される）。
     pub template: PathBuf,
-    /// 720p（幅1280）基準ROI `[x, y, w, h]`。`None` なら全面。
     #[serde(default)]
     pub roi: Option<[u32; 4]>,
-    /// マッチ判定閾値 0.0..=1.0。省略時は [`MatchConfidence::DEFAULT_THRESHOLD`]（0.95）。
     #[serde(default = "default_threshold")]
     pub threshold: f32,
 
-    /// MAA baseTask 相当の継承。将来の resolve で使用。本スライスでは無視。
     #[serde(default)]
     pub base: Option<String>,
-    /// 認識成功時アクション（[`Action`]）。省略時は [`Action::DoNothing`] 扱い
-    /// （[`run_step`] で補充）。未知 `type` や必須フィールド欠落はロード時エラー。
     #[serde(default)]
     pub action: Option<Action>,
-    /// next 遷移リスト。将来の状態機械で使用。本スライスでは無視。
     #[serde(default)]
     pub next: Option<Vec<String>>,
 }
@@ -269,43 +184,14 @@ fn default_threshold() -> f32 {
 }
 
 impl TaskDef {
-    /// テンプレート画像を読み込み、algorithm + roi + threshold で認識を実行する。
-    ///
-    /// 戻り値の [`MatchResult::region`] は **入力 screenshot と同じ座標空間**の座標
-    /// （[`VisionEngine`] 仕様）。roi 指定時は cropping 後の局所座標 → 画面座標へオフセット戻しする。
-    ///
-    /// # テンプレートキャッシュ（05-template-cache / F13/F17/F19）
-    /// disk 読込+デコード、needle の Lanczos3 リサイズ、ccoeff 前処理 (`T'` 計算) は
-    /// [`prepared_template`] の (パス, norm_w, norm_h) キー + mtime 検証キャッシュで
-    /// **初回のみ**実行される。verify_after_fire の再 detect や diagnose も同一キャッシュ
-    /// を通るため、テンプレ読込・リサイズ・前処理が毎サイクル 2 倍化することはない。
-    ///
-    /// # 動的スケール（raw-1258 空間 → 正規化後画面）
-    /// PC版テンプレート/ROI は raw-1258x708 空間で定義されるが、呼出側が screenshot を
-    /// どの寸法に正規化して渡してもよい（黒帯クロップ + normalize 後は 1280x720 等）。
-    /// 本メソッドは入力 screenshot の `width()/height()` から X/Y 別比を再計算し、
-    /// [`crate::scale::roi_to_normalized`] / `crate::scale::needle_to_normalized` で
-    /// ROI・needle をその空間へ揃える。よって **detect シグネチャは不変**で、呼出側は
-    /// 正規化済み screenshot を渡すだけでよい（クロップ/resize は内部で吸収）。
-    ///
-    /// `template_root` は、`template` が相対パスの場合の解決基準（通常は TOML の親ディレクトリ）。
-    /// [`load_pipeline`] で既に絶対化済みならこの引数は使われない。
     pub fn detect(
         &self,
         screenshot: &DynamicImage,
         template_root: &Path,
     ) -> Result<Option<MatchResult>, TaskDefError> {
-        // 1+2. ROI/needle を正規化後キャプチャ寸法へ動的スケール。
-        //
-        // PC版テンプレート/ROI は raw-1258x708 空間で定義されるが、実行時キャプチャは
-        // 黒帯クロップ + normalize で 1280x720 等へ変動する。detect シグネチャは不変のまま、
-        // 入力 screenshot の width()/height()（=normalize 後寸法）から X/Y 別比を再計算して
-        // ROI・needle をその空間へ揃える（scale.rs のファクタ API）。
         let norm_w = screenshot.width();
         let norm_h = screenshot.height();
 
-        // テンプレート解決 (キャッシュ): disk 読込 + Lanczos3 リサイズ + ccoeff 前処理は
-        // (パス, norm_w, norm_h) + mtime 検証で初回のみ。読込失敗は TemplateLoadFailed。
         let tpl_path = if self.template.is_absolute() {
             self.template.clone()
         } else {
@@ -313,8 +199,6 @@ impl TaskDef {
         };
         let prepared = prepared_template(&tpl_path, norm_w, norm_h)?;
 
-        // ROI cropping（raw-1258 空間 ROI → 正規化後画面の画素座標へスケールして crop）
-        // scaled_roi はオフセット戻しにも再利用（局所座標 → 正規化後画面座標）。
         let scaled_roi = self.roi_to_region().map(|r| {
             let s = crate::scale::roi_to_normalized([r.x, r.y, r.width, r.height], norm_w, norm_h);
             ScreenRegion::new(s[0], s[1], s[2], s[3])
@@ -324,29 +208,16 @@ impl TaskDef {
             None => screenshot.clone(),
         };
 
-        // 3. algorithm 切替（既存エンジン再利用）
         let thr = MatchConfidence::new(self.threshold);
         let result = match self.algorithm {
-            // SseVisionEngine::with_defaults() は閾値0.85固定のため、TaskDef.threshold を
-            // 反映するには threshold_only で構築する。needle はキャッシュの正規化済みもの。
             Algorithm::Sse => {
                 let m = TemplateMatcher::threshold_only(thr);
                 SseVisionEngine::new(m).match_template(&work, &prepared.needle)
             }
-            // CCOEFF も downscale_factor=1（threshold_only 相当）で構築する。
-            // 設計案では downscale=2 を想定していたが、Triangle 1/2縮小は周期パターンで
-            // サブピクセル位相依存の相関低下を生じ、needle 埋込位置が奇数座標だと閾値未満に
-            // なる（位置非依存の「埋め込めば必ず一致」性質が壊れる）。宣言的タスクでは
-            // ユーザが「テンプレを埋めれば確実にマッチする」ことを期待するため、正確性を
-            // 優先して downscale=1 とする。全面走査の性能は将来スライスで ROI/解像度前提を
-            // 併用して最適化する。キャッシュの前処理済みテンプレート
-            // (match_template_prepared) を使い `T'` 計算を省略する (F13)。
             Algorithm::Ccoeff => CcoeffVisionEngine::threshold_only(thr)
                 .match_template_prepared(&work, &prepared.ccoeff),
         };
 
-        // 4. ROI オフセット戻し（cropping した場合、局所→正規化後画面座標へ）。
-        //    scaled_roi（正規化後空間の ROI）の (x,y) で戻す。
         Ok(result.map(|mut mr| {
             if let Some(r) = scaled_roi {
                 mr.region = ScreenRegion::new(
@@ -360,7 +231,6 @@ impl TaskDef {
         }))
     }
 
-    /// roi 配列 → [`ScreenRegion`]。`w`/`h` が 0 なら `None`（=全面扱い）。
     fn roi_to_region(&self) -> Option<ScreenRegion> {
         let [x, y, w, h] = self.roi?;
         if w == 0 || h == 0 {
@@ -370,53 +240,28 @@ impl TaskDef {
     }
 }
 
-/// パイプライン読込・テンプレート読込のエラー。
 #[derive(Debug, Error)]
 pub enum TaskDefError {
-    /// テンプレート画像の読込失敗。
     #[error("template load failed {path}: {reason}")]
     TemplateLoadFailed { path: PathBuf, reason: String },
 
-    /// TOML 解析失敗（構文エラー・未知キー・未知 algorithm・型不一致を含む）。
     #[error("TOML parse failed {path}: {reason}")]
     ParseFailed { path: PathBuf, reason: String },
 
-    /// 保存（シリアライズ・書き出し）失敗。UC-1 シナリオ作成 GUI の save 経路
-    /// （[`save_task_def`] / [`save_pipeline_manifest`]）。
     #[error("save failed: {reason}")]
     SaveFailed { reason: String },
 }
 
-// ---- 05-template-cache: PreparedTemplate キャッシュ (F13/F17/F19) ----
-//
-// F13/F17/F19: TaskDef::detect は毎サイクル「テンプレート PNG の disk 読込+デコード →
-// needle の Lanczos3 リサイズ → ccoeff 前処理 (T' 計算)」を繰り返していた。さらに
-// verify_after_fire は同タスクの detect をもう 1 度呼ぶため、これらが毎サイクル 2 倍化する。
-//
-// TemplateCache は (絶対パス, norm_w, norm_h) をキーに前処理済みテンプレートを保持し、
-// ファイル mtime の検証でテンプレ差し替えを反映する。プロセス全体で共有する静的インスタンス
-// (TEMPLATE_CACHE) を使い、detect / run_step (verify 再検出) / diagnose の全経路が同一
-// キャッシュを使う (TaskDef は不変のまま detect シグネチャも不変)。
-
-/// 前処理済みテンプレート 1 エントリ分のデータ。
-///
-/// キャッシュミス時のみ「disk 読込+デコード → [`crate::scale::needle_to_normalized`]
-/// (Lanczos3 リサイズ) → ccoeff 前処理」を実行した結果。SSE 経路は `needle` を、
-/// ccoeff 経路は `ccoeff` を使う (前処理の 1 回化 — F13/F17)。
 pub(crate) struct PreparedTemplate {
-    /// 正規化後 (norm_w x norm_h 空間へリサイズ済み) needle。SSE 経路で使用。
     pub(crate) needle: DynamicImage,
-    /// ccoeff 前処理済み表現 (luma + T' + denomT)。
     pub(crate) ccoeff: PreparedCcoeff,
 }
 
-/// キャッシュエントリ。`mtime` はテンプレートファイルの読込時点の更新時刻。
 struct CachedTemplate {
     mtime: Option<SystemTime>,
     prepared: Arc<PreparedTemplate>,
 }
 
-/// (絶対パス, norm_w, norm_h) キーの前処理済みテンプレートキャッシュ。
 struct TemplateCache {
     entries: Mutex<HashMap<(PathBuf, u32, u32), CachedTemplate>>,
 }
@@ -430,12 +275,6 @@ impl Default for TemplateCache {
 }
 
 impl TemplateCache {
-    /// `path` のテンプレートを `norm_w x norm_h` 空間へ前処理した結果を返す。
-    ///
-    /// キャッシュヒット時は mtime 検証のみ (disk 読込・リサイズ・前処理なし)。
-    /// ミス時のみ disk 読込 + リサイズ + ccoeff 前処理を実行してエントリを載せる。
-    /// 読込失敗は [`TaskDefError::TemplateLoadFailed`] を返し、**エラーはキャッシュしない**
-    /// (次回の呼び出しで再試行する — ファイルが後から配置されるケースを妨げない)。
     fn get_or_prepare(
         &self,
         path: &Path,
@@ -443,8 +282,6 @@ impl TemplateCache {
         norm_h: u32,
     ) -> Result<Arc<PreparedTemplate>, TaskDefError> {
         let key = (path.to_path_buf(), norm_w, norm_h);
-        // ロック取得。poisoned は他スレッドの panic 中にロックが放たれたもので、
-        // マップ内容自体は壊れていないため回復して使う (panic 連鎖を防ぐ)。
         let mut entries = match self.entries.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -453,11 +290,9 @@ impl TemplateCache {
             if mtime_unchanged(path, hit.mtime) {
                 return Ok(hit.prepared.clone());
             }
-            // テンプレートが差し替えられた → 当該エントリを無効化して再読込。
             debug!("template cache invalidated (mtime changed): {path:?}");
             entries.remove(&key);
         }
-        // キャッシュミス: disk 読込 + Lanczos3 リサイズ + ccoeff 前処理 (1 回だけ実行)。
         let needle = image::open(path).map_err(|e| TaskDefError::TemplateLoadFailed {
             path: path.to_path_buf(),
             reason: e.to_string(),
@@ -480,18 +315,10 @@ impl TemplateCache {
     }
 }
 
-/// テンプレートファイルの mtime (取得不能な FS では [`None`])。
 fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// `path` の現在の mtime がキャッシュ時点のものと一致するか。
-///
-/// メタデータ取得に失敗する (ファイル削除済み等) 場合は**キャッシュを信頼する** —
-/// 読込時点ではファイルが実在したことをキャッシュが保証しており、削除後に disk を見に
-/// 行くと必ず読込失敗になるため (削除後もキャッシュヒットし続ける挙動は
-/// `detect_template_loaded_once_for_repeated_detects` が固定する)。キャッシュ側に mtime
-/// がない (取得不能な FS で読み込んだ) 場合も比較不能のためキャッシュを信頼する。
 fn mtime_unchanged(path: &Path, cached: Option<SystemTime>) -> bool {
     match (file_mtime(path), cached) {
         (Some(current), Some(cached)) => current == cached,
@@ -500,15 +327,8 @@ fn mtime_unchanged(path: &Path, cached: Option<SystemTime>) -> bool {
     }
 }
 
-/// プロセス全体で共有するテンプレートキャッシュ。
-/// detect / verify 再検出 (run_step) / diagnose の全経路が同一キャッシュを使う。
 static TEMPLATE_CACHE: LazyLock<TemplateCache> = LazyLock::new(TemplateCache::default);
 
-/// テンプレートを `(path, norm_w, norm_h)` キーで前処理済みの形に解決する (単一入り口)。
-///
-/// [`TaskDef::detect`] と [`crate::diagnose::diagnose_task`] が使う。エントリの key に
-/// norm 寸法を含むため、異なるキャプチャ寸法 (1280x720 / 1258x708 等) が混在しても
-/// 相互に汚染しない。
 pub(crate) fn prepared_template(
     path: &Path,
     norm_w: u32,
@@ -517,14 +337,6 @@ pub(crate) fn prepared_template(
     TEMPLATE_CACHE.get_or_prepare(path, norm_w, norm_h)
 }
 
-/// ディレクトリ内の `*.toml` を走査し、各1ファイルを1 [`TaskDef`] として読み込む。
-///
-/// [`crate::template_store::TemplateStore::load_from_directory`] と同構造
-/// （`read_dir` → 拡張子フィルタ → パース → 集約）。順序は保持する（`Vec<TaskDef>`）。
-///
-/// 相対 `template` パスは各 TOML ファイルの親ディレクトリ基準で絶対化する。
-/// 画像は遅延読込（パスだけ保持し、[`TaskDef::detect`] 呼出時に `image::open`）。
-/// 存在しないディレクトリ・空ディレクトリは空 `Vec` を返す。
 pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
     let mut defs = Vec::new();
     if !dir.exists() {
@@ -542,7 +354,6 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
         })?;
         let path = entry.path();
 
-        // *.toml のみ（template_store::is_image_file の TOML版）
         let is_toml = path
             .extension()
             .and_then(|e| e.to_str())
@@ -552,9 +363,6 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
             continue;
         }
 
-        // pipeline.toml はパイプライン manifest（Goal/start_task 宣言）であり TaskDef
-        // ではない。誤パース回避のため manifest 慣例パスを明示的にスキップする
-        // （regression: `load_pipeline_skips_pipeline_manifest_file`）。
         if is_pipeline_manifest_path(&path) {
             debug!("Skipping pipeline manifest (not a TaskDef): {:?}", path);
             continue;
@@ -569,24 +377,15 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
             reason: e.to_string(),
         })?;
 
-        // template 相対パスを TOMLファイルの親ディレクトリ基準で絶対化
         if !def.template.is_absolute() && path.parent().is_some() {
             let parent = path.parent().expect("parent exists");
             def.template = parent.join(&def.template);
         }
 
-        // Issue #184: 無構造テンプレート (stddev < TEMPLATE_MIN_LUMA_STDDEV) の
-        // fail-visible 通知。load 自体は成功させる — 既存 pipeline 資産の後方互換
-        // (問題のある資産を弾くのではなく、恒久 NoMatch 想定を operator へ可視化する。
-        // 保存時点での同じ検証は GUI 側 (anaden-studio) が同じ anaden-vision 実装で行う)。
         if let Some(warning) = unstructured_warning_for_path(&def.template) {
             warn!("task '{}': {warning}", def.name);
         }
 
-        // Issue #187: needle (テンプレート PNG) が ROI に収まらない (幅 or 高さ超過) の
-        // fail-visible 通知。stddev warn と同じ位置づけ — load は成功させ恒久 NoMatch
-        // 想定を可視化するのみ (Issue #182: 再生成 needle 138px vs roi 幅 121px で
-        // 発火しなかった実例。検出条件自体は template_quality の単一実装)。
         if let Some(warning) = needle_exceeds_roi_warning_for_path(&def.template, def.roi) {
             warn!("task '{}': {warning}", def.name);
         }
@@ -598,15 +397,8 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
     Ok(defs)
 }
 
-/// パイプライン manifest の慣例ファイル名。各パイプラインディレクトリのルートに
-/// 置かれたこのファイルは TaskDef ではなく [`PipelineManifest`]（Goal/start_task）
-/// を宣言する。`load_pipeline` はこのファイルをスキップし、
-/// [`load_pipeline_manifest`] が読み込む。
 pub const PIPELINE_MANIFEST_FILENAME: &str = "pipeline.toml";
 
-/// `path` がパイプライン manifest の慣例パス（ファイル名 == `pipeline.toml`、
-/// case-sensitive）かを判定する。TaskDef 誤パース回避のために [`load_pipeline`]
-/// が呼ぶ。
 fn is_pipeline_manifest_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
@@ -614,75 +406,16 @@ fn is_pipeline_manifest_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// パイプライン manifest。各パイプラインディレクトリのルートに置かれた
-/// `pipeline.toml`（[`PIPELINE_MANIFEST_FILENAME`]）が宣言する、開始タスクと
-/// ゴール（終端条件）の集合。
-///
-/// TaskDef（認識タスク）とは分離された宣言層で、[`load_pipeline`] はこのファイルを
-/// TaskDef として誤パースしない（[`load_pipeline`] がスキップし、
-/// [`load_pipeline_manifest`] が読み込む）。
-///
-/// # TOML schema
-///
-/// ```toml
-/// start_task = "<task-name>"          # 必須: 最初に実行する TaskDef 名
-///
-/// [[goal]]                            # 省略可（無宣言 = 無限ループ・後方互換）
-/// name = "<goal-name>"
-/// [goal.stop]
-/// LoopCount = { target = 50 }        # UC-1: N 回反復で停止
-/// # または
-/// # [goal.stop.TemplateMatch]        # UC-2: テンプレートマッチで停止
-/// # task = "clear_button"
-/// # confidence = 0.85
-/// # または
-/// # Timeout = { secs = 3600 }        # UC-3: 指定秒数経過で停止
-/// ```
-///
-/// `start_task` は必須。`goals` は `[[goal]]` 配列（0個以上）。未知フィールドは
-/// `deny_unknown_fields` で拒否される（typo 回帰防止）。
-///
-/// # Goal バリアントの意味
-///
-/// 各 `stop` は [`anaden_core::StopCondition`] のいずれか1つ。詳細な評価セマンティクス
-/// （`LoopCount` は tick 数 = evaluate 呼出回数、`TemplateMatch` は信頼度閾値、
-/// `Timeout` は `elapsed_secs >= secs`）は `anaden_core::goal` モジュール doc 参照。
-/// 本 manifest 層は宣言をパースするだけで評価はしない（評価は driver 層の責務）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineManifest {
-    /// 最初に実行する TaskDef 名（パイプラインディレクトリ内の `*.toml` の `name`）。
     pub start_task: String,
-    /// ゴール（終端条件）のリスト。`[[goal]]` 配列。空の場合、driver は従来通り
-    /// 無限ループとして振る舞う（後方互換）。
-    ///
-    /// フィールド名は Rust 慣習で `goals` だが、TOML では `[[goal]]` 配列表記で
-    /// 宣言するため `#[serde(rename = "goal")]` で同期する。保存時、空なら
-    /// `goal` 行自体を出力しない（無宣言 = 無限ループの手書き後方互換形式）。
     #[serde(default, rename = "goal", skip_serializing_if = "Vec::is_empty")]
     pub goals: Vec<anaden_core::Goal>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub watch: Vec<String>,
 }
 
-/// パイプラインディレクトリ内の慣例パス `pipeline.toml` を manifest として読み込む。
-///
-/// [`load_pipeline`] とは対照的に、TaskDef (`*.toml`) は読まず、manifest ファイル
-/// （[`PIPELINE_MANIFEST_FILENAME`]）のみを読み込む。ファイルが存在しない場合は
-/// [`TaskDefError::ParseFailed`] を返す（manifest 経路を選んだ呼出側は manifest の
-/// 存在を期待するため、不在は即時 fail する — [`load_pipeline`] の「空 Vec を返す」
-/// 緩い契約とは意図的に異なる）。
-///
-/// # 引数
-/// - `dir`: パイプラインディレクトリ。`dir/pipeline.toml` を読む。
-///
-/// # 戻り値
-/// - `Ok(PipelineManifest)`: パース成功。`start_task` + `goals` に分離済み。
-/// - `Err(TaskDefError::ParseFailed)`: ファイル不在・読込失敗・TOML 構文エラー・
-///   未知フィールド・`start_task` 欠落等。
-///
-/// # Goals と TaskDef の分離契約
-/// `goals` に含まれる `StopCondition::TemplateMatch { task, .. }` の `task` 名は
-/// 別ディレクトリのテンプレート識別子を指す場合があり、本関数は TaskDef 名前空間との
-/// 衝突を検証しない（driver 層の責務）。本関数は純粋に manifest の構文解析のみを行う。
 pub fn load_pipeline_manifest(dir: &Path) -> Result<PipelineManifest, TaskDefError> {
     let manifest_path = dir.join(PIPELINE_MANIFEST_FILENAME);
     let content =
@@ -698,25 +431,6 @@ pub fn load_pipeline_manifest(dir: &Path) -> Result<PipelineManifest, TaskDefErr
     Ok(manifest)
 }
 
-/// [`TaskDef`] を1ファイル1タスク慣例（[`load_pipeline`] が読む形式）で
-/// `path` へ書き出す（UC-1 シナリオ作成 GUI の保存経路）。
-///
-/// 保存 TOML は既存 schema と同一形式（保存形式の単一情報源は本関数）:
-/// - `template` が絶対パスの場合は `path` の親ディレクトリ（パイプライン
-///   ディレクトリ）基準の相対パス・フォワードスラッシュ形式へ変換する
-///   （fishing/fishing_start.toml の `"../field_loop_pc/hud_tr.png"` 形式）。
-///   [`load_pipeline`] が相対 template を TOML 親ディレクトリ基準で絶対化するのと対称。
-/// - 相対化不能な絶対パス（共通祖先なし = 別ドライブ等）は絶対形式のまま
-///   保存する（[`TaskDef::detect`] は絶対パスを優先するため動作可能）。
-/// - manifest 慣例ファイル名（[`PIPELINE_MANIFEST_FILENAME`]）への保存は拒否する
-///   （`load_pipeline` が TaskDef として読まないため、書き出すと実行不能になる）。
-///
-/// # Errors
-/// - [`TaskDefError::SaveFailed`]: manifest 慣例パス指定・シリアライズ失敗・
-///   書き出し失敗（親ディレクトリ不在等）。1 バイトも書き出さず fail する。
-///
-/// 保存 → [`load_pipeline`] 往復はテストで機械保証されている
-/// （`save_task_def_roundtrips_through_load_pipeline` 等）。
 pub fn save_task_def(def: &TaskDef, path: &Path) -> Result<(), TaskDefError> {
     if is_pipeline_manifest_path(path) {
         return Err(TaskDefError::SaveFailed {
@@ -737,18 +451,6 @@ pub fn save_task_def(def: &TaskDef, path: &Path) -> Result<(), TaskDefError> {
     })
 }
 
-/// [`PipelineManifest`] を `dir/pipeline.toml`（[`PIPELINE_MANIFEST_FILENAME`]）へ
-/// 書き出す（UC-1 シナリオ作成 GUI の保存経路）。
-///
-/// `goals` は `[[goal]]` 配列テーブルとして書き出される（`rename` の対称）。
-/// 空なら `goal` 行自体を出力しない（無宣言 = 無限ループの手書き後方互換形式）。
-///
-/// # Errors
-/// シリアライズ失敗・書き出し失敗（`dir` 不在等）は
-/// [`TaskDefError::SaveFailed`] を返す。1 バイトも書き出さず fail する。
-///
-/// 保存 → [`load_pipeline_manifest`] 往復はテストで機械保証されている
-/// （`save_pipeline_manifest_roundtrips_through_load`）。
 pub fn save_pipeline_manifest(manifest: &PipelineManifest, dir: &Path) -> Result<(), TaskDefError> {
     let content = to_pretty_toml(manifest).map_err(|e| TaskDefError::SaveFailed {
         reason: e.to_string(),
@@ -759,22 +461,12 @@ pub fn save_pipeline_manifest(manifest: &PipelineManifest, dir: &Path) -> Result
     })
 }
 
-/// 保存用 TOML 文字列を生成する（f32 浮動小数点の最短表現正規化付き）。
-///
-/// toml 0.8 は `serialize_f32` を `v as f64` で書き出すため `0.7f32` が
-/// `0.699999988079071` に展開され、手書き形式（`threshold = 0.70` 等）との
-/// 機械一致が壊れる。本関数は一度 `toml::Value` へ落としてから float を
-/// 「f32 へ丸め → 最短10進表現 → f64」へ正規化する。schema の浮動小数点は
-/// 全て f32（threshold/confidence）のため値は往復不変（f32 表示は f32 を
-/// 一意に復元する Rust の roundtrip 表示保証）。
 fn to_pretty_toml<T: Serialize + ?Sized>(value: &T) -> Result<String, toml::ser::Error> {
     let mut v = toml::Value::try_from(value)?;
     normalize_f32_floats(&mut v);
     toml::to_string(&v)
 }
 
-/// [`to_pretty_toml`] 用: `toml::Value` ツリー内の float を f32 最短表現へ
-/// 正規化する（再帰）。f32 起源の float のみ値が変化しない（schema 契約）。
 fn normalize_f32_floats(value: &mut toml::Value) {
     match value {
         toml::Value::Float(f) => {
@@ -796,17 +488,6 @@ fn normalize_f32_floats(value: &mut toml::Value) {
     }
 }
 
-/// `template` を `base` 基準の相対パス（フォワードスラッシュ区切り）へ変換する。
-///
-/// - `template` が相対パスならセパレータ正規化のみ行う。
-/// - 絶対パスなら `base` との共通コンポーネント接頭辞を求め、`..` 遷移 + 残差で
-///   相対化する（`templates/pipelines/fishing` 基準の `../field_loop_pc/hud_tr.png` 形式）。
-/// - 共通祖先を持たない（Windows のドライブ違い等）場合は絶対・フォワードスラッシュ
-///   形式を返す（[`TaskDef::detect`] は絶対パスをそのまま使うため動作可能）。
-///
-/// レキシカル変換のみ（`.`/`..` 成分の正規化・シンボリックリンク解決はしない）。
-/// `load_pipeline` が絶対化に使う `parent.join(rel)` と対称のため、`..` 成分を
-/// 含むパスも正しく往復する。
 fn relativize_template(template: &Path, base: &Path) -> String {
     let forward = |p: &Path| p.to_string_lossy().replace('\\', "/");
     if !template.is_absolute() || base.as_os_str().is_empty() {
@@ -819,7 +500,6 @@ fn relativize_template(template: &Path, base: &Path) -> String {
         .zip(base_components.iter())
         .take_while(|(t, b)| t == b)
         .count();
-    // 先頭（Prefix/RootDir）が一致しない = 共通祖先なし → 絶対パス保持。
     if common == 0 {
         return forward(template);
     }
@@ -836,45 +516,15 @@ fn relativize_template(template: &Path, base: &Path) -> String {
     forward(&rel)
 }
 
-/// 1ステップの実行結果。action は省略時 [`Action::DoNothing`] を補充済み。
-///
-/// `next` は空の場合あり（終端タスク）。base 継承解決は範囲外のため `next` は
-/// [`TaskDef::next`] の生の値をそのまま返す。
-///
-/// `matched_region` はマッチしたテンプレート位置（[`MatchResult::region`]）。caller はこれを
-/// [`Action::ClickSelf`] のクリック座標計算などに使う（純粋層 [`crate`] 外の pipeline_runner）。
-///
-/// `matched_confidence` はマッチの信頼度（[`MatchResult::confidence`]）。Issue #37 T4:
-/// 宣言的ゴール TemplateMatch(UC-2) 評価が `last_match` を構築するために必要。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepOutcome {
-    /// マッチしたタスク名（= `run_step` の `current_name` と一致するはず）。
     pub matched_task: String,
-    /// 実行すべきアクション（action 省略時は [`Action::DoNothing`]）。
     pub action: Action,
-    /// next 遷移先リスト（空可）。
     pub next: Vec<String>,
-    /// マッチしたテンプレート領域（スクリーンショット元解像度の座標）。
     pub matched_region: ScreenRegion,
-    /// マッチの信頼度（0.0..=1.0）。
     pub matched_confidence: f32,
 }
 
-/// `current_name` の [`TaskDef`] を探して1ステップ実行（detect）する。
-///
-/// 戻り値 [`Result<Option<StepOutcome>, TaskDefError>`]:
-/// - `current_name` が `tasks` に無い → `Ok(None)`（未知タスク名 = NoMatch 扱い）。
-/// - `detect` が `Ok(None)`（閾値下・ROI 外）→ `Ok(None)`（NoMatch = リトライ候補）。
-/// - `detect` が `Ok(Some(_))` → action（省略時 [`Action::DoNothing`] 補充）+ next で
-///   [`StepOutcome`] 構築して `Ok(Some(_))`。
-/// - `detect` がテンプレ読込失敗等の [`Err`] → そのまま `Err`（F34: NoMatch に潰さず
-///   可視化。caller は NoMatch (リトライ候補) と区別して停止扱い等にできる）。
-///
-/// 本スライスは「1ステップ」のみ。next への自動遷移ループは caller 側で戻り値の `next` を
-/// 見て次の `current_name` を決める形で実装する（本関数内では行わない）。
-///
-/// `template` は [`load_pipeline`] 経由で絶対化済みを想定する。`detect` 内部で
-/// `self.template.is_absolute()` なら `template_root` を無視するため、空 [`Path`] を渡す。
 pub fn run_step(
     tasks: &[TaskDef],
     screenshot: &DynamicImage,
@@ -895,16 +545,14 @@ pub fn run_step(
                 matched_confidence: matched.confidence.0,
             }))
         }
-        Ok(None) => Ok(None), // 閾値下 / ROI 外
+        Ok(None) => Ok(None),
         Err(e) => {
-            // F34: テンプレ欠落等の読込エラーは NoMatch と区別して伝える (warn で可視化)。
             warn!("task '{current_name}' detect failed: {e}");
             Err(e)
         }
     }
 }
 
-/// ROI cropping ヘルパ。はみ出し時は画面サイズに clamp する。
 fn crop_imm(img: &DynamicImage, r: ScreenRegion) -> DynamicImage {
     let x = r.x.min(img.width().saturating_sub(1));
     let y = r.y.min(img.height().saturating_sub(1));
@@ -923,7 +571,6 @@ mod tests {
     use std::fs;
     use std::path::PathBuf;
 
-    /// `(x+y) mod 64` の勾配パターン（ccoeff.rs テスト準拠。denomT≠0 を保証）。
     fn gradient_needle(w: u32, h: u32) -> GrayImage {
         let mut img = GrayImage::new(w, h);
         for y in 0..h {
@@ -935,7 +582,6 @@ mod tests {
         img
     }
 
-    /// `(haystack_w, haystack_h)` の背景 `bg` の上に needle を `(ox, oy)` に埋め込んだ画像。
     fn embed(
         haystack_w: u32,
         haystack_h: u32,
@@ -958,14 +604,12 @@ mod tests {
         DynamicImage::ImageLuma8(img)
     }
 
-    /// `dir` に `filename` を作成し `body` を書き込む。
     fn write_toml(dir: &Path, filename: &str, body: &str) -> PathBuf {
         let path = dir.join(filename);
         fs::write(&path, body).expect("write toml");
         path
     }
 
-    /// テンプレPNGを `dir/scenes/title/title_center.png` に保存。
     fn write_template(dir: &Path, needle: &GrayImage) -> PathBuf {
         let sub = dir.join("scenes").join("title");
         fs::create_dir_all(&sub).expect("mkdir");
@@ -973,8 +617,6 @@ mod tests {
         needle.save(&p).expect("save png");
         p
     }
-
-    // ---- テスト1: TOML解析 ----
 
     #[test]
     fn load_pipeline_parses_full_taskdef() {
@@ -1001,7 +643,6 @@ mod tests {
         assert!((d.threshold - 0.95).abs() < 1e-6);
         assert_eq!(d.base.as_deref(), Some("TitleBase"));
         assert_eq!(d.next.as_deref(), Some(&["LoadGame".to_string()][..]));
-        // template が親ディレクトリ基準で絶対化されている
         assert!(d.template.is_absolute(), "template must be absolute");
         assert_eq!(d.template, tmp.path().join("scenes/title/title_center.png"));
     }
@@ -1009,7 +650,6 @@ mod tests {
     #[test]
     fn load_pipeline_rejects_unknown_field() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // typo: threshild
         let toml_body = r#"
             name      = "X"
             state     = "X"
@@ -1080,16 +720,9 @@ mod tests {
         assert_eq!(defs[0].name, "R");
     }
 
-    // ---- Issue #184: 無構造テンプレートの loader warn (load は成功維持) ----
-
-    /// 無構造 (ほぼ単色) テンプレ PNG を含む pipeline dir を load しても、load 自体は
-    /// 成功し TaskDef が返ること (後方互換 — loader は既存資産を弾かず warn のみ)。
-    /// warn 発火条件自体 (stddev 計算・閾値・パス解決) は template_quality モジュールの
-    /// `unstructured_warning_for_path` テストで担保する (tracing 出力の直接捕捉は不要)。
     #[test]
     fn load_pipeline_succeeds_with_unstructured_template() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // 無構造テンプレ PNG (全面同色 → stddev 0)。
         GrayImage::from_pixel(40, 20, Luma([250u8]))
             .save(tmp.path().join("flat.png"))
             .expect("save flat png");
@@ -1117,15 +750,9 @@ mod tests {
         );
     }
 
-    /// Issue #187: needle (テンプレ PNG) が roi より大きい pipeline dir を load しても、
-    /// load 自体は成功し TaskDef が返ること (stddev warn と同じ warn-only 契約)。
-    /// warn 発火条件自体 (寸法取得・roi との比較) は template_quality モジュールの
-    /// `needle_exceeds_roi_warning_for_path` テストで担保する。
-    /// 構成は Issue #182 の実例 (構造あり needle 138x20 vs roi 幅 121) を踏襲する。
     #[test]
     fn load_pipeline_succeeds_with_needle_exceeding_roi() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // 構造ありテンプレ PNG 138x20 (gradient → stddev warn には掛からない)。
         let mut needle = GrayImage::new(138, 20);
         for y in 0..20 {
             for x in 0..138 {
@@ -1161,16 +788,10 @@ mod tests {
         );
     }
 
-    // ---- テスト2: ROI指定 detect ----
-
     #[test]
     fn detect_with_roi_finds_embedded_position() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let needle = gradient_needle(40, 40);
-        // raw-1258x708 空間（PC_CLIENT_*_MEASURED）。ROI = [520,320,240,80]。
-        // screenshot を 1258x708 にすることで detect 内の roi_to_normalized /
-        // needle_to_normalized が恒等（sx=sy=1.0）となり、needle をそのまま埋め込んだ
-        // 検証が成立する。needle(40x40) を ROI 内 (600,340) に埋める。
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 600, 340, 128));
         write_template(tmp.path(), &needle);
 
@@ -1188,7 +809,6 @@ mod tests {
 
         let m = task.detect(&screenshot, tmp.path()).expect("detect ok");
         let m = m.expect("should match within ROI");
-        // ROI オフセット戻し済み → 元座標。埋込 (600,340) 付近。
         assert!(
             m.region.x >= 598 && m.region.x <= 602,
             "region.x in ROI offset coords: got {}",
@@ -1210,7 +830,6 @@ mod tests {
     fn detect_with_roi_outside_returns_none() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let needle = gradient_needle(40, 40);
-        // needle を ROI 外 (50,50) に埋める（raw-1258x708 空間）。
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 50, 50, 128));
         write_template(tmp.path(), &needle);
 
@@ -1230,21 +849,14 @@ mod tests {
         assert!(m.is_none(), "needle outside ROI must not match");
     }
 
-    /// 全面走査テスト用キャンバス。新スケールモデルでは needle/ROI は raw-1258x708 空間で
-    /// 定義され、detect が screenshot 寸法へ動的スケールする。needle_to_normalized /
-    /// roi_to_normalized を恒等（sx=sy=1.0）にするため、screenshot も PC 実測寸法 1258x708
-    /// とする（=PC_CLIENT_*_MEASURED）。CCOEFF 全面走査は O(N·M) なので、needle を小さく
-    /// （NEEDLE_PX=16）して走査コストを抑える（位置精度・完全一致埋込の検証意図は保持）。
     const FULL_W: u32 = 1258;
     const FULL_H: u32 = 708;
-    /// 全面走査テストの needle サイズ。小さく保って ccoeff O(N·M) を実用的時間に抑える。
     const NEEDLE_PX: u32 = 12;
 
     #[test]
     fn detect_without_roi_finds_position_fullscan() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
-        // downscale=1 なので奇数座標でも完全一致埋込なら confidence=1.0。
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
         write_template(tmp.path(), &needle);
 
@@ -1279,8 +891,6 @@ mod tests {
         );
     }
 
-    // ---- テスト3: algorithm 切替 ----
-
     #[test]
     fn detect_switches_sse_and_ccoeff() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1311,7 +921,6 @@ mod tests {
             .expect("ccoeff ok")
             .expect("ccoeff should match");
 
-        // 両者とも埋込位置を発見
         for (label, x) in [("sse", sse_m.region.x), ("ccoeff", cc_m.region.x)] {
             assert!(
                 (148..=152).contains(&x),
@@ -1321,7 +930,6 @@ mod tests {
         for (label, y) in [("sse", sse_m.region.y), ("ccoeff", cc_m.region.y)] {
             assert!((73..=77).contains(&y), "{label} region.y at embed: got {y}");
         }
-        // 両者とも閾値を超える（完全一致埋込）
         assert!(
             sse_m.confidence.0 >= 0.9,
             "sse confidence >= 0.9: got {}",
@@ -1334,9 +942,6 @@ mod tests {
         );
     }
 
-    // ---- テスト4: 閾値境界 ----
-
-    /// needle に定数オフセットを加えたテンプレ（完全一致ではないが構造は同じ）。
     fn shifted_needle(needle: &GrayImage, delta: i32) -> GrayImage {
         let mut out = GrayImage::new(needle.width(), needle.height());
         for (x, y, p) in needle.enumerate_pixels() {
@@ -1351,15 +956,9 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &base, 150, 75, 128));
-        // 埋込画像は base。テンプレートは輝度シフト版（≠完全一致）。
-        // SSE は絶対輝度差を測るため、輝度シフトで confidence が大きく低下する
-        // （CCOEFF は平均除去で定数シフトを完全に吸収し 1.0 のままになるため、閾値境界の
-        // 証明には SSE を使う）。
         let tpl_needle = shifted_needle(&base, 60);
         write_template(tmp.path(), &tpl_needle);
 
-        // 低閾値では一致する（位置は解決できる）
-        // ROI 付与で SSE 全面走査を局所化（FULL_W/H=1258x708 全面走査は重いため）。
         let low_task = TaskDef {
             name: "T".into(),
             state: "T".into(),
@@ -1375,7 +974,6 @@ mod tests {
             .detect(&screenshot, tmp.path())
             .expect("detect ok")
             .expect("should match at low threshold");
-        // 輝度シフト版テンプレ → SSE confidence は 1.0 より十分低い
         assert!(
             low.confidence.0 < 1.0,
             "brightness-shifted template must not be a perfect SSE match: got {}",
@@ -1387,7 +985,6 @@ mod tests {
             "shift should noticeably degrade SSE confidence: got {achievable}"
         );
 
-        // 到達可能信頼度より高い閾値 → None（閾値が結果を gating していることの証明）
         let high_task = TaskDef {
             threshold: achievable + 0.05,
             ..low_task
@@ -1400,8 +997,6 @@ mod tests {
             "threshold above achievable confidence ({achievable}) must yield None"
         );
     }
-
-    // ---- テスト5: テンプレート欠落 ----
 
     #[test]
     fn detect_missing_template_returns_load_error() {
@@ -1424,10 +1019,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::TemplateLoadFailed { .. }));
     }
 
-    // ---- テスト6: Action の TOML 解析 ----
-
-    /// action 付きの最小 TaskDef TOML 本体（共通フィールド + action ブロック）。
-    /// `template` は存在しなくても load_pipeline のパース段階では読込しないため OK。
     fn taskdef_toml_with_action(action_block: &str) -> String {
         format!(
             r#"
@@ -1596,13 +1187,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
-    // ---- テスト7: run_step ----
-
-    /// run_step テスト共通セットアップ。gradient_needle(40,40) を FULL_W×FULL_H
-    /// キャンバスに (150,75) で埋込んだ screenshot と、絶対パステンプレを返す。
-    /// `with_needle=false` なら背景のみの screenshot を返す。
-    /// tempdir を `.into_path()` で永続化し、drop によるテンプレ削除を回避する
-    /// （OS 一時領域に残るが、テスト成否には影響しない）。
     fn run_step_setup(with_needle: bool) -> (DynamicImage, PathBuf) {
         let tmp = tempfile::tempdir().expect("tempdir");
         let needle = gradient_needle(40, 40);
@@ -1612,7 +1196,6 @@ mod tests {
             luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])))
         };
         let tpl = write_template(tmp.path(), &needle);
-        // tempdir を永続化（drop でテンプレが消えるのを防ぐ）。ディレクトリは OS 一時領域に残る。
         let _persisted_dir = tmp.keep();
         (screenshot, tpl)
     }
@@ -1673,7 +1256,6 @@ mod tests {
 
     #[test]
     fn run_step_no_match_returns_none() {
-        // 背景のみ（needle 無）→ detect は Ok(None)
         let (screenshot, tpl) = run_step_setup(false);
         let tasks = vec![TaskDef {
             name: "Title".into(),
@@ -1698,20 +1280,12 @@ mod tests {
 
     #[test]
     fn run_step_below_threshold_returns_none() {
-        // SSE + 輝度シフト版テンプレで「到達可能信頼度」を 1.0 未満に下げ、
-        // それより高い閾値を設定 → detect が Ok(None) → run_step も None。
-        // （MatchConfidence::new は [0,1] にクランプするため、閾値 1.1 では gating できない。
-        //  detect_threshold_above_achievable_returns_none と同じ手法を採る）
-        //
-        // ROI 付与: needle は raw-1258 空間(1258x708 でスケール恒等) なので、needle を含む小窓
-        // ROI を指定して SSE 全面走査を局所化（FULL_W/H=1258x708 の全面走査は数分かかるため）。
         let tmp = tempfile::tempdir().expect("tempdir");
         let base = gradient_needle(40, 40);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &base, 150, 75, 128));
         let tpl_needle = shifted_needle(&base, 60);
         write_template(tmp.path(), &tpl_needle);
 
-        // 低閾値で到達可能信頼度を計測
         let probe = TaskDef {
             name: "Title".into(),
             state: "Title".into(),
@@ -1733,7 +1307,6 @@ mod tests {
             "shifted template must degrade SSE confidence below 0.95: got {achievable}"
         );
 
-        // 到達可能信頼度より高い閾値 → run_step は None
         let tasks = vec![TaskDef {
             threshold: achievable + 0.05,
             ..probe
@@ -1760,30 +1333,17 @@ mod tests {
             next: None,
         }];
 
-        // 存在しないタスク名 → 検索失敗経路 (Ok(None) = NoMatch 扱い)
         let out = run_step(&tasks, &screenshot, "NoSuchTask").expect("run_step ok");
         assert!(out.is_none(), "unknown task name must yield Ok(None)");
 
         let _ = std::fs::remove_file(&tpl);
     }
 
-    // ---- 05-template-cache: PreparedTemplate キャッシュ契約 (F13/F17/F19) ----
-    //
-    // F13: テンプレート PNG は毎サイクル disk 読込+デコード+needle リサイズ+ccoeff 前処理
-    // されていた。キャッシュ導入後、同一 TaskDef の detect を複数回 (別フレームインスタンスで)
-    // 呼んでも disk 読込は初回のみであることを検証する。
-    //
-    // 検証手法 (ローダ注入の代わりに決定論的副作用で観測): 初回 detect 後にテンプレート
-    // ファイルを削除する。キャッシュが効いていれば以降の detect は disk を見ずに成功し、
-    // 毎回読み込む実装なら image::open が失敗して Err/None になる (現行実装 = RED)。
-
-    /// F13: 同一 TaskDef の detect 2 回 (別フレーム) でテンプレ disk 読込は 1 回のみ。
     #[test]
     fn detect_template_loaded_once_for_repeated_detects() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let needle = gradient_needle(40, 40);
         let tpl = write_template(tmp.path(), &needle);
-        // 同一寸法 (norm key 同一)・別インスタンスのフレーム。needle は ROI 内の別位置に埋込。
         let frame1 = luma_dyn(embed(FULL_W, FULL_H, &needle, 620, 330, 128));
         let frame2 = luma_dyn(embed(FULL_W, FULL_H, &needle, 560, 360, 128));
 
@@ -1809,10 +1369,8 @@ mod tests {
             m1.region.x
         );
 
-        // テンプレート削除 = 以降の disk 読込は必ず失敗する環境を作る。
         std::fs::remove_file(&tpl).expect("remove template file");
 
-        // 2 回目: disk 読込していれば Err。キャッシュヒットなら frame2 の埋込位置にマッチ。
         let m2 = task
             .detect(&frame2, tmp.path())
             .expect("2nd detect must be served from cache (no disk reload)");
@@ -1824,9 +1382,6 @@ mod tests {
         );
     }
 
-    /// F13: テンプレートファイルが書き換わった (mtime 変更) 場合はキャッシュを無効化して
-    /// 再読込すること。実行毎読込の現行実装では自明に成立するが、キャッシュ導入が
-    /// 「テンプレ差し替えが反映されない」退化を生まないための無効化契約の固定。
     #[test]
     fn detect_cache_invalidated_on_mtime_change() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1846,7 +1401,6 @@ mod tests {
             next: None,
         };
 
-        // 初回: needle が埋め込まれている → マッチ (キャッシュに載る)。
         assert!(
             task.detect(&frame, tmp.path())
                 .expect("1st detect ok")
@@ -1854,10 +1408,8 @@ mod tests {
             "embedded needle must match on first detect"
         );
 
-        // mtime 粒度の粗いファイルシステムに備えて少し待ってから書き換える。
         std::thread::sleep(std::time::Duration::from_millis(20));
 
-        // テンプレートを「frame に埋め込んでいない反転パターン」へ差し替える。
         let mut inverted = GrayImage::new(40, 40);
         for y in 0..40 {
             for x in 0..40 {
@@ -1866,8 +1418,6 @@ mod tests {
         }
         inverted.save(&tpl).expect("save inverted template");
 
-        // 再 detect: mtime 変更を検知して再読込 → 新テンプレでは NoMatch。
-        // キャッシュが古いまま (stale serve) なら埋込 needle にマッチし続けて RED。
         let m2 = task.detect(&frame, tmp.path()).expect("2nd detect ok");
         assert!(
             m2.is_none(),
@@ -1875,10 +1425,6 @@ mod tests {
         );
     }
 
-    /// F19: verify_after_fire は同タスクの detect をもう一度呼ぶ (driver が run_step を
-    /// 直接呼ぶ)。この再検出でもテンプレート読込がキャッシュされること (= テンプレ読込・
-    /// リサイズ・前処理が 2 倍化しない) を「テンプレ削除後の再 run_step が依然成功する」
-    /// ことで検証する (現行 = 毎回読込で RED)。
     #[test]
     fn run_step_reuses_cached_template_for_verify_recheck() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -1899,10 +1445,8 @@ mod tests {
             next: None,
         }];
 
-        // 1 サイクル目 (tick 相当)。
         let out1 = run_step(&tasks, &frame1, "T").expect("1st run_step must match");
 
-        // テンプレ削除 → verify 相当の再 run_step は disk 読込すれば失敗する。
         std::fs::remove_file(&tpl).expect("remove template file");
 
         let out2 = run_step(&tasks, &frame2, "T")
@@ -1914,14 +1458,9 @@ mod tests {
         let _ = out1;
     }
 
-    /// F34: detect がテンプレート読込エラー (欠落) のとき run_step はそれを None
-    /// (=NoMatch 扱い) に潰さず [`TaskDefError`] で伝えること。NoMatch (リトライ候補) と
-    /// テンプレ欠落 (設定破損 = 停止すべき) は caller (engine) が異なる扱いをする状態であり、
-    /// 区別不能なまま潰すのは fail-invisible。従来は黙って None に潰していた (= 本テストで固定)。
     #[test]
     fn run_step_missing_template_returns_err_not_none() {
         let (screenshot, _tpl) = run_step_setup(true);
-        // template を存在しないパスに → detect が Err → run_step は Err を伝える
         let tasks = vec![TaskDef {
             name: "Title".into(),
             state: "Title".into(),
@@ -1942,22 +1481,7 @@ mod tests {
         );
     }
 
-    // ---- テスト7b: サイズバリエーション E2E（detect 動的スケール） ----
-    //
-    // 本スライス（コミット4）の中核証明: raw-1258x708 空間で定義した needle/ROI が、
-    // 異なる screenshot 寸法（1258x708 ネイティブ / 1280x720 / 黒帯クロップ後を想定した
-    // 別アスペクト比）のどれでも detect でマッチすること。
-    //
-    // 方法: raw-1258x708 の「特徴パターン」を1枚作り、(a) needle = ROI 領域を crop、
-    // (b) screenshot = raw画像を各寸法へ resize_exact したもの、とする。
-    // detect は needle を screenshot 寸法へ needle_to_normalized でスケールするが、
-    // screenshot 側も同一 raw 画像を同ファクタで resize しているため、needle のスケール結果と
-    // screenshot 内の対応領域が一致する（Triangle 補間の一致）。よって「同じ needle/ROI が
-    // サイズバリエーション全域でマッチする」ことを検証できる。
-
-    /// raw-1258x708 空間の特徴パターン画像（gradient の変種で一意性を持たせる）。
     fn raw_feature_canvas() -> GrayImage {
-        // (x*2 + y) mod 200 の濃淡パターン。周期が十分大きく広域に特異。
         let mut img = GrayImage::new(FULL_W, FULL_H);
         for y in 0..FULL_H {
             for x in 0..FULL_W {
@@ -1968,11 +1492,8 @@ mod tests {
         img
     }
 
-    /// raw-1258x708 空間の ROI。needle はこの領域を crop して作る。
-    /// 画面中央やや右上（テンプレが局所的に特異な領域）。
     const VAR_ROI: [u32; 4] = [400, 200, 120, 80];
 
-    /// raw 特徴画像の ROI 領域を needle として crop して PNG 保存し、絶対パスを返す。
     fn write_var_needle(tmp: &std::path::Path, raw: &GrayImage) -> PathBuf {
         let [x, y, w, h] = VAR_ROI;
         let mut needle = GrayImage::new(w, h);
@@ -1984,8 +1505,6 @@ mod tests {
         write_template(tmp, &needle)
     }
 
-    /// raw 特徴画像を `(tw, th)` へ Triangle resize した screenshot を作る。
-    /// 黒帯入りキャプチャの crop 後を想定し、16:9 以外の寸法も含む。
     fn resized_screenshot(raw: &GrayImage, tw: u32, th: u32) -> DynamicImage {
         let dyn_raw = DynamicImage::ImageLuma8(raw.clone());
         dyn_raw.resize_exact(tw, th, image::imageops::FilterType::Triangle)
@@ -1993,7 +1512,6 @@ mod tests {
 
     #[test]
     fn detect_matches_across_size_variants_dynamic_scale() {
-        // raw-1258x708 ネイティブ。スケール恒等（sx=sy=1.0）。ベースライン。
         let tmp = tempfile::tempdir().expect("tempdir");
         let raw = raw_feature_canvas();
         let tpl = write_var_needle(tmp.path(), &raw);
@@ -2019,7 +1537,6 @@ mod tests {
             "native 1258x708 confidence ~1.0: got {}",
             m.confidence.0
         );
-        // ROI オフセット戻し済み → raw 座標で ROI 開始位置 (400,200) に一致。
         assert!(
             (398..=402).contains(&m.region.x),
             "native region.x near ROI x=400: got {}",
@@ -2036,7 +1553,6 @@ mod tests {
 
     #[test]
     fn detect_matches_across_size_variants_1280x720() {
-        // 1258x708 → 1280x720（normalize 後の代表寸法）。X/Y 別比でスケール。
         let tmp = tempfile::tempdir().expect("tempdir");
         let raw = raw_feature_canvas();
         let tpl = write_var_needle(tmp.path(), &raw);
@@ -2057,8 +1573,6 @@ mod tests {
             .detect(&screenshot, tmp.path())
             .expect("detect ok")
             .expect("1280x720 must match via dynamic scale");
-        // 同一 raw 画像を両者 Triangle resize しているため、スケール後 needle と
-        // screenshot 内対応領域が一致し高 confidence になる。
         assert!(
             m.confidence.0 >= 0.9,
             "1280x720 dynamic-scale match confidence >= 0.9: got {}",
@@ -2070,9 +1584,6 @@ mod tests {
 
     #[test]
     fn detect_matches_across_size_variants_letterboxed_crop_dims() {
-        // 黒帯クロップ後を想定した 16:9 以外の寸法（例: 1000x600）でもマッチすること。
-        // 実キャプチャ(1918x1048) → crop_to_content → 16:9 前後の寸法になりうるが、
-        // detect は screenshot 寸法から動的にファクタを再計算するので任意寸法で動く。
         let tmp = tempfile::tempdir().expect("tempdir");
         let raw = raw_feature_canvas();
         let tpl = write_var_needle(tmp.path(), &raw);
@@ -2102,14 +1613,6 @@ mod tests {
         let _ = std::fs::remove_file(&tpl);
     }
 
-    // ---- テスト8: ドキュメント推奨 TOML 例との同期 ----
-    //
-    // Tool-Reference / Declarative-Tasks-Design の「実装済み範囲」に載せた
-    // 推奨 TOML 例が `toml::from_str::<TaskDef>` で解析できることを検証する。
-    // ドキュメント更新者が誤って `[task.x]` 表記等に戻した場合、このテストが即座に壊れ、
-    // ドキュメントと実装スキーマのズレを CI で検知できる。
-
-    /// 最小タスク（タイトル画面クリック）。インライン action + フラット next。
     #[test]
     fn doc_recommended_toml_parses() {
         let toml_body = r#"
@@ -2133,7 +1636,6 @@ mod tests {
         assert_eq!(def.next.as_deref(), Some(&["LoadGame".to_string()][..]));
     }
 
-    /// click_rect インライン action（roi 含む）の解析検証。
     #[test]
     fn doc_recommended_toml_click_rect_parses() {
         let toml_body = r#"
@@ -2157,7 +1659,6 @@ mod tests {
         assert_eq!(def.next.as_deref(), Some(&["Field".to_string()][..]));
     }
 
-    /// swipe インライン action の解析検証。
     #[test]
     fn doc_recommended_toml_swipe_parses() {
         let toml_body = r#"
@@ -2181,7 +1682,6 @@ mod tests {
         assert!(def.next.as_deref().map(|v| v.is_empty()).unwrap_or(false));
     }
 
-    /// 停止タスク（終端）。action=stop。
     #[test]
     fn doc_recommended_toml_stop_parses() {
         let toml_body = r#"
@@ -2197,9 +1697,6 @@ mod tests {
         assert_eq!(def.action, Some(Action::Stop));
     }
 
-    /// 順序の罠の回帰テスト: インライン action の後に next を置いても
-    /// action テーブルスコープに吸われず、正しく TaskDef 直下へマッピングされること。
-    /// インライン表記の価値（順序非依存）を保証する。これが壊れる = 要再設計。
     #[test]
     fn inline_action_does_not_swallow_following_keys() {
         let toml_body = r#"
@@ -2216,8 +1713,6 @@ mod tests {
         assert_eq!(def.next.as_deref(), Some(&["AfterStop".to_string()][..]));
     }
 
-    /// ドキュメント「禁止パターン」の回帰テスト: `[task.X]` 名前空間表記は
-    /// deny_unknown_fields で拒否されること（フラット構造の前提を固定）。
     #[test]
     fn doc_forbidden_namespace_table_rejected() {
         let toml_body = r#"
@@ -2228,15 +1723,6 @@ mod tests {
         assert!(err.is_err(), "namespace [task.X] must be rejected");
     }
 
-    // ---- PC版(Windows, 16:9)パイプラインスライス(T5) ----
-    //
-    // 実機(20:9)テンプレ templates/pipelines/field_loop/*, nav_to_field/* を上書きせず、
-    // PC版は pc-scoped 名前空間(field_loop_pc/, nav_to_field_pc/, scenes/field_pc/)へ隔離する
-    // (T7 の 20:9→16:9 劣化検証は両者の共存を前提とするため)。
-    // 全 ROI は RAW 1258x708 空間で定義。normalize は常に1280幅基準へリサイズ（早期return廃止）、detect が roi_to_normalized で1280空間へスケール。
-
-    /// workspace の `templates/` ルートを返す。
-    /// anaden-vision クレート(crates/anaden-vision)からは `../../templates`。
     fn workspace_templates_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -2244,7 +1730,6 @@ mod tests {
             .join("templates")
     }
 
-    /// ROI の全要素が 1258x708 キャンバスに収まり、かつ幅/高さが 0 でないことを検証。
     fn assert_roi_within_1258x708(roi: [u32; 4], label: &str) {
         let [x, y, w, h] = roi;
         assert!(
@@ -2263,7 +1748,6 @@ mod tests {
             .join("pipelines")
             .join("field_loop_pc");
         let defs = load_pipeline(&dir).expect("field_loop_pc must load");
-        // tap_bottom + tap_hud_tr の 2 タスク。
         assert_eq!(
             defs.len(),
             2,
@@ -2305,20 +1789,6 @@ mod tests {
         assert!(hud.template.exists(), "hud template PNG must exist");
     }
 
-    // ---- T-manifest-reader: 実 template の manifest round-trip 回帰 ----
-    //
-    // docs/goal-manifest.md §実例 は `templates/pipelines/field_loop_pc/pipeline.toml`
-    // を UC-1 (LoopCount) の正例として宣言する。既存 manifest テスト群は tempdir 上の
-    // 合成 TOML で網羅するが、実 template ファイルが doc の schema 通りにパースできる
-    // ことを CI で固定する（doc 編集者が schema を壊した場合に即座に RED）。
-    //
-    // 併せて「分離契約」を同一ディレクトリで再検証する: load_pipeline は pipeline.toml
-    // をスキップして TaskDef(tap_bottom/tap_hud_tr)のみを返し、load_pipeline_manifest は
-    // pipeline.toml のみを start_task + goals に分離する。
-
-    /// `templates/pipelines/field_loop_pc/pipeline.toml` が `load_pipeline_manifest`
-    /// で正しくパースされ、`start_task = "TapBottomStablePc"` + UC-1 LoopCount(50) の
-    /// `goals` に分離されることを検証する。doc/schema 同期の回帰テスト。
     #[test]
     fn field_loop_pc_pipeline_manifest_loads_start_task_and_loop_count_goal() {
         let dir = workspace_templates_root()
@@ -2327,12 +1797,10 @@ mod tests {
         let manifest = load_pipeline_manifest(&dir)
             .expect("field_loop_pc/pipeline.toml must load as manifest");
 
-        // start_task は同ディレクトリの TaskDef(tap_bottom.toml) name と一致すること。
         assert_eq!(
             manifest.start_task, "TapBottomStablePc",
             "start_task must match TapBottomStablePc TaskDef name"
         );
-        // [[goal]] は1つ。UC-1 LoopCount。
         assert_eq!(
             manifest.goals.len(),
             1,
@@ -2345,11 +1813,8 @@ mod tests {
             anaden_core::StopCondition::LoopCount { target: 50 },
             "field_loop_pc goal must be UC-1 LoopCount(target=50)"
         );
-        // バリデーション（target>0）も通過すること（driver 呼出前前提条件）。
         goal.validate().expect("field_loop_pc goal must validate");
 
-        // 分離契約の再検証: 同ディレクトリで load_pipeline は manifest をスキップし
-        // TaskDef のみ(tap_bottom + tap_hud_tr = 2件)を返すこと。
         let defs = load_pipeline(&dir).expect("TaskDefs must load (manifest skipped)");
         assert_eq!(
             defs.len(),
@@ -2360,8 +1825,6 @@ mod tests {
             defs.iter().any(|d| d.name == "TapBottomStablePc"),
             "TapBottomStablePc TaskDef must be present alongside the manifest"
         );
-        // start_task は manifest と TaskDef 名前空間の整合も取れていること
-        // （doc の「TaskDef の name と一致」という制約）。
         assert!(
             defs.iter().any(|d| d.name == manifest.start_task),
             "manifest.start_task '{}' must exist as a TaskDef in the same directory",
@@ -2393,7 +1856,6 @@ mod tests {
         assert_eq!(nav.next.as_deref(), Some(&[][..]));
         let nav_roi = nav.roi.expect("FieldHudTopPc has ROI");
         assert_roi_within_1258x708(nav_roi, "FieldHudTopPc");
-        // field 到達 = 目標なので発火しない。テンプレは scenes/field_pc/ へ参照する。
         assert!(
             nav.template.exists(),
             "nav template PNG must exist at {:?}",
@@ -2406,23 +1868,6 @@ mod tests {
         );
     }
 
-    // ---- T3: nav_to_field_pc コールドスタート中間スライス (title_pc 小テンプレ化) ----
-    //
-    // T3 の核心: title コールドスタートの未知ブロッカー(TASKS.md:30-33 既知)を解消する。
-    // 既存 _title_load/load_game.toml は threshold=0.01 のハックで実シーン変動に弱い。
-    // また legacy title_center/load_game_area(大型テンプレ) は背景差・点滅アニメに弱い。
-    //
-    // 解決策: 点滅("Tap to Start" 正規化(930,488)) に巻き込まれない固定テクスチャ
-    // (version_label / title_logo_corner, scenes/title_pc/) で **安定検出** し、
-    // click_rect で点滅位置を静的タップする。認識テンプレ≠タップ対象のため点滅フレームの
-    // 非安定性に影響されず認識が成立する(T3 設計の要点)。
-    //
-    // 全 ROI は RAW 1258x708 空間で定義。normalize は常に1280幅基準へリサイズ（早期return廃止）、detect が roi_to_normalized で1280空間へスケール。
-    // template 参照先は pc-scoped(scenes/title_pc/)。
-
-    /// nav_to_field_pc が T3 の中間スライス(TapToStartPc, LoadGamePc)を含み、
-    /// それぞれが click_rect 発火 + pc-scoped title_pc テンプレ参照であることを検証する。
-    /// legacy _title_load(threshold=0.01 ハック) に代わる安定検出スライスの存在証明。
     #[test]
     fn pc_nav_to_field_contains_t3_cold_start_slices() {
         let dir = workspace_templates_root()
@@ -2432,14 +1877,10 @@ mod tests {
         let by_name: std::collections::HashMap<&str, &TaskDef> =
             defs.iter().map(|d| (d.name.as_str(), d)).collect();
 
-        // TapToStartPc: title 検出(title_logo_corner) → click_rect で "Tap to Start" をタップ。
-        // (Issue #208 でアンカーを version_label から title_logo_corner へ切替 — ID 表示帯は
-        //  バージョン/ID が変わる内容可変資産で cross-capture 不安定だったため)
         let tap = by_name
             .get("TapToStartPc")
             .expect("TapToStartPc (T3 title cold-start slice) must exist");
         assert_eq!(tap.algorithm, Algorithm::Ccoeff);
-        // 点滅位置は click_rect(静的矩形)で発火。認識は別テンプレで行う。
         let action = tap
             .action
             .as_ref()
@@ -2450,7 +1891,6 @@ mod tests {
              got {:?}",
             action
         );
-        // 検出テンプレは pc-scoped title_pc 小テンプレ(大型 title_center ではない)。
         assert!(
             tap.template.exists(),
             "TapToStartPc template PNG must exist at {:?}",
@@ -2461,7 +1901,6 @@ mod tests {
             "TapToStartPc must reference pc-scoped title_pc scene, got {:?}",
             tap.template
         );
-        // threshold は 0.01 ハックではなく実用的値(>= 0.5)。ハック回帰防止。
         assert!(
             tap.threshold >= 0.5,
             "TapToStartPc threshold {} must not be the legacy 0.01 hack (>= 0.5 expected)",
@@ -2469,14 +1908,11 @@ mod tests {
         );
         let tap_roi = tap.roi.expect("TapToStartPc has detection ROI");
         assert_roi_within_1258x708(tap_roi, "TapToStartPc");
-        // click_rect.roi も 1258x708 収容。
         if let Action::ClickRect { roi } = action {
             assert_roi_within_1258x708(
                 [roi.x, roi.y, roi.width, roi.height],
                 "TapToStartPc click_rect.roi",
             );
-            // "Tap to Start" 正規化(930,488) → RAW 換算で画面中央よりやや右下に位置する。
-            // x が画面右半分(>600)であることを緩く検証(点滅ボタン中央の回帰防止)。
             assert!(
                 roi.x > 600,
                 "TapToStartPc click_rect x={} should be in right half (~Tap-to-Start col 930)",
@@ -2484,7 +1920,6 @@ mod tests {
             );
         }
 
-        // LoadGamePc: title ロゴ検出(logo_corner) → click_rect で "Load" ボタンをタップ。
         let load = by_name
             .get("LoadGamePc")
             .expect("LoadGamePc (T3 title cold-start slice) must exist");
@@ -2514,11 +1949,6 @@ mod tests {
         );
         let load_roi = load.roi.expect("LoadGamePc has detection ROI");
         assert_roi_within_1258x708(load_roi, "LoadGamePc");
-        // Issue #208: TapToStartPc と LoadGamePc は同じ安定アンカー title_logo_corner を
-        // 共有する (旧設計の「ステップごとに別テンプレ (version_label≠logo_corner) で
-        // 重複検出を避ける」は、version_label が内容可変資産で cross-capture 不安定と
-        // 判明したため廃止)。ステップ弁別はテンプレ差ではなく pipeline の next 状態機械
-        // と click_rect タップ位置の差で行う。
         assert_eq!(
             tap.template, load.template,
             "TapToStartPc and LoadGamePc must share the stable title_logo_corner anchor \
@@ -2531,14 +1961,6 @@ mod tests {
             tap.template
         );
 
-        // Issue #208: TapToStartPc の検出 ROI は title_logo_corner needle (120x120) を
-        // 囲むスラック窓。ぴったり ROI (needle==roi 幅) はキャプチャ間のコンテンツ配置
-        // ドリフトで最良一致位置を roi 外に弾き conf 0.99→0.78 に崩壊するため、
-        // スラックを持たせてある。旧値 [8,2,138,20] は version_label アンカー時代の値。
-        // Issue #210 (2026-09-24): live「ロードゲーム」タイトルで needle 最良位置が
-        // (625,243) と約 20px 上方へドリフトし旧窓 [614,253,140,140] の上端を超過した
-        // ため、観測 envelope ±20px の [604,223,160,180] へ拡張 (旧窓の厳密スーパーセット)。
-        // テンプレ差し替えと ROI は対で更新されるため、片方だけ戻る回帰をこのテストで弁別する。
         assert_eq!(
             tap_roi,
             [604, 223, 160, 180],
@@ -2553,23 +1975,6 @@ mod tests {
         );
     }
 
-    // ---- T1: nav_to_field_pc コールドスタート next チェーン接続 (Task#1 / Issue#5) ----
-    //
-    // T3(title_pc sub-templating) が作成する中間スライス(tap_to_start / load_game)と、
-    // 既存の終点 FieldHudTopPc を `next` で繋いだ「walkable な状態機械」を検証する。
-    // T1 は「接続の仕上げ」: T3 が TOML ファイルを置いた後、各スライスの `next` が
-    //   TapToStartPc -> LoadGamePc -> FieldHudTopPc(next=[]) の単方向チェーンを形成する
-    // ことを保証する。これが無いと cold-start 自動化が最初のスライスで停止する。
-    //
-    // 座標系: 全スライスとも RAW 1258x708 空間(T7/docs:pc-capture-dimensions.md §2 の不変条件)。
-    // template 参照先も pc-scoped(scenes/title_pc/, scenes/field_pc/)。
-    //
-    // 本テストは T3 のスライス作成後に GREEN になる。T3 未完了時はチェーンが途切れて
-    // RED になることが期待される(依存関係を CI で可視化する意図)。
-
-    /// nav_to_field_pc の全タスクが「next で辿れる閉じた有向グラフ」を形成し、
-    /// 起点(TapToStartPc, indegree=0)から終点(FieldHudTopPc, next=[])まで到達可能である
-    /// ことを検証する T1 の中核テスト。中間スライスが未作成(T3 未完了)なら RED。
     #[test]
     fn pc_nav_to_field_cold_start_chain_is_walkable_to_field() {
         let dir = workspace_templates_root()
@@ -2584,7 +1989,6 @@ mod tests {
         let by_name: std::collections::HashMap<&str, &TaskDef> =
             defs.iter().map(|d| (d.name.as_str(), d)).collect();
 
-        // 1. 終点: FieldHudTopPc は必須・field 到達なので next=[] で停止。
         let terminal = by_name
             .get("FieldHudTopPc")
             .expect("FieldHudTopPc (terminal) must exist in nav_to_field_pc");
@@ -2594,8 +1998,6 @@ mod tests {
             "FieldHudTopPc is the field-arrival terminal: next must be empty"
         );
 
-        // 2. 中間スライス(T3 作成対象)が存在するなら、全スライスの next 参照先が
-        //    nav_to_field_pc 内に存在する(名前解決不能な next は cold-start 停止原因)。
         for d in &defs {
             let next = d.next.clone().unwrap_or_default();
             for target in &next {
@@ -2609,21 +2011,10 @@ mod tests {
             }
         }
 
-        // 2.5 到達性不変条件(起点 -> 終点の完全歩行可能性)。
-        //     step2(名前解決)は next=[] を vacuous に通過し、step3(points_at_field)は
-        //     兄弟スライス(LoadGamePc -> FieldHudTopPc)だけで満たされるため、
-        //     起点エッジの欠落(next=[])が GREEN を装うギャップがあった。
-        //     本表明はそれを閉じる: (a) indegree=0 の起点を厳密に1つ特定し、
-        //     (b) next エッジを辿る到達性ウォーク(visited で cycle-safe)で
-        //     起点から終点 FieldHudTopPc まで到達可能なことを表明する。
-        //     起点の next が空(切れ目)なら起点から終点へ到達不能となり RED。
-        //
-        // (a) indegree 計算: 各ノードの被参照回数を数え、indegree=0 を起点候補とする。
         let mut indegree: std::collections::HashMap<&str, usize> =
             defs.iter().map(|d| (d.name.as_str(), 0usize)).collect();
         for d in &defs {
             for target in d.next.as_deref().unwrap_or(&[]) {
-                // 参照先は step2 で存在検証済み。自己ループは indegree に含めない(起点性不変)。
                 if *target != d.name
                     && let Some(slot) = indegree.get_mut(target.as_str())
                 {
@@ -2648,8 +2039,6 @@ mod tests {
             "the sole start must be TapToStartPc (title cold-start entry)"
         );
 
-        // (b) 到達性ウォーク: 起点 TapToStartPc から next エッジを BFS で辿り、
-        //     終点 FieldHudTopPc に到達できることを表明。visited で cycle-safe。
         let start = "TapToStartPc";
         let target_terminal = "FieldHudTopPc";
         let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
@@ -2679,12 +2068,7 @@ mod tests {
              must be connected via next."
         );
 
-        // 到達性の補強: 全中間ノード(indegree>0 の非終点)も起点から到達可能であること。
-        //     到達性ウォークで到達したノード集合を使い、孤立した中間ノードを検出する。
         let reachable: std::collections::HashSet<&str> = if reached_terminal {
-            // 終点到達時は break 前の visited を再構築するため再ウォーク(visited は消費済みでない)。
-            // reachable 判定のため、visited はウォーク途中で増分していたが break で早期終了した
-            // 可能性があるため、ここでは到達性の主張(reached_terminal)に依存し全ノード到達を再検証。
             let mut v: std::collections::HashSet<&str> = std::collections::HashSet::new();
             let mut f: std::collections::VecDeque<&str> = std::collections::VecDeque::new();
             f.push_back(start);
@@ -2713,9 +2097,6 @@ mod tests {
             );
         }
 
-        // 3. チェーン整合性: FieldHudTopPc を指すスライスが少なくとも1つ存在する
-        //    (load -> field の接続が物理的にあること)。FieldHudTopPc 単独の場合は
-        //    中間スライス未作成(T3 未完了)なので、この時点では cold-start 不可。
         let points_at_field = defs.iter().any(|d| {
             d.next
                 .as_ref()
@@ -2729,7 +2110,6 @@ mod tests {
              reach Field until an intermediate slice lists FieldHudTopPc in its next."
         );
 
-        // 4. 全 ROI は RAW 1258x708 空間(docs:pc-capture-dimensions.md §2 不変条件)。
         for d in &defs {
             if let Some(roi) = d.roi {
                 assert_roi_within_1258x708(roi, &d.name);
@@ -2737,32 +2117,6 @@ mod tests {
         }
     }
 
-    // ---- T5: リアル1サイクル CLI 実行契約 (Issue #12 fallback clause) ----
-    //
-    // T5 は実機 PC(AnotherEden.exe タイトル画面) で TapToStartPc -> LoadGamePc ->
-    // FieldHudTopPc の状態機械ウォークを CLI 経由で証明するチケット。その実行契約
-    // (正確な開始タスク + 厳密な3段階遷移順序) をコードで固定し、live 実行時に
-    // オペレータが打つコマンドがこの契約と一致することを保証する。
-    //
-    // デバイス未接続時(本環境)は title_pc_probe.png が存在しないため absence-skip
-    // (pc_title_pc_templates_match_real_capture_above_threshold 参照) を維持し、
-    // 本テストが「実行すべき CLI 引数の契約」を代わりに固定する。実機接続時に
-    // オペレータが `anaden run --target windows templates/pipelines/nav_to_field_pc
-    // TapToStartPc --algorithm ccoeff --verify-after-fire true --max-iters 1` を実行
-    // すると、以下の3段階がこの順序で1サイクル駆動されることがこの表明の本体。
-    //
-    // Why not: 開始タスク名や中間段階の順序を README 文面だけで担保すると、T3/T1 の
-    // TOML リネーム時に README が陳腐化し気付かず live 証明が壊れる。TOML 由来の
-    // 名前を CI で参照することで契約とデータを同期させる。
-
-    /// T5 リアル1サイクル証明: nav_to_field_pc の `next` チェーンを開始タスクから
-    /// 辿ると、厳密に `[TapToStartPc, LoadGamePc, FieldHudTopPc]` の順で3段階到達し
-    /// 終点で停止することを検証する。CLI `--target windows ... TapToStartPc` が
-    /// 駆動する正確な状態機械ウォークを固定する。
-    ///
-    /// 各段階は単一の `next` を持ち(分岐無し)、終点 FieldHudTopPc は next=[] で停止
-    /// する。これが live 1サイクル証明の前提条件であり、段階数・順序・非分岐性が
-    /// 保たれなくなれば本テストが RED となり README/CLI 文面のズレを検知する。
     #[test]
     fn pc_nav_to_field_one_cycle_walk_order_matches_cli_contract() {
         let dir = workspace_templates_root()
@@ -2772,17 +2126,13 @@ mod tests {
         let by_name: std::collections::HashMap<&str, &TaskDef> =
             defs.iter().map(|d| (d.name.as_str(), d)).collect();
 
-        // CLI 開始タスク契約: `anaden run ... TapToStartPc`。
         const CLI_START_TASK: &str = "TapToStartPc";
-        // live 証明が期待する厳密な3段階順序(開始→中間→終点)。
         const EXPECTED_WALK_ORDER: [&str; 3] = ["TapToStartPc", "LoadGamePc", "FieldHudTopPc"];
 
-        // `next` を辿って実際の到達順序を構築(非分岐前提で単一経路を追う)。
         let mut actual_order: Vec<&str> = Vec::new();
         let mut visited: std::collections::HashSet<&str> = std::collections::HashSet::new();
         let mut cursor: Option<&str> = Some(CLI_START_TASK);
         while let Some(name) = cursor {
-            // cycle 保護(自己ループや循環で無限ループしない)。
             if !visited.insert(name) {
                 break;
             }
@@ -2791,8 +2141,6 @@ mod tests {
                 .get(name)
                 .unwrap_or_else(|| panic!("walk node '{name}' must exist in nav_to_field_pc"));
             let next = def.next.as_deref().unwrap_or(&[]);
-            // 非分岐性: 各段階は単一の next(終点は空)のみ持つ。
-            //   分岐があると live 1サイクルの振る舞いが非決定性になり証明にならない。
             assert!(
                 next.len() <= 1,
                 "{}: non-deterministic cold-start (next has {} targets {:?}); \
@@ -2813,8 +2161,6 @@ mod tests {
             EXPECTED_WALK_ORDER
         );
 
-        // 終点は next=[] で停止する(1サイクルで終わる)。max-iters 1 の live 実行が
-        // FieldHudTopPc に到達して終了することの前提。
         let terminal = by_name
             .get("FieldHudTopPc")
             .expect("FieldHudTopPc terminal must exist");
@@ -2826,31 +2172,14 @@ mod tests {
         );
     }
 
-    // (旧 pc_pipeline_namespace_does_not_collide_with_20x9_field_loop は Issue #188 で
-    //  20:9 側 (field_loop) を削除したため対象が消滅 — テストごと削除)
-
-    // ---- PC版 field_pc シーンテンプレスライス (Task#3 / Issue#5) ----
-    //
-    // templates/scenes/field_pc/ に PC版(16:9, RAW 1258x708) 参照テンプレ3つ
-    // (template_01, hud_top, hud_topright) を新設する。
-    // 20:9 既存 templates/scenes/field/* は PC の 16:9 フレーム上で劣化し(conf 0.6723 < 0.80)
-    // field_loop が --target windows でマッチしない現状を、pc-scoped 名前空間で解除する。
-    // 全 ROI は RAW 1258x708 空間。TOML は TaskDef スキーマ(algorithm+template+平坦 roi)。
-    //
-    // TaskDef::detect で capture_probe.png(T7 PrintWindow 実機フレーム) 上の
-    // 各 PC テンプレが threshold(0.95) 以上でマッチすることを E2E 検証する。
-
     fn field_pc_dir() -> PathBuf {
         workspace_templates_root().join("scenes").join("field_pc")
     }
 
-    /// field_pc/ の3 TOML が TaskDef スキーマで parse でき、PNG が存在し、
-    /// ROI が RAW 1258x708 に収まることを検証。
     #[test]
     fn pc_field_pc_scene_templates_load_and_validate() {
         let dir = field_pc_dir();
         let defs = load_pipeline(&dir).expect("field_pc scene dir must load");
-        // template_01 + hud_top + hud_topright の3タスク。
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(
             names.len() >= 3,
@@ -2858,7 +2187,6 @@ mod tests {
         );
 
         for d in &defs {
-            // TaskDef スキーマ(legacy method+[roi] は deny_unknown_fields で弾かれる)。
             assert_eq!(
                 d.algorithm,
                 Algorithm::Ccoeff,
@@ -2898,13 +2226,6 @@ mod tests {
         }
     }
 
-    /// field_pc ネームスペースは 20:9 scenes/field と名前衝突しない
-    /// (pc-scoped ACL 隔離。T7 劣化検証が共存を前提とする)。
-    ///
-    /// 注: legacy scenes/field/*.toml は旧 schema(`method=` + `[roi]` サブテーブル)で
-    /// TaskDef の deny_unknown_fields と非互換(toml::from_str が ParseFailed)のため、
-    /// ここでは legacy TOML をパースせず、TaskDef 名と legacy *ファイル名* の重複を
-    /// 比較する(名前空間分離の本質は同名衝突の回避であり、schema 非互換とは無関係)。
     #[test]
     fn pc_field_pc_namespace_does_not_collide_with_scenes_field() {
         let pc_dir = field_pc_dir();
@@ -2920,7 +2241,6 @@ mod tests {
             .into_iter()
             .map(|d| d.name)
             .collect();
-        // legacy scenes/field の *.toml ファイル名(stem)を名前空間識別子として使う。
         let legacy_stems: Vec<String> = std::fs::read_dir(&legacy_dir)
             .expect("read scenes/field")
             .filter_map(|e| e.ok())
@@ -2944,25 +2264,12 @@ mod tests {
                 "PC scene task '{n}' collides with legacy 20:9 scenes/field namespace"
             );
         }
-        // field_pc の 3 TaskDef 名が legacy stem(template_01/hud_top/hud_topright)と
-        // 衝突しないことを具体的に保証(FieldPc* 接頭辞で分離済み)。
         assert!(
             !pc_names.iter().any(|n| legacy_stems.contains(n)),
             "no PC task name may equal a legacy scenes/field filename stem"
         );
     }
 
-    /// field_pc 用キャプチャプローブのパスを解決する。
-    /// 優先順位(menu_pc_probe_path と同じ規約):
-    ///   1. `templates/captures/field_pc_probe.png`(規約位置・tracked)
-    ///   2. workspace ルート直下 `capture_probe.png`(開発時の暫定プローブ)
-    ///
-    /// Why not 旧インライン resolver: 旧実装は workspace ルートの `capture_probe.png`
-    /// (`.gitignore:17` で除外) のみを見ており、fresh clone では存在せず absence-skip で
-    /// 偽 green になっていた。規約位置の tracked プローブを primary にすることで再現性を保証し、
-    /// menu_pc と同じ primary/fallback 構造に揃えて drift を防ぐ(Issue #9)。
-    ///
-    /// 見つからなければ None(CI フォーク等では検証をスキップ)。
     fn field_pc_probe_path() -> Option<PathBuf> {
         let primary = workspace_templates_root()
             .join("captures")
@@ -2980,14 +2287,6 @@ mod tests {
         None
     }
 
-    /// E2E: field_pc_probe.png(T7 PrintWindow 実機 1258x708 field フレーム) 上で
-    /// 各 PC field テンプレが threshold 以上の confidence でマッチする。
-    /// これが --target windows で field_loop がアンブロックされる直接証明。
-    ///
-    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
-    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
-    /// プローブ不在時は absence-skip せず image::open が fail-loud で panic する
-    /// (CI が missing-probe を偽 green で報告しないための不変量)。
     #[test]
     #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_field_pc_templates_match_real_capture_above_threshold() {
@@ -3037,12 +2336,6 @@ mod tests {
         }
     }
 
-    /// field_loop_pc/ の各 TaskDef が field_pc_probe.png 上で threshold 以上でマッチする。
-    /// `--target windows` + `field_loop_pc` パイプラインのオフライン/E2E 前提契約。
-    ///
-    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
-    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
-    /// プローブ不在時は absence-skip せず fail-loud で panic する。
     #[test]
     #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_field_loop_pc_templates_match_real_capture_above_threshold() {
@@ -3084,26 +2377,14 @@ mod tests {
         }
     }
 
-    // ---- PC版 menu_pc シーンテンプレスライス (Task#2 / Issue#6 / 親 Issue#5) ----
-    //
-    // templates/scenes/menu_pc/ に PC版(16:9, RAW 1258x708) 参照テンプレ7件
-    // (bag/board/gacha/grasta/info/party/record) を新設する。20:9 既存 templates/scenes/menu/*
-    // は PC の 16:9 フレーム上で劣化するため、pc-scoped 名前空間(menu_pc)で隔離する。
-    // 全 ROI は RAW 1258x708 空間で定義。normalize は常に1280幅基準へリサイズ（早期return廃止）、detect が roi_to_normalized で1280空間へスケール。
-    // TOML は TaskDef スキーマ(algorithm=sse + template + 平坦 roi)。20:9 legacy menu は
-    // 旧 schema(method + [roi] サブテーブル)で TaskDef と非互換のため共存(非破壊)。
-
     fn menu_pc_dir() -> PathBuf {
         workspace_templates_root().join("scenes").join("menu_pc")
     }
 
-    /// menu_pc/ の7 TOML が TaskDef スキーマで parse でき、PNG が存在し、
-    /// ROI が RAW 1258x708 に収まり、全て SSE アルゴリズム・threshold>=0.95 であることを検証。
     #[test]
     fn pc_menu_pc_scene_templates_load_and_validate() {
         let dir = menu_pc_dir();
         let defs = load_pipeline(&dir).expect("menu_pc scene dir must load");
-        // bag + board + gacha + grasta + info + party + record の7タスク。
         assert_eq!(
             defs.len(),
             7,
@@ -3112,7 +2393,6 @@ mod tests {
         );
 
         for d in &defs {
-            // TaskDef スキーマ(legacy method+[roi] は deny_unknown_fields で弾かれる)。
             assert_eq!(
                 d.algorithm,
                 Algorithm::Sse,
@@ -3157,13 +2437,6 @@ mod tests {
         }
     }
 
-    /// menu_pc ネームスペースは 20:9 legacy scenes/field および scenes/menu と
-    /// 名前衝突しない(pc-scoped ACL 隔離。非破壊共存の前提)。
-    ///
-    /// 注: legacy scenes/{field,menu}/*.toml は旧 schema(`method=` + `[roi]` サブテーブル)で
-    /// TaskDef の deny_unknown_fields と非互換(toml::from_str が ParseFailed)のため、
-    /// ここでは legacy TOML をパースせず、TaskDef 名と legacy *ファイル名* の重複を比較する
-    /// (名前空間分離の本質は同名衝突の回避であり、schema 非互換とは無関係)。
     #[test]
     fn pc_menu_pc_namespace_does_not_collide_with_scenes_field_or_menu() {
         let pc_dir = menu_pc_dir();
@@ -3175,7 +2448,6 @@ mod tests {
             .map(|d| d.name)
             .collect();
 
-        // legacy scenes/field と scenes/menu の *.toml ファイル名(stem)を名前空間識別子として使う。
         for legacy_seg in ["field", "menu"] {
             let legacy_dir = workspace_templates_root().join("scenes").join(legacy_seg);
             assert!(
@@ -3206,19 +2478,12 @@ mod tests {
                 );
             }
         }
-        // menu_pc の全 TaskDef 名が legacy field/menu stem と衝突しないことを保証。
         assert!(
             !pc_names.is_empty(),
             "menu_pc must define at least one task for namespace isolation check"
         );
     }
 
-    /// menu_pc 用キャプチャプローブのパスを解決する。
-    /// 優先順位:
-    ///   1. `templates/captures/menu_pc_probe.png`(規約位置)
-    ///   2. workspace ルート直下 `menu_pc_probe.png`
-    ///
-    /// 見つからなければ None(CI フォーク等では検証をスキップ)。
     fn menu_pc_probe_path() -> Option<PathBuf> {
         let primary = workspace_templates_root()
             .join("captures")
@@ -3236,15 +2501,6 @@ mod tests {
         None
     }
 
-    /// E2E: menu_pc_probe.png(16:9 PC RAW 1258x708 メニューフレーム) 上で
-    /// 各 menu_pc テンプレ 7 件(bag/board/gacha/grasta/info/party/record)が
-    /// threshold(>=0.95) 以上の confidence でマッチし、かつ ROI が 1258x708 に
-    /// 収まることを検証する。これが conf>=0.95 acceptance gate。
-    ///
-    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
-    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
-    /// プローブ不在時は absence-skip せず fail-loud で panic する
-    /// (namespace-dir / probe の両 early-return を廃止)。
     #[test]
     #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_menu_pc_templates_match_real_capture_above_threshold() {
@@ -3260,7 +2516,6 @@ mod tests {
         });
 
         let defs = load_pipeline(&dir).expect("menu_pc load");
-        // menu 底部 7 アイコン(bag/board/gacha/grasta/info/party/record)。
         assert!(
             defs.len() >= 7,
             "menu_pc must contain 7 bottom-bar icon tasks, got {}",
@@ -3279,7 +2534,6 @@ mod tests {
                     d.name, d.threshold
                 )
             });
-            // acceptance gate: threshold 自体も >=0.95 を要求(acceptance 地盤)。
             assert!(
                 d.threshold >= 0.95,
                 "{}: threshold {} below menu_pc acceptance floor 0.95",
@@ -3310,29 +2564,15 @@ mod tests {
         }
     }
 
-    // ---- T3: PC版 title_pc シーン小テンプレスライス (title コールドスタート blk 解消) ----
-    //
-    // templates/scenes/title_pc/ に PC版(16:9, RAW 1258x708) title 検出用 **小テンプレ** 2件
-    // (version_label, title_logo_corner) を新設する。TASKS.md:30-33 既知ブロッカー:
-    //   - templates/scenes/title/ は PNG 9個・TOML 0個(スキーマ未定義)
-    //   - title_center.png(800x300, 306KB) / load_game_area.png(600x150) は大型で背景差に弱い
-    // 本スライスはこれを解消: 点滅("Tap to Start") 非依存の固定テクスチャ(右下 version 帯,
-    //   左上 ロゴ角)を小テンプレ化し nav_to_field_pc/TapToStartPc・LoadGamePc の検出に供する。
-    // 全 ROI は RAW 1258x708 空間で定義。normalize は常に1280幅基準へリサイズ（早期return廃止）、detect が roi_to_normalized で1280空間へスケール。
-    // TOML は TaskDef スキーマ(algorithm=ccoeff + template + 平坦 roi)。
-
     fn title_pc_dir() -> PathBuf {
         workspace_templates_root().join("scenes").join("title_pc")
     }
 
-    /// title_pc/ の小テンプレ TOML が TaskDef スキーマで parse でき、PNG が存在し、
-    /// ROI が RAW 1258x708 に収まることを検証。state は全て 'title_pc' で一貫。
     #[test]
     fn pc_title_pc_scene_templates_load_and_validate() {
         let dir = title_pc_dir();
         assert!(dir.exists(), "scenes/title_pc namespace must exist (T3)");
         let defs = load_pipeline(&dir).expect("title_pc scene dir must load");
-        // version_label + title_logo_corner の2小テンプレ。
         let names: Vec<&str> = defs.iter().map(|d| d.name.as_str()).collect();
         assert!(
             names.contains(&"TitlePcVersionLabel"),
@@ -3344,7 +2584,6 @@ mod tests {
         );
 
         for d in &defs {
-            // TaskDef スキーマ(legacy 20:9 title/ は TOML 0個で未定義のため共存)。
             assert_eq!(
                 d.algorithm,
                 Algorithm::Ccoeff,
@@ -3367,8 +2606,6 @@ mod tests {
                 d.name,
                 d.template
             );
-            // template PNG は scenes/title_pc/ 配下に存在(20:9 scenes/title/ ではない)。
-            // is_absolute + exists で実在は保証済み。ここでは pc-scoped 配下であることを念押し。
             assert!(
                 d.template.to_string_lossy().contains("title_pc"),
                 "{}: template must live under scenes/title_pc/, got {:?}",
@@ -3377,12 +2614,6 @@ mod tests {
             );
             let roi = d.roi.expect("title_pc template must have an ROI");
             assert_roi_within_1258x708(roi, &d.name);
-            // 小テンプレ要件(TASKS.md: 小テンプレ化): 各辺 50..=120 程度。
-            // 大型(title_center 800x300 相当)だと背景差に弱くなるため寸法上限で縛る。
-            // 上限は 180 (Issue #208/#210): 検出アンカーのスラック窓 (ドリフト吸収) は
-            // 縦方向ヘッドレーンを多く取り 160x180 まで到達。巨大テンプレの背景差脆弱性
-            // 懸念は live/probe の cross-capture conf pin が代替担保する。
-            // 旧上限 130 を 8px 超える。ID 帯の全文幅を保つ必要があるため上限を拡張した。
             assert!(
                 roi[2] <= 180 && roi[3] <= 180,
                 "{}: sub-template ROI {:?} exceeds small-template ceiling (~180px) \
@@ -3393,8 +2624,6 @@ mod tests {
         }
     }
 
-    /// title_pc ネームスペースは 20:9 legacy scenes/title および scenes/field/menu と
-    /// 名前衝突しない(T7 の 20:9→16:9 劣化検証が共存を前提とするため非破壊が必須)。
     #[test]
     fn pc_title_pc_namespace_does_not_collide() {
         let pc_dir = title_pc_dir();
@@ -3408,9 +2637,6 @@ mod tests {
             !pc_names.is_empty(),
             "title_pc must define at least one task for namespace isolation check"
         );
-        // legacy 20:9 scenes/title/ は TOML 0個(load_pipeline は空 Vec を返す)。
-        // それでも将来追加された際の衝突を防ぐため、既知の 20:9 大型テンプレ名
-        // (title_center, load_game_area) との重複を明示的に拒否する。
         let forbidden = [
             "title_center",
             "load_game_area",
@@ -3423,7 +2649,6 @@ mod tests {
                 "title_pc task '{n}' collides with legacy 20:9 large-template namespace"
             );
         }
-        // state も pc-scoped('title_pc')。20:9 の 'Title' と衝突しない。
         for d in load_pipeline(&pc_dir).expect("title_pc reload") {
             assert_ne!(
                 d.state, "Title",
@@ -3433,11 +2658,6 @@ mod tests {
         }
     }
 
-    /// title_pc 用キャプチャプローブのパスを解決する(field_pc/menu_pc と同じ規約)。
-    ///   1. `templates/captures/title_pc_probe.png`(規約位置・tracked 想定)
-    ///   2. workspace ルート直下 `title_pc_probe.png`
-    ///
-    /// 見つからなければ None(CI フォークや実機プローブ未整備時は検証をスキップ)。
     fn title_pc_probe_path() -> Option<PathBuf> {
         let primary = workspace_templates_root()
             .join("captures")
@@ -3455,16 +2675,6 @@ mod tests {
         None
     }
 
-    /// E2E: title_pc_probe.png(PC 実機 1258x708 title フレーム) 上で各 title_pc 小テンプレが
-    /// threshold 以上の confidence でマッチすることを検証する。これが T3 コールドスタート
-    /// 検出の最終証明(Tap-to-Start 点滅に巻き込まれない固定テクスチャで安定マッチ)。
-    ///
-    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
-    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
-    /// プローブ不在時は absence-skip せず fail-loud で panic する
-    /// (namespace-dir / probe の両 early-return を廃止)。本テストは Issue #12 の
-    /// Branch B(README 完成)から Branch A(実機プローブ整備)へ、プローブ配置だけで
-    /// 自己昇格する — `--features pc-e2e --run-ignored all` 起動で実効検証となる。
     #[test]
     #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_title_pc_templates_match_real_capture_above_threshold() {
@@ -3482,24 +2692,12 @@ mod tests {
         let defs = load_pipeline(&dir).expect("title_pc load");
         let probe = image::open(&probe_path).expect("open title_pc_probe.png");
 
-        // 本番経路（PipelineDriver）と同一の normalize_capture (黒帯クロップ [アスペクト
-        // 保護付き] → normalize・Issue #212) を適用してから detect に渡す。
-        // 旧 Issue #12 の明示 resize_exact(1258x708) ハックは廃止: detect が
-        // normalize 後寸法へ ROI/needle を動的スケールするため、サイズ・黒帯へ自動対応する。
         let screenshot = crate::scale::ScreenScaler::new()
             .normalize_capture(&probe)
             .0;
         let (sw, sh) = (screenshot.width(), screenshot.height());
 
         for d in &defs {
-            // Issue #208: TitlePcVersionLabel は probe 一致要求の対象外。左上 ID 表示帯は
-            // バージョン/ID 文字列が変わる**内容可変資産**で、#182 版 (conf 0.94) も
-            // #208 再生成版も 07-07 probe (title_pc_probe.png) には一致しない (None) —
-            // cross-capture 安定性が原理的にない。そのため login/nav の検出アンカーは
-            // title_logo_corner へ移行済みであり、本 E2E は TitlePcLogoCorner の一致
-            // (実測 conf 0.9848) を以て title_pc 検出の実効検証とする。
-            // version_label の資産契約 (構造 stddev・全幅ダーク行なし・roi 寸法対) は
-            // 通常テスト (template_quality / title_live_regression / t1/t3 pin) が担保する。
             if d.name == "TitlePcVersionLabel" {
                 println!(
                     "TitlePcVersionLabel: skipped — content-variable asset (version/ID text \
@@ -3524,8 +2722,6 @@ mod tests {
                 m.confidence.0,
                 d.threshold
             );
-            // match region は detect 入力画像（=normalize 後、通常 1280x720）と同じ座標空間。
-            // 画像寸法内に収まること（旧 raw-1258 前提は本番経路移行で廃止）。
             assert!(
                 m.region.x + m.region.width <= sw && m.region.y + m.region.height <= sh,
                 "{}: match region [{},{},{},{}] must fit within normalized probe {}x{}",
@@ -3552,21 +2748,6 @@ mod tests {
         }
     }
 
-    /// E2E (Issue #192): nav_to_field_pc/LoadGamePc の検出 (needle title_logo_corner.png
-    /// 120x120 × roi) が title_pc_probe.png 上で threshold 以上の confidence でマッチする
-    /// ことを検証する。
-    ///
-    /// 旧 roi [140,60,60,60] は Issue #13 の 20:9 自己クロップ暫定値のコピーで、PR #47 が
-    /// needle を [624,263,120,120] の最高エネルギー窓へ再クロップした際に消費者側 roi を
-    /// 対更新しなかった (= #182 version_label と同種の片側更新バグ)。needle 120x120 が
-    /// roi 60x60 に収まらず ccoeff は恒久 NoMatch だった (PR #191 lane1 発見)。
-    /// scenes/title_pc 側の E2E ([`pc_title_pc_templates_match_real_capture_above_threshold`])
-    /// は TitlePcLogoCorner 定義のみを検証するため、消費者 (load_game.toml) 側の roi が
-    /// needle 再クロップ元の実位置を指すことを本テストで別途固定する。
-    ///
-    /// ゲート(R1 三値化): 他の pc_* E2E と同じくデフォルト(pc-e2e feature OFF)では
-    /// `#[ignore]`。`--features pc-e2e --run-ignored all` 起動でのみ実行し、プローブ不在時は
-    /// fail-loud で panic する (absence-skip しない)。
     #[test]
     #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_nav_to_field_pc_load_game_matches_title_probe() {
@@ -3590,7 +2771,6 @@ mod tests {
         });
         let probe = image::open(&probe_path).expect("open title_pc_probe.png");
 
-        // 本番経路と同一の normalize_capture を適用 (pc_title_pc E2E と同一前提)。
         let screenshot = crate::scale::ScreenScaler::new()
             .normalize_capture(&probe)
             .0;
@@ -3627,21 +2807,6 @@ mod tests {
         );
     }
 
-    /// E2E (Issue #208): login パイプラインの LoginTapTitlePc (アンカー title_logo_corner
-    /// × スラック roi [604,223,160,180]) が title_pc_probe.png 上で threshold 以上の
-    /// confidence でマッチすることを検証する。
-    ///
-    /// Issue #208 で login/nav のアンカーは version_label (内容可変資産・cross-capture
-    /// 不安定) から title_logo_corner へ切替わった。#208 の live 実測では needle==roi 幅の
-    /// ぴったり ROI がキャプチャ間ドリフトで conf 0.99→0.78 に崩壊したため、消費者 roi は
-    /// needle を囲むスラック窓になっている (Issue #210 で live ドリフト (~20px 上方) を
-    /// 吸収するため [604,223,160,180] へ拡張)。tap_to_start /
-    /// load_game との roi 対整合は通常テスト
-    /// ([`pc_title_pc_logo_corner_consumers_share_matching_roi_and_template_dims`]) が pin する。
-    ///
-    /// ゲート(R1 三値化): 他の pc_* E2E と同じくデフォルト(pc-e2e feature OFF)では
-    /// `#[ignore]`。`--features pc-e2e --run-ignored all` 起動でのみ実行し、プローブ不在時は
-    /// fail-loud で panic する (absence-skip しない)。
     #[test]
     #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn pc_login_tap_title_matches_title_probe() {
@@ -3662,7 +2827,6 @@ mod tests {
         });
         let probe = image::open(&probe_path).expect("open title_pc_probe.png");
 
-        // 本番経路と同一の normalize_capture を適用 (他の title probe E2E と同一前提)。
         let screenshot = crate::scale::ScreenScaler::new()
             .normalize_capture(&probe)
             .0;
@@ -3699,17 +2863,12 @@ mod tests {
         );
     }
 
-    /// Branch B (Issue #12 デバイス未接続フォールバック) の README 再開手順節が、
-    /// コード事実(TOML ROI/threshold・R1 ゲート機構・テスト名)と整合していることを
-    /// CI で固定する。手順 doc がコードから drift したら RED。
-    /// What(テスト対象): README の "PC 版 title cold-start 再開手順" 節。
     #[test]
     fn pc_title_pc_readme_resume_procedure_matches_code_facts() {
         let readme =
             std::fs::read_to_string(workspace_templates_root().join("..").join("README.md"))
                 .expect("README.md must be readable from anaden-vision");
 
-        // 節本体の存在(Step-by-step 手順書)。
         assert!(
             readme.contains("PC 版 title cold-start 再開手順"),
             "README must contain the resume procedure section (Issue #12 Branch B)"
@@ -3718,14 +2877,11 @@ mod tests {
             readme.contains("title_pc_probe.png"),
             "README procedure must reference the probe artifact title_pc_probe.png"
         );
-        // 手順 (c): テスト名の再現コマンドが載っていること。
         assert!(
             readme.contains("pc_title_pc_templates_match_real_capture_above_threshold"),
             "README procedure must name the E2E test to run on device reconnect"
         );
 
-        // 手順 (d)/(e): README に記載された ROI/threshold が、実際の TOML(pars した TaskDef)
-        //              と数値レベルで一致すること。doc の数値が古くなったら RED。
         let defs = load_pipeline(&title_pc_dir()).expect("title_pc scene dir must load");
         let by_name: std::collections::HashMap<&str, &TaskDef> =
             defs.iter().map(|d| (d.name.as_str(), d)).collect();
@@ -3741,7 +2897,7 @@ mod tests {
             vl_roi_str
         );
         let vl_thr_str = format!("threshold = {}", version_label.threshold);
-        let _ = vl_thr_str; // threshold 表記は表内 `0.80` 形式で検証(_で参照を保持)。
+        let _ = vl_thr_str;
 
         let logo_corner = by_name
             .get("TitlePcLogoCorner")
@@ -3754,19 +2910,12 @@ mod tests {
             lc_roi_str
         );
 
-        // 設計根拠リンク: 20:9 大型テンプレ既知ブロッカー経由の迂回が cross-ref されていること。
         assert!(
             readme.contains("title_center.png") && readme.contains("load_game_area.png"),
             "README must cross-reference the 20:9 large-template known blockers \
              (title_center.png / load_game_area.png) as the design rationale"
         );
 
-        // R1 三値ゲートの根拠: pipeline.rs の実装行が README で明示されていること。
-        //   - 実装関数名 title_pc_probe_path
-        //   - ゲート機構: pc-e2e feature flag + --run-ignored 起動コマンド
-        // absence-skip 機構は R1 で廃止(プローブ不在時は fail-loud panic)されたため、
-        // README の再開手順は新ゲート機構を記述しなければならない。旧 absence-skip 文言は
-        // 歴史的経緯の記述として README に残り得るが、本 assert は新機構トークンを要求する。
         assert!(
             readme.contains("title_pc_probe_path")
                 && readme.contains("pc-e2e")
@@ -3776,22 +2925,12 @@ mod tests {
         );
     }
 
-    /// R1 docs-drift contract (Issue #19 / T3-readme):
-    /// README の「absence-skip フラグの理由」節が、R1 三値ゲート(ignore attribute,
-    /// pc-e2e feature, --run-ignored)へ移行済みであることを固定する。R1 で absence-skip
-    /// (None ブランチ return)は廃止されプローブ不在時は fail-loud panic になったため、
-    /// skip の理由を説明する節は新ゲート機構を記述しなければならない。旧文言のまま残ると
-    /// 読者にサイレント skip が生きていると誤認させる(偽成功の温床)。本テストは README:137
-    /// 相当の skip-reason 段落が pc-e2e feature トークンを含むことを要求する
-    /// (旧 absence-skip-return 記述のみだと RED)。
     #[test]
     fn pc_title_pc_readme_skip_reason_describes_r1_gate_not_absence_skip() {
         let readme =
             std::fs::read_to_string(workspace_templates_root().join("..").join("README.md"))
                 .expect("README.md must be readable from anaden-vision");
 
-        // skip *理由* を説明する節が R1 ゲート機構(pc-e2e feature)へ言及していること。
-        // 旧 absence-skip-return 記述のみの README ではこのトークンが欠落し RED となる。
         assert!(
             readme.contains("absence-skip") && readme.contains("pc-e2e"),
             "README skip-reason prose must be migrated to the R1 three-valued gate \
@@ -3799,43 +2938,6 @@ mod tests {
         );
     }
 
-    // ---- Issue #12 Branch A: title_pc ROI 実機プローブ grounded contract test ----
-    //
-    // 旧 Issue #13 T2 の retain-old-value ガード([1046,668,112,28] / [140,60,60,60] を硬固定)
-    // は no-probe 時代のグリーンウォッシュ防止用だった。その panic 文が待っていた
-    // 「幾何学的裏付け(geometric corroboration)」= PC 実機プローブが 2026-07-07 に到着し、
-    // TOML ROI は実測値([712,8,121,35] / [624,263,120,120])へ更新済み。よって旧ガードは
-    // 陳腐化し、テストは「実機プローブで grounded した導出ナラティブ」を固定し直す。
-    //
-    // さらに Issue #182 (2026-09, 実機 E2E run-180-live-e2e) で version_label のアンカーは
-    // 右上 version 帯 [712,8,121,35] から【左上 ID 表示帯 [8,2,138,20]】へ再選択された:
-    // 旧帯から切り出したテンプレは無構造のほぼ白一色(stddev 3.76)で原理的に match 不能
-    // (65 iters 発火 0)だった。ID 帯テンプレ(138x20, stddev 53.1)は実機エンジンキャプチャ
-    // から再生成され、発火 1/10 iters・フィールド到達まで実証済み。
-    //
-    // 新契約(Branch A — real-probe-grounded / Issue #182 改訂):
-    //   (A) 両 TOML ROI が実測値(operator probe 2026-07-07 = logo, 実機 E2E 2026-09 =
-    //       version_label ID 帯, PC RAW 1258x708 space) に等しい。silent revert to the old
-    //       values ([1046,668,112,28] / [140,60,60,60] / [712,8,121,35] version 帯時代) を
-    //       RED で検出する。
-    //   (B) 実機プローブ title_pc_probe.png が存在し、取り込み寸法不変量を持つ:
-    //       - 生ファイルは 1918x1048 RGBA(オペレータ制御不可の取得ウィンドウサイズ)。
-    //       - pipeline.rs は crop_to_content → normalize 経路で detect に渡す。
-    //   (C) 実機プローブから再導出した列分散 run が、実測 ROI 帯の存在を裏付けること
-    //       (logo 带 y=63..468, x=164..1096 に run が再現する)。version_label の ID 帯は
-    //       2026-07-07 プローブより後の実機観測(run-180)で選出されたアンカーのため、
-    //       当該プローブ上の run 裏付けは logo 帯のみに適用する(ID 帯の実証は run-180
-    //       の実機 E2E evidence による)。
-    //   (D) 旧暫定値([1046,668,112,28]=右下 / [140,60,60,60]=左上小マーク) は 20:9 自己クロップ
-    //       由来の不正確さ を文書化済み。実測値への移行完了を固定。
-    //
-    // ※プローブ不在時(古い CI checkout) は presence-of-probe 不変量 (B) で panic せず、
-    //    実測値保持 (A) だけを検証して残りを明示ログで skip する。プローブは tracked なので
-    //    fresh clone にも存在し、本 skip は取り込みミス時の grace path に過ぎない。
-
-    /// analyze_title_regions.rs(列分散手法) と同一の決定論的 run 検出を再実装する。
-    /// examples/ はバイナリでライブラリ関数ではないため、本テスト内でアルゴリズムを再現し
-    /// プロダクション結合を増やさない(architecture-coupling-balance.md)。
     fn title_region_runs(gray: &GrayImage, y0: u32, y1: u32, xs: u32, xe: u32) -> Vec<(u32, u32)> {
         let band_h = (y1 - y0) as usize;
         let mut col_var: Vec<u64> = Vec::with_capacity((xe - xs) as usize);
@@ -3880,13 +2982,6 @@ mod tests {
         runs
     }
 
-    /// Issue #12 Branch A contract: title_pc ROI は実機プローブ title_pc_probe.png で
-    /// grounded しており、TOML ROI が実測値(ID 帯 [8,2,138,20] (Issue #182) /
-    /// [624,263,120,120]) に等しいこと、かつプローブから再導出した列分散 run が
-    /// 幾何学的裏付けを与えることを固定する。
-    /// 旧 Issue #13 retain-old-value ガード(=no-probe 時代のグリーンウォッシュ防止) は
-    /// 実機プローブ到着により陳腐化したため、real-probe-grounded ナラティブへ置換した。
-    /// What(テスト対象): version_label.toml / title_logo_corner.toml の ROI 導出契約。
     #[test]
     fn pc_title_pc_roi_derivation_matches_column_variance_runs_or_documents_gap() {
         let defs = load_pipeline(&title_pc_dir()).expect("title_pc scene dir must load");
@@ -3900,16 +2995,6 @@ mod tests {
             .get("TitlePcLogoCorner")
             .expect("TitlePcLogoCorner must exist");
 
-        // (A) 実測値保持契約: 両 ROI は実機観測 (PC RAW 1258x708 space) で実測/選出された
-        //     値でなければならない。旧値への silent revert を RED で検出する:
-        //     - version_label: Issue #182 で左上 ID 表示帯 [8,2,138,20] へ再選択。旧
-        //       [712,8,121,35] (右上 version 帯・operator probe 2026-07-07) から切り出した
-        //       テンプレは無構造 (stddev 3.76) で恒久 NoMatch、さらにその前の Issue #13
-        //       暫定 [1046,668,112,28]=右下 は 20:9 自己クロップ由来。
-        //     - logo_corner: operator がドラッグした全帯 [164,63,932,405] を、小テンプレ上限
-        //       (<=130px)・背景差耐性のため find_logo_corner_subfeature.rs で最高エネルギー
-        //       120x120 窓へ再クロップ (DEFER option b)。候補 [624,263,120,120] はロゴ
-        //       グリフ上の安定小特徴 (operator probe 2026-07-07)。
         assert_eq!(
             version_label.roi,
             Some([8, 2, 138, 20]),
@@ -3933,9 +3018,6 @@ mod tests {
              Issue #13 provisional [140,60,60,60] was a 20:9 self-crop artifact"
         );
 
-        // (B) プローブ取り込み不変量: title_pc_probe.png は tracked ので fresh clone にも
-        //     存在するはず。取り込みミスで欠けている場合は実測値保持 (A) だけ検証し、
-        //     geometric corroboration (C) は明示ログで skip する(偽 green にしない)。
         let probe_path = match title_pc_probe_path() {
             Some(p) => p,
             None => {
@@ -3949,8 +3031,6 @@ mod tests {
         };
 
         let probe = image::open(&probe_path).expect("open title_pc_probe.png");
-        // 生ファイル寸法不変量: 取得ウィンドウサイズはオペレータ制御不可につき 1918x1048 RGBA。
-        // 本番経路（PipelineDriver）は crop_to_content → normalize でこれを 1280x720 へ正規化する。
         assert_eq!(
             (probe.width(), probe.height()),
             (1918, 1048),
@@ -3960,10 +3040,6 @@ mod tests {
              re-validated."
         );
 
-        // 本番経路と同一の正規化（normalize_capture → 1280x720）を適用。
-        // 旧インライン resize_exact(1258x708) ハックは廃止: 本番は黒帯クロップ後に normalize する
-        // ため、幾何学的検証も同経路を通す。ROI は raw-1258 空間で定義されるので、
-        // roi_to_normalized で 1280x720 空間へ変換して run を見る。
         let normalized = crate::scale::ScreenScaler::new()
             .normalize_capture(&probe)
             .0;
@@ -3971,14 +3047,6 @@ mod tests {
         let norm_w = normalized.width();
         let norm_h = normalized.height();
 
-        // (C) geometric corroboration (= 旧 retain-old-value ガードが待っていた実機裏付け):
-        //     実測 ROI 帯の y-range 内で、x-range に重なる列分散 run が再現すること。
-        //     これが「実測 ROI が実機プローブ上の実テクスチャ位置を指している」客観的証明。
-        //     roi は (A) で pin 済みの TOML 実測値をそのまま使い、1280x720 空間へスケール
-        //     して run を見る (リテラルの二重管理を避ける)。
-        //     なお title_pc_probe.png (2026-07-07) は ID 帯テンプレ (run-180 エンジン
-        //     キャプチャ由来) とは独立のキャプチャなので、ここでの run 一致は
-        //     cross-capture ロバスト性の一部として機能する (Issue #182)。
         let vl_roi = version_label.roi.expect("(A) pinned version_label roi");
         let vl = crate::scale::roi_to_normalized(vl_roi, norm_w, norm_h);
         let vl_runs = title_region_runs(
@@ -3998,7 +3066,6 @@ mod tests {
             vl
         );
 
-        // logo_corner: ROI [624,263,120,120] を同空間へスケールして run を見る。
         let lc_roi = logo_corner.roi.expect("(A) pinned logo_corner roi");
         let lc = crate::scale::roi_to_normalized(lc_roi, norm_w, norm_h);
         let lc_runs = title_region_runs(
@@ -4017,36 +3084,8 @@ mod tests {
              find_logo_corner_subfeature.rs inside the operator-dragged band). got runs={lc_runs:?}",
             lc
         );
-
-        // (D) 実機プローブ到着による契約の置換を文書化: 旧 retain-old-value ガードの前提
-        //     (PC 実機プローブ未整備 → 暫定値を値そのままで保持) は解消済み。プローブが
-        //     tracked のまま万一失われた場合は上記 (B) で skip されるため、ここに到達するのは
-        //     プローブが実在し実測 ROI が它のテクスチャ位置を指している時のみ (= 真の green)。
     }
 
-    // ---- Issue #182/#208 remediation: 共有テンプレ対整合 + 無構造テンプレ回帰防止 ----
-    //
-    // Issue #208 の恒久修正で login/nav の検出アンカーは title_logo_corner.png に統一された。
-    // 同 PNG は 3 つのパイプライン TOML
-    //   (pipelines/login/tap_title.toml, pipelines/nav_to_field_pc/tap_to_start.toml,
-    //    pipelines/nav_to_field_pc/load_game.toml)
-    // から共有参照される (scenes/title_pc/title_logo_corner.toml は原点 roi
-    // [624,263,120,120] の別定義)。Issue #182/#192 は「テンプレ差し替えと roi 更新の
-    // 片側化」が恒久 NoMatch を生んだ実例 (Release Review lane 発見)。本テスト群はその再発を防ぐ:
-    //   t1: version_label テンプレ PNG が構造を持つこと (輝度 stddev > 20.0)。旧テンプレは
-    //       幾ら待っても match しない無構造のほぼ白一色 (stddev 3.76) だった。
-    //   t2: logo_corner を共有参照する 3 パイプライン TOML の roi がすべて同じスラック窓
-    //       [614,253,140,140] (原点 [624,263,120,120] 中心 ±10px) で、needle 寸法 (120x120)
-    //       が roi に収まること (対更新の pin)。
-    //   t3: version_label.toml (scenes 検出専用) の roi が version_label.png 寸法 (138x20) と
-    //       一致すること (needle-wider-than-roi 回帰防止。内容可変資産である旨は #208 で
-    //       doc 済み — probe E2E の一致要求対象からは除外)。
-
-    /// t1: version_label.png の輝度 stddev が閾値を超えること (無構造テンプレの再発防止)。
-    /// 旧テンプレ (Issue #182 以前) は stddev 3.76 のほぼ白一色で、TM_CCOEFF_NORMED が
-    /// 原理的に match できず実機 65 iters 発火 0 だった。再生成品は stddev 53.1。
-    /// stddev 計算は Issue #184 の共通実装 (template_quality) を使う (二重実装禁止)。
-    /// What(テスト対象): templates/scenes/title_pc/version_label.png の画像構造。
     #[test]
     fn pc_title_pc_version_label_template_has_structure_above_stddev_threshold() {
         let path = title_pc_dir().join("version_label.png");
@@ -4061,29 +3100,10 @@ mod tests {
         );
     }
 
-    /// t2: title_logo_corner.png を共有参照する 3 パイプライン TOML (login/tap_title,
-    /// nav_to_field_pc/tap_to_start, nav_to_field_pc/load_game) の roi がすべて
-    /// [604,223,160,180] であり、needle 寸法 (120x120) が roi に収まること。
-    ///
-    /// Issue #208 で判明した設計要件: needle==roi 幅のぴったり ROI (旧 [624,263,120,120])
-    /// はキャプチャ間のコンテンツ配置ドリフト (07-07 probe → 09-19 live で (+2,-1) px)
-    /// で最良一致位置を roi 外に弾き conf 0.99→0.78 に崩壊するため、needle を囲む
-    /// スラック窓でドリフトを吸収する。Issue #210 実機検証 (2026-09-24) では live
-    /// 「ロードゲーム」タイトルで needle 最良位置が (625,243) と原点から約 20px 上方へ
-    /// ドリフトし旧窓 [614,253,140,140] の上端を超過したため、anchor 原点を四辺
-    /// ≥20px の余白で囲む窓 (上辺のみ上方ドリフト吸収のため 40px) へ拡張した。
-    /// テンプレ差し替えと roi 更新は 3 消費者で対にすること
-    /// (Issue #182/#192 の片側更新バグの再発防止)。
-    /// What(テスト対象): 3 消費者 TOML の roi・template 参照と title_logo_corner.png 寸法の整合。
     #[test]
     fn pc_title_pc_logo_corner_consumers_share_matching_roi_and_template_dims() {
         const EXPECTED_ROI: [u32; 4] = [604, 223, 160, 180];
-        // スラック窓の基準原点 (needle 再クロップ元)。
         const ANCHOR_ORIGIN: [u32; 4] = [624, 263, 120, 120];
-        /// 窓の各辺が anchor 原点から確保する最小余白 (Issue #210 で 10→20px へ拡大)。
-        /// スラック窓のパディング (非対称)。#208 実測 (+2,−1)px に加え #210 live
-        /// 検証で ~20px **上方**ドリフトを観測したため、上方向のヘッドレーンを
-        /// 多く取る (横 20 / 縦 下+20 上-40)。
         const SLACK_X: u32 = 20;
         const SLACK_DOWN: u32 = 20;
         const SLACK_UP: u32 = 40;
@@ -4128,7 +3148,6 @@ mod tests {
             );
         }
 
-        // テンプレ寸法 (120x120) は roi に収まること (needle-wider-than-roi = 恒久 NoMatch)。
         let img = image::open(title_pc_dir().join("title_logo_corner.png"))
             .expect("title_logo_corner.png must open");
         assert_eq!(
@@ -4158,11 +3177,6 @@ mod tests {
         );
     }
 
-    /// t3: version_label.toml (scenes/title_pc 検出専用) の roi が [8,2,138,20] で
-    /// version_label.png 寸法 (138x20) と一致すること。Issue #208 で login/nav の
-    /// アンカーは logo_corner へ移行したが、scenes 検出専用として残置する本 TOML の
-    /// needle/roi 対整合は引き続き pin する (片側更新で恒久 NoMatch になるのを防ぐ)。
-    /// What(テスト対象): scenes/title_pc/version_label.toml の roi と PNG 寸法の整合。
     #[test]
     fn pc_title_pc_version_label_scene_def_roi_matches_template_dims() {
         const EXPECTED_ROI: [u32; 4] = [8, 2, 138, 20];
@@ -4190,16 +3204,6 @@ mod tests {
         );
     }
 
-    // ---- pipeline.toml スキップ契約 ----
-    //
-    // `load_pipeline` は慣例パス `pipeline.toml` を TaskDef としてパースせずスキップする。
-    // この manifest 由来の Goal 読込機能は Issue #38 で削除された（driver 配線が T4/T5
-    // に繰越され dead-code となったため）。スキップ契約自体は load_pipeline の不変条件
-    // として残り、manifest 相当の TOML が置かれても TaskDef 誤パースしないことを保証する。
-
-    /// manifest のみ（task 無し）を置いたディレクトリを走査すると、load_pipeline は
-    /// pipeline.toml をスキップするので空 Vec を返すこと（回帰: manifest が TaskDef
-    /// として誤パースされない）。
     #[test]
     fn load_pipeline_skips_pipeline_manifest_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4223,28 +3227,6 @@ mod tests {
         );
     }
 
-    // ---- T5-toml-doc: load_pipeline_manifest で start_task + goal を分離パース ----
-    //
-    // manifest 経路(A) の本体。`pipeline.toml` を TaskDef ではなく PipelineManifest
-    // (start_task + goals) として読み込む。Goal シリアライズ表記は anaden-core/src/goal.rs
-    // の既存テスト(deserialize_loop_count/template_match/timeout, deny_unknown_fields)で
-    // 既検証済み。本テスト群は「manifest ロード層が start_task と goals を正しく分離し、
-    // Goal バリアント3種を透過的にパースすること」を検証する（Goal 自体の評価ロジックは
-    // anaden-core 側の責務なのでここでは扱わない）。
-    //
-    // schema:
-    //   start_task = "<task-name>"        # 必須
-    //   [[goal]]                          # 0個以上（無宣言 = 無限ループ後方互換）
-    //   name = "<goal-name>"
-    //   [goal.stop]
-    //   LoopCount = { target = <u64> }
-    //   # or
-    //   [goal.stop.TemplateMatch]
-    //   task = "<template>", confidence = <f32>
-    //   # or
-    //   Timeout = { secs = <u64> }
-
-    /// UC-1 (LoopCount): start_task + 単一 goal が分離パースされること。
     #[test]
     fn manifest_parses_start_task_and_loop_count_goal() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4272,7 +3254,6 @@ mod tests {
         );
     }
 
-    /// UC-2 (TemplateMatch): start_task + TemplateMatch goal が分離パースされること。
     #[test]
     fn manifest_parses_template_match_goal() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4303,7 +3284,6 @@ mod tests {
         );
     }
 
-    /// UC-3 (Timeout): start_task + Timeout goal が分離パースされること。
     #[test]
     fn manifest_parses_timeout_goal() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4330,8 +3310,6 @@ mod tests {
         );
     }
 
-    /// 後方互換（無限ループ維持）: goal 宣言が無い manifest は空 goals で読み込めること。
-    /// driver は goals が空なら Goal 無し（= 従来の無限ループ）として振る舞う。
     #[test]
     fn manifest_without_goals_loads_as_empty_goals_for_backcompat() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4351,7 +3329,6 @@ mod tests {
         );
     }
 
-    /// start_task 欠落は ParseFailed（必須フィールド）。
     #[test]
     fn manifest_missing_start_task_rejected() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4370,7 +3347,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
-    /// deny_unknown_fields: manifest 直下の未知フィールドは拒否されること。
     #[test]
     fn manifest_rejects_unknown_top_field() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4387,8 +3363,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
-    /// deny_unknown_fields: goal テーブル内の未知フィールドは拒否されること
-    /// （Goal/StopCondition の deny_unknown_fields が manifest 経由でも効くことの証明）。
     #[test]
     fn manifest_rejects_unknown_goal_field() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4410,9 +3384,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
-    /// manifest ファイル不在は ParseFailed（慣例パス pipeline.toml が無いと明示的エラー）。
-    /// load_pipeline の「空 Vec を返す」緩い契約とは意図的に異なる: manifest 経路を
-    /// 選んだ呼出側は manifest が存在することを期待するため、不在は即時 fail する。
     #[test]
     fn manifest_missing_file_returns_error() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4420,15 +3391,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
-    // ---- T5 (Issue #50): StopCondition::All / Any 合成バリアントの manifest round-trip ----
-    //
-    // Goal シリアライズ表記の再帰的ネスト（All/Any が Vec<StopCondition> を持つ）を
-    // manifest ロード層が透過的にパースできること、および deny_unknown_fields が
-    // 合成階層でも効くことを検証する。serde が間接再帰を自動処理するため
-    // load_pipeline_manifest 本体のコード変更は不要（no-change であることの回帰証明）。
-
-    /// UC-1 系 All 合成（inline-table 形式）: 複数の子条件が1つの All にまとめて
-    /// パースされること。R4 で最高リスクとされた「inline table 形式の round-trip」。
     #[test]
     fn manifest_parses_all_inline_table_form() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4467,8 +3429,6 @@ mod tests {
         }
     }
 
-    /// UC-2 系 Any 合成（sub-table 形式）: [[goal.stop.Any.conditions]] 配列表記で
-    /// 子条件が順序保持でパースされること。R4 のもう一方の表記（sub-table 形式）。
     #[test]
     fn manifest_parses_any_subtable_array_form() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4506,8 +3466,6 @@ mod tests {
         }
     }
 
-    /// ネストした合成（All の中に Any）が再帰的にパースされること。
-    /// serde の間接再帰デシリアライズが深い階層でも破綻しないことの証明。
     #[test]
     fn manifest_parses_nested_all_containing_any() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4555,8 +3513,6 @@ mod tests {
         }
     }
 
-    /// deny_unknown_fields が合成階層でも効くこと（R4）。
-    /// All.conditions 配列内の子 StopCondition に未知フィールドがあれば拒否される。
     #[test]
     fn manifest_rejects_unknown_field_in_composition_child() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4581,8 +3537,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
-    /// deny_unknown_fields: All テーブル直下の未知フィールドも拒否されること。
-    /// （`conditions` 以外のキーを All に置けないことの証明。）
     #[test]
     fn manifest_rejects_unknown_field_on_all_variant() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4604,11 +3558,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
     }
 
-    /// manifest 経路でも `Goal::validate` 相当の不変量（空 conditions 拒否）が
-    /// serde レベルではなく呼出側で検出可能であることの境界確認。
-    /// ※ load_pipeline_manifest 自体は validate を呼ばない（driver 層の責務）ため、
-    /// ここでは空 conditions でもパース自体は成功し、value が構築されることのみ検証する。
-    /// validate 拒否は anaden-core 側のテストで担保済み。
     #[test]
     fn manifest_parses_empty_conditions_without_runtime_panic() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4625,8 +3574,6 @@ mod tests {
             "#,
         );
 
-        // manifest ロード層は構文解析のみ。空 conditions はパース時点では Err ではなく、
-        // 値が構築される（validate は上位層）。パニックしないことの回帰。
         let parsed = load_pipeline_manifest(tmp.path());
         let manifest = parsed.expect("empty conditions parses at manifest layer (no panic)");
         assert_eq!(manifest.goals.len(), 1);
@@ -4636,9 +3583,6 @@ mod tests {
         ));
     }
 
-    /// 複数 goal 宣言: [[goal]] 配列として2つ以上の goal が順序保持でパースされること。
-    /// （goal.rs モジュールは AND/OR 合成を扱わないが、manifest 層は複数宣言を受容し、
-    /// driver 層が最初の1つを評価する等の将来拡張を妨げない。）
     #[test]
     fn manifest_parses_multiple_goals_in_order() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4675,13 +3619,9 @@ mod tests {
         );
     }
 
-    /// load_pipeline と load_pipeline_manifest の分離契約: 同一ディレクトリで
-    /// TaskDef (*.toml) は load_pipeline が読み、manifest (pipeline.toml) は
-    /// load_pipeline_manifest が読む。両者が衝突しないことの回帰。
     #[test]
     fn load_pipeline_and_load_pipeline_manifest_are_separated() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // TaskDef（通常タスク）
         write_toml(
             tmp.path(),
             "tap_bottom.toml",
@@ -4692,7 +3632,6 @@ mod tests {
             template = "t.png"
             "#,
         );
-        // manifest（Goal/start_task）
         write_toml(
             tmp.path(),
             "pipeline.toml",
@@ -4706,12 +3645,10 @@ mod tests {
             "#,
         );
 
-        // load_pipeline は TaskDef のみ（manifest をスキップ）。
         let defs = load_pipeline(tmp.path()).expect("task defs load");
         assert_eq!(defs.len(), 1, "only TaskDef picked up, manifest skipped");
         assert_eq!(defs[0].name, "TapBottom");
 
-        // load_pipeline_manifest は manifest のみ（start_task + goals を分離）。
         let manifest = load_pipeline_manifest(tmp.path()).expect("manifest load");
         assert_eq!(manifest.start_task, "TapBottom");
         assert_eq!(manifest.goals.len(), 1);
@@ -4721,16 +3658,6 @@ mod tests {
         );
     }
 
-    // ---- Issue #146 T3: fishing パイプライン最小構成 (UC-2) ----
-    //
-    // つりタスクの実体 (釣りUI固有の画像認識テンプレート・ROI) は別チケット切出し。
-    // 本スライスは「パース・起動可能な pipeline 構造」のみを検証する
-    // (estimate 承認条件: 画像認識精度は受入基準に含めない)。
-    // start_task の検出テンプレートは既存 pc-scoped field scene (hud_top.png) を
-    // 流用した暫定のもので、釣りシーンの実テンプレート導入時に差し替える。
-
-    /// templates/pipelines/fishing/ が load_pipeline で TaskDef として
-    /// 読み込めること (テンプレPNG実在・ROI 1258x708 収容)。
     #[test]
     fn fishing_pipeline_taskdefs_load() {
         let dir = workspace_templates_root().join("pipelines").join("fishing");
@@ -4750,8 +3677,6 @@ mod tests {
         assert_roi_within_1258x708(roi, "FishingStartPc");
     }
 
-    /// templates/pipelines/fishing/pipeline.toml が manifest として start_task +
-    /// goals に分離パースでき、start_task が同一ディレクトリの TaskDef 名と一致すること。
     #[test]
     fn fishing_pipeline_manifest_loads() {
         let dir = workspace_templates_root().join("pipelines").join("fishing");
@@ -4769,13 +3694,6 @@ mod tests {
         );
     }
 
-    // ---- T1 (Issue #160 Shard 1 / UC-1): 保存ヘルパー save → load round-trip ----
-    //
-    // シナリオ作成 GUI (UC-1) が書き出す TOML は既存 schema (load_pipeline /
-    // load_pipeline_manifest) で parse 可能であることを機械保証する (AC-1 の土台)。
-    // 保存形式の単一情報源は vision 側の save_task_def / save_pipeline_manifest。
-
-    /// テスト用の最小 TaskDef を作る (フィールドは呼び出し側で上書き)。
     fn sample_task_def() -> TaskDef {
         TaskDef {
             name: "T".into(),
@@ -4790,9 +3708,6 @@ mod tests {
         }
     }
 
-    /// 全フィールド (base/next/click_rect action 含む) の TaskDef を
-    /// save → load_pipeline で完全往復できること (deny_unknown_fields 対称性:
-    /// シリアライザが未知キーを吐けば load の deny_unknown_fields が弾く)。
     #[test]
     fn save_task_def_roundtrips_through_load_pipeline() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4828,7 +3743,6 @@ mod tests {
             })
         );
         assert_eq!(d.next.as_deref(), Some(&["LoadGame".to_string()][..]));
-        // template は保存 TOML の親ディレクトリ基準で絶対化されて戻る。
         assert_eq!(
             d.template,
             tmp.path().join("scenes/title/title_center.png"),
@@ -4836,8 +3750,6 @@ mod tests {
         );
     }
 
-    /// 保存文字列のトップレベルキー集合は TaskDef の既知フィールドと完全一致する
-    /// こと (load 側 deny_unknown_fields との明示的な対称性検証)。
     #[test]
     fn saved_taskdef_key_set_is_exactly_known_fields() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4874,9 +3786,6 @@ mod tests {
         assert_eq!(keys, expected, "no unknown keys, no missing keys");
     }
 
-    /// 絶対 template パスは保存先 TOML の親ディレクトリ基準の相対パス
-    /// (フォワードスラッシュ) として書き出されること。
-    /// fishing/fishing_start.toml の `../field_loop_pc/hud_tr.png` 形式。
     #[test]
     fn save_task_def_relativizes_absolute_template_forward_slash() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4903,7 +3812,6 @@ mod tests {
             content.contains("template = \"../field_loop_pc/hud_tr.png\""),
             "forward-slash relative form expected:\n{content}"
         );
-        // round-trip: load は親ディレクトリ基準で絶対化し、実在ファイルへ解決する。
         let defs = load_pipeline(&fishing).expect("reload");
         assert_eq!(defs.len(), 1);
         assert!(
@@ -4913,7 +3821,6 @@ mod tests {
         );
     }
 
-    /// template がパイプラインディレクトリ配下なら `<sub>/x.png` 形式で保存される。
     #[test]
     fn save_task_def_template_under_pipeline_dir_saves_relative() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4930,16 +3837,12 @@ mod tests {
         );
     }
 
-    /// 共通祖先を持たない絶対パス (Windows の別ドライブ等) は絶対・フォワード
-    /// スラッシュ形式のまま保存されること ([`TaskDef::detect`] は絶対パスを優先)。
     #[test]
     fn relativize_template_without_common_ancestor_keeps_absolute() {
         let got = relativize_template(Path::new("Z:\\a\\b.png"), Path::new("C:\\x\\y"));
         assert_eq!(got, "Z:/a/b.png");
     }
 
-    /// manifest 慣例ファイル名 (pipeline.toml) への TaskDef 保存は拒否されること
-    /// (load_pipeline が TaskDef として読まないため、書き出すと実行不能になる)。
     #[test]
     fn save_task_def_rejects_manifest_convention_filename() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4951,7 +3854,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::SaveFailed { .. }));
     }
 
-    /// 親ディレクトリが存在しないパスへの保存は SaveFailed (fail-closed)。
     #[test]
     fn save_task_def_missing_parent_dir_errors() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -4963,11 +3865,11 @@ mod tests {
         assert!(matches!(err, TaskDefError::SaveFailed { .. }));
     }
 
-    /// manifest (複数 goal: LoopCount + TemplateMatch) の save → load 往復。
     #[test]
     fn save_pipeline_manifest_roundtrips_through_load() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let manifest = PipelineManifest {
+            watch: Vec::new(),
             start_task: "Farm".into(),
             goals: vec![
                 anaden_core::Goal {
@@ -4988,12 +3890,11 @@ mod tests {
         assert_eq!(back, manifest);
     }
 
-    /// goals 空の manifest は `goal` 行自体を書き出さない (無宣言 = 無限ループの
-    /// 後方互換形式)。
     #[test]
     fn save_pipeline_manifest_empty_goals_omits_goal_key() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let manifest = PipelineManifest {
+            watch: Vec::new(),
             start_task: "TapBottom".into(),
             goals: Vec::new(),
         };
@@ -5006,13 +3907,11 @@ mod tests {
         );
     }
 
-    /// Rust 側フィールド名 `goals` は TOML 上 `[[goal]]` 配列テーブルとして
-    /// 書き出されること (`#[serde(rename = "goal")]` のシリアライズ対称性。
-    /// `[[goals]]` は手書き形式に存在しない)。
     #[test]
     fn save_pipeline_manifest_writes_goal_array_table_rename() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let manifest = PipelineManifest {
+            watch: Vec::new(),
             start_task: "TapBottom".into(),
             goals: vec![anaden_core::Goal {
                 name: "farm50".into(),
@@ -5032,12 +3931,83 @@ mod tests {
         );
     }
 
-    /// 存在しないディレクトリへの manifest 保存は SaveFailed (fail-closed)。
+    #[test]
+    fn manifest_parses_watch_task_names() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "TapBottom"
+            watch = ["levelup_popup", "close_btn"]
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        assert_eq!(
+            manifest.watch,
+            vec!["levelup_popup".to_string(), "close_btn".to_string()],
+            "watch must parse as a string array"
+        );
+    }
+
+    #[test]
+    fn manifest_without_watch_defaults_to_empty() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        write_toml(
+            tmp.path(),
+            "pipeline.toml",
+            r#"
+            start_task = "TapBottom"
+            "#,
+        );
+
+        let manifest = load_pipeline_manifest(tmp.path()).expect("manifest must load");
+        assert!(manifest.watch.is_empty());
+    }
+
+    #[test]
+    fn save_pipeline_manifest_empty_watch_omits_watch_key() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = PipelineManifest {
+            watch: Vec::new(),
+            start_task: "TapBottom".into(),
+            goals: Vec::new(),
+        };
+        save_pipeline_manifest(&manifest, tmp.path()).expect("save");
+        let content =
+            fs::read_to_string(tmp.path().join(PIPELINE_MANIFEST_FILENAME)).expect("read");
+        assert!(
+            !content.contains("watch"),
+            "watch key must be omitted:\n{content}"
+        );
+    }
+
+    #[test]
+    fn save_pipeline_manifest_watch_roundtrips() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let manifest = PipelineManifest {
+            watch: vec!["levelup_popup".into(), "close_btn".into()],
+            start_task: "TapBottom".into(),
+            goals: Vec::new(),
+        };
+        save_pipeline_manifest(&manifest, tmp.path()).expect("save");
+        let content =
+            fs::read_to_string(tmp.path().join(PIPELINE_MANIFEST_FILENAME)).expect("read");
+        assert!(
+            content.contains("watch = ["),
+            "watch must serialize as string array:\n{content}"
+        );
+        let back = load_pipeline_manifest(tmp.path()).expect("reload");
+        assert_eq!(back, manifest);
+    }
+
     #[test]
     fn save_pipeline_manifest_missing_dir_errors() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let err = save_pipeline_manifest(
             &PipelineManifest {
+                watch: Vec::new(),
                 start_task: "X".into(),
                 goals: Vec::new(),
             },
@@ -5047,11 +4017,6 @@ mod tests {
         assert!(matches!(err, TaskDefError::SaveFailed { .. }));
     }
 
-    /// 既存手書き manifest と保存形式の機械一致: 既存 pipeline.toml を
-    /// load → save し、手書きファイルと保存ファイルを toml::Value として比較して
-    /// 完全一致すること (コメント・インライン/サブテーブル表記差は Value 比較で
-    /// 吸収され、キー構造・値のみが検証される = 「保存形式が既存手書き形式と
-    /// 同一 schema」の機械保証)。
     #[test]
     fn saved_manifest_matches_handwritten_value_form_for_existing_pipelines() {
         let pipelines = workspace_templates_root().join("pipelines");
@@ -5083,15 +4048,6 @@ mod tests {
         );
     }
 
-    /// 既存手書き TaskDef (全 pipeline の *.toml) と保存形式の機械一致。
-    /// load_pipeline で絶対化された template を save で相対化し直しても、
-    /// 手書きファイルと toml::Value 完全一致すること (AC-4「既存 pipeline の
-    /// parse 互換を壊さない」の構造的保証)。
-    ///
-    /// template の相対化基準は保存先 TOML の親ディレクトリ (= パイプライン
-    /// ディレクトリ) のため、リポジトリ実ファイルを直接上書きせず、TOML のみを
-    /// tempdir へコピーした同一階層構造上で load → 同場所 save → 比較する。
-    /// (PNG は load_pipeline が読まないためコピー不要。)
     #[test]
     fn saved_taskdefs_match_handwritten_value_form_for_existing_pipelines() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -5123,7 +4079,6 @@ mod tests {
                     .find(|d| d.name == name)
                     .unwrap_or_else(|| panic!("TaskDef {name} not loaded from {dir:?}"))
                     .clone();
-                // 同じパイプラインディレクトリ内へ上書き保存 → 再読込比較。
                 save_task_def(&def, &p).expect("save in place");
                 let saved = fs::read_to_string(&p).expect("saved");
                 let sv: toml::Value = toml::from_str(&saved).expect("saved value");
@@ -5134,16 +4089,12 @@ mod tests {
                 checked += 1;
             }
         }
-        // Issue #188 で android 版 pipeline を削除し 14 → 8 (fail-closed 下限)。
         assert!(
             checked >= 8,
             "expected all 8 handwritten TaskDefs, checked {checked}"
         );
     }
 
-    /// `src` 以下のディレクトリ構造と `*.toml` のみを `dst` へ再帰コピーする
-    /// (PNG 等の実ファイルはコピーしない — 機械一致テストはパス解決まで検証する
-    /// ため template 実体は不要)。
     fn copy_toml_files_only(src: &Path, dst: &Path) {
         fs::create_dir_all(dst).expect("mkdir dst");
         for entry in fs::read_dir(src).expect("read src") {

@@ -1,18 +1,3 @@
-//! キャプチャ幾何ドリフト診断 (Issue #212 由来): 実ショットを複数経路の前処理に
-//! 通し、roi 付き detect と roi なし全文探索 (最良 conf 含む) を突き合わせて出力する。
-//!
-//! 経路:
-//!   A: raw (無前処理)
-//!   B: crop_to_content_with_info のみ (素の黒帯クロップ)
-//!   C: normalize_capture (本番前処理 = crop_to_canvas_with_info + normalize・engine と
-//!      anaden-tool run-pipeline が使う単一関数)
-//!   D: normalize のみ (旧 tool run-pipeline 相当・Issue #212 修正前の再現用)
-//!
-//! あわせて行平均輝度プロファイル (内容領域の特定) を出力する。
-//!
-//! usage (全文探索が重いので --release 推奨):
-//!   cargo run --release -p anaden-vision --example issue212_staged -- <shot.png>
-
 use std::path::Path;
 
 use anaden_vision::{MatchResult, ScreenScaler, TaskDef, crop_to_content_with_info, load_pipeline};
@@ -45,7 +30,6 @@ fn fmt_match(r: &Option<MatchResult>) -> String {
     }
 }
 
-/// roi 付き (TOML どおり) と roi なし全文探索 (threshold=0 で最良 conf まで) を出力。
 fn probe(label: &str, frame: &image::DynamicImage, task: &TaskDef) {
     let (w, h) = (frame.width(), frame.height());
     let with_roi = task.detect(frame, Path::new("")).expect("detect with roi");
@@ -62,7 +46,6 @@ fn probe(label: &str, frame: &image::DynamicImage, task: &TaskDef) {
     );
 }
 
-/// raw 画像の行平均輝度プロファイル (内容領域・未描画黒の特定用)。
 fn row_profile(raw: &image::DynamicImage) {
     let rgb = raw.to_rgb8();
     let (w, h) = rgb.dimensions();
@@ -92,10 +75,8 @@ fn main() {
 
     let task = login_task();
 
-    // A: raw 無前処理
     probe("A raw", &raw, &task);
 
-    // B: 素の黒帯クロップ (キャンバス内部の黒も除去してしまう旧来の挙動)
     let (cropped, info) = crop_to_content_with_info(&raw);
     println!(
         "B crop_to_content: offset=({},{}) size={}x{}",
@@ -103,7 +84,6 @@ fn main() {
     );
     probe("B crop-only", &cropped, &task);
 
-    // C: 本番前処理 (normalize_capture = アスペクト保護付きクロップ + 1280 正規化)
     let (normalized, crop_info) = ScreenScaler::new().normalize_capture(&raw);
     println!(
         "C normalize_capture: content {}x{} (offset {},{}) -> {}x{}",
@@ -116,7 +96,6 @@ fn main() {
     );
     probe("C normalize_capture (production)", &normalized, &task);
 
-    // D: normalize のみ (Issue #212 修正前の tool run-pipeline 相当)
     let tool_normalized = ScreenScaler::new().normalize(&raw);
     probe("D normalize-only (pre-#212 tool)", &tool_normalized, &task);
 }

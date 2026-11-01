@@ -1,14 +1,3 @@
-// TDD tests for Issue #102 T4: review-gate.js must mirror the T1 unified
-// gate-diff helper (review-gate-diff.js buildUnifiedGateDiff) as an inline
-// copy — same fallback chain (working-tree → HEAD~1..HEAD → merge-base →
-// intent-to-add → fail-closed), same exact-match 429-placeholder detection,
-// same fail-closed behavior — and its DIFF_FETCH_PROMPT must collect the
-// merge-base range and untracked enumeration.
-//
-// Source-scan + behavior drift-guard pattern (review-gate.js is not importable:
-// top-level phase()/agent() calls; Workflow runtime rejects ESM imports).
-//
-// Run: node --test .claude/workflows/tests/review-gate-unified-diff.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -19,7 +8,6 @@ import { buildUnifiedGateDiff as canonical } from '../review-gate-diff.js';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'review-gate.js');
 const src = readFileSync(wfPath, 'utf8');
 
-/** Extract a top-level `function name(...) {...}` source by brace matching. */
 function extractFunctionSource(scriptSrc, name) {
   const start = scriptSrc.indexOf(`function ${name}(`);
   assert.ok(start >= 0, `function ${name} must be inlined in review-gate.js`);
@@ -54,13 +42,11 @@ function extractFunctionSource(scriptSrc, name) {
   assert.fail(`unbalanced braces extracting ${name}`);
 }
 
-/** Load buildUnifiedGateDiff + its private deps as one evaluatable bundle. */
 function loadInlinedUnified() {
   const names = ['isPlaceholderSection', 'assembleSnapshot', 'parseUntrackedFiles', 'buildUnifiedGateDiff'];
   const parts = names.map((n) => extractFunctionSource(src, n));
   const consts = 'const PLACEHOLDER_SENTINELS = ["429", "rate limit", "placeholder"];\n';
   const bcr = extractFunctionSource(src, 'buildCommitRangeDiffInput');
-  // eslint-disable-next-line no-new-func
   const factory = new Function(`${consts}${bcr}${parts.join('\n')}\nreturn buildUnifiedGateDiff;`);
   return factory();
 }

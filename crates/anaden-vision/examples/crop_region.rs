@@ -1,5 +1,3 @@
-//! 一時検証ヘルパ: 入力PNG(既に正規化済想定)の指定矩形を crop して保存。
-//! usage: crop_region <input.png> <output.png> <x,y,w,h>
 use image::DynamicImage;
 use std::path::Path;
 

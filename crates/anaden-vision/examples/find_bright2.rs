@@ -1,5 +1,3 @@
-//! 指定領域の明るいブロックを探す(領域指定版)
-//! usage: find_bright2 <img> <x0> <y0> <x1> <y1>
 use anaden_vision::ScreenScaler;
 
 fn main() {

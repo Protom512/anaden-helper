@@ -1,10 +1,3 @@
-// TDD tests for Issue #99 Task 1: pm:create-ticket agent の schema に declared
-// files (files: string[]) を追加し、PM プロンプトに ticket-declared files の
-// 明記を要求する。継続系 ("next") 指示時は PM プロンプトを分岐し、未マージ
-// ブランチ・open PR の残作業サマリ形式でチケット生成させる (UC-3)。
-//
-// Source-scan pattern (workflow script is not importable):
-//   Run: node --test .claude/workflows/tests/pm-ticket-files.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -17,7 +10,6 @@ const src = readFileSync(wfPath, 'utf8');
 function pmPromptBlock() {
   const at = src.indexOf('pm:create-ticket');
   assert.ok(at > -1, 'pm:create-ticket agent call exists');
-  // prompt precedes the options object; slice a generous window backwards
   const promptStart = src.lastIndexOf('`You are the Product Manager', at);
   assert.ok(promptStart > -1, 'PM prompt template literal found');
   return src.slice(promptStart, at + 4000);
@@ -54,8 +46,6 @@ test('PM prompt branches for continuation ("next") instructions (UC-3)', () => {
 
 test('continuation branch is distinct from new-feature template (no mechanical template application)', () => {
   const block = pmPromptBlock();
-  // The branch must instruct a remaining-work-summary ticket format rather than
-  // blindly reusing the new-feature template (persona/motivation/use cases).
   const branchAt = block.indexOf('${isBacklogPick');
   const ternary = block.slice(branchAt, branchAt + 3000);
   assert.match(ternary, /サマリ形式|summary format/i, 'branch defines summary format');
@@ -64,7 +54,6 @@ test('continuation branch is distinct from new-feature template (no mechanical t
     'branch is a genuine alternative format');
 });
 
-// ── Issue #104: ticketKind (commit-range fallback の誤検出防止) ──
 test('pm:create-ticket schema requires ticketKind enum (Issue #104)', () => {
   const begin = src.indexOf('// [pm-ticket-files-begin]');
   const end = src.indexOf('// [pm-ticket-files-end]');

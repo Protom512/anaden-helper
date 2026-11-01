@@ -1,20 +1,3 @@
-// cargo-mutants baseline gate (Issue #214, Phase 0 / T4).
-//
-// Gate decision (user-approved): a refactor phase passes when the workspace
-// mutant run produces ZERO NEW surviving mutants relative to the recorded
-// baseline. Existing survivors may persist; fixing them is welcome but not
-// required. A mutant "survives" when tests still pass (MissedMutant) or hang
-// (TimeoutMutant) — both mean the tests failed to kill it.
-//
-// Usage:
-//   node scripts/quality/mutants_gate.mjs snapshot   # after a full run: record baseline
-//   node scripts/quality/mutants_gate.mjs check      # after a later run: compare vs baseline
-//
-// Prerequisite run (overnight scale; .cargo/mutants.toml configures nextest +
-// output under target/):
-//   cargo mutants --workspace --in-place --jobserver-tasks 4
-//
-// Exit codes: 0 = pass, 1 = new survivors, 2 = missing/unusable inputs (fail-closed).
 import fs from 'node:fs';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
@@ -34,23 +17,9 @@ const readJson = (root, relative) => {
   }
 };
 
-// ---------------------------------------------------------------------------
-// Outcome parsing and comparison
-// ---------------------------------------------------------------------------
 
-// 実測 (cargo-mutants 27, 2026-10-18 baseline run): timeout の summary は
-// "Timeout" ("TimeoutMutant" ではない)。Timeout = テストが mutant でハング =
-// 殺せていないため survivor 扱い (新規 Timeout は回帰)。
 const SURVIVING_SUMMARIES = new Set(['MissedMutant', 'Timeout']);
 
-/**
- * Extracts survivors (Missed/Timeout mutants) and totals from a parsed
- * cargo-mutants outcomes.json. Note: the `success` flag is FALSE whenever any
- * mutant survives (cargo-mutants' own exit semantics), so run integrity is
- * validated from count consistency instead: the four outcome counts must sum
- * to total_mutants and match the per-entry outcomes actually present.
- * Throws on inconsistent data — a broken run must never be compared as clean.
- */
 export function parseOutcomes(json) {
   if (!json || !Array.isArray(json.outcomes)) {
     throw new Error('outcomes.json has no outcomes array — malformed');
@@ -63,7 +32,7 @@ export function parseOutcomes(json) {
   for (const entry of json.outcomes) {
     const scenario = entry?.scenario;
     const mutant = scenario && typeof scenario === 'object' ? scenario.Mutant : null;
-    if (!mutant) continue; // Baseline entry
+    if (!mutant) continue;
     if (entry.summary === 'MissedMutant') {
       missedCount += 1;
       survivors.push({
@@ -102,7 +71,6 @@ export function parseOutcomes(json) {
       `outcomes.json inconsistent: total_mutants=${totals.totalMutants} but entries sum to ${countedTotal}`,
     );
   }
-  // Issue #244: missed/timeout を個別に per-entry 数と照合 (両方非 null が前提)。
   if (totals.missed !== null && totals.missed !== missedCount) {
     throw new Error(
       `outcomes.json inconsistent: missed(${totals.missed}) != parsed MissedMutant entries (${missedCount})`,
@@ -129,10 +97,6 @@ export function parseOutcomes(json) {
   };
 }
 
-/**
- * Set-diffs survivors by mutant name. `newSurvivors` (present now, absent in
- * baseline) fail the gate; `fixedSurvivors` are informational.
- */
 export function compareSurvivors(baselineSurvivors, currentSurvivors) {
   const baselineNames = new Set(baselineSurvivors.map((s) => s.name));
   const currentNames = new Set(currentSurvivors.map((s) => s.name));
@@ -142,9 +106,6 @@ export function compareSurvivors(baselineSurvivors, currentSurvivors) {
   };
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
 
 function snapshot(root) {
   const outcomes = readJson(root, OUTCOMES_PATH);
@@ -216,10 +177,6 @@ function check(root) {
   return 0;
 }
 
-/**
- * CLI entry point. `mode` is `snapshot` or `check` (default: check).
- * `opts.root` overrides the repo root (tests).
- */
 export function main(argv = [], opts = {}) {
   const root = opts.root ?? path.resolve(scriptDir, '..', '..');
   const mode = argv[0] ?? 'check';

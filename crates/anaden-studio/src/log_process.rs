@@ -1,11 +1,3 @@
-//! 子プロセス stdout/stderr 読み取りスレッドの起動と共有子プロセスハンドル
-//! (Issue #172: log_view.rs 分割で旧モジュールから移動)。
-//!
-//! IO（子プロセス stdout/stderr パイプ読み取り）は本モジュールの
-//! `spawn_stdout_reader` / `spawn_output_readers` のみで、`std::sync::mpsc`
-//! で `LogEvent` を UI 側へ非ブロッキング配送する（行解析・バッファリングは
-//! [`crate::log_buffer`]、状態トラッカは [`crate::log_status`]）。
-
 use std::io::{BufRead, BufReader};
 use std::process::{Child, Stdio};
 use std::sync::mpsc::SyncSender;
@@ -15,27 +7,13 @@ use std::thread::JoinHandle;
 
 use crate::log_buffer::LogEvent;
 
-/// 子プロセスの stdout を行単位で読み取り `tx` へ送るスレッドを起動する。
-///
-/// 読み取りスレッドは行を `SyncSender::try_send` で送る（bounded）。UI 側が
-/// 受信を止めてもスレッドがブロックしないよう、`Full/Disconnected` 時は
-/// 該当行を破棄して読み取りを継続する（ログは best-effort）。
-///
-/// 戻り値:
-/// - `Ok((Child, JoinHandle))`: 起動成功。`Child` の stdout は本スレッドが
-///   消費するため UI 側は wait のみ行うこと。JoinHandle は EOF 後に子の
-///   exit code を待ち `LogEvent::Exit` を送って完了する。
-/// - `Err(spawn 失敗)`: 子プロセス未起動。
-///
-/// # Errors
-/// `std::process::Command::spawn` の失敗（実行ファイル不在等）をそのまま返す。
 #[allow(dead_code)]
 pub fn spawn_stdout_reader(
     mut cmd: std::process::Command,
     tx: SyncSender<LogEvent>,
 ) -> std::io::Result<(SharedChild, JoinHandle<()>)> {
     cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::null()); // shard-4 では stdout のみ（tracing は stdout 出力）
+    cmd.stderr(Stdio::null());
     let mut child = cmd.spawn()?;
     let stdout = child.stdout.take();
     let shared = SharedChild::new(child);
@@ -43,9 +21,6 @@ pub fn spawn_stdout_reader(
     Ok((shared, reader))
 }
 
-/// drain → 子の終了待ち → `LogEvent::Exit` 通知 (1 回だけ) を行う
-/// reader スレッドを起動する。[`spawn_stdout_reader`] と
-/// [`spawn_output_readers`] の stdout 側に共通。
 fn spawn_exit_reporting_reader(
     stdout: Option<std::process::ChildStdout>,
     child: SharedChild,
@@ -58,21 +33,14 @@ fn spawn_exit_reporting_reader(
     })
 }
 
-/// 複数スレッド（UI 側 kill/wait と reader スレッドの終了検出）で共有する子プロセス。
-///
-/// `Child::wait` は blocking かつ排他のため共有できない。本型では
-/// `SharedChild::wait_for_exit` が `try_wait` をポーリングし、UI 側の
-/// kill/wait と競合しない（lock は各呼び出し毎に短時間のみ保持）。
 #[derive(Clone)]
 pub struct SharedChild(Arc<Mutex<Child>>);
 
 impl SharedChild {
-    /// ラップする。
     pub fn new(child: Child) -> Self {
         Self(Arc::new(Mutex::new(child)))
     }
 
-    /// 非ブロッキングの生存確認。終了済みなら false。
     pub fn is_running(&self) -> bool {
         let Ok(mut child) = self.0.lock() else {
             return false;
@@ -80,7 +48,6 @@ impl SharedChild {
         matches!(child.try_wait(), Ok(None))
     }
 
-    /// kill + wait（停止ボタン用）。ロック中毒時は何もしない。
     pub fn kill_and_wait(&self) {
         let Ok(mut child) = self.0.lock() else {
             return;
@@ -89,9 +56,6 @@ impl SharedChild {
         let _ = child.wait();
     }
 
-    /// 子の終了を 50ms 間隔の try_wait ポーリングで待ち、exit code を返す。
-    ///
-    /// UI 側が kill_and_wait で先に終了させた場合も即座に検出できる。
     fn wait_for_exit(&self) -> Option<i32> {
         loop {
             let status = {
@@ -111,9 +75,6 @@ impl SharedChild {
     }
 }
 
-/// パイプ 1 本（`R`）を非ブロッキング送信で drain し、`prefix` 付きの行を
-/// `tx` へ送る。Full/Disconnected 時は行を破棄して読み取りを継続
-/// （EOF 検出のため。ログは best-effort）。
 fn drain_pipe<R: std::io::Read>(pipe: Option<R>, tx: &SyncSender<LogEvent>, prefix: &str) {
     let Some(pipe) = pipe else { return };
     for line in BufReader::new(pipe).lines() {
@@ -126,22 +87,10 @@ fn drain_pipe<R: std::io::Read>(pipe: Option<R>, tx: &SyncSender<LogEvent>, pref
         if matches!(
             tx.try_send(LogEvent::Line(line)),
             Err(TrySendError::Full(_) | TrySendError::Disconnected(_))
-        ) {
-            // UI が受信しなくても読み取りは続行（EOF 検出のため）。
-        }
+        ) {}
     }
 }
 
-/// stdout と stderr の**両方**を別々のスレッドで読み取る子プロセスを起動する。
-///
-/// Issue #85 (Issue #83 shard 2): 読み手不在によるパイプ容量超過ブロックを
-/// 解消するため、ChildProcess から利用される。stdout と stderr は独立した
-/// 2 スレッドで並行 drain する（逐次読み取りは片パイプだけ書く子で
-/// デッドロックするため）。子の終了待機と `LogEvent::Exit` は stdout 側の
-/// reader が 1 回だけ行う。
-///
-/// # Errors
-/// `std::process::Command::spawn` の失敗（実行ファイル不在等）をそのまま返す。
 pub fn spawn_output_readers(
     mut cmd: std::process::Command,
     tx: SyncSender<LogEvent>,
@@ -168,12 +117,8 @@ pub fn spawn_output_readers(
 mod tests {
     use super::*;
 
-    // ---- spawn_output_readers (stdout/stderr 並行 drain) ----
-
     #[test]
     fn output_readers_stream_both_stdout_and_stderr() {
-        // stdout と stderr の両方へ書く子。逐次読み取りなら stderr が
-        // パイプ容量で詰まる可能性があるが、並行 drain で両方届く。
         let cmd = if cfg!(windows) {
             let mut c = std::process::Command::new("cmd");
             c.args(["/C", "echo out-line & echo err-line 1>&2"]);
@@ -212,11 +157,8 @@ mod tests {
         );
     }
 
-    // ---- spawn_stdout_reader (echo プロセスで統合確認) ----
-
     #[test]
     fn stdout_reader_streams_lines_and_exit() {
-        // Windows は cmd /c、それ以外は sh。どちらも2行出力して終了する。
         let cmd = if cfg!(windows) {
             let mut c = std::process::Command::new("cmd");
             c.args(["/C", "echo one & echo two"]);
