@@ -1,0 +1,103 @@
+# ワールドマップ移動ルート定義 (neko_nikki 用)
+#
+# 1 エントリ = 「現在地点 (次元の狭間 or 直前訪問地) → 目的エリア」の world map 操作列。
+# id は nekonikki_hints.toml の nav_route_ref (r01..r73) と 1:1。
+#
+# steps の kind:
+#   open_map    : フィールドからメニュー→地図を開く
+#   era         : 時代タブ選択 (modern|ancient|future|other)
+#   region      : 地方選択 (world map 上の項目 tap、要スクロールの場合 scroll 併記)
+#   area        : エリア選択 (地方マップ内の移動先タップ)
+#   confirm     : 移動確認 (「はい」)
+#   wait_load   : ローディング完了待ち (field_hud / area_anchor 検出)
+#
+# status:
+#   unverified = 実機で操作列を確認していない (pipeline は fail-closed skip)
+#   verified   = 実機確認済み
+#
+# まず高頻度エリアから verified にしていく (Phase 1)。全 73 中、初期に充填する代表:
+#   バルオキー(r46) / 月影の森(r26) / 王都ユニガン(r29) / 火の村ラトル(r30) /
+#   曙光都市エルジオン(r28) / 次元の狭間ハブ / ガルレア大陸各時代
+
+version = 1
+
+[[route]]
+id = "hub_dimension_rift"
+target = "次元の狭間"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "region", name = "次元の狭間" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "dimension_rift_hub" },
+]
+
+[[route]]
+id = "r46"
+target = "バルオキー (現代ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "modern" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "バルオキー" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+]
+
+[[route]]
+id = "r26"
+target = "月影の森 エリア2 (現代ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "modern" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "月影の森" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+  # エリア2 へのエリア内移動は feather_marker 追従に委譲 (境界を超えて歩行)
+]
+
+[[route]]
+id = "r29"
+target = "王都ユニガン (現代ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "modern" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "王都ユニガン" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+]
+
+[[route]]
+id = "r30"
+target = "火の村ラトル (古代ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "ancient" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "火の村ラトル" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+]
+
+[[route]]
+id = "r28"
+target = "曙光都市エルジオン ガンマ区画 (未来ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "future" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "曙光都市エルジオン" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+]
+
+# r01..r25, r27, r31..r45, r47..r73: 未定義。
+# 実機で順次 verified にする。未定義 / unverified のルートは pipeline が
+# fail-closed で skip し report に記録する (設計: neko_nikki.md §6)。
