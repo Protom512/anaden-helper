@@ -17,21 +17,24 @@
 //!   可能性が最も高い。
 //! - fallback: `PostMessageW(WM_LBUTTONDOWN/UP)`。ウィンドウメッセージキューへの合成メッセージ。
 //!   GetMessage 経由だと synthetic フラグが立ち一部ゲームは弾く → fallback 扱い。
-//!   cocos2d-x は client 座標として lParam を解釈するため、ClientToScreen でクライアント座標を
-//!   画面絶対座標へ直して SendInput、PostMessage はクライアント座標のまま lParam を組み立てる
-//!   (実装注意点)。
+//!   (実測メモ: 本クライアントのウィンドウクラスは `GLFW30`。client 座標として lParam を解釈するため、
+//!   ClientToScreen でクライアント座標を画面絶対座標へ直して SendInput、PostMessage は
+//!   クライアント座標のまま lParam を組み立てる — 実装注意点。)
 //!
 //! # 実行
 //! フェーズ1(メモ帳で SendInput 前提確認。--self-test):
 //!   cargo run --release -p anaden-device --example probe_windows_input -- --self-test
 //!
 //! フェーズ2(AnotherEden.exe 実ゲーム。プロセス名で PID 自動解決):
+//!   **`--x/--y` はクライアント領域相対座標** (ウィンドウ左上ではなく client area 原点基準。
+//!   probe 内部でクライアント原点を加算する — 画面絶対座標を渡すと窓の外に落ちる)。
+//!   クライアント 1484×835 の中央なら `--x 742 --y 417`:
 //!   cargo run --release -p anaden-device --example probe_windows_input -- \
-//!     --process AnotherEden.exe --x 960 --y 540 --hold-ms 60 --settle-ms 1500
+//!     --process AnotherEden.exe --x 742 --y 417 --hold-ms 60 --settle-ms 1500
 //!
 //! フェーズ2 fallback(PostMessage 背面送信):
 //!   cargo run --release -p anaden-device --example probe_windows_input -- \
-//!     --process AnotherEden.exe --x 960 --y 540 --method postmessage
+//!     --process AnotherEden.exe --x 742 --y 417 --method postmessage
 //!
 //! 引数未指定時デフォルト:
 //!   --process AnotherEden.exe --x 960 --y 540 --hold-ms 60 --settle-ms 1500 --method sendinput
