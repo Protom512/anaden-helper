@@ -1,0 +1,35 @@
+# ticket_digest 実行計画 (雛形)
+#
+# 消費順: priority の小さい順。difficulty のキーを 1 枚ずつ消費。
+# 生成方法 (推奨): anaden-tool plan-tenmei <キャラ名> で data/ad_tenmei.toml から逆引き生成
+#                 (ツール未実装 — ticket_digest Issue のサブタスク)
+#
+# note は人間向けメモ (どのキャラの天冥を狙っているか等)。
+
+version = 1
+
+# 特急券が尽きた時の挙動: stop (既定) = pipeline 終了 / normal_entry = 通常入場へ切替 (非推奨: 戦闘発生)
+on_ticket_empty = "stop"
+
+# キー購入 (クロノス石 20) は自動では行わない
+auto_buy_key_with_stone = false
+
+[[entry]]
+dungeon = "ミグランス城"
+difficulty = "VH"
+priority = 1
+note = "アルド天冥 / VH報酬枠=天"
+
+[[entry]]
+dungeon = "ゼノ・ドメイン"
+difficulty = "VH"
+priority = 2
+note = "リィカ天冥"
+
+[[entry]]
+dungeon = "次元戦艦"
+difficulty = "VH"
+priority = 3
+note = "ヘレナ冥 / VH報酬枠=天"
+
+# ...実際の計画は plan-tenmei でユーザーの育成方針 (上げたいキャラ順) から生成する

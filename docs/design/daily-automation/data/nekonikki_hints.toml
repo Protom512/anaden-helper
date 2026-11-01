@@ -1,0 +1,760 @@
+# ねこにっき ヒント→場所 対応表 (73 種の固定文)
+# source: https://altema.jp/anaden/nekonikki (2026-11-01 時点)
+#
+# hint.id          -> templates/scenes/neko_pc/hint_text_{id:02}.png と対応
+# template_status  -> pending = テンプレート未収集 (pipeline はその枠を fail-closed skip)
+#                     collected = 収集済み
+# nav_route_ref    -> nav_routes.toml の [[route]].id (r01..r73, hint id と 1:1)
+#
+# 注意: ゲーム更新でヒントが追加された場合、この表に追記するまで unknown 扱い (skip + 報告)。
+
+version = 1
+source = "https://altema.jp/anaden/nekonikki"
+
+# --- あ行 ---
+
+[[hint]]
+id = 1
+hint_text = "あの目玉のようなものは？ 不思議な島"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "薄明の島"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r01"
+
+[[hint]]
+id = 2
+hint_text = "あの社がこんな有様とは… 時の流れは残酷"
+era = "未来"
+continent = "ガルレア大陸"
+area_name = "猫神神社跡地"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r02"
+
+[[hint]]
+id = 3
+hint_text = "荒れ果てている 空気も澱んでいる"
+era = "未来"
+continent = "ガルレア大陸"
+area_name = "澱みの地"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r03"
+
+[[hint]]
+id = 4
+hint_text = "戦でたくさんの魂が"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "古戦場跡"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r04"
+
+[[hint]]
+id = 5
+hint_text = "一面雪景色 こんな山の中で寝たら駄目"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "クンロン山脈"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r05"
+
+[[hint]]
+id = 6
+hint_text = "色鮮やかな国 猫ちゃんのレースも興味深い"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "辰の国ナグシャム"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r06"
+
+[[hint]]
+id = 7
+hint_text = "色鮮やかな森 おいしい果実でもなってないかしら"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "ホキシの森"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r07"
+
+[[hint]]
+id = 8
+hint_text = "入り江の先に朽ちた船が見える なんだか不気味"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "クルチの入り江"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r08"
+
+[[hint]]
+id = 9
+hint_text = "薄暗い洞窟に 怖い土偶がいっぱい"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "贄偶窟"
+area_sub = "地上階 入口"
+template_status = "pending"
+nav_route_ref = "r09"
+
+[[hint]]
+id = 10
+hint_text = "大きな木の樹の下は日陰になってる 涼しそう"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "古樹野"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r10"
+
+[[hint]]
+id = 11
+hint_text = "汚染された土地を下へ下へ あまり居心地のいい場所ではない"
+era = "未来"
+continent = "ガルレア大陸"
+area_name = "汚染坑"
+area_sub = "エリア1"
+template_status = "pending"
+nav_route_ref = "r11"
+
+[[hint]]
+id = 12
+hint_text = "穏やかで美しい海岸 世界の果てにふさわしい場所"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "最果ての島"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r12"
+
+[[hint]]
+id = 13
+hint_text = "鬼ごっこに付き合わされて へとへとのよう"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "魔獣の村コニウム"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r13"
+
+[[hint]]
+id = 14
+hint_text = "お花がきれいな宮殿 ふみふみしたら怒られる？"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "パルシファル宮殿"
+area_sub = "1階"
+template_status = "pending"
+nav_route_ref = "r14"
+
+# --- か行 ---
+
+[[hint]]
+id = 15
+hint_text = "風に揺れる一面のススキが綺麗"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "イナナリ高原"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r15"
+
+[[hint]]
+id = 16
+hint_text = "機械はたくさんあるのに ヒトはさっぱり さみしい廃墟"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "工業都市廃墟"
+area_sub = "連絡通路"
+template_status = "pending"
+nav_route_ref = "r16"
+
+[[hint]]
+id = 17
+hint_text = "木の上に大きなヒトたちがいっぱい スケールの大きな村"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "古代樹の村パドレ"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r17"
+
+[[hint]]
+id = 18
+hint_text = "きのこも とかげも 何もかもが 大きな原っぱ"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "ゾル平原"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r18"
+
+[[hint]]
+id = 19
+hint_text = "気味の悪い時計 勝手に動かしたら 怒られそう"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "時の塔"
+area_sub = "7階"
+template_status = "pending"
+nav_route_ref = "r19"
+
+[[hint]]
+id = 20
+hint_text = "綺麗な黄金色の麦畑 かくれんぼしたら楽しそう"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "ラウラ・ドーム"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r20"
+
+[[hint]]
+id = 21
+hint_text = "この里寒すぎる はやくかまくらの中に避難する"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "隠れ里イトイス"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r21"
+
+[[hint]]
+id = 22
+hint_text = "皇宮のどこもカッチコチ この氷は溶けない？"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "妖魔皇宮"
+area_sub = "本殿1階"
+template_status = "pending"
+nav_route_ref = "r22"
+
+[[hint]]
+id = 23
+hint_text = "この時代にも 地上で生きるヒトたちの集落が"
+era = "未来"
+continent = "ガルレア大陸"
+area_name = "再生集落アンガル"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r23"
+
+[[hint]]
+id = 24
+hint_text = "この野原を歩いていると 栄えていた時の名残りを感じる"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "怨丹ヶ原"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r24"
+
+[[hint]]
+id = 25
+hint_text = "こんなブキミな沼に本と花瓶 どんな方が住んでいる"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "人喰い沼"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r25"
+
+[[hint]]
+id = 26
+hint_text = "今夜もお池に映ったまんまるのお月さまが綺麗"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "月影の森"
+area_sub = "エリア2"
+template_status = "pending"
+nav_route_ref = "r26"
+
+[[hint]]
+id = 27
+hint_text = "極楽極楽…いい湯"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "温泉"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r27"
+
+# --- さ行 ---
+
+[[hint]]
+id = 28
+hint_text = "最先端の都市 この時代ではどんな物が売っている？"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "曙光都市エルジオン"
+area_sub = "ガンマ区画"
+template_status = "pending"
+nav_route_ref = "r28"
+
+[[hint]]
+id = 29
+hint_text = "さすがは王都 城の前に並ぶお花も素敵"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "王都ユニガン"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r29"
+
+[[hint]]
+id = 30
+hint_text = "さすが火の村…！ ヒトにも土地にも熱気を感じる"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "火の村ラトル"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r30"
+
+[[hint]]
+id = 31
+hint_text = "里の中においしそうな食べ物がたくさん"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "いかるがの里"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r31"
+
+[[hint]]
+id = 32
+hint_text = "寂れた遊園地"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "トト・ドリームランド"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r32"
+
+[[hint]]
+id = 33
+hint_text = "素敵なお城がこんな姿に 争いとは愚か"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "ミグランス城"
+area_sub = "2階"
+template_status = "pending"
+nav_route_ref = "r33"
+
+[[hint]]
+id = 34
+hint_text = "素敵なステンドグラス この玉座は私にふさわしい"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "魔獣城"
+area_sub = "玉座"
+template_status = "pending"
+nav_route_ref = "r34"
+
+[[hint]]
+id = 35
+hint_text = "砂埃で目を瞑りたい くるくる風車から目を離せない"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "ザルボー"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r35"
+
+[[hint]]
+id = 36
+hint_text = "随分古い船 床が抜けないか心配"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "船墓場"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r36"
+
+[[hint]]
+id = 37
+hint_text = "草原に大きな滝 水浴びしたら気持ちよさそう"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "チャロル草原"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r37"
+
+[[hint]]
+id = 38
+hint_text = "空飛ぶ鉄の箱がいったりきたり"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "エルジオン"
+area_sub = "エアポート"
+template_status = "pending"
+nav_route_ref = "r38"
+
+# --- た行 ---
+
+[[hint]]
+id = 39
+hint_text = "たくさんのヒトの熱狂が伝わってくる 賑やかなスタジアム"
+era = "未来"
+continent = "ガルレア大陸"
+area_name = "サテラ・スタジアム"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r39"
+
+[[hint]]
+id = 40
+hint_text = "塔の壁が閉じたり開いたり あのポールにどんなからくりがある？"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "星の塔"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r40"
+
+[[hint]]
+id = 41
+hint_text = "洞窟の中に大きな門があったと聞いた"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "鬼火洞"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r41"
+
+[[hint]]
+id = 42
+hint_text = "どこまで行っても砂だらけ"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "ルチャナ砂漠"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r42"
+
+[[hint]]
+id = 43
+hint_text = "都市よりもーっと高い場所で 何を研究していた？"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "ゼノ・ドメイン"
+area_sub = "右上2エリア先"
+template_status = "pending"
+nav_route_ref = "r43"
+
+[[hint]]
+id = 44
+hint_text = "鳥が飛んだら 道が塞がった 不思議な池"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "龍神池"
+area_sub = "エリア1"
+template_status = "pending"
+nav_route_ref = "r44"
+
+[[hint]]
+id = 45
+hint_text = "どんよりとした街 赤と青のモヤモヤは何？"
+era = "冥峡界"
+continent = ""
+area_name = "影の街ナズリク"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r45"
+
+# --- な行 ---
+
+[[hint]]
+id = 46
+hint_text = "のどかな村にこんな立派な像が 隣に立てば気分は英雄のお供"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "バルオキー"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r46"
+
+[[hint]]
+id = 47
+hint_text = "登れば登るほど暑い山 喉がカラカラになる"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "ヴァシュー山岳"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r47"
+
+# --- は行 ---
+
+[[hint]]
+id = 48
+hint_text = "博物館に本がたくさん 聡明なワタクシにはぴったりな場所"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "マクミナル博物館"
+area_sub = "図書エリア"
+template_status = "pending"
+nav_route_ref = "r48"
+
+[[hint]]
+id = 49
+hint_text = "早く連れ戻す 生きている者がいるべき世界じゃない"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "煉獄界"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r49"
+
+[[hint]]
+id = 50
+hint_text = "原っぱが気持ちよさそう 遠くに見えるのはお城"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "ヌアル平原"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r50"
+
+[[hint]]
+id = 51
+hint_text = "光る胞子が空を舞って とっても綺麗な原っぱ"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "コリンダの原"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r51"
+
+[[hint]]
+id = 52
+hint_text = "不思議な玉 景色が変わった"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "蛇骨島"
+area_sub = "蛇肝ダマク"
+template_status = "pending"
+nav_route_ref = "r52"
+
+[[hint]]
+id = 53
+hint_text = "不思議な領域 キラキラ映っているのは雪？"
+era = "冥峡界"
+continent = ""
+area_name = "凍時領域"
+area_sub = "ナズリク東側"
+template_status = "pending"
+nav_route_ref = "r53"
+
+[[hint]]
+id = 54
+hint_text = "不思議な領域 遠くに見えるあの建物は聖堂？"
+era = "冥峡界"
+continent = ""
+area_name = "凍時領域"
+area_sub = "ナズリク西側"
+template_status = "pending"
+nav_route_ref = "r54"
+
+[[hint]]
+id = 55
+hint_text = "蛇の首に岩のアーチができている 潜っても崩れない？"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "蛇骨島"
+area_sub = "蛇首イゴマ"
+template_status = "pending"
+nav_route_ref = "r55"
+
+[[hint]]
+id = 56
+hint_text = "蛇の背中を猪が駆けてくる 踏まれないよう気を付ける"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "蛇骨島"
+area_sub = "蛇首ガバラギ"
+template_status = "pending"
+nav_route_ref = "r56"
+
+[[hint]]
+id = 57
+hint_text = "ベンチに座って空中から街を一望できるなんてすごい技術"
+era = "未来"
+continent = "ガルレア大陸"
+area_name = "空中城郭イージア"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r57"
+
+# --- ま行 ---
+
+[[hint]]
+id = 58
+hint_text = "丸い扉にカラフルな布 草原の端っこにこんな素敵な村が"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "サルーパ"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r58"
+
+[[hint]]
+id = 59
+hint_text = "巻きワラがいたるところに 変わった港町"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "海ノ国ザミ"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r59"
+
+[[hint]]
+id = 60
+hint_text = "マグマがぐつぐつ"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "ナダラ火山"
+area_sub = "噴火口前"
+template_status = "pending"
+nav_route_ref = "r60"
+
+[[hint]]
+id = 61
+hint_text = "道に並んでいるのは燭台？ 燃え方が不気味"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "ケルリの道"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r61"
+
+[[hint]]
+id = 62
+hint_text = "湖の上に石造りの道を作るなんて"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "ティレン湖道"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r62"
+
+[[hint]]
+id = 63
+hint_text = "湖の上に街 小舟に揺られて優雅にまわってみたい"
+era = "古代"
+continent = "ミグレイナ大陸"
+area_name = "水の都アクトゥール"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r63"
+
+[[hint]]
+id = 64
+hint_text = "道に先が崩れて… あんまりはしゃぐと危ない"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "廃道ルート99"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r64"
+
+[[hint]]
+id = 65
+hint_text = "見晴らしがいい街 空に浮かんだ大きな木がよく見える"
+era = "未来"
+continent = "ミグレイナ大陸"
+area_name = "ニルヴァ"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r65"
+
+[[hint]]
+id = 66
+hint_text = "紫の野菜の化け物が見える 湿原にいるからとってもみずみずしい"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "カレク湿原"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r66"
+
+[[hint]]
+id = 67
+hint_text = "燃えるような紅葉 落ち葉を拾うのも楽しそう"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "紅葉街道"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r67"
+
+# --- や行 ---
+
+[[hint]]
+id = 68
+hint_text = "山風が涼しくて 風車の音が心地いい国"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "山ノ国ガダロ"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r68"
+
+[[hint]]
+id = 69
+hint_text = "山道の岩に不思議な飾りが 東の文化は変わっている"
+era = "古代"
+continent = "ガルレア大陸"
+area_name = "タルガナ山道"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r69"
+
+[[hint]]
+id = 70
+hint_text = "夕焼けが素敵！"
+era = "現代"
+continent = "ミグレイナ大陸"
+area_name = "蛇骨島"
+area_sub = "蛇頭メズキータ"
+template_status = "pending"
+nav_route_ref = "r70"
+
+[[hint]]
+id = 71
+hint_text = "雪山の上に随分と立派なお屋敷"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "妖魔殿"
+area_sub = "一階入口"
+template_status = "pending"
+nav_route_ref = "r71"
+
+# --- ら行 / わ行 ---
+
+[[hint]]
+id = 72
+hint_text = "立派な提灯 お掘りを見ながら一息つくか？"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "巳の国イザナ"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r72"
+
+[[hint]]
+id = 73
+hint_text = "ワタクシたち猫にとって 居心地がよさそうな社"
+era = "現代"
+continent = "ガルレア大陸"
+area_name = "猫神神社"
+area_sub = ""
+template_status = "pending"
+nav_route_ref = "r73"
