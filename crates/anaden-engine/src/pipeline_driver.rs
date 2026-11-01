@@ -616,6 +616,17 @@ pub enum StepOutcome {
         next_current: Option<String>,
         fired: Option<InputCommand>,
     },
+    /// 常時監視 (watch) タスクがマッチしその action を発火した (Issue #252)。
+    ///
+    /// [`PipelineDriver::run_once`] が current タスクの評価より先に watch タスク群を
+    /// チェックし、マッチしたら本 variant を返して tick を終了する。**current は
+    /// 進まない**(本流を壊さずポップアップ等を閉じるだけ)。`task` はマッチした
+    /// watch タスク名、`fired` は発火した (rescale 済み) コマンド (action が
+    /// コマンドを生まない場合は [`None`])。
+    WatchFired {
+        task: String,
+        fired: Option<InputCommand>,
+    },
 }
 
 /// パイプライン実行ドライバ。純粋 tick + 実 capture/input を接続する。
@@ -675,6 +686,10 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     /// `run_loop_core` 開始時にリセットされ、`verify_action_effect` で加算、
     /// `build_outcome` が [`ProgressReport::verify`] へ埋め込む。
     verify_stats: VerifyStats,
+    /// 常時監視 (interrupt) タスク名リスト (Issue #252)。[`Self::with_watch`] で設定。
+    /// 空 (既定) なら watch チェックは一切行われない (従来挙動・後方互換)。
+    /// 名前は `tasks` 内の TaskDef を指す (CLI が起動時検証する)。
+    watch: Vec<String>,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -709,6 +724,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             max_recovery_attempts: u32::MAX,
             jitter: None,
             verify_stats: VerifyStats::default(),
+            watch: Vec::new(),
         }
     }
 
@@ -790,6 +806,23 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         self
     }
 
+    /// 常時監視 (interrupt) タスク名を設定する (Issue #252)。
+    ///
+    /// 呼ぶと各 tick で current タスクの評価より先に `watch` 内のタスクを
+    /// (先頭順に) テンプレート照合し、マッチしたものがあればその action を発火して
+    /// tick を終了する (current は進まない)。レベルアップ・実績等の不定期ポップアップ
+    /// を pipeline 本流から分離してハンドルする (MAA の interrupt 相当)。
+    ///
+    /// タスク名は [`Self::new`] に渡した `tasks` 内の TaskDef と同名であること。
+    /// 名前解決は呼出側 (CLI) が起動時に行う (存在しない名前は fail-closed で
+    /// run 前に弾く)。空 Vec を渡すと watch なし (従来挙動)。
+    ///
+    /// watch タスクの `next` は無視される (遷移しない・閉じるだけ)。
+    pub fn with_watch(mut self, watch: Vec<String>) -> Self {
+        self.watch = watch;
+        self
+    }
+
     /// スケーラへの参照(主にテスト・デバッグ用)。
     pub fn scaler(&self) -> &ScreenScaler {
         &self.scaler
@@ -843,6 +876,14 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             "frame raw={raw_w}x{raw_h} normalized={norm_w}x{norm_h} (device_width={})",
             self.device_width
         );
+        // Issue #252: watch (常時監視) チェック — current タスクより優先。
+        // マッチした watch タスクがあればその action を発火して本 tick は終了
+        // (current は進めない = 本流を壊さずポップアップを閉じる)。
+        if !self.watch.is_empty()
+            && let Some(outcome) = self.check_watch(&normalized, norm_w, norm_h).await
+        {
+            return outcome;
+        }
         // 3. tick（純粋計算 + current 遷移）
         let t_rec = std::time::Instant::now();
         // tick は内部で current を next[0] へ進めるため、マッチした(発火前)タスク名を
@@ -915,6 +956,73 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 next_current: tick.next_current,
             }
         }
+    }
+
+    /// watch タスク群をこのフレームで評価する (Issue #252)。
+    ///
+    /// [`Self::run_once`] から current タスク評価の前に呼ばれる。先頭の watch タスクから
+    /// 順に [`anaden_vision::run_step`] で照合し:
+    /// - マッチ → action を [`crate::pipeline_runner::action_to_command`] で入力コマンド化
+    ///   (ジッタ適用 → rescale → 発火) し [`StepOutcome::WatchFired`] を返す。
+    ///   `next` は無視 (遷移しない・閉じるだけ)。
+    /// - 非マッチ → 次の watch タスクへ。全て非マッチなら [`None`] (通常の current 評価へ)。
+    /// - テンプレート読込エラー → [`StepErrorKind::Other`] (F34 と同一契約: 設定破損は停止系)。
+    /// - 発火 IO エラー → [`StepErrorKind::Execute`]。
+    ///
+    /// 事後検証 (run_once_verified) は watch 発火には適用しない — ポップアップ消失は
+    /// 次 tick の watch 再評価 (非マッチになる) で自然に確認されるため。
+    async fn check_watch(
+        &mut self,
+        normalized: &DynamicImage,
+        norm_w: u32,
+        norm_h: u32,
+    ) -> Option<StepOutcome> {
+        for name in self.watch.clone() {
+            let step = match anaden_vision::run_step(&self.tasks, normalized, &name) {
+                Ok(Some(s)) => s,
+                Ok(None) => continue,
+                Err(e) => {
+                    warn!("watch task '{name}' detect failed: {e}");
+                    return Some(StepOutcome::Error {
+                        kind: StepErrorKind::Other,
+                        message: format!("watch template: {e}"),
+                    });
+                }
+            };
+            let command = crate::pipeline_runner::action_to_command(
+                &step.action,
+                Some(step.matched_region),
+                norm_w,
+                norm_h,
+            );
+            let fired = match command {
+                Some(cmd) => {
+                    // ジッタは本流タップと同一規則 (normalize 後空間 → rescale)。
+                    let cmd = match self.jitter.as_mut() {
+                        Some(j) => j.jitter_command(cmd),
+                        None => cmd,
+                    };
+                    let device_cmd =
+                        rescale_command(cmd, self.device_width, &self.last_crop_info);
+                    match self.execute_command(&device_cmd).await {
+                        Ok(()) => {
+                            debug!("watch fired: {name} -> {device_cmd:?}");
+                            Some(device_cmd)
+                        }
+                        Err(e) => {
+                            warn!("watch execute error ({name}): {e}");
+                            return Some(StepOutcome::Error {
+                                kind: StepErrorKind::Execute,
+                                message: format!("execute: {e}"),
+                            });
+                        }
+                    }
+                }
+                None => None,
+            };
+            return Some(StepOutcome::WatchFired { task: name, fired });
+        }
+        None
     }
 
     /// 発火後検証付きの 1 サイクル([`Self::run_once`] + 事後検証)。
@@ -1861,6 +1969,18 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 StepOutcome::Error { kind, message } => {
                     // §A D7: Error arm はゴール評価なし (tick も clock も進めない)。
                     self.step_error(&mut state, recover, kind, message).await
+                }
+                StepOutcome::WatchFired { task, fired } => {
+                    // Issue #252: watch ハンドル成功 — current を進めず継続。
+                    // テンプレートマッチ成功 (健全サイクル) として streak をリセットし、
+                    // per_task_matches は watch タスク側へ計上する (ポップアップ処理回数の
+                    // テレメトリ)。ゴール評価は行わない (本流の tick ではないため —
+                    // LoopCount は進まず TemplateMatch の last_match も伝播しない)。
+                    state.record_match_tick(&task);
+                    if let Some(cmd) = fired {
+                        state.fired.push(cmd);
+                    }
+                    StepFlow::Continue
                 }
             };
             match flow {
@@ -6372,5 +6492,203 @@ mod tests {
         assert_eq!(pr.iterations, 3);
         assert!(pr.jitter_seed.is_none());
         assert_eq!(pr.verify, VerifyReport::default());
+    }
+
+    // ===== Issue #252: watch (常時監視 interrupt) タスク機構 =====
+    //
+    // Title (本流) と Popup (watch) の 2 テンプレを raw_feature 上の別 ROI に置き、
+    // フレーム側の該当領域を平塗りで消すことで「どちらだけがマッチする画面か」を
+    // 作り分ける (run_loop を回すテストで両者の優先順位と current 非遷移を検証)。
+
+    /// watch 用テンプレの raw-1258 空間 ROI (Title 用 NEEDLE_ROI と離れた位置)。
+    const POPUP_NEEDLE_ROI: [u32; 4] = [400, 300, 12, 12];
+    /// POPUP_NEEDLE_ROI を含むマッチ走査小窓。
+    const POPUP_MATCH_ROI: [u32; 4] = [390, 290, 48, 36];
+
+    /// raw_feature の指定 ROI 領域を平塗り (値 128) で潰したフレームを返す。
+    /// 潰された領域のテンプレはマッチしなくなる (= その「画面が写っていない」状態)。
+    fn frame_with_region_masked(roi: [u32; 4]) -> DynamicImage {
+        let mut raw = raw_feature();
+        let [x, y, w, h] = roi;
+        for dy in 0..h {
+            for dx in 0..w {
+                raw.put_pixel(x + dx, y + dy, Luma([128]));
+            }
+        }
+        luma_dyn(raw)
+    }
+
+    /// 指定テンプレ/ROI の ClickRect タスクを組み立てる (click_rect_task の汎用版)。
+    fn task_with_template(
+        name: &str,
+        template: PathBuf,
+        roi: [u32; 4],
+        next: Option<Vec<&str>>,
+    ) -> TaskDef {
+        TaskDef {
+            name: name.into(),
+            state: name.into(),
+            algorithm: anaden_vision::Algorithm::Ccoeff,
+            template,
+            roi: Some(roi),
+            threshold: 0.9,
+            base: None,
+            action: Some(Action::ClickRect {
+                roi: ScreenRegion::new(roi[0], roi[1], roi[2], roi[3]),
+            }),
+            next: next.map(|v| v.into_iter().map(String::from).collect()),
+        }
+    }
+
+    /// Title (本流・終端) + Popup (watch) の 2 タスク driver。
+    fn build_watch_driver(
+        frames: Vec<DynamicImage>,
+    ) -> (
+        PipelineDriver<FakeCapture, FakeInput>,
+        Arc<Mutex<Vec<InputCommand>>>,
+    ) {
+        // Popup テンプレ (raw_feature の POPUP_NEEDLE_ROI 領域) を PNG 保存。
+        let raw = raw_feature();
+        let [px, py, pw, ph] = POPUP_NEEDLE_ROI;
+        let mut needle = GrayImage::new(pw, ph);
+        for dy in 0..ph {
+            for dx in 0..pw {
+                needle.put_pixel(dx, dy, *raw.get_pixel(px + dx, py + dy));
+            }
+        }
+        let popup_tpl = write_template_persisted(&needle);
+
+        let fired = new_fired();
+        let driver = PipelineDriver::new(
+            FakeCapture {
+                frames: frames_of(frames),
+                fail: false,
+            },
+            FakeInput {
+                fired: fired.clone(),
+                fail: false,
+            },
+            PipelineState::new("Title"),
+            vec![
+                task_with_template("Title", crop_needle_template(), MATCH_ROI, Some(vec![])),
+                task_with_template("Popup", popup_tpl, POPUP_MATCH_ROI, None),
+            ],
+            FULL_W,
+            300,
+        );
+        (driver, fired)
+    }
+
+    /// watch タスクがマッチした tick は WatchFired を返し、current は進まない
+    /// (= Title は未評価のまま次サイクルへ残る)。
+    #[tokio::test]
+    async fn watch_match_fires_and_keeps_current() {
+        // Title の走査窓全体を消したフレーム = Popup (watch) だけが写っている画面。
+        // (needle 12px 部分だけの消去では不十分 — 走査窓 48x36 内の別位置に
+        // 周期パターンが一致し得るため、窓全体を平塗りする。)
+        let popup_only = frame_with_region_masked(MATCH_ROI);
+        let (mut d, fired) = build_watch_driver(vec![popup_only.clone(), popup_only]);
+        d = d.with_watch(vec!["Popup".into()]);
+
+        let outcome = d.run_once().await;
+        match &outcome {
+            StepOutcome::WatchFired { task, fired: f } => {
+                assert_eq!(task, "Popup");
+                assert!(f.is_some(), "watch ClickRect must fire a command");
+            }
+            other => panic!("expected WatchFired, got {other:?}"),
+        }
+        assert_eq!(
+            d.current(),
+            "Title",
+            "watch handling must not advance current"
+        );
+        assert_eq!(fired.lock().expect("lock").len(), 1);
+    }
+
+    /// watch と current が同じフレームでマッチする場合、watch が優先される
+    /// (current の発火・遷移より先にポップアップを閉じる)。
+    #[tokio::test]
+    async fn watch_takes_priority_over_current_task() {
+        let both = luma_dyn(raw_feature());
+        let (mut d, fired) = build_watch_driver(vec![both.clone(), both]);
+        d = d.with_watch(vec!["Popup".into()]);
+
+        let outcome = d.run_once().await;
+        assert!(
+            matches!(outcome, StepOutcome::WatchFired { .. }),
+            "watch must win over current, got {outcome:?}"
+        );
+        assert_eq!(d.current(), "Title");
+        assert_eq!(fired.lock().expect("lock").len(), 1, "only watch fires");
+    }
+
+    /// watch 非マッチのフレームでは通常の current 評価が行われる (透過)。
+    #[tokio::test]
+    async fn watch_no_match_falls_through_to_current() {
+        // Popup の走査窓全体を消したフレーム = Title だけが写っている画面。
+        let title_only = frame_with_region_masked(POPUP_MATCH_ROI);
+        let (mut d, _) = build_watch_driver(vec![title_only.clone(), title_only]);
+        d = d.with_watch(vec!["Popup".into()]);
+
+        let outcome = d.run_once().await;
+        match &outcome {
+            StepOutcome::Fired { next_current, .. } => {
+                assert!(
+                    next_current.is_none(),
+                    "Title is terminal (empty next)"
+                );
+            }
+            other => panic!("expected Fired (Title terminal), got {other:?}"),
+        }
+    }
+
+    /// e2e: ポップアップ割込みをはさんでも pipeline は完走する (acceptance。
+    /// watch 発火は per_task_matches に計上され、fired_count に含まれる)。
+    #[tokio::test]
+    async fn run_loop_completes_through_watch_interruption() {
+        let popup_only = frame_with_region_masked(MATCH_ROI);
+        let title_only = frame_with_region_masked(POPUP_MATCH_ROI);
+        let (mut d, fired) = build_watch_driver(vec![popup_only, title_only]);
+        d = d.with_watch(vec!["Popup".into()]);
+
+        let outcome = d.run_loop(Duration::ZERO, 10).await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::TerminalTask,
+            "pipeline must complete, got {:?}",
+            outcome.reason
+        );
+        assert_eq!(outcome.iterations, 2, "popup tick + title tick");
+        assert_eq!(
+            outcome.progress_report.fired_count, 2,
+            "watch fire + title fire"
+        );
+        // per_task_matches: Popup (watch) と Title が各 1 回。
+        let popup_matches = outcome
+            .progress_report
+            .per_task_matches
+            .iter()
+            .find(|t| t.task == "Popup")
+            .map(|t| t.matches);
+        assert_eq!(popup_matches, Some(1), "watch task must be counted");
+        assert_eq!(fired.lock().expect("lock").len(), 2);
+    }
+
+    /// watch 未設定 (既定) では watch チェックが一切行われない (後方互換):
+    /// Popup だけのフレームは Title 非マッチ = NoMatch になる。
+    #[tokio::test]
+    async fn no_watch_config_preserves_nomatch_behavior() {
+        let popup_only = frame_with_region_masked(MATCH_ROI);
+        let (mut d, fired) = build_watch_driver(vec![popup_only.clone(), popup_only]);
+        // with_watch を呼ばない = 既定 watch 空。
+
+        let outcome = d.run_once().await;
+        assert!(
+            matches!(outcome, StepOutcome::NoMatch),
+            "without watch, popup-only frame is NoMatch, got {outcome:?}"
+        );
+        assert_eq!(d.current(), "Title");
+        assert!(fired.lock().expect("lock").is_empty());
     }
 }

@@ -588,6 +588,13 @@ async fn run_with_windows(
         start_task,
     );
 
+    // Issue #252: manifest の `watch` (常時監視 interrupt タスク) を解決して検証。
+    // 未宣言/manifest 不在なら空 (従来挙動)。未解決名は run 前に fail-closed で弾く。
+    let watch_names = resolve_watch_tasks(pipeline_dir, &tasks)?;
+    if !watch_names.is_empty() {
+        info!("watch (常時監視) タスク: {watch_names:?} — current タスクより優先評価");
+    }
+
     // ---- (2) 起動保証(Win32Launch) ----
     // `launcher` は (5) の NoMatch リカバリフックでも再利用するためここで構築。
     // 起動保証の呼出本体は `ensure_open_outcome`(run/standalone 共有)へ一本化。
@@ -681,6 +688,7 @@ async fn run_with_windows(
             )
             .with_verify(verify_after_fire)
             .with_jitter(jitter.clone())
+            .with_watch(watch_names.clone())
             .with_cancel(cancel_token)
             .with_recovery_grace(recovery_grace)
             .with_max_recovery_attempts(max_recovery_attempts),
@@ -704,6 +712,7 @@ async fn run_with_windows(
             )
             .with_verify(verify_after_fire)
             .with_jitter(jitter)
+            .with_watch(watch_names)
             .with_cancel(cancel_token)
             .with_recovery_grace(recovery_grace)
             .with_max_recovery_attempts(max_recovery_attempts),
@@ -715,6 +724,37 @@ async fn run_with_windows(
             artifacts,
         )
         .await
+    }
+}
+
+/// manifest (`pipeline.toml`) の `watch` タスク名を検証付きで解決する (Issue #252)。
+///
+/// - manifest 不在 / `watch` 未宣言 → 空 Vec (従来挙動・watch なし)。
+/// - `watch` 宣言済みだがパース不能 → [`Err`] (fail-closed・resolve_goal と同一契約)。
+/// - `watch` 内の名前が pipeline の TaskDef に存在しない → [`Err`] (run 前に弾く。
+///   実行中に初めて判明するより起動時 fail の方が復旧が早い)。
+fn resolve_watch_tasks(
+    pipeline_dir: &std::path::Path,
+    tasks: &[anaden_vision::TaskDef],
+) -> Result<Vec<String>> {
+    let manifest_path = pipeline_dir.join(anaden_vision::PIPELINE_MANIFEST_FILENAME);
+    if !manifest_path.is_file() {
+        return Ok(Vec::new());
+    }
+    let manifest = anaden_vision::load_pipeline_manifest(pipeline_dir)
+        .map_err(|e| anyhow::anyhow!("pipeline.toml manifest の読込失敗: {e}"))?;
+    let missing: Vec<&String> = manifest
+        .watch
+        .iter()
+        .filter(|w| !tasks.iter().any(|t| &t.name == *w))
+        .collect();
+    if missing.is_empty() {
+        Ok(manifest.watch)
+    } else {
+        anyhow::bail!(
+            "manifest の watch タスクが pipeline 内に存在しない: {missing:?} \
+             (TaskDef 名と一致させてください)"
+        );
     }
 }
 
@@ -1709,5 +1749,52 @@ mod tests {
             !pipeline_dir.join(".anaden-run").exists(),
             "no-persist must not create artifacts dir"
         );
+    }
+
+    // ===== Issue #252: watch タスク名の manifest 解決 (fail-closed 検証) =====
+
+    /// manifest 不在 → watch 空 (従来挙動)。
+    #[test]
+    fn resolve_watch_tasks_without_manifest_returns_empty() {
+        let tmp = tempfile::tempdir().unwrap();
+        let got = resolve_watch_tasks(tmp.path(), &[]).expect("resolve");
+        assert!(got.is_empty());
+    }
+
+    /// watch 未宣言の manifest → watch 空。
+    #[test]
+    fn resolve_watch_tasks_without_watch_key_returns_empty() {
+        let dir = manifest_goal_dir("");
+        let got = resolve_watch_tasks(dir.path(), &[]).expect("resolve");
+        assert!(got.is_empty());
+    }
+
+    /// watch 宣言にある名前が TaskDef に存在しない → Err (run 前 fail-closed)。
+    #[test]
+    fn resolve_watch_tasks_unknown_name_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pipeline.toml"),
+            "start_task = \"SomeTaskPc\"\nwatch = [\"ghost_popup\"]\n",
+        )
+        .unwrap();
+        let err = resolve_watch_tasks(tmp.path(), &[]).expect_err("unknown watch must fail");
+        let msg = format!("{err:#}");
+        assert!(
+            msg.contains("ghost_popup"),
+            "error must name the missing task: {msg}"
+        );
+    }
+
+    /// manifest が parse 不能 → Err (resolve_goal と同一の fail-closed 契約)。
+    #[test]
+    fn resolve_watch_tasks_broken_manifest_errors() {
+        let tmp = tempfile::tempdir().unwrap();
+        std::fs::write(
+            tmp.path().join("pipeline.toml"),
+            "totally_not_valid_toml = [",
+        )
+        .unwrap();
+        assert!(resolve_watch_tasks(tmp.path(), &[]).is_err());
     }
 }

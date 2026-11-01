@@ -177,11 +177,16 @@ impl ScenarioEditorState {
     }
 
     /// 現在の状態から pipeline manifest へ変換する (バリデーションは呼出側の責務)。
+    ///
+    /// `watch` (常時監視タスク・Issue #252) は studio のオーサリング対象外のため
+    /// 常に空で保存される (手書き pipeline.toml の watch 宣言は studio 経由の
+    /// 保存では失われる点に注意 — watch 編集 UI は未提供)。
     #[must_use]
     pub fn to_manifest(&self) -> PipelineManifest {
         PipelineManifest {
             start_task: self.start_task.clone(),
             goals: self.goals.clone(),
+            watch: Vec::new(),
         }
     }
 }
