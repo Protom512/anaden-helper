@@ -6,10 +6,15 @@
 //!   cargo run --bin anaden-tool -- match <screenshot> <template> <threshold>
 //!   cargo run --bin anaden-tool -- detect <screenshot> [--templates <dir>]
 //!   cargo run --bin anaden-tool -- run-pipeline <screenshot> <pipeline_dir> <start_task> [--algorithm sse|ccoeff]
+//!   cargo run --bin anaden-tool -- plan-tenmei <キャラ名>... [--difficulty H|VH] [--data <tenmei.toml>] [--out <plan.toml>]
+//!   cargo run --bin anaden-tool -- plan-expand <plan.toml> [--pipeline <dir>] [--out <routine.toml>]
 //! ```
 //!
 //! (Issue #188: ADB 経路の capture / launch / record / explore サブコマンドは
 //!  Android サポート削除に伴い廃止)
+
+mod plan_data;
+mod plan_tool;
 
 use std::path::PathBuf;
 
@@ -76,6 +81,38 @@ enum Commands {
         /// algorithm 上書き（`sse` または `ccoeff`）。未指定時は TOML の algorithm を尊重
         #[arg(short, long)]
         algorithm: Option<String>,
+    },
+    /// 天冥を上げたいキャラ名から ticket_digest 計画 TOML を逆引き生成 (Issue #248)。
+    ///
+    /// キャラ名は優先度順に複数指定可。TOML は --out 未指定で stdout、
+    /// 指定時はファイルへ (経過メッセージは stderr)。
+    PlanTenmei {
+        /// 天冥を上げたいキャラ名 (ad_tenmei.toml [[char]].name と完全一致・優先度順)
+        #[arg(required = true)]
+        chars: Vec<String>,
+        /// ad_tenmei.toml パス
+        #[arg(short, long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/ad_tenmei.toml"))]
+        data: PathBuf,
+        /// 消費難易度 (`H` または `VH`。既定 `VH`)
+        #[arg(long, default_value = "VH")]
+        difficulty: plan_data::Difficulty,
+        /// 計画 TOML の出力先 (未指定時 stdout)
+        #[arg(short, long)]
+        out: Option<PathBuf>,
+    },
+    /// 計画 TOML を routine TOML へ静的展開する (Issue #248。1 ダンジョン 1 ステップ)。
+    PlanExpand {
+        /// 計画 TOML (ticket_digest_plan.toml 形式)
+        plan: PathBuf,
+        /// ad_tenmei.toml パス (dungeon 突合用)
+        #[arg(short, long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../data/ad_tenmei.toml"))]
+        data: PathBuf,
+        /// 展開先 pipeline ディレクトリ
+        #[arg(short, long, default_value = concat!(env!("CARGO_MANIFEST_DIR"), "/../../templates/pipelines/ticket_digest"))]
+        pipeline: PathBuf,
+        /// routine TOML の出力先 (未指定時 stdout)
+        #[arg(short, long)]
+        out: Option<PathBuf>,
     },
 }
 
@@ -213,6 +250,22 @@ fn main() -> anyhow::Result<()> {
                 &start_task,
                 algorithm.as_deref(),
             )?;
+        }
+        Commands::PlanTenmei {
+            chars,
+            data,
+            difficulty,
+            out,
+        } => {
+            plan_tool::run_plan_tenmei(&chars, &data, difficulty, out.as_deref())?;
+        }
+        Commands::PlanExpand {
+            plan,
+            data,
+            pipeline,
+            out,
+        } => {
+            plan_tool::run_plan_expand(&plan, &data, &pipeline.to_string_lossy(), out.as_deref())?;
         }
     }
 

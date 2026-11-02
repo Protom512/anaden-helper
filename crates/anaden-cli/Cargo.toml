@@ -37,6 +37,8 @@ image = { workspace = true }
 imageproc = { workspace = true }
 # 03-report-channel: run 成果物 (report.json) の機械可読シリアライズ。
 serde_json = { workspace = true }
+# plan 系ツール (Issue #248): data/*.toml スキーマの derive。
+serde = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
