@@ -1,0 +1,16 @@
+name      = "AdSelectDetectPc"
+state     = "ad_select_pc"
+algorithm = "ccoeff"
+# ticket_digest pipeline v0 (Issue #248) — 画面検出アンカー群 (atlas seed)。
+# AD (アナザーダンジョン) 選択画面の到達検出。2026-11-01 実機キャプチャ
+# (1918x1048 → raw-1258 正規化) から生成。スキップ消化フロー (skip_btn・
+# difficulty 分岐・result 多段) は live テンプレート収集後に拡張する。
+# 座標系: RAW 1258x708 ピクセル空間 (PC版クライアント実測)。
+template  = "ad_select_title.png"
+# 検出 ROI: 「アナザーダンジョン」ヘッダ (252x31) を囲むスラック窓 (±10px。
+# Issue #208 教訓: needle==roi のぴったり窓は配置ドリフトで conf が崩れる)。
+roi       = [492, 37, 272, 51]
+threshold = 0.85
+action    = { type = "do_nothing" }
+# v0 は検出で終端 (画面到達確認パイプライン)。FSM 拡張時に遷移先へ繋ぐ。
+next      = []
