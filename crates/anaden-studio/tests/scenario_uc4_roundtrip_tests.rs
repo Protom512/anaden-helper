@@ -106,18 +106,18 @@ fn child_ui(ctx: &egui::Context) -> egui::Ui {
     )
 }
 
-/// 正常系 1: リポジトリ実 8 pipeline 全てについて load → (編集なし) save →
+/// 正常系 1: リポジトリ実 pipeline 全てについて load → (編集なし) save →
 /// 再 load が意味等価。TaskDef ベクタ・manifest・元ファイル名 (stem) が保全され、
 /// template 相対参照 (`../`・`../../`・サブディレクトリ) が元の形で書き戻る。
+/// pipeline 数は追加 (ticket_digest #248 等) で増えるため固定しない (空でないことのみ前提)。
 #[test]
-fn all_four_repo_pipelines_roundtrip_losslessly() {
+fn all_repo_pipelines_roundtrip_losslessly() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = copy_pipelines_tomls(tmp.path());
     let dirs = pipeline_dirs(&root);
-    assert_eq!(
-        dirs.len(),
-        4,
-        "既存 4 pipeline が前提: {:?}",
+    assert!(
+        !dirs.is_empty(),
+        "リポジトリ実 pipeline が少なくとも 1 つコピーされている前提: {:?}",
         dirs.iter()
             .map(|d| d.display().to_string())
             .collect::<Vec<_>>()

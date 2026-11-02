@@ -1,0 +1,11 @@
+name      = "VeryHardRowDetectPc"
+state     = "ad_select_pc"
+algorithm = "ccoeff"
+# ticket_digest v0 — 難易度行「ベリーハード」(赤鍵アイコン込み)。
+# hard_row_detect との対 (VH=赤鍵・H=緑鍵)。誤対防止は batch confusion matrix で確認済み前提
+# (同一画面内の近接類似行 — ゲートテストで相互非マッチを検証する)。
+template  = "veryhard_row.png"
+roi       = [896, 487, 235, 53]
+threshold = 0.85
+action    = { type = "do_nothing" }
+next      = []
