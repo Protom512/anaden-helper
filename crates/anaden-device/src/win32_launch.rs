@@ -40,11 +40,14 @@ use tracing::{info, warn};
 use windows::Win32::Foundation::{CloseHandle, STILL_ACTIVE};
 use windows::Win32::System::Threading::{
     CREATE_NEW_PROCESS_GROUP, GetExitCodeProcess, OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION,
-    PROCESS_TERMINATE, TerminateProcess,
 };
 
 use crate::ensure::EnsureOutcome;
 use crate::error::DeviceError;
+use crate::win32_terminate::{DEFAULT_CLOSE_WAIT, TerminateStages, terminate_child_staged};
+// 既存テスト (Issue #210) の掃除ヘルパのみから使用。終了の本体は win32_terminate へ移動済み。
+#[cfg(test)]
+use crate::win32_terminate::terminate_pid;
 
 // ---- デフォルト定数 ----
 
@@ -151,80 +154,35 @@ impl Win32Launch {
     /// 既存の子プロセスを終了させてからランチャーを起動する (再起動・Issue #210)。
     ///
     /// 手順 (二重起動防止の構造保証):
-    /// 1. 子プロセス (`child`) が残っていれば全インスタンスを `TerminateProcess` で
-    ///    終了し、`exit_wait` 以内にプロセス一覧から消失するまでポーリングする。
-    ///    初回時点で存在しなければ何もせず素通りする (kill 不要の冪等再起動)。
+    /// 1. 子プロセス (`child`) が残っていれば全インスタンスを段階的に終了する
+    ///    (Issue #266: WM_CLOSE (graceful) → [`DEFAULT_CLOSE_WAIT`] の退出ポーリング →
+    ///    残存時のみ `TerminateProcess`)。初回時点で存在しなければ何もせず素通りする
+    ///    (kill 不要の冪等再起動)。
     /// 2. 消失を確認した後で `Launcher.exe` を 1 回だけ spawn する
     ///    ([`Self::launch_app`] 相当)。起動完了 (タイトル到達) の待ちは呼出側の
     ///    起動猶予 (engine の `with_recovery_grace`) が担う — 本メソッドは戻り値で
     ///    「再 spawn してよい状態」になったことのみを保証する。
     ///
-    /// `exit_wait` を経過しても子が残存する場合 (終了要求が拒否された等) は
+    /// graceful 猶予 + `exit_wait` を経過しても子が残存する場合 (終了要求が拒否された等) は
     /// `Err` を返す (spawn しない = 二重起動より fail-closed)。
     pub async fn restart_app(&self, exit_wait: Duration) -> Result<(), DeviceError> {
         let child = self.child.clone();
-        // (1) 既存子プロセスの終了 + 消失確認 (blocking: プロセス列挙 + sleep ポーリング)。
-        tokio::task::spawn_blocking(move || terminate_child_blocking(&child, exit_wait))
-            .await
-            .map_err(|e| DeviceError::CommandFailed {
-                message: format!("restart_app の blocking タスクがパニック/中止: {e}"),
-            })??;
+        // (1) 既存子プロセスの段階的終了 + 消失確認 (blocking: プロセス列挙 + sleep ポーリング)。
+        tokio::task::spawn_blocking(move || {
+            terminate_child_staged(
+                &child,
+                TerminateStages {
+                    close_wait: DEFAULT_CLOSE_WAIT,
+                    exit_wait,
+                },
+            )
+        })
+        .await
+        .map_err(|e| DeviceError::CommandFailed {
+            message: format!("restart_app の blocking タスクがパニック/中止: {e}"),
+        })??;
         // (2) 消失確認後にランチャーを 1 回だけ spawn。
         self.launch_app().await
-    }
-}
-
-/// `restart_app` の (1) 終了待ち本体 (blocking)。
-///
-/// ループ毎にプロセス一覧から `child` (大文字小文字無視) を探し、残っていれば
-/// 全 PID へ `TerminateProcess` を発行して `POLL_INTERVAL` 待つ。すべて消失した時点で
-/// `Ok(())`。`exit_wait` の deadline を過ぎても残存すれば `Err` (fail-closed)。
-/// 個別 PID への終了要求エラー (権限等) は warn のみで再試行し、最終的な消失判定で
-/// 成否を決める (一時的エラーで再起動を諦めすぎない)。
-fn terminate_child_blocking(child: &str, exit_wait: Duration) -> Result<(), DeviceError> {
-    let deadline = Instant::now() + exit_wait;
-    loop {
-        let pids: Vec<u32> = match snapshot_processes() {
-            Ok(entries) => entries
-                .iter()
-                .filter(|e| e.name.eq_ignore_ascii_case(child))
-                .map(|e| e.pid)
-                .collect(),
-            Err(e) => {
-                return Err(DeviceError::CommandFailed {
-                    message: format!("Win32Launch: 再起動前スナップショット失敗: {e}"),
-                });
-            }
-        };
-        if pids.is_empty() {
-            info!("Win32Launch: 再起動前処理完了 — {child} は存在しない (二重起動なし)");
-            return Ok(());
-        }
-        info!("Win32Launch: 再起動のため既存 {child} を終了します (pids={pids:?}) — Issue #210");
-        for pid in pids {
-            if let Err(e) = terminate_pid(pid) {
-                warn!("Win32Launch: TerminateProcess({pid}) 失敗 (再試行): {e}");
-            }
-        }
-        if Instant::now() >= deadline {
-            return Err(DeviceError::CommandFailed {
-                message: format!(
-                    "Win32Launch: 再起動前の {child} 終了待ちが {exit_wait:?} でタイムアウト \
-                     (プロセス残存 = 二重起動防止のため spawn 中止)"
-                ),
-            });
-        }
-        std::thread::sleep(POLL_INTERVAL);
-    }
-}
-
-/// 指定 PID へ終了要求 (`TerminateProcess`・exit code 1) を出す。
-fn terminate_pid(pid: u32) -> windows::core::Result<()> {
-    unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, false, pid)?;
-        let result = TerminateProcess(handle, 1);
-        let _ = CloseHandle(handle);
-        result
     }
 }
 
