@@ -83,4 +83,6 @@ windows = { version = "0.62", features = [
     # 起動/プロセスプローブ: CreateProcess / プロセス・スナップショット列挙
     "Win32_System_Threading",
     "Win32_System_Diagnostics_ToolHelp",
+    # 段階的終了テストフィクスチャ (Issue #266): ウィンドウクラス登録用モジュールハンドル
+    "Win32_System_LibraryLoader",
 ] }

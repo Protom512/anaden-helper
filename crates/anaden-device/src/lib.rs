@@ -21,6 +21,10 @@ mod win32_launch;
 // cfg(windows) で gating し、Linux ではコンパイル対象外とする。
 #[cfg(windows)]
 mod win32_proc;
+// PC版(Windows) 既存ゲームプロセスの段階的終了 (Issue #266)。launch から参照。
+// cfg(windows) で gating し、Linux ではコンパイル対象外とする。
+#[cfg(windows)]
+mod win32_terminate;
 
 /// ゲーム起動保証の成果物 enum ([`Win32Launch::ensure_open`] 等)。
 ///
@@ -42,3 +46,6 @@ pub use win32_input::{InputMethod, Win32InputExecutor};
 pub use win32_launch::{
     DEFAULT_CHILD, DEFAULT_LAUNCHER, DEFAULT_WAIT, DEFAULT_WORKDIR, Win32Launch,
 };
+/// PC版(Windows) 既存ゲームプロセスの段階的終了 (WM_CLOSE → 待機 → TerminateProcess・Issue #266)。
+#[cfg(windows)]
+pub use win32_terminate::{DEFAULT_CLOSE_WAIT, TerminateStages, terminate_child_staged};
