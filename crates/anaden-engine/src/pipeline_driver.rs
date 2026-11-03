@@ -356,7 +356,14 @@ enum StepFlow {
     /// 継続 (interval sleep へ)。
     Continue,
     /// 停止 (呼出側がそのまま return する完成 outcome)。
-    Stop(LoopOutcome),
+    /// 224 bytes 超の payload で enum 全体が肥大化するため Box 化 (Issue #272)。
+    Stop(Box<LoopOutcome>),
+}
+
+impl StepFlow {
+    fn stop(outcome: LoopOutcome) -> Self {
+        Self::Stop(Box::new(outcome))
+    }
 }
 
 /// マッチ系 arm の種別 (Fired / NoFire)。§A D9 の非対称契約をデータ化:
@@ -1650,14 +1657,14 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         arm: MatchArm,
     ) -> StepFlow {
         if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
-            return StepFlow::Stop(stop);
+            return StepFlow::stop(stop);
         }
         let Some(_) = next_current else {
             let (reason, text) = match arm {
                 MatchArm::Fired => (LoopStopReason::TerminalTask, self.current().to_string()),
                 MatchArm::NoFire => (LoopStopReason::Stop, "stop".to_string()),
             };
-            return StepFlow::Stop(self.build_outcome(
+            return StepFlow::stop(self.build_outcome(
                 state.iterations,
                 std::mem::take(&mut state.fired),
                 reason,
@@ -1721,10 +1728,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let now = self.recovery_clock.elapsed();
         let due = state.recovery_enabled && state.guard.record_miss(now);
         if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
-            return StepFlow::Stop(stop);
+            return StepFlow::stop(stop);
         }
         if due && let Some(stop) = self.run_recovery_or_stop(miss_cause, state, recover).await {
-            return StepFlow::Stop(stop);
+            return StepFlow::stop(stop);
         }
         StepFlow::Continue
     }
@@ -1777,7 +1784,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         message: String,
     ) -> StepFlow {
         if !is_recoverable_io_error(kind) {
-            return StepFlow::Stop(self.build_outcome(
+            return StepFlow::stop(self.build_outcome(
                 state.iterations - 1,
                 std::mem::take(&mut state.fired),
                 LoopStopReason::ExecuteError,
@@ -1795,11 +1802,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 .run_recovery_or_stop("capture error outside grace", state, recover)
                 .await
             {
-                Some(stop) => StepFlow::Stop(stop),
+                Some(stop) => StepFlow::stop(stop),
                 None => StepFlow::Continue,
             }
         } else {
-            StepFlow::Stop(self.build_outcome(
+            StepFlow::stop(self.build_outcome(
                 state.iterations - 1,
                 std::mem::take(&mut state.fired),
                 LoopStopReason::CaptureError,
@@ -1994,7 +2001,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             };
             match flow {
                 StepFlow::Continue => {}
-                StepFlow::Stop(outcome) => return outcome,
+                StepFlow::Stop(outcome) => return *outcome,
             }
             // interval 待ちを cancel 通知で即時抜けられるように select! 化。
             // トークン未設定時は cancel 分岐が発火しないので従来の sleep のみ(後方互換)。
