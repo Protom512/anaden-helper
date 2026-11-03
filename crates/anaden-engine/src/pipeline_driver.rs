@@ -1809,6 +1809,24 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
+    /// Issue #252: watch ハンドル成功 — current を進めず継続。
+    /// テンプレートマッチ成功 (健全サイクル) として streak をリセットし、
+    /// per_task_matches は watch タスク側へ計上する (ポップアップ処理回数の
+    /// テレメトリ)。ゴール評価は行わない (本流の tick ではないため —
+    /// LoopCount は進まず TemplateMatch の last_match も伝播しない)。
+    fn step_watch_fired(
+        &mut self,
+        state: &mut LoopState,
+        task: &str,
+        fired: Option<InputCommand>,
+    ) -> StepFlow {
+        state.record_match_tick(task);
+        if let Some(cmd) = fired {
+            state.fired.push(cmd);
+        }
+        StepFlow::Continue
+    }
+
     /// `run_loop` + NoMatch 連続時リカバリフック付き。
     ///
     /// `recover_nomatch_threshold > 0` かつ `recover` が [`Some`] のとき、
@@ -1971,16 +1989,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     self.step_error(&mut state, recover, kind, message).await
                 }
                 StepOutcome::WatchFired { task, fired } => {
-                    // Issue #252: watch ハンドル成功 — current を進めず継続。
-                    // テンプレートマッチ成功 (健全サイクル) として streak をリセットし、
-                    // per_task_matches は watch タスク側へ計上する (ポップアップ処理回数の
-                    // テレメトリ)。ゴール評価は行わない (本流の tick ではないため —
-                    // LoopCount は進まず TemplateMatch の last_match も伝播しない)。
-                    state.record_match_tick(&task);
-                    if let Some(cmd) = fired {
-                        state.fired.push(cmd);
-                    }
-                    StepFlow::Continue
+                    self.step_watch_fired(&mut state, &task, fired)
                 }
             };
             match flow {
