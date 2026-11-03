@@ -158,6 +158,84 @@ test('any change to a tests/ directory file is a violation', () => {
   assert.equal(code, 1);
 });
 
+test('whitespace-only rewrap of a tests/ directory file passes (Issue #272)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,4 +2,1 @@',
+    '-assert_eq!(',
+    '-    j.point(),',
+    '-    (1, 2)',
+    '-);',
+    '+assert_eq!(j.point(), (1, 2));',
+  ].join('\n');
+  const code = main([], {
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\nassert_eq!(\n    j.point(),\n    (1, 2)\n);\n' },
+    newSources: { 'crates/x/tests/integ.rs': '#[test]\nassert_eq!(j.point(), (1, 2));\n' },
+  });
+  assert.equal(code, 0);
+});
+
+test('rustfmt array collapse that drops a trailing comma is NOT whitespace-only (Issue #272 boundary)', () => {
+  // The real drift shape: multi-line array with trailing comma collapses to one
+  // line and rustfmt removes the comma, so tokens change and the gate still
+  // flags it. Whether to treat trailing-comma normalization as insignificant is
+  // an open operator decision recorded in Issue #272.
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,5 +2,1 @@',
+    '-for name in [',
+    '-    "A",',
+    '-    "B",',
+    '-] {',
+    '+for name in ["A", "B"] {',
+  ].join('\n');
+  const code = main([], {
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\nfor name in [\n    "A",\n    "B",\n] {}\n' },
+    newSources: { 'crates/x/tests/integ.rs': '#[test]\nfor name in ["A", "B"] {}\n' },
+  });
+  assert.equal(code, 1);
+});
+
+test('indent-only change inside a #[cfg(test)] region passes (Issue #272)', () => {
+  const diff = [
+    'diff --git a/crates/x/src/lib.rs b/crates/x/src/lib.rs',
+    '--- a/crates/x/src/lib.rs',
+    '+++ b/crates/x/src/lib.rs',
+    '@@ -7,1 +7,1 @@',
+    '-    fn t1() { assert!(true); }',
+    '+      fn t1() { assert!(true); }',
+  ].join('\n');
+  const code = main([], {
+    diffText: diff,
+    oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
+    newSources: { 'crates/x/src/lib.rs': OLD_SRC.replace('    fn t1()', '      fn t1()') },
+  });
+  assert.equal(code, 0);
+});
+
+test('one-token change in a tests/ directory file still fails (Issue #272)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,1 +2,1 @@',
+    '-fn t1() { assert!(true); }',
+    '+fn t1() { assert!(false); }',
+  ].join('\n');
+  const code = main([], {
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\nfn t1() { assert!(true); }\n' },
+    newSources: { 'crates/x/tests/integ.rs': '#[test]\nfn t1() { assert!(false); }\n' },
+  });
+  assert.equal(code, 1);
+});
+
 test('non-.rs files are ignored', () => {
   const diff = [
     'diff --git a/docs/foo.md b/docs/foo.md',

@@ -4,6 +4,10 @@
 // diff may touch test code — a #[cfg(test)] module/item region (including the
 // attribute lines themselves) or any file under tests/. Additions count as
 // touches: the campaign contract is "not a single line of test code changes".
+// Exception (Issue #272): a diff whose old/new sources are equal after
+// stripping all whitespace is a pure reformat (rustfmt reindent/rewrap) and
+// moves no tokens, so it is not a test change. Everything else — mixed hunks,
+// token edits, new tests/ files — fails as before.
 //
 // Usage:
 //   node scripts/quality/assert_tests_untouched.mjs [base]
@@ -118,12 +122,25 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
     if (typeof src !== 'string') throw new Error(`missing ${side} source for ${file}`);
     return src;
   };
+  const stripAllWhitespace = (src) => src.replace(/\s+/g, '');
   for (const file of files) {
     if (!file.path.endsWith('.rs')) continue;
     const oldLines = file.hunks.flatMap((h) => h.oldLines);
     const newLines = file.hunks.flatMap((h) => h.newLines);
     const classification = classifyPath(file.path);
     filesChecked += 1;
+    // A file whose old/new sources are equal modulo whitespace is a pure
+    // reformat and moves no tokens (Issue #272). New files have no old side,
+    // so tests/ additions still fall through to the checks below.
+    const oldSrc = oldSources[file.path];
+    const newSrc = newSources[file.path];
+    if (
+      typeof oldSrc === 'string'
+      && typeof newSrc === 'string'
+      && stripAllWhitespace(oldSrc) === stripAllWhitespace(newSrc)
+    ) {
+      continue;
+    }
     if (classification === 'tests-dir') {
       for (const line of newLines) {
         violations.push({ file: file.path, side: 'new', line, reason: 'tests/ directory file changed' });
