@@ -33,7 +33,7 @@ fn render_all_modes_headless() {
         ctx.begin_pass(egui::RawInput::default());
         app.render_modebar(&mut test_ui(&ctx, label));
         app.render_body(&mut test_ui(&ctx, label));
-        ctx.end_pass();
+        let _ = ctx.end_pass();
     }
 }
 
@@ -56,7 +56,7 @@ fn render_authoring_two_frames_headless_completes() {
         ctx.begin_pass(egui::RawInput::default());
         app.render_modebar(&mut test_ui(&ctx, &format!("frame-{frame}")));
         app.render_body(&mut test_ui(&ctx, &format!("frame-{frame}")));
-        ctx.end_pass();
+        let _ = ctx.end_pass();
     }
 }
 
@@ -69,5 +69,5 @@ fn render_live_authoring_canvas_headless_completes() {
     ctx.begin_pass(egui::RawInput::default());
     app.render_modebar(&mut test_ui(&ctx, "live"));
     app.render_body(&mut test_ui(&ctx, "live"));
-    ctx.end_pass();
+    let _ = ctx.end_pass();
 }
