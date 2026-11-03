@@ -139,7 +139,7 @@ test('adding a brand-new #[cfg(test)] mod in a src file is a violation', () => {
   assert.equal(code, 1);
 });
 
-test('any change to a tests/ directory file is a violation', () => {
+test('brand-new file under tests/ passes: additive coverage is allowed (Issue #272)', () => {
   const diff = [
     'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
     'new file mode 100644',
@@ -155,7 +155,7 @@ test('any change to a tests/ directory file is a violation', () => {
     oldSources: {},
     newSources: { 'crates/x/tests/integ.rs': '#[test]\nfn new_test() {}\n' },
   });
-  assert.equal(code, 1);
+  assert.equal(code, 0);
 });
 
 test('whitespace-only rewrap of a tests/ directory file passes (Issue #272)', () => {

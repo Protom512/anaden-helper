@@ -2,12 +2,14 @@
 //
 // Structural guarantee for the complexity-reduction campaign: no hunk of a git
 // diff may touch test code — a #[cfg(test)] module/item region (including the
-// attribute lines themselves) or any file under tests/. Additions count as
-// touches: the campaign contract is "not a single line of test code changes".
-// Exception (Issue #272): a diff whose old/new sources are equal after
+// attribute lines themselves) or a file under tests/. The protective core:
+// existing test code may change only by pure whitespace reformat, and
+// deletions of test files are never allowed. Two narrow allowances
+// (Issue #272): (1) a whole-file diff whose old/new sources are equal after
 // stripping all whitespace is a pure reformat (rustfmt reindent/rewrap) and
-// moves no tokens, so it is not a test change. Everything else — mixed hunks,
-// token edits, new tests/ files — fails as before.
+// moves no tokens, so it is not a test change; (2) a brand-new file under
+// tests/ (zero old lines) is the repo's additive pattern for new coverage.
+// Token edits, mixed hunks, and deletions fail as before.
 //
 // Usage:
 //   node scripts/quality/assert_tests_untouched.mjs [base]
@@ -142,6 +144,9 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
       continue;
     }
     if (classification === 'tests-dir') {
+      // Brand-new tests/ files (zero old lines) are additive new coverage; the
+      // guarded cases below are modification and deletion (Issue #272).
+      if (oldLines.length === 0) continue;
       for (const line of newLines) {
         violations.push({ file: file.path, side: 'new', line, reason: 'tests/ directory file changed' });
       }
