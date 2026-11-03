@@ -198,10 +198,13 @@ mod tests {
     /// radius 0 は座標を変えない (無効化スイッチ)。
     #[test]
     fn zero_radius_is_identity() {
-        let mut j = Jitter::with_config(9, JitterConfig {
-            tap_radius_px: 0,
-            interval_ratio: 0.15,
-        });
+        let mut j = Jitter::with_config(
+            9,
+            JitterConfig {
+                tap_radius_px: 0,
+                interval_ratio: 0.15,
+            },
+        );
         assert_eq!(j.jitter_point(100, 200), (100, 200));
     }
 
@@ -232,11 +235,17 @@ mod tests {
     /// ratio 0 は interval を変えない (無効化スイッチ)。
     #[test]
     fn zero_ratio_interval_is_identity() {
-        let mut j = Jitter::with_config(9, JitterConfig {
-            tap_radius_px: 3,
-            interval_ratio: 0.0,
-        });
-        assert_eq!(j.jitter_interval(Duration::from_millis(777)), Duration::from_millis(777));
+        let mut j = Jitter::with_config(
+            9,
+            JitterConfig {
+                tap_radius_px: 3,
+                interval_ratio: 0.0,
+            },
+        );
+        assert_eq!(
+            j.jitter_interval(Duration::from_millis(777)),
+            Duration::from_millis(777)
+        );
     }
 
     /// 1ms 未満の base でも最低 1ms にクランプされる (ゼロ割・負防止)。

@@ -94,11 +94,7 @@ fn normalize_fixture(name: &str) -> image::DynamicImage {
 fn ad_select_anchors_match_live_fixture_through_production_preprocessing() {
     let normalized = normalize_fixture("ad_select_live_1918x1048.png");
     let tasks = ticket_digest_tasks();
-    for name in [
-        "AdSelectDetectPc",
-        "HardRowDetectPc",
-        "VeryHardRowDetectPc",
-    ] {
+    for name in ["AdSelectDetectPc", "HardRowDetectPc", "VeryHardRowDetectPc"] {
         let task = find_task(&tasks, name);
         let conf = detect_conf(task, &normalized).unwrap_or_else(|| {
             panic!(
@@ -141,11 +137,7 @@ fn anchors_do_not_cross_match_other_screen_fixture() {
     let ad_select = normalize_fixture("ad_select_live_1918x1048.png");
     let reward = normalize_fixture("reward_congrats_live_1918x1048.png");
     let tasks = ticket_digest_tasks();
-    for name in [
-        "AdSelectDetectPc",
-        "HardRowDetectPc",
-        "VeryHardRowDetectPc",
-    ] {
+    for name in ["AdSelectDetectPc", "HardRowDetectPc", "VeryHardRowDetectPc"] {
         let task = find_task(&tasks, name);
         assert!(
             detect_conf(task, &reward).is_none(),

@@ -1009,8 +1009,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                         Some(j) => j.jitter_command(cmd),
                         None => cmd,
                     };
-                    let device_cmd =
-                        rescale_command(cmd, self.device_width, &self.last_crop_info);
+                    let device_cmd = rescale_command(cmd, self.device_width, &self.last_crop_info);
                     match self.execute_command(&device_cmd).await {
                         Ok(()) => {
                             debug!("watch fired: {name} -> {device_cmd:?}");
@@ -6434,8 +6433,14 @@ mod tests {
         };
         let dx = (x as i64 - i64::from(px)).abs();
         let dy = (y as i64 - i64::from(py)).abs();
-        assert!(dx <= 3, "x jitter {dx} exceeds radius (plain={px}, got={x})");
-        assert!(dy <= 3, "y jitter {dy} exceeds radius (plain={py}, got={y})");
+        assert!(
+            dx <= 3,
+            "x jitter {dx} exceeds radius (plain={px}, got={x})"
+        );
+        assert!(
+            dy <= 3,
+            "y jitter {dy} exceeds radius (plain={py}, got={y})"
+        );
         assert!(
             (dx, dy) != (0, 0),
             "jitter must displace the tap at least once for seed {seed}"
@@ -6478,7 +6483,10 @@ mod tests {
         let v = &outcome.progress_report.verify;
         assert_eq!(v.checks, 1, "exactly one post-fire check");
         assert_eq!(v.passed, 0);
-        assert_eq!(v.failed, 1, "persistent target must count as verify failure");
+        assert_eq!(
+            v.failed, 1,
+            "persistent target must count as verify failure"
+        );
     }
 
     /// 検証無効 run: verify.enabled == false で計数 0 (後方互換)。
@@ -6650,10 +6658,7 @@ mod tests {
         let outcome = d.run_once().await;
         match &outcome {
             StepOutcome::Fired { next_current, .. } => {
-                assert!(
-                    next_current.is_none(),
-                    "Title is terminal (empty next)"
-                );
+                assert!(next_current.is_none(), "Title is terminal (empty next)");
             }
             other => panic!("expected Fired (Title terminal), got {other:?}"),
         }
