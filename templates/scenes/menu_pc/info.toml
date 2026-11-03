@@ -3,12 +3,12 @@ state     = "menu_pc"
 algorithm = "sse"
 template  = "info.png"
 # PC版(Windows 16:9) menu シーン参照テンプレ (Task #28 / Issue #6 / 親 Issue #5)。
-# pc-scoped 名前空間(scenes/menu_pc/)。20:9 既存 templates/scenes/menu/info.toml
-# (旧 schema, 20:9 座標) は共存(非破壊)。
+# Issue #268: 3.17.50 メニューバーUI変更への追従 (導出手法・座標系は party.toml 参照)。
+# info = 左から8タイル目 (ラベル「その他」— 4x ズームクロップで判読。ギアアイコン。
+# 7タイル目は新設の「お知らせ」で、旧7対象には相当タスクなし)。
 #
-# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。
-#
-# ROI 導出: menu_pc_probe.png の下部アイコンバー右クラスタ7アイコンのうち info(最右)。
-# legacy 20:9 座標のコピペ禁止。template info.png は同サイズ RGBA 自己クロップ。
-roi       = [1145, 579, 68, 73]
+# 生成コマンド (絶対命令: 生成コマンドをログに残す):
+#   resize_crop_template e5_menu_now.png templates/scenes/menu_pc/info.png \
+#       --letterbox 10 --roi 804,567,92,93
+roi       = [804, 567, 92, 93]
 threshold = 0.95
