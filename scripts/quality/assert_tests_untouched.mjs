@@ -3,13 +3,17 @@
 // Structural guarantee for the complexity-reduction campaign: no hunk of a git
 // diff may touch test code — a #[cfg(test)] module/item region (including the
 // attribute lines themselves) or a file under tests/. The protective core:
-// existing test code may change only by pure whitespace reformat, and
-// deletions of test files are never allowed. Two narrow allowances
-// (Issue #272): (1) a whole-file diff whose old/new sources are equal after
-// stripping all whitespace is a pure reformat (rustfmt reindent/rewrap) and
-// moves no tokens, so it is not a test change; (2) a brand-new file under
-// tests/ (zero old lines) is the repo's additive pattern for new coverage.
-// Token edits, mixed hunks, and deletions fail as before.
+// existing test code may change only by provably format-only deltas or via an
+// explicitly reviewed allowlist entry, and deletions of test files are never
+// allowed. Three narrow allowances (Issue #272): (1) a whole-file diff whose
+// old/new sources normalize equal (format-only: reindent, rewrap, and rustfmt
+// trailing-comma normalization outside literals) is not a test change; (2) a
+// brand-new file under tests/ (zero old lines) is the repo's additive pattern
+// for new coverage; (3) residual violations in files listed in
+// assert-tests-untouched-allowlist.json pass, and an entry matching no
+// violation in the current diff fails as stale so the list cannot rot.
+// Token edits (including inside string literals), mixed hunks, and deletions
+// fail as before.
 //
 // Usage:
 //   node scripts/quality/assert_tests_untouched.mjs [base]
@@ -108,6 +112,117 @@ export function parseDiff(diffText) {
 }
 
 // ---------------------------------------------------------------------------
+// Format-only normalization (Issue #272 v2)
+// ---------------------------------------------------------------------------
+
+/**
+ * Normalizes Rust source for format-only comparison.
+ * Outside literals and comments, drops all whitespace and every trailing
+ * comma (a comma whose next non-whitespace character is `)`, `]`, or `}`).
+ * String, byte-string, raw-string, and char literals keep their bytes
+ * verbatim, so a change like "key zero" -> "keyzero" inside a literal is a
+ * semantic edit, never a reformat. Comment text is kept with whitespace
+ * dropped, so comment reflow passes while wording edits do not. Char-vs-
+ * lifetime is a heuristic: 'x' / '\x' + closing quote reads as a char
+ * literal, anything else as a lifetime, which needs no special handling.
+ */
+export function normalizeRustSource(src) {
+  const text = String(src);
+  const n = text.length;
+  const out = [];
+  const isIdentChar = (c) => /[A-Za-z0-9_]/.test(c);
+
+  const emitCode = (chunk) => {
+    const noTrailingCommas = chunk.replace(/,(?=\s*[)\]}])/g, '');
+    out.push(noTrailingCommas.replace(/\s+/g, ''));
+  };
+
+  // Returns the index just past a cooked string's closing quote (`"` at start,
+  // backslash escapes honored). Unterminated input consumes to the end, which
+  // still compares deterministically on both sides.
+  const scanQuoted = (start) => {
+    let j = start + 1;
+    while (j < n) {
+      if (text[j] === '\\') { j += 2; continue; }
+      if (text[j] === '"') return j + 1;
+      j += 1;
+    }
+    return n;
+  };
+
+  let codeStart = 0;
+  let i = 0;
+  while (i < n) {
+    const c = text[i];
+    const prev = i > 0 ? text[i - 1] : '';
+    if (c === '/' && text[i + 1] === '/') {
+      const nl = text.indexOf('\n', i);
+      const stop = nl === -1 ? n : nl;
+      emitCode(text.slice(codeStart, i));
+      out.push(text.slice(i + 2, stop).replace(/\s+/g, ''));
+      codeStart = i = stop;
+      continue;
+    }
+    if (c === '/' && text[i + 1] === '*') {
+      let depth = 1;
+      let j = i + 2;
+      while (j < n && depth > 0) {
+        if (text[j] === '/' && text[j + 1] === '*') { depth += 1; j += 2; }
+        else if (text[j] === '*' && text[j + 1] === '/') { depth -= 1; j += 2; }
+        else j += 1;
+      }
+      emitCode(text.slice(codeStart, i));
+      out.push(text.slice(i + 2, j - 2).replace(/\s+/g, ''));
+      codeStart = i = j;
+      continue;
+    }
+    // Raw strings: r"..." / r#"..."# (##+) and the br-prefixed forms. An `r`
+    // not followed by the quote shapes (e.g. the raw identifier `r#type`)
+    // falls through as ordinary code.
+    let rawPrefixLen = 0;
+    if (!isIdentChar(prev)) {
+      if (c === 'r' && (text[i + 1] === '"' || text[i + 1] === '#')) rawPrefixLen = 1;
+      else if (c === 'b' && text[i + 1] === 'r' && (text[i + 2] === '"' || text[i + 2] === '#')) rawPrefixLen = 2;
+    }
+    if (rawPrefixLen > 0) {
+      let j = i + rawPrefixLen;
+      let hashes = 0;
+      while (text[j] === '#') { hashes += 1; j += 1; }
+      if (text[j] === '"') {
+        const closing = '"' + '#'.repeat(hashes);
+        const end = text.indexOf(closing, j + 1);
+        const stop = end === -1 ? n : end;
+        emitCode(text.slice(codeStart, i));
+        out.push(text.slice(i, stop));
+        codeStart = i = stop + closing.length;
+        continue;
+      }
+    }
+    if (c === '"' || (!isIdentChar(prev) && c === 'b' && text[i + 1] === '"')) {
+      const stop = scanQuoted(c === '"' ? i : i + 1);
+      emitCode(text.slice(codeStart, i));
+      out.push(text.slice(i, stop));
+      codeStart = i = stop;
+      continue;
+    }
+    if (c === "'") {
+      let j = i + 1;
+      if (text[j] === '\\') j += 2;
+      else j += 1;
+      if (text[j] === "'") {
+        emitCode(text.slice(codeStart, i));
+        out.push(text.slice(i, j + 1));
+        codeStart = i = j + 1;
+        continue;
+      }
+    }
+    i += 1;
+  }
+  emitCode(text.slice(codeStart, n));
+  return out.join('');
+}
+
+// ---------------------------------------------------------------------------
 // Region checks
 // ---------------------------------------------------------------------------
 
@@ -124,22 +239,22 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
     if (typeof src !== 'string') throw new Error(`missing ${side} source for ${file}`);
     return src;
   };
-  const stripAllWhitespace = (src) => src.replace(/\s+/g, '');
   for (const file of files) {
     if (!file.path.endsWith('.rs')) continue;
     const oldLines = file.hunks.flatMap((h) => h.oldLines);
     const newLines = file.hunks.flatMap((h) => h.newLines);
     const classification = classifyPath(file.path);
     filesChecked += 1;
-    // A file whose old/new sources are equal modulo whitespace is a pure
-    // reformat and moves no tokens (Issue #272). New files have no old side,
-    // so tests/ additions still fall through to the checks below.
+    // A file whose old/new sources normalize equal is a pure reformat
+    // (reindent, rewrap, rustfmt trailing-comma normalization) and moves no
+    // token a test can observe (Issue #272). New files have no old side, so
+    // tests/ additions still fall through to the checks below.
     const oldSrc = oldSources[file.path];
     const newSrc = newSources[file.path];
     if (
       typeof oldSrc === 'string'
       && typeof newSrc === 'string'
-      && stripAllWhitespace(oldSrc) === stripAllWhitespace(newSrc)
+      && normalizeRustSource(oldSrc) === normalizeRustSource(newSrc)
     ) {
       continue;
     }
@@ -180,12 +295,30 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
 
 /**
  * CLI entry point. Returns the process exit code (0/1/2).
- * `opts` exists for tests: `{ root, base, diffText, oldSources, newSources }`
+ * `opts` exists for tests: `{ root, base, diffText, oldSources, newSources, allowlist }`
  * injects everything so no git command is executed.
  */
 export function main(argv = [], opts = {}) {
   const root = opts.root ?? path.resolve(scriptDir, '..', '..');
   const base = opts.base ?? argv[0] ?? 'HEAD';
+
+  let allowlistEntries = opts.allowlist;
+  if (allowlistEntries === undefined) {
+    const allowlistPath = path.join(scriptDir, 'assert-tests-untouched-allowlist.json');
+    let raw;
+    try {
+      raw = fs.readFileSync(allowlistPath, 'utf8');
+    } catch (error) {
+      console.error(`tests-untouched: cannot read assert-tests-untouched-allowlist.json: ${error.message}`);
+      return 2;
+    }
+    try {
+      allowlistEntries = JSON.parse(raw)?.entries ?? [];
+    } catch (error) {
+      console.error(`tests-untouched: cannot parse assert-tests-untouched-allowlist.json: ${error.message}`);
+      return 2;
+    }
+  }
 
   let diffText = opts.diffText;
   let oldSources = opts.oldSources;
@@ -236,14 +369,35 @@ export function main(argv = [], opts = {}) {
     return 2;
   }
 
-  if (result.violations.length > 0) {
-    console.error(`tests-untouched: ${result.violations.length} hunk(s) touch test code (diff base: ${base})`);
-    for (const v of result.violations) {
+  const allowlistByFile = new Map(
+    (allowlistEntries ?? []).map((entry) => [normalizePath(entry.file), entry]),
+  );
+  const remaining = [];
+  const allowlistedFiles = new Set();
+  for (const v of result.violations) {
+    if (allowlistByFile.has(v.file)) {
+      allowlistedFiles.add(v.file);
+      continue;
+    }
+    remaining.push(v);
+  }
+  const stale = [...allowlistByFile.keys()].filter((f) => !allowlistedFiles.has(f));
+  if (stale.length > 0) {
+    console.error(`tests-untouched: stale allowlist entries (no matching violation in this diff):`);
+    for (const f of stale) console.error(`  ${f}`);
+  }
+  if (remaining.length > 0) {
+    console.error(`tests-untouched: ${remaining.length} hunk(s) touch test code (diff base: ${base})`);
+    for (const v of remaining) {
       console.error(`  ${v.file}:${v.line} (${v.side}) ${v.reason}`);
     }
     return 1;
   }
-  console.log(`tests-untouched: OK (${result.filesChecked} .rs file(s) in diff, no test code touched; base=${base})`);
+  if (stale.length > 0) return 1;
+  console.log(
+    `tests-untouched: OK (${result.filesChecked} .rs file(s) in diff, no test code touched`
+      + `${allowlistedFiles.size > 0 ? `, ${allowlistedFiles.size} allowlisted file(s)` : ''}; base=${base})`,
+  );
   return 0;
 }
 

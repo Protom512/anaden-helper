@@ -24,6 +24,10 @@ const NEW_SRC_PROD_ONLY = OLD_SRC.replace('pub fn prod_a() {}', 'pub fn prod_a()
 // New version where a production fn was deleted entirely (test region intact).
 const NEW_SRC_DELETED_PROD = ['pub fn prod_b() {}', '', '#[cfg(test)]', 'mod tests {', '    #[test]', '    fn t1() { assert!(true); }', '}'].join('\n');
 
+// Hermetic main() runner: injects an empty allowlist so the repo's real
+// assert-tests-untouched-allowlist.json cannot make these tests stale.
+const call = (opts) => main([], { allowlist: [], ...opts });
+
 // ---------------------------------------------------------------------------
 // Core scenarios
 // ---------------------------------------------------------------------------
@@ -38,7 +42,7 @@ test('added line inside a new-side test region is a violation (exit 1)', () => {
     '-    fn t1() { assert!(true); }',
     '+    fn t1() { assert!(false); }',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
     newSources: { 'crates/x/src/lib.rs': OLD_SRC.replace('assert!(true)', 'assert!(false)') },
@@ -57,7 +61,7 @@ test('deleted line that was inside an old-side test region is a violation', () =
     ' }',
   ].join('\n');
   const newSrc = ['#cfg', ''].join('\n'); // placeholder, new side won't hit region
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
     newSources: { 'crates/x/src/lib.rs': OLD_SRC.replace('    #[test]\n    fn t1() { assert!(true); }\n', '') },
@@ -74,7 +78,7 @@ test('production-only modifications on both sides pass (exit 0)', () => {
     '-pub fn prod_a() {}',
     '+pub fn prod_a() -> u32 { 1 }',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
     newSources: { 'crates/x/src/lib.rs': NEW_SRC_PROD_ONLY },
@@ -92,7 +96,7 @@ test('deleting production lines (test region untouched) passes', () => {
     '-pub fn prod_a() {}',
     ' pub fn prod_b() {}',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
     newSources: { 'crates/x/src/lib.rs': NEW_SRC_DELETED_PROD },
@@ -110,7 +114,7 @@ test('editing the #[cfg(test)] attribute line itself is a violation', () => {
     '-#[cfg(test)]',
     '+#[cfg(all(test, windows))]',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
     newSources: { 'crates/x/src/lib.rs': newSrc },
@@ -131,7 +135,7 @@ test('adding a brand-new #[cfg(test)] mod in a src file is a violation', () => {
     '+    fn t2() {}',
     '+}',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
     newSources: { 'crates/x/src/lib.rs': newSrc },
@@ -150,7 +154,7 @@ test('brand-new file under tests/ passes: additive coverage is allowed (Issue #2
     '+fn new_test() {}',
     '+',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: {},
     newSources: { 'crates/x/tests/integ.rs': '#[test]\nfn new_test() {}\n' },
@@ -170,7 +174,7 @@ test('whitespace-only rewrap of a tests/ directory file passes (Issue #272)', ()
     '-);',
     '+assert_eq!(j.point(), (1, 2));',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/tests/integ.rs': '#[test]\nassert_eq!(\n    j.point(),\n    (1, 2)\n);\n' },
     newSources: { 'crates/x/tests/integ.rs': '#[test]\nassert_eq!(j.point(), (1, 2));\n' },
@@ -178,11 +182,7 @@ test('whitespace-only rewrap of a tests/ directory file passes (Issue #272)', ()
   assert.equal(code, 0);
 });
 
-test('rustfmt array collapse that drops a trailing comma is NOT whitespace-only (Issue #272 boundary)', () => {
-  // The real drift shape: multi-line array with trailing comma collapses to one
-  // line and rustfmt removes the comma, so tokens change and the gate still
-  // flags it. Whether to treat trailing-comma normalization as insignificant is
-  // an open operator decision recorded in Issue #272.
+test('rustfmt array collapse that drops a trailing comma is format-only (Issue #272 v2)', () => {
   const diff = [
     'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
     '--- a/crates/x/tests/integ.rs',
@@ -194,10 +194,148 @@ test('rustfmt array collapse that drops a trailing comma is NOT whitespace-only 
     '-] {',
     '+for name in ["A", "B"] {',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/tests/integ.rs': '#[test]\nfor name in [\n    "A",\n    "B",\n] {}\n' },
     newSources: { 'crates/x/tests/integ.rs': '#[test]\nfor name in ["A", "B"] {}\n' },
+  });
+  assert.equal(code, 0);
+});
+
+test('rustfmt argument explode that inserts a trailing comma is format-only (Issue #272 v2)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,1 +2,8 @@',
+    '-let j = with_config(9, Config { a: 0, b: 0.15 });',
+    '+let j = with_config(',
+    '+    9,',
+    '+    Config {',
+    '+        a: 0,',
+    '+        b: 0.15,',
+    '+    },',
+    '+);',
+  ].join('\n');
+  const code = call({
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': 'let j = with_config(9, Config { a: 0, b: 0.15 });\n' },
+    newSources: {
+      'crates/x/tests/integ.rs': 'let j = with_config(\n    9,\n    Config {\n        a: 0,\n        b: 0.15,\n    },\n);\n',
+    },
+  });
+  assert.equal(code, 0);
+});
+
+test('whitespace change inside a string literal fails (Issue #272 v2 hole)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,1 +2,1 @@',
+    '-assert_eq!(label(), "key zero");',
+    '+assert_eq!(label(), "keyzero");',
+  ].join('\n');
+  const code = call({
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\nassert_eq!(label(), "key zero");\n' },
+    newSources: { 'crates/x/tests/integ.rs': '#[test]\nassert_eq!(label(), "keyzero");\n' },
+  });
+  assert.equal(code, 1);
+});
+
+test('content change inside a raw string fails (Issue #272 v2)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,1 +2,1 @@',
+    '-let s = r#"key zero"#;',
+    '+let s = r#"keyzero"#;',
+  ].join('\n');
+  const code = call({
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\nlet s = r#"key zero"#;\n' },
+    newSources: { 'crates/x/tests/integ.rs': '#[test]\nlet s = r#"keyzero"#;\n' },
+  });
+  assert.equal(code, 1);
+});
+
+test('comment-only whitespace reflow passes (Issue #272 v2)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,1 +2,1 @@',
+    '-// checks   the   zero   case',
+    '+// checks the zero case',
+  ].join('\n');
+  const code = call({
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\n// checks   the   zero   case\nassert!(true);\n' },
+    newSources: { 'crates/x/tests/integ.rs': '#[test]\n// checks the zero case\nassert!(true);\n' },
+  });
+  assert.equal(code, 0);
+});
+
+test('comma moved to a non-trailing position fails (Issue #272 v2)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,1 +2,1 @@',
+    '-let v = [1, 2];',
+    '+let v = [1 2,];',
+  ].join('\n');
+  const code = call({
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\nlet v = [1, 2];\n' },
+    newSources: { 'crates/x/tests/integ.rs': '#[test]\nlet v = [1 2,];\n' },
+  });
+  assert.equal(code, 1);
+});
+
+test('comma removed from inside a list fails (Issue #272 v2)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,1 +2,1 @@',
+    '-run(a, b);',
+    '+run(a b);',
+  ].join('\n');
+  const code = call({
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\nrun(a, b);\n' },
+    newSources: { 'crates/x/tests/integ.rs': '#[test]\nrun(a b);\n' },
+  });
+  assert.equal(code, 1);
+});
+
+test('violation in an allowlisted file passes (Issue #272 v2)', () => {
+  const diff = [
+    'diff --git a/crates/x/tests/integ.rs b/crates/x/tests/integ.rs',
+    '--- a/crates/x/tests/integ.rs',
+    '+++ b/crates/x/tests/integ.rs',
+    '@@ -2,1 +2,1 @@',
+    '-fn t1() { assert!(true); }',
+    '+fn t1() { assert!(false); }',
+  ].join('\n');
+  const code = main([], {
+    diffText: diff,
+    oldSources: { 'crates/x/tests/integ.rs': '#[test]\nfn t1() { assert!(true); }\n' },
+    newSources: { 'crates/x/tests/integ.rs': '#[test]\nfn t1() { assert!(false); }\n' },
+    allowlist: [{ file: 'crates/x/tests/integ.rs', reason: 'mechanical fix, reviewed', ref: '#272' }],
+  });
+  assert.equal(code, 0);
+});
+
+test('stale allowlist entry fails (Issue #272 v2)', () => {
+  const code = main([], {
+    diffText: '',
+    oldSources: {},
+    newSources: {},
+    allowlist: [{ file: 'crates/x/tests/other.rs', reason: 'mechanical fix, reviewed', ref: '#272' }],
   });
   assert.equal(code, 1);
 });
@@ -211,7 +349,7 @@ test('indent-only change inside a #[cfg(test)] region passes (Issue #272)', () =
     '-    fn t1() { assert!(true); }',
     '+      fn t1() { assert!(true); }',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
     newSources: { 'crates/x/src/lib.rs': OLD_SRC.replace('    fn t1()', '      fn t1()') },
@@ -228,7 +366,7 @@ test('one-token change in a tests/ directory file still fails (Issue #272)', () 
     '-fn t1() { assert!(true); }',
     '+fn t1() { assert!(false); }',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/tests/integ.rs': '#[test]\nfn t1() { assert!(true); }\n' },
     newSources: { 'crates/x/tests/integ.rs': '#[test]\nfn t1() { assert!(false); }\n' },
@@ -245,12 +383,12 @@ test('non-.rs files are ignored', () => {
     '-old',
     '+new',
   ].join('\n');
-  const code = main([], { diffText: diff, oldSources: {}, newSources: {} });
+  const code = call({ diffText: diff, oldSources: {}, newSources: {} });
   assert.equal(code, 0);
 });
 
 test('empty diff passes trivially (nothing changed -> tests untouched)', () => {
-  const code = main([], { diffText: '', oldSources: {}, newSources: {} });
+  const code = call({ diffText: '', oldSources: {}, newSources: {} });
   assert.equal(code, 0);
 });
 
@@ -263,7 +401,7 @@ test('missing new-side source for a changed .rs file fails closed (exit 2)', () 
     '-pub fn prod_a() {}',
     '+pub fn prod_a() -> u32 { 1 }',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
     newSources: {},
@@ -280,7 +418,7 @@ test('benches/ changes are not flagged (out of test scope, not .rs tests)', () =
     '-fn bench_old() {}',
     '+fn bench_new() {}',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/benches/b.rs': 'fn bench_old() {}\n' },
     newSources: { 'crates/x/benches/b.rs': 'fn bench_new() {}\n' },
@@ -298,7 +436,7 @@ test('whole-file deletion of a tests/ file is a violation (Issue #231)', () => {
     '-#[test]',
     '-fn t() {}',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/tests/integ.rs': '#[test]\nfn t() {}\n' },
     newSources: {},
@@ -315,7 +453,7 @@ test('whole-file deletion of a production file is not flagged (Issue #231)', () 
     '@@ -1,1 +0,0 @@',
     '-pub fn p() {}',
   ].join('\n');
-  const code = main([], {
+  const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/prod.rs': 'pub fn p() {}\n' },
     newSources: {},
