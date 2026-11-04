@@ -451,7 +451,7 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') =>
     undeclared: preImpl ? [] : undeclared,
     foreignChanges,
     missing,
-    reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : (`ticket-precheck PASS (${mode})${foreignNote}` || (preImpl && missing.length > 0 ? `ticket-precheck PASS (pre-implementation) — ${missing.length} declared file(s) pending implementation` : 'ticket-precheck PASS — declared files match changed files')),
+    reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : `ticket-precheck PASS (${mode})${foreignNote}`,
   };
 };
 const evaluateIssuePremise = (input) => {

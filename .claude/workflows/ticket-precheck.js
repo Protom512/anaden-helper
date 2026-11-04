@@ -50,18 +50,18 @@ export function evaluateTicketPrecheck(declaredFiles, changedFiles, mode = 'stri
     }
   }
   const preImpl = mode === 'pre-implementation';
-  const hasMismatch = preImpl ? undeclared.length > 0 : (undeclared.length > 0 || missing.length > 0);
+  const foreignChanges = preImpl ? undeclared : [];
+  const hasMismatch = preImpl ? false : (undeclared.length > 0 || missing.length > 0);
   const fail =
     changed.malformed ||
     (declared.malformed && changed.ordered.length > 0) ||
     (declared.ordered.length === 0 && changed.ordered.length > 0) ||
-    (preImpl && declared.ordered.length === 0 && changed.ordered.length > 0) ||
     hasMismatch;
   const parts = [];
-  if (undeclared.length > 0) {
+  if (!preImpl && undeclared.length > 0) {
     parts.push(`undeclared changed files: ${undeclared.join(', ')}`);
   }
-  if (missing.length > 0) {
+  if (missing.length > 0 && !preImpl) {
     parts.push(`declared but unchanged files: ${missing.join(', ')}`);
   }
   if (declared.ordered.length === 0 && changed.ordered.length > 0) {
@@ -73,13 +73,15 @@ export function evaluateTicketPrecheck(declaredFiles, changedFiles, mode = 'stri
   if (declared.malformed && changed.ordered.length > 0) {
     parts.push('malformed declaration (fail-closed)');
   }
+  const foreignNote = foreignChanges.length > 0 ? ` [foreign changes: ${foreignChanges.join(', ')} — concurrent editor, not blocking]` : '';
   return {
     verdict: fail ? 'FAIL' : 'PASS',
     declared: declared.ordered,
     changed: changed.ordered,
-    undeclared,
+    undeclared: preImpl ? [] : undeclared,
+    foreignChanges,
     missing,
-    reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : (preImpl && missing.length > 0 ? `ticket-precheck PASS (pre-implementation) — ${missing.length} declared file(s) pending implementation; no undeclared changed files` : 'ticket-precheck PASS — declared files match changed files'),
+    reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : `ticket-precheck PASS (${mode})${foreignNote}`,
   };
 }
 

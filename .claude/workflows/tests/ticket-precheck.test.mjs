@@ -141,10 +141,12 @@ test('pre-implementation mode: declared-but-unchanged files do not FAIL (Issue #
   assert.match(r.reason, /pre-implementation/);
 });
 
-test('pre-implementation mode: undeclared changed file still FAILs', () => {
+test('pre-implementation mode: undeclared changed files are non-blocking foreign changes (Issue #226 / PR #235)', () => {
   const r = evaluateTicketPrecheck(['a.js'], ['x.js'], 'pre-implementation');
-  assert.equal(r.verdict, 'FAIL');
-  assert.deepEqual(r.undeclared, ['x.js']);
+  assert.equal(r.verdict, 'PASS');
+  assert.deepEqual(r.foreignChanges, ['x.js']);
+  assert.deepEqual(r.undeclared, []);
+  assert.match(r.reason, /foreign changes: x\.js/);
 });
 
 test('pre-implementation mode: empty declaration with actual diff still FAILs (fail-closed)', () => {
