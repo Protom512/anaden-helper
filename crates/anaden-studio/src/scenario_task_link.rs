@@ -1,18 +1,3 @@
-//! シナリオ保存 pipeline → タスク登録・有効化のドメイン (Issue #160 UC-3 / Shard 4)。
-//!
-//! MAA interface.json モデル (設計ノート A) の 4 段階フロー (a) pipeline 作成
-//! (save_scenario) → (b) task エントリ登録 (`templates/tasks/<id>.toml` 生成) →
-//! (c) 有効化 ([`crate::tasks::enable_task`]) → (d) queue 追加 (既存ホーム一覧)
-//! のうち (b)(c) を担う純ドメイン。egui 非依存。task = pipeline への名前参照
-//! (MAA taskItem の entry と同型) であり pipeline 本体とは完全分離。
-//!
-//! - fail-closed: 同名 task TOML 既存時は上書き拒否、task id の安全性検証
-//!   (register・bind 両経路・Issue #180)、書き込み前に
-//!   [`TaskDefinition::parse_toml`] で完全検証、有効化は
-//!   [`crate::tasks::enable_task`] の pipeline load 検証に委譲。
-//! - TOML 書き込み中断・有効化失敗時は登録した TOML を補償削除し部分状態を
-//!   残さない (Issue #180)。
-
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 
@@ -20,45 +5,33 @@ use thiserror::Error;
 
 use crate::tasks::{self, TaskDefinition, TaskError, TaskKind};
 
-/// タスク登録・有効化に関するエラー。
 #[derive(Debug, Error)]
 pub enum ScenarioTaskError {
-    /// task id が task TOML ファイル名として不適 (空・パス区切り・Windows 予約文字等)。
     #[error("task id `{id}` is not a safe task file name")]
     UnsafeTaskId { id: String },
-    /// 同名 task TOML が既存 (上書き拒否・fail-closed)。
     #[error("task already exists (overwrite refused): {0}")]
     TaskAlreadyExists(PathBuf),
-    /// pipeline ディレクトリが workspace root 配下ではない (相対化不能)。
     #[error("pipeline dir {dir} is not a subdirectory of the workspace root")]
     NotRootRelative { dir: String },
-    /// 生成した task TOML が書き込み前検証に不合格 (通常は起きない・生成バグ検出)。
     #[error("generated task TOML failed pre-write validation: {0}")]
     InvalidGenerated(#[source] TaskError),
-    /// task TOML 書き込み IO 失敗。
     #[error("failed to write task file {path}")]
     Write {
         path: PathBuf,
         source: Box<std::io::Error>,
     },
-    /// 紐付け先 task TOML が存在しない。
     #[error("task not found: {0}")]
     TaskNotFound(PathBuf),
-    /// 有効化 (enable_task) の失敗。pipeline load 不能・id 不一致等は本 variant で伝播。
     #[error(transparent)]
     Enable(#[from] TaskError),
 }
 
-/// 既存 stub タスク (implemented = false の pipeline_run) の選択肢表示モデル。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StubTaskOption {
-    /// タスク定義 ID (= TOML ファイル名規約 `<id>.toml`)。
     pub id: String,
-    /// 表示ラベル (title)。
     pub title: String,
 }
 
-/// タスク定義一覧から stub 選択肢 (未実装 pipeline_run) を導出する純関数。
 #[must_use]
 pub fn stub_options(defs: &[TaskDefinition]) -> Vec<StubTaskOption> {
     defs.iter()
@@ -70,30 +43,17 @@ pub fn stub_options(defs: &[TaskDefinition]) -> Vec<StubTaskOption> {
         .collect()
 }
 
-/// パネルが呼出側 (app.rs) へ通知するイベント (UC-3 配線)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ScenarioPanelEvent {
-    /// タスク登録・有効化に成功 (ホーム一覧の再読込が必要)。`message` は再読込後にも
-    /// status へ再設定する成功メッセージ (再読込が status を上書きするため持ち回す)。
     TaskEnabled { message: String },
 }
 
-/// `ui_task_link` 描画に必要な app.rs 側コンテキスト (配線データ)。
 pub struct TaskLinkContext<'a> {
-    /// workspace ルート (pipeline_dir の相対化基準)。
     pub root: &'a Path,
-    /// task TOML ディレクトリ (既定 `templates/tasks`)。
     pub tasks_dir: &'a Path,
-    /// 既存 stub タスク選択肢 (implemented=false の pipeline_run)。
     pub stubs: &'a [StubTaskOption],
 }
 
-/// task id が task TOML ファイル名として安全か。
-///
-/// - 単一パス要素 (パス区切り・`.`/`..` 拒否) — `ScenarioValidationError::UnsafeName`
-///   と同一契約 (`file_name()` 一致検査)。
-/// - Windows 予約ファイル名文字 (`<>:"|?*`)・backslash・制御文字も拒否
-///   (書き込み IO 事故・OS 間非移植の未然防止)。
 fn is_safe_task_id(id: &str) -> bool {
     !id.is_empty()
         && Path::new(id).file_name() == Some(OsStr::new(id))
@@ -102,15 +62,6 @@ fn is_safe_task_id(id: &str) -> bool {
             .any(|c| matches!(c, '<' | '>' | ':' | '"' | '|' | '?' | '*' | '\\') || c.is_control())
 }
 
-/// pipeline ディレクトリを repo root 相対・forward slash 形式へ解決する。
-///
-/// [`crate::scenario_ui::resolve_template_reference`] を再用し、結果が
-/// 絶対パス・`..` 遷移含み・空の場合は [`ScenarioTaskError::NotRootRelative`]
-/// で fail-closed する。受け入れるのは **root 相対の任意パス**
-/// (セパレータは forward slash) であって、`templates/pipelines/<name>` は
-/// 慣例上の代表例にすぎない — ディレクトリ prefix としては検証しない
-/// (doc-code 整合・Issue #180: prefix 検証の追加は既存 task TOML の受け付け
-/// を変える動作変更になるため非スコープ)。
 fn pipeline_dir_rel(pipeline_dir: &Path, root: &Path) -> Result<String, ScenarioTaskError> {
     let rel = crate::scenario_ui::resolve_template_reference(pipeline_dir, root);
     let unsafe_rel =
@@ -123,10 +74,6 @@ fn pipeline_dir_rel(pipeline_dir: &Path, root: &Path) -> Result<String, Scenario
     Ok(rel)
 }
 
-/// 生成する task TOML のシリアライズ専用構造 (stub 状態: implemented = false)。
-///
-/// フィールド順 = 出力 TOML のキー順 (既存 `templates/tasks/*.toml` と同一順)。
-/// 有効化は [`crate::tasks::enable_task`] が行うため生成時点では必ず stub 状態。
 #[derive(serde::Serialize)]
 struct GeneratedTaskToml<'a> {
     id: &'a str,
@@ -138,10 +85,6 @@ struct GeneratedTaskToml<'a> {
     start_task: Option<&'a str>,
 }
 
-/// task TOML ソースを生成する (ヘッダコメント付き・人間可読)。
-///
-/// 既存 `templates/tasks/*.toml` の形式 (由来コメント 2 行 + キー順) に合わせる。
-/// コメント内 title は制御文字を空白化して改行混入を防ぐ (値側は serializer がエスケープ)。
 fn generate_task_toml(
     id: &str,
     title: &str,
@@ -177,20 +120,6 @@ fn generate_task_toml(
     ))
 }
 
-/// 保存済み pipeline を新規タスクとして登録 (b) して有効化 (c) する。
-///
-/// - task id は `<id>.toml` のファイル名になる。既存時は
-///   [`ScenarioTaskError::TaskAlreadyExists`] (上書き拒否・1 バイトも書かない)。
-/// - `title` が空の場合は task id を採用する (フォーム既定値のフォールバック)。
-/// - 生成 TOML は stub 状態 (`implemented = false` + pipeline_dir + start_task 宣言)
-///   で書き出し直後に [`crate::tasks::enable_task`] でフリップする — 有効化の
-///   fail-closed 検証 (pipeline load 可能・id 一致) を新規経路にも適用する。
-/// - TOML 書き込み中断 (部分ファイル残留)・有効化失敗時は登録した TOML を
-///   補償削除する (部分状態を残さない・Issue #180。削除自体の失敗は stub
-///   (選択不可) が残るのみで無害なため伝播しない)。
-///
-/// # Errors
-/// 上記 fail-closed 条件いずれかで [`ScenarioTaskError`]。
 pub fn register_and_enable_task(
     tasks_dir: &Path,
     root: &Path,
@@ -216,16 +145,12 @@ pub fn register_and_enable_task(
         return Err(ScenarioTaskError::TaskAlreadyExists(task_path));
     }
     let source = generate_task_toml(id, title, &dir_rel, start_task)?;
-    // 書き込み前の完全検証 (fail-closed): 生成ソースが正当な stub 定義であること。
     TaskDefinition::parse_toml(&source, &task_path).map_err(ScenarioTaskError::InvalidGenerated)?;
     std::fs::create_dir_all(tasks_dir).map_err(|source| ScenarioTaskError::Write {
         path: tasks_dir.to_path_buf(),
         source: Box::new(source),
     })?;
     if let Err(source) = std::fs::write(&task_path, &source) {
-        // 補償削除 (Issue #180): 呼出前は task_path が存在しなかった (冒頭の
-        // exists 検査で保証) ため、write 中断で残留した部分ファイルはすべて
-        // 本呼出の産物。削除して部分状態を残さない (削除失敗は stub 残留のみ)。
         let _ = std::fs::remove_file(&task_path);
         return Err(ScenarioTaskError::Write {
             path: task_path,
@@ -235,27 +160,12 @@ pub fn register_and_enable_task(
     match tasks::enable_task(&task_path, id, &dir_rel, root) {
         Ok(def) => Ok(def),
         Err(e) => {
-            // 補償削除: 本呼出で登録した TOML のみを戻す。
             let _ = std::fs::remove_file(&task_path);
             Err(ScenarioTaskError::Enable(e))
         }
     }
 }
 
-/// 既存 stub タスク (`implemented = false` の pipeline_run) へ pipeline を
-/// 紐付けて有効化する (ルート (ii): (b) スキップで enable_task のみ)。
-///
-/// task id は [`register_and_enable_task`] と対称に
-/// [`ScenarioTaskError::UnsafeTaskId`] で検証する (Issue #180: 公開 API の
-/// 引数がそのまま `tasks_dir.join` へ入るため、不正 id はパス構築の前段で
-/// 拒否する)。それ以外の検証 (id 一致・kind・pipeline load 可能・外科的行編集の
-/// 往復確認) はすべて [`crate::tasks::enable_task`] に委譲する — 有効化の
-/// 単一情報源。
-///
-/// # Errors
-/// [`ScenarioTaskError::UnsafeTaskId`] (不正 task id)、
-/// [`ScenarioTaskError::TaskNotFound`] (TOML 無し) または
-/// [`ScenarioTaskError::Enable`] (enable_task の fail-closed 検証失敗)。
 pub fn bind_and_enable_task(
     tasks_dir: &Path,
     root: &Path,

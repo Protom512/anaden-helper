@@ -1,37 +1,19 @@
-//! ticket_digest 計画データのスキーマと読み書き (Issue #248 offline)。
-//!
-//! - `data/ad_tenmei.toml`: アナダン天冥データ (GitHub Wiki
-//!   `daily-automation-data/ad_tenmei.toml` 由来。ダンジョン定義 +
-//!   クリア時天冥アップキャラ対応)。
-//! - `data/ticket_digest_plan.toml`: ねこの手特急券の消化計画
-//!   (設計: GitHub Wiki `Daily-Automation-ticket-digest` §6)。
-//!
-//! 両ファイルとも wiki を上流とする派生データのため `deny_unknown_fields` で
-//! 厳格にパースし、上流スキーマの drift を fail-closed に検出する
-//! (黙って未知フィールドを落として古い意味で動き続けない)。
-
 use std::path::Path;
 
 use serde::{Deserialize, Serialize};
 
-/// 天冥データ (`ad_tenmei.toml`) の想定スキーマ版。
 const TENMEI_VERSION: u32 = 1;
-/// 計画 TOML (`ticket_digest_plan.toml`) の想定スキーマ版。
 const PLAN_VERSION: u32 = 1;
 
-/// 消費難易度 (TOML では `H` / `VH`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Serialize, Deserialize)]
 pub enum Difficulty {
-    /// ハード (グリーンキー消費。異境はグリーン 2 枚)。
     #[serde(rename = "H")]
     Hard,
-    /// ベリーハード (レッドキー消費)。
     #[serde(rename = "VH")]
     VeryHard,
 }
 
 impl Difficulty {
-    /// 生成ファイルの記述・表示に使う文字列 (TOML 値と同一)。
     #[must_use]
     pub fn as_toml_str(self) -> &'static str {
         match self {
@@ -61,25 +43,19 @@ impl std::str::FromStr for Difficulty {
     }
 }
 
-/// 報酬枠の天/冥 alignment (上流データの `ten` / `mei` / `both` / `all_dist`)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 pub enum SlotAlignment {
-    /// 天側。
     #[serde(rename = "ten")]
     Ten,
-    /// 冥側。
     #[serde(rename = "mei")]
     Mei,
-    /// 天冥両方。
     #[serde(rename = "both")]
     Both,
-    /// 全配布キャラの天冥がアップ (秘境 etc.)。
     #[serde(rename = "all_dist")]
     AllDist,
 }
 
 impl SlotAlignment {
-    /// 計画 `note` 向けの日本語ラベル。
     #[must_use]
     pub fn label(&self) -> &'static str {
         match self {
@@ -91,13 +67,6 @@ impl SlotAlignment {
     }
 }
 
-/// 難易度別インラインテーブル (`key = { H = "..", VH = ".." }` 等の形状)。
-///
-/// 上流データには `key = {}` (キー消費なしの秘境) や
-/// `alignment = { VH = "all_dist" }` (H 側欠落) が実在するため、
-/// メンバーは欠落を許す `Option` にする。
-/// `default = "..."` 用の汎用 None コンストラクタ
-/// (serde の attribute path には variant `None` を直接書けないため)。
 fn none<T>() -> Option<T> {
     None
 }
@@ -105,16 +74,13 @@ fn none<T>() -> Option<T> {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct DifficultyTable<T> {
-    /// `H` 側の値。
     #[serde(rename = "H", default = "none")]
     pub hard: Option<T>,
-    /// `VH` 側の値。
     #[serde(rename = "VH", default = "none")]
     pub very_hard: Option<T>,
 }
 
 impl<T> DifficultyTable<T> {
-    /// 指定難易度側の値を取り出す。
     #[must_use]
     pub fn get(&self, difficulty: Difficulty) -> Option<&T> {
         match difficulty {
@@ -124,116 +90,73 @@ impl<T> DifficultyTable<T> {
     }
 }
 
-/// 報酬枠解放に必要な天冥値 (上流データ `[reward_slots]`。人間向け参照値)。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct RewardSlots {
-    /// ベリーハード枠の解放天冥値。
     pub vh: Vec<u32>,
-    /// ハード枠の解放天冥値。
     pub hard: Vec<u32>,
-    /// 異境ベリーハード枠。
     pub iseki_vh: Vec<u32>,
-    /// 異境ハード枠。
     pub iseki_hard: Vec<u32>,
-    /// ガルレア大陸 (5 枠)。
     pub gallerea: Vec<u32>,
 }
 
-/// `ad_tenmei.toml` 全体。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenmeiDoc {
-    /// スキーマ版。
     pub version: u32,
-    /// データの出典 URL。
     pub source: String,
-    /// 報酬枠解放天冥値 (参照用)。
     pub reward_slots: RewardSlots,
-    /// ダンジョン一覧 (`[[dungeon]]`)。
     #[serde(rename = "dungeon")]
     pub dungeons: Vec<TenmeiDungeon>,
-    /// 天冥アップキャラ対応 (`[[char]]`)。
     #[serde(rename = "char")]
     pub chars: Vec<TenmeiChar>,
 }
 
-/// `[[dungeon]]` 1 エントリ。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenmeiDungeon {
-    /// ダンジョン名 (計画 `entry.dungeon` と突合する識別子)。
     pub name: String,
-    /// 分類 (`main` / `side` / `iseki` / `hiseki` 等)。
     pub category: String,
-    /// ねこの手特急券のスキップ対象か。
     pub skip_target: bool,
-    /// 難易度別キー色 (`green` / `red` / `green2`。参照用)。
     pub key: DifficultyTable<String>,
-    /// 難易度別報酬枠 alignment。
     pub alignment: DifficultyTable<SlotAlignment>,
 }
 
-/// `[[char]]` 1 エントリ (上げたいキャラ → ダンジョンの逆引き表)。
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TenmeiChar {
-    /// キャラ名 (plan-tenmei の引数と完全一致させる)。
     pub name: String,
-    /// このキャラの上がる側 (天 / 冥)。
     pub alignment: SlotAlignment,
-    /// 天冥がアップするダンジョン名のリスト (記載順 = 逆引きの優先順)。
     pub dungeons: Vec<String>,
 }
 
-/// 特急券が尽きた時の挙動 (計画 TOML `on_ticket_empty`)。
-///
-/// 消費は live FSM 実装 (Issue #248 実機待ち) の契約。offline の段では
-/// 計画ファイルへの round-trip のみ保証する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum OnTicketEmpty {
-    /// pipeline を終了する (既定・推奨)。
     #[serde(rename = "stop")]
     Stop,
-    /// 通常入場へ切替 (戦闘が発生するため別 pipeline 前提・非推奨)。
     #[serde(rename = "normal_entry")]
     NormalEntry,
 }
 
-/// 計画 TOML (`ticket_digest_plan.toml`) 全体。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanDoc {
-    /// スキーマ版。
     pub version: u32,
-    /// 特急券切れ時の挙動。
     pub on_ticket_empty: OnTicketEmpty,
-    /// クロノス石でのキー自動購入を行うか (既定 false = 買わない)。
     pub auto_buy_key_with_stone: bool,
-    /// 消化エントリ (`[[entry]]`。priority 小さい順に消化)。
     #[serde(rename = "entry")]
     pub entries: Vec<PlanEntry>,
 }
 
-/// 計画 `[[entry]]` 1 エントリ (= 1 ダンジョン周回サイクル)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PlanEntry {
-    /// ダンジョン名 (`ad_tenmei.toml` `[[dungeon]].name` と突合)。
     pub dungeon: String,
-    /// 消費難易度。
     pub difficulty: Difficulty,
-    /// 消費順 (小さい順)。
     pub priority: u32,
-    /// 人間向けメモ (どのキャラの天冥を狙っているか等)。
     pub note: String,
 }
 
-/// `ad_tenmei.toml` を読み込む (スキーマ版チェック込み・fail-closed)。
-///
-/// # Errors
-/// ファイル読込失敗・TOML パース失敗 (未知フィールド・型不一致含む)・
-/// スキーマ版不一致を anyhow で返す。
 pub fn load_tenmei(path: &Path) -> anyhow::Result<TenmeiDoc> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("天冥データ読込失敗 {}: {e}", path.display()))?;
@@ -248,11 +171,6 @@ pub fn load_tenmei(path: &Path) -> anyhow::Result<TenmeiDoc> {
     Ok(doc)
 }
 
-/// 計画 TOML を読み込む (スキーマ版チェック込み・fail-closed)。
-///
-/// # Errors
-/// ファイル読込失敗・TOML パース失敗 (未知フィールド・型不一致含む)・
-/// スキーマ版不一致を anyhow で返す。
 pub fn load_plan(path: &Path) -> anyhow::Result<PlanDoc> {
     let text = std::fs::read_to_string(path)
         .map_err(|e| anyhow::anyhow!("計画 TOML 読込失敗 {}: {e}", path.display()))?;
@@ -267,26 +185,17 @@ pub fn load_plan(path: &Path) -> anyhow::Result<PlanDoc> {
     Ok(doc)
 }
 
-/// 生成する計画 TOML に付けるヘッダコメント (生成物の自己記述)。
 const PLAN_HEADER: &str = "# ticket_digest 実行計画 (anaden-tool plan-tenmei 生成)\n\
      #\n\
      # 消費順: priority の小さい順。difficulty のキーを 1 枚ずつ消費。\n\
      # 再生成: anaden-tool plan-tenmei <キャラ名>...\n\
      # routine 化: anaden-tool plan-expand <このファイル> [--out <routine.toml>]";
 
-/// [`PlanDoc`] をヘッダコメント付き TOML 文字列へ整形する。
-///
-/// # Errors
-/// TOML 化に失敗した場合 (通常到達しない) のみ anyhow で返す。
 pub fn render_plan_toml(doc: &PlanDoc) -> anyhow::Result<String> {
     let body = toml::to_string(doc).map_err(|e| anyhow::anyhow!("計画 TOML 化に失敗: {e}"))?;
     Ok(format!("{PLAN_HEADER}\n\n{body}"))
 }
 
-/// テキストをファイルへ書き込む (親ディレクトリを自動作成)。
-///
-/// # Errors
-/// ディレクトリ作成・書込の io エラーを anyhow で返す。
 pub fn write_text_file(path: &Path, text: &str) -> anyhow::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()

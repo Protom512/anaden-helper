@@ -1,39 +1,11 @@
-//! pipeline ディレクトリ指定の決定的解決 (単一実装・Issue #202 UC-3)。
-//!
-//! 従来 `anaden run` (CLI main.rs) と routine (engine routine.rs) がそれぞれ
-//! 同一候補順の resolver を二重実装していた (PR #201 lane2 minor)。
-//! 本モジュールへ統一し、CLI 側は失敗時「元のパスを返す」契約の薄い委譲に
-//! なった (`anaden-cli` main.rs `resolve_pipeline_dir`)。
-//!
-//! 解決は **workdir 非依存** (基準点は manifest 由来の workspace ルート)。
-//! 従来 `run` は pipeline_dir を cwd 相対で `load_pipeline` に渡していたため、
-//! 起動 workdir 次第で「パイプライン読込失敗」になっていた (GUI 子プロセス
-//! 起動で顕在化・Issue #139 T2 の動機)。
-
 use std::path::{Path, PathBuf};
 
-/// pipeline_dir 指定を決定的に解決する (単一情報源)。
-///
-/// 候補順 (最初に実在するディレクトリを採用):
-/// 1. 与えられたパス自体 (相対・絶対を問わず cwd 解決)
-/// 2. `<root>/<与えられた相対パス>` (例: `templates/pipelines/login`)。
-///    絶対パスで非実在の場合は basename のみ候補とする
-///    (例: `C:\x\login` → `<root>/login`)。
-/// 3. `<root>/templates/pipelines/<相対パス>` (bare name `login` 等の解決先。
-///    `templates` コンポーネントを含む指定は自己解決済みのため対象外)
-///
-/// いずれも実在しなければ [`None`] を返す (fail-closed: 偽パスを捏造しない)。
-/// 呼出側の契約に応じて:
-/// - routine 系 (engine) は [`None`] を [`crate::RoutineError`] 等へ変換
-/// - `run` (CLI) は元のパスをそのまま返し下流 `load_pipeline` の
-///   fail-closed エラーに委譲する
 #[must_use]
 pub fn resolve_pipeline_dir(input: &Path, root: &Path) -> Option<PathBuf> {
     if input.is_dir() {
         return Some(input.to_path_buf());
     }
     let rel = if input.is_absolute() {
-        // 絶対パスで非実在の場合は候補 2/3 の basename のみ試す。
         PathBuf::from(input.file_name()?.to_string_lossy().into_owned())
     } else {
         input.to_path_buf()
@@ -45,9 +17,6 @@ pub fn resolve_pipeline_dir(input: &Path, root: &Path) -> Option<PathBuf> {
     if joined.is_dir() {
         return Some(joined);
     }
-    // bare name (`login` 等) は templates/pipelines 基準で解決する。
-    // `templates` コンポーネントを含む指定 (例: `templates/pipelines/ghost`) は
-    // 候補 2 で解決済みのため候補 3 の対象外 (二重接頭は試さない)。
     if !rel.components().any(|c| c.as_os_str() == "templates") {
         let pipelined = root.join("templates").join("pipelines").join(&rel);
         if pipelined.is_dir() {

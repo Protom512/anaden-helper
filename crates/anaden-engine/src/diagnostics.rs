@@ -1,25 +1,9 @@
-//! NoMatch 診断レポートのファイル出力層（Issue #71 Task 2/4）。
-//!
-//! [`anaden_vision::diagnose_all`] / [`anaden_vision::format_diagnose_report`] の
-//! 純粋計算結果を、環境変数（`ANADEN_SNAPSHOT_DIR` 設定時、または
-//! `ANADEN_DIAG_REPORT=1`）が指すディレクトリへ best-effort で保存する薄い IO
-//! ラッパー。未設定時は一切のファイル IO を行わない（後方互換）。env 読み取りは
-//! [`diag_report_dir`] に限定し、コア fn [`save_diagnose_report`] はディレクトリを
-//! 引数で受ける純粋設計（nextest 並列実行での env 競合をテスト側で回避可能にするため）。
-
 use std::path::Path;
 
 use image::DynamicImage;
 
 use anaden_vision::{TaskDef, diagnose_all, format_diagnose_report};
 
-/// レポート出力ディレクトリを環境変数から取得する。
-///
-/// 有効化条件（`save_snapshot` と同じ設計）:
-/// - `ANADEN_SNAPSHOT_DIR` 設定時はそのパス（スナップショット PNG と同一 dir で対応付け）。
-/// - `ANADEN_DIAG_REPORT` にディレクトリパスが設定されていればそのパス。
-/// - `ANADEN_DIAG_REPORT=1` / `true`（フラグ形式）ならカレントディレクトリで有効化。
-/// - 両方未設定なら [`None`]（= レポート保存 OFF・ファイル IO ゼロ・後方互換）。
 pub fn diag_report_dir() -> Option<std::path::PathBuf> {
     if let Some(dir) = std::env::var_os("ANADEN_SNAPSHOT_DIR") {
         return Some(std::path::PathBuf::from(dir));
@@ -28,22 +12,11 @@ pub fn diag_report_dir() -> Option<std::path::PathBuf> {
         if v == "1" || v == "true" {
             return Some(std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
         }
-        // フラグ以外の値はディレクトリパスとして扱う。
         return Some(std::path::PathBuf::from(v));
     }
     None
 }
 
-/// NoMatch フレームをダンプし、全テンプレート別 conf 内訳レポートを保存する。
-///
-/// コア実装。`dir` は呼出側（本 crate の env ラッパー）が決定する。
-/// レポートは `<dir>/diag_<task>_<counter>.md` へ出力する。`dump_frame` が
-/// `true` のときのみフレームダンプ `<dir>/diag_<task>_<counter>.png` も出力する
-/// （`ANADEN_SNAPSHOT_DIR` 設定時は `save_snapshot` が既に PNG 保存するため
-/// 二重保存を避けて `false` を渡す。`ANADEN_DIAG_REPORT` 単独有効時は `true`）。
-///
-/// 全エラー（ディレクトリ作成・PNG/MD 書込）は `let _ =` / warn で無視し
-/// panic しない（診断は best-effort。保存失敗でループを止めない）。
 pub fn save_diagnose_report(
     dir: &Path,
     task: &str,
@@ -56,7 +29,6 @@ pub fn save_diagnose_report(
         tracing::warn!("diag report create_dir failed ({}): {e}", dir.display());
         return;
     }
-    // 1. フレームダンプ (PNG)。best-effort。save_snapshot と重複する場合はスキップ。
     if dump_frame {
         let png_path = dir.join(format!("diag_{task}_{counter}.png"));
         match frame.save(&png_path) {
@@ -65,7 +37,6 @@ pub fn save_diagnose_report(
         }
     }
 
-    // 2. テンプレート別 conf 内訳レポート (markdown)。
     let entries = diagnose_all(tasks, frame);
     let report = format_diagnose_report(
         &format!("{task}_{counter}"),

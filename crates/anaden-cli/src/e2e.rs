@@ -1,32 +1,14 @@
-//! UC-2 実機 E2E 証跡ヘルパー (Issue #139 T6)。
-//!
-//! `.claude/rules/pipeline-evidence-verification.md` 準拠の evidence 採取:
-//! - 生コマンド出力・スクショ・tree hash を `.omc/logs/{run-id}/` へ永続化
-//! - evidence は自己申告不可 (= 機械的検証可能な形式でファイルへ書く)
-//! - メタデータ (runTimestamp / command / exit code) を JSON で残す
-//!
-//! GUI (anaden-studio) は本モジュールを直接呼ばない。CLI 側 `--evidence-dir`
-//! フラグ (`run` サブコマンド) が採取を担い、studio は子プロセス引数へ
-//! `--evidence-dir` を渡すのみ (contract coupling: 子プロセス境界)。
-
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
 
-/// E2E run ディレクトリ直下のEvidence ログ ファイル名 (生コマンド出力)。
 pub const EVIDENCE_LOG_FILE: &str = "uc2-e2e-evidence.log";
 
-/// メタデータ JSON ファイル名 (機械的検証可能な evidence 索引)。
 pub const EVIDENCE_META_FILE: &str = "uc2-e2e-metadata.json";
 
-/// スクショ PNG のファイル名プレフィクス。
 pub const SCREENSHOT_PREFIX: &str = "uc2-shot";
 
-/// E2E 証跡ディレクトリ (`{evidence_dir}` 直下に run-id ディレクトリを作る)。
-///
-/// `run_id` が空・`/`/`\`/`..` を含む場合は fail-closed として `None` を返す
-/// (パス インジェクション・意図しないディレクトリ逸脱を防ぐ)。
 #[must_use]
 pub fn e2e_run_dir(evidence_dir: &Path, run_id: &str) -> Option<PathBuf> {
     if run_id.is_empty()
@@ -40,7 +22,6 @@ pub fn e2e_run_dir(evidence_dir: &Path, run_id: &str) -> Option<PathBuf> {
     Some(evidence_dir.join(run_id))
 }
 
-/// `SystemTime` を Unix 秒へ射影 (メタデータの runTimestamp 生成用・テスト可能)。
 #[must_use]
 pub fn unix_now() -> u64 {
     std::time::SystemTime::now()
@@ -49,26 +30,19 @@ pub fn unix_now() -> u64 {
         .unwrap_or(0)
 }
 
-/// Unix 秒 → (年, 月, 日, 時, 分, 秒) (UTC・秒精度)。
-///
-/// 実装はcivil-from-days (Howard Hinnant アルゴリズム) の手書き変換。
-/// chrono 依存を増やさないための最小実装 (テストで既知値を検証)。
-/// 03-report-channel: ファイル名安全なタイムスタンプ (run_report) との
-/// 単一変換源として pub(crate) 公開。
 #[must_use]
 pub(crate) fn date_parts_unix(unix_secs: u64) -> (i64, u64, u64, u64, u64, u64) {
     let days = (unix_secs / 86_400) as i64;
     let secs_of_day = unix_secs % 86_400;
-    // civil_from_days: days=1970-01-01 起点の経過日 → y/m/d
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     (
         y,
@@ -80,18 +54,12 @@ pub(crate) fn date_parts_unix(unix_secs: u64) -> (i64, u64, u64, u64, u64, u64) 
     )
 }
 
-/// ISO 8601 (UTC, 秒精度) 文字列を Unix 秒から生成。
 #[must_use]
 pub fn iso8601_utc(unix_secs: u64) -> String {
     let (y, m, d, hh, mm, ss) = date_parts_unix(unix_secs);
     format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z")
 }
 
-/// FNV-1a 64bit hash (tree hash 計算の単一情報源)。
-///
-/// `git write-tree` 相当の tree hash は git コマンド実行で取得するが、
-/// git が無い環境でも evidence を hash 付与可能にするため、
-/// 実行コマンド文字列 + パイプライン定義一式の内容 hash を本関数で計算する。
 #[must_use]
 pub fn fnv1a64(bytes: &[u8]) -> u64 {
     let mut hash: u64 = 0xcbf2_9ce4_8422_2325;
@@ -102,10 +70,6 @@ pub fn fnv1a64(bytes: &[u8]) -> u64 {
     hash
 }
 
-/// evidence ログへ 1 行 (生コマンド出力) を追記する。
-///
-/// ファイルが無ければ作成する。append 失敗は呼出側でハンドリングできるよう
-/// `io::Result` を返す (panic しない)。
 pub fn append_evidence_line(dir: &Path, line: &str) -> std::io::Result<()> {
     use std::fs::OpenOptions;
     if !dir.exists() {
@@ -118,9 +82,6 @@ pub fn append_evidence_line(dir: &Path, line: &str) -> std::io::Result<()> {
     writeln!(f, "{line}")
 }
 
-/// スクショ PNG を `{dir}/{SCREENSHOT_PREFIX}-{seq:03}.png` へ保存する。
-///
-/// 保存済み最大 seq + 1 を次の seq とする (既存ファイル走査・決定的)。
 pub fn save_screenshot(dir: &Path, image: &image::DynamicImage) -> std::io::Result<PathBuf> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
@@ -140,7 +101,6 @@ pub fn save_screenshot(dir: &Path, image: &image::DynamicImage) -> std::io::Resu
     }
 }
 
-/// 保存済みスクショの件数 (認識サイクル証明の実測値カウント用)。
 #[must_use]
 pub fn count_screenshots(dir: &Path) -> usize {
     std::fs::read_dir(dir)
@@ -156,11 +116,6 @@ pub fn count_screenshots(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
-/// メタデータ JSON (手書きシリアライズ — evidence 索引は本関数が単一情報源)。
-///
-/// フィールド: runId / runTimestamp / command / treeHash / screenshots /
-/// evidenceLogFile / recordedAtUnix。JSON エスケープは最小 (\"" と \\ のみ。
-/// command は外部入力ではない CLI 引数由来だが、念のためエスケープする)。
 pub fn write_metadata(
     dir: &Path,
     run_id: &str,
@@ -188,14 +143,6 @@ pub fn write_metadata(
     Ok(path)
 }
 
-/// 認識サイクル証明用 `Capture` デコレータ (Issue #139 T6)。
-///
-/// 内側の `Capture` 実装 (Win32Capture 等) へ委譲しつつ、**サイクル毎に**:
-/// 1. スクショ PNG を evidence ディレクトリへ保存 (`uc2-shot-NNN.png`)
-/// 2. 認証ログ行 (`cycle=N size=WxH`) を evidence ログへ追記
-///
-/// 保存失敗でもキャプチャ自体は成功扱いとする (evidence 採取が本番実行を
-/// 壊さない)。ただし失敗はログ行へ記録する (静黙化しない)。
 pub struct EvidenceCapture<C> {
     inner: C,
     dir: PathBuf,
@@ -203,7 +150,6 @@ pub struct EvidenceCapture<C> {
 }
 
 impl<C: anaden_engine::Capture + Send + Sync> EvidenceCapture<C> {
-    /// デコレータを構築。`dir` は e2e_run_dir で検証済みの run ディレクトリ。
     pub fn new(inner: C, dir: PathBuf) -> Self {
         Self {
             inner,
@@ -212,7 +158,6 @@ impl<C: anaden_engine::Capture + Send + Sync> EvidenceCapture<C> {
         }
     }
 
-    /// 現在のサイクル数 (テスト用)。
     #[cfg(test)]
     pub fn cycle_count(&self) -> u32 {
         self.cycle.load(std::sync::atomic::Ordering::SeqCst)
@@ -246,13 +191,6 @@ impl<C: anaden_engine::Capture + Send + Sync> anaden_engine::Capture for Evidenc
     }
 }
 
-/// パイプラインディレクトリ内の `*.toml` 全ファイルの内容をソート順に連結して
-/// FNV-1a 64 でハッシュした tree hash (`fnv-1a64:<hex>`) を返す。
-///
-/// git が無い環境でも pipeline 定義の同一性を機械検証可能にするための
-/// content hash (`.claude/rules/pipeline-evidence-verification.md` §1.1 tree hash)。
-/// ディレクトリが読めない/空の場合は `fnv-1a64:0` を返す (fail-closed: hash 欠損を
-/// 捏造しない)。
 #[must_use]
 pub fn tree_hash_of_pipeline(dir: &Path) -> String {
     let mut names: Vec<PathBuf> = match std::fs::read_dir(dir) {

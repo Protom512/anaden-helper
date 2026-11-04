@@ -1,35 +1,16 @@
-//! CLI 引数解析（Issue #119 shard1 タスク3: lib 側テスト可能な形への抽出）。
-//!
-//! 従来 `main.rs` にあった `parse_args` を純関数化した。
-//! Issue #123 (shard 2): `--pipeline` deprecated フラグは完全削除され、
-//! 未知の引数として扱われる。起動はフラグなしの統合GUI のみ。
-//! Issue #188: `--target android|windows` も Android 削除により廃止
-//! （キャプチャは Win32 固定。未知の引数として扱われる）。
-
-/// コマンドライン引数の解析結果。
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct CliArgs {
-    /// キャプチャバックエンド (Issue #188 で Windows 固定。呼出元互換で残置)。
     pub target: crate::source::Target,
-    /// PC版(Windows)対象プロセスの exe 名。未指定時は GUI 既定値。
     pub exe: Option<String>,
-    /// `-h` / `--help` が指定されたか（main でヘルプ表示して終了する）。
     pub help: bool,
 }
 
-/// 起動するアプリの種別。
-///
-/// Issue #119/#123: フラグの有無に関わらず起動するのは単一の統合GUI
-/// （全タブ利用可）のみ。`--pipeline` は完全削除済み（未知の引数扱い）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LaunchKind {
-    /// 統合GUI を起動する。
     Unified,
-    /// ヘルプを表示して終了する。
     Help,
 }
 
-/// 解析済み CLI 引数から起動するアプリ種別を決める純関数。
 pub fn launch_kind(args: &CliArgs) -> LaunchKind {
     if args.help {
         return LaunchKind::Help;
@@ -37,7 +18,6 @@ pub fn launch_kind(args: &CliArgs) -> LaunchKind {
     LaunchKind::Unified
 }
 
-/// ヘルプ文言（Issue #123: `--pipeline` 記述は削除済み。Issue #188: `--target` も削除）。
 pub const HELP_TEXT: &str = "\
 anaden-studio — 統合GUI (作成 / バッチ評価 / pipeline 実行)
 
@@ -49,11 +29,6 @@ OPTIONS:
   -h, --help                  このヘルプを表示
 ";
 
-/// コマンドライン引数列をパースする純関数（`main.rs` から抽出）。
-///
-/// - `--exe <name>`: PC版(Windows)キャプチャの対象 exe 名。
-/// - `-h` / `--help`: ヘルプ要求。
-/// - 未知の引数（旧 `--pipeline` / `--target` 含む）は無視して継続（従来動作と同一）。
 pub fn parse_args_from<I>(args: I) -> CliArgs
 where
     I: IntoIterator<Item = String>,

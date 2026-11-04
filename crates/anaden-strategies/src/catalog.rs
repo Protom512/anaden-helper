@@ -1,83 +1,36 @@
-//! 戦略カタログ: 選択可能な戦略とオプションの宣言的定義（UI・設定向け）。
-//!
-//! 戦略の実体 (`MiniGameStrategy` trait 実装) とは分離されたメタ情報層。
-//! anaden-studio 等 GUI はこのカタログからドロップダウン/チェックボックスを生成し、
-//! 選択結果を [`StrategySelection`] (serde/TOML互換) に射影する。
-//!
-//! Issue #139 / #188: カタログは `templates/pipelines/` に実在する PC 版
-//! パイプラインのみを登録する（Android 版 4 パイプラインは Issue #188 で削除。
-//! fishing / login は templates/tasks のタスクバンク経由で扱うため未登録）。
-//! `pipeline_dir` / `start_task` / `algorithm` / `target` を [`StrategyDef`] が持つ
-//! ことで、`anaden run` 引数列の組み立てはカタログ定義単一情報源から行われる。
-//! `max_iters` (04-studio-maxiters-outcome / F6) も同様にカタログ定義から
-//! `--max-iters` として明示渡され、CLI 黙示既定 (100 サイクル) に依存しない。
-
 use serde::{Deserialize, Serialize};
 
-/// builtin カタログ戦略の既定最大サイクル数 (`--max-iters` 明示値)。
-///
-/// `anaden run` の CLI 既定は 100 サイクル (interval 1s なら ≈100 秒) で、
-/// farming 周回の打ち切りとしては短すぎる黙示既定だった (F6)。カタログ経由の
-/// studio 実行は本値を明示渡しし、CLI 黙示既定に依存しない。
 const BUILTIN_MAX_ITERS: u64 = 10_000;
 
-/// 戦略オプションの定義（ON/OFF トグル）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrategyOptionDef {
-    /// オプションの識別子（TOML キー）。
     pub id: String,
-    /// UI 表示名。
     pub label: String,
-    /// 既定値。
     pub default: bool,
 }
 
-/// 選択可能な戦略（実在パイプライン）の定義。
-///
-/// `pipeline_dir` / `start_task` / `algorithm` は各パイプラインの
-/// TaskDef TOML (`templates/pipelines/<id>/*.toml`) の `name` / `algorithm` と
-/// 一致させること（カタログ単一情報源化・Issue #139 T1）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrategyDef {
-    /// 戦略の識別子（= `templates/pipelines/` のディレクトリ名）。
     pub id: String,
-    /// UI 表示名。
     pub label: String,
-    /// ON/OFF 可能なオプション群。
     pub options: Vec<StrategyOptionDef>,
-    /// `anaden run` へ渡す pipeline ディレクトリ（リポジトリルート相対）。
     pub pipeline_dir: String,
-    /// 開始タスク名（TaskDef TOML の `name`・pipeline.toml の `start_task`）。
     pub start_task: String,
-    /// テンプレートマッチアルゴリズム（`sse`|`ccoeff`・TaskDef の algorithm 準拠）。
     pub algorithm: String,
-    /// `--target` 上書き（Issue #188 で CLI 側フラグを削除。settings.toml 互換で残置）。
     #[serde(default)]
     pub target: Option<String>,
-    /// `anaden run` へ明示渡す最大サイクル数 (`--max-iters <N>`)。
-    ///
-    /// 未指定 (None) の場合はフラグを出力しない (= CLI 既定 100 に黙示依存)。
-    /// builtin 戦略は CLI 既定が farming に短すぎるため (F6) 必ず明示値を設定する。
     #[serde(default)]
     pub max_iters: Option<u64>,
 }
 
 impl StrategyDef {
-    /// この定義から `anaden run` の引数列（サブコマンド以降）を組み立てる。
-    ///
-    /// 単一情報源化（Issue #139 T1）: 引数列はハードコード match ではなく
-    /// このメソッド（カタログ定義）からのみ構成される。
     #[must_use]
     pub fn to_run_args(&self) -> Vec<String> {
-        // --target フラグは Issue #188 で CLI から削除済み (Win32 固定) のため
-        // 出力しない。`target` フィールドは settings.toml 互換で残置。
         let mut args = vec![
             "run".to_string(),
             "--algorithm".to_string(),
             self.algorithm.clone(),
         ];
-        // F6 (04-studio-maxiters-outcome): max_iters は明示渡す。
-        // 未指定時のみフラグを出さない (CLI 既定へ委譲)。
         if let Some(max_iters) = self.max_iters {
             args.push("--max-iters".to_string());
             args.push(max_iters.to_string());
@@ -88,10 +41,6 @@ impl StrategyDef {
     }
 }
 
-/// 実在パイプラインのカタログ定義を構築するヘルパ（builtin の宣言性確保用）。
-///
-/// `max_iters` は builtin 全戦略共通の [`BUILTIN_MAX_ITERS`] を設定する
-/// (04-studio-maxiters-outcome / F6: CLI 既定 100 への黙示依存を排除)。
 fn pipeline_def(
     id: &str,
     label: &str,
@@ -112,22 +61,12 @@ fn pipeline_def(
     }
 }
 
-/// 戦略カタログ。実在パイプラインのメタ情報一覧。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct StrategyCatalog {
     strategies: Vec<StrategyDef>,
 }
 
 impl StrategyCatalog {
-    /// `templates/pipelines/` に実在するパイプラインのカタログを構築する
-    /// （Issue #139: fishing は pipeline が実在しないため登録しない）。
-    ///
-    /// 各定義の `start_task` / `algorithm` は TaskDef TOML の実測値:
-    /// - `field_loop_pc`   : pipeline.toml    start_task="TapBottomStablePc" / ccoeff
-    /// - `nav_to_field_pc` : tap_to_start.toml name="TapToStartPc" / ccoeff
-    ///
-    /// (Android 版 field_loop / nav_to_field / worldmap_loop / _title_load は
-    /// Issue #188 でテンプレート資産ごと削除したため登録しない)
     #[must_use]
     pub fn builtin() -> Self {
         Self {
@@ -152,42 +91,30 @@ impl StrategyCatalog {
         }
     }
 
-    /// カタログ内の戦略定義一覧。
     #[must_use]
     pub fn strategies(&self) -> &[StrategyDef] {
         &self.strategies
     }
 
-    /// 識別子から戦略定義を引く。
     #[must_use]
     pub fn find(&self, id: &str) -> Option<&StrategyDef> {
         self.strategies.iter().find(|s| s.id == id)
     }
 
-    /// カタログ既定値での選択状態を生成する（全戦略オフ・オプションは既定値）。
     #[must_use]
     pub fn default_selection(&self) -> StrategySelection {
         StrategySelection::from_defaults(self)
     }
 }
 
-/// ユーザーの選択状態（serde 化され toml 設定と往復する）。
-///
-/// 既存 TOML 設定形式との互換: 未知の戦略/オプションが含まれていても
-/// 読み込み時にエラーにせず保持する（フォワード互換）。
 #[derive(Debug, Clone, PartialEq, Default, Serialize, Deserialize)]
 pub struct StrategySelection {
-    /// 選択された戦略の識別子。
     pub strategy: Option<String>,
-    /// オプションの ON/OFF 状態（キー: "<strategy_id>.<option_id>"）。
-    ///
-    /// `#[serde(default)]`: 旧形式（オプション記述なし）の TOML とも互換する。
     #[serde(default)]
     pub options: std::collections::BTreeMap<String, bool>,
 }
 
 impl StrategySelection {
-    /// カタログの既定値から選択状態を構築する（戦略未選択・オプションは default）。
     #[must_use]
     pub fn from_defaults(catalog: &StrategyCatalog) -> Self {
         let mut options = std::collections::BTreeMap::new();
@@ -202,7 +129,6 @@ impl StrategySelection {
         }
     }
 
-    /// 特定戦略のオプション値を取得する。未登録なら `None`。
     #[must_use]
     pub fn option(&self, strategy_id: &str, option_id: &str) -> Option<bool> {
         self.options
@@ -210,16 +136,11 @@ impl StrategySelection {
             .copied()
     }
 
-    /// 特定戦略のオプション値を設定する。
     pub fn set_option(&mut self, strategy_id: &str, option_id: &str, value: bool) {
         self.options
             .insert(format!("{strategy_id}.{option_id}"), value);
     }
 
-    /// 選択がカタログに対して有効か検証する。
-    ///
-    /// # Errors
-    /// 選択された戦略がカタログに存在しない場合、`UnknownStrategy` を返す。
     pub fn validate(&self, catalog: &StrategyCatalog) -> Result<(), SelectionError> {
         if let Some(id) = &self.strategy
             && catalog.find(id).is_none()
@@ -230,10 +151,8 @@ impl StrategySelection {
     }
 }
 
-/// 選択検証エラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SelectionError {
-    /// カタログに存在しない戦略が選択された。
     #[error("unknown strategy: {id}")]
     UnknownStrategy { id: String },
 }

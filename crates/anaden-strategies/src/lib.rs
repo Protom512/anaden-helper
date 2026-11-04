@@ -1,5 +1,3 @@
-//! ミニゲーム戦略の実装とレジストリ。
-
 mod catalog;
 mod registry;
 

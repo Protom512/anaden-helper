@@ -1,49 +1,15 @@
-//! `ensure-open` / `launch` サブコマンドの純粋契約層。
-//!
-//! デバイス層(`anaden_device::EnsureOutcome`)へ依存するが、デバイス I/O は一切行わない。
-//! ここにある関数はすべて純粋(副作用なし・決定論的)で、`tests/` からデバイスなしで
-//! テスト可能。終了コード契約の数値をここで唯一の源泉(Source of Truth)とする。
-//!
-//! 設計意図(architecture-coupling-balance):
-//!   - `EnsureOutcome` は `anaden_device` の純粋ドメイン enum のまま触らない。
-//!   - 終了コードへの射影は CLI 層の関心事なので `anaden_cli_contract`(本モジュール)へ置く。
-//!     デバイス層へ終了コード知識を漏れ出させない。
-//!
-//! Android (ADB) ターゲットは Issue #188 で削除済み(実行ターゲットは PC 版 Win32 固定)。
-
 pub mod pipeline;
 
 use anaden_device::EnsureOutcome;
 
-/// AlreadyOpen / Launched の両方が返す成功終了コード。
 pub const EXIT_ALREADY_OR_LAUNCHED: i32 = 0;
 
-/// spawn / OpenProcess 等のハードエラー終了コード。
 pub const EXIT_HARDCERROR: i32 = 1;
 
-/// 起動は試みたが前景化/生存確認できなかった(Timeout)の終了コード。
-/// `run` サブコマンドでは Timeout は soft warn(続行)だが、スタンドアロン
-/// `ensure-open` / `launch` では CI gate が失敗と見なせるよう非ゼロとする。
 pub const EXIT_TIMEOUT: i32 = 2;
 
-/// プロセスは生存しているが readiness probe が splash-hang (not-ready) を検出した
-/// (フレーム不変 + TCP ソケット 0) の終了コード (Issue #275)。
-/// Timeout(2) = 起動未確認、hard error(1) = spawn/API 失敗、と区別される
-/// 「起動したが実体は hang」の第 4 状態。CI gate は exit 3 を fail-closed 扱いする。
 pub const EXIT_NOT_READY: i32 = 3;
 
-/// [`EnsureOutcome`] を終了コードへ射影する純粋関数。
-///
-/// 契約(Issue #21 AC / Issue #275 拡張):
-///   - [`EnsureOutcome::AlreadyOpen`] → [`EXIT_ALREADY_OR_LAUNCHED`] = 0
-///   - [`EnsureOutcome::Launched`]    → [`EXIT_ALREADY_OR_LAUNCHED`] = 0
-///   - [`EnsureOutcome::Timeout`]     → [`EXIT_TIMEOUT`] = 2
-///   - [`EnsureOutcome::NotReady`]    → [`EXIT_NOT_READY`] = 3 (プロセス生存だが splash-hang)
-///
-/// ハードエラー(spawn / OpenProcess 失敗)の終了コード
-/// ([`EXIT_HARDCERROR`] = 1)は、呼び出し側が `Err` を受け取った時に使う。
-/// 本関数は `Ok(outcome)` のみを扱う。借用で受け取るため、呼び出し側は
-/// 同一の `outcome` から [`ensure_outcome_label`] も併用できる。
 pub fn ensure_open_exit_code(outcome: &EnsureOutcome) -> i32 {
     match outcome {
         EnsureOutcome::AlreadyOpen => EXIT_ALREADY_OR_LAUNCHED,
@@ -53,15 +19,6 @@ pub fn ensure_open_exit_code(outcome: &EnsureOutcome) -> i32 {
     }
 }
 
-/// スタンドアロン ensure-open/launch の終了コード決定(Ok/Err 双方を覆盖・純粋・決定論的)。
-///
-/// Issue #21 AC4: Ok 側は [`ensure_open_exit_code`] へ委任、Err 側(ハードエラー:
-/// spawn / OpenProcess 失敗)は [`EXIT_HARDCERROR`] = 1。本関数が AC4 の
-/// 「hard error ⇒ exit 1」契約の唯一の真実の源。`std::process::exit` はテスト不能なため、
-/// exit の発動は呼出側(main の `exit_standalone`)が行い、本関数は純粋に射影するだけ
-/// (テスト可能性と rust-anti-patterns panic 禁止の両立)。ジェネリック `<E>` により
-/// anyhow 型へ依存せず device/anyhow フリーを維持。`E: ?Sized` により `&str`(`E = str`)
-/// のような unsized なエラー型の借用も受け取れる(`Result<&EnsureOutcome, &str>` でテスト可能)。
 pub fn standalone_exit_code<E: ?Sized>(result: Result<&EnsureOutcome, &E>) -> i32 {
     match result {
         Ok(outcome) => ensure_open_exit_code(outcome),
@@ -69,11 +26,6 @@ pub fn standalone_exit_code<E: ?Sized>(result: Result<&EnsureOutcome, &E>) -> i3
     }
 }
 
-/// [`EnsureOutcome`] を人間可読な1行ラベルへ射影する純粋関数。
-///
-/// `run` パスと standalone サブコマンド(`ensure-open`/`launch`)の
-/// 「EnsureOutcome → 人間可読メッセージ」唯一の真実の源。両経路のドリフトを防ぐため、
-/// ラベル化は必ずこの関数へ集中させる。
 pub fn ensure_outcome_label(outcome: &EnsureOutcome) -> &'static str {
     match outcome {
         EnsureOutcome::AlreadyOpen => "起動不要(既に起動中)",
@@ -85,109 +37,26 @@ pub fn ensure_outcome_label(outcome: &EnsureOutcome) -> &'static str {
     }
 }
 
-/// `run` サブコマンドの CI 成功終了コード。
-///
-/// ゴール到達 / Stop アクション / 終端タスク到達 など「宣言的終端状態への正常収束」は
-/// すべて CI gate 上 success(0) とみなす。非ゴールモードの `MaxIterations` 到達も
-/// 今日の挙動(exit 0)を保持する(後述)。
 pub const EXIT_RUN_SUCCESS: i32 = 0;
 
-/// `run` サブコマンドのハードエラー終了コード(capture/execute IO 失敗)。
-///
-/// `EXIT_HARDCERROR`(1) と同一値。`standalone_exit_code` の hard-error 契約と一貫。
 pub const EXIT_RUN_HARDCERROR: i32 = EXIT_HARDCERROR;
 
-/// `run` サブコマンドの soft-failure(タイムアウト系)終了コード。
-///
-/// ゴールモードで `GoalTimeout` / `MaxIterations` に到達した際の「成果物は出たが
-/// 宣言的ゴール未到達」を表現する非ゼロ値。`EXIT_TIMEOUT`(2) と同一値で、
-/// `ensure-open` の soft-failure 契約と並行する。
 pub const EXIT_RUN_TIMEOUT: i32 = EXIT_TIMEOUT;
 
-/// [`LoopStopReason`](anaden_engine::LoopStopReason) を `run` サブコマンドの
-/// 終了コードへ射影する純粋関数(Issue #37 AC: exit code + 成果レポート)。
-///
-/// # 契約(真実の源 — 下表は match 式の全分岐と 1:1)
-///
-/// | `LoopStopReason`    | 終了コード | 由来 |
-/// |---------------------|-----------|------|
-/// | `Stop`              | 0 (success) | `Action::Stop` 到達 = 宣言的終端 |
-/// | `TerminalTask`      | 0 (success) | next 無し終端タスク到達 = 正常収束 |
-/// | `MaxIterations`     | 0 (success) | **非ゴールモードは今日の exit 0 を保持** (注記参照) |
-/// | `GoalReached`       | 0 (success) | 宣言的ゴール到達 = CI success(Issue #37) |
-/// | `GoalTimeout`       | 2 (timeout) | ゴール未到達だが進捗あり = soft failure(Issue #37) |
-/// | `Interrupted`       | 2 (timeout) | Ctrl+C / SIGINT 中断 = ユーザー意図の中断 (soft failure) |
-/// | `CaptureError`      | 1 (hard)    | capture IO 失敗 = ハードエラー |
-/// | `ExecuteError`      | 1 (hard)    | execute IO 失敗 = ハードエラー |
-/// | `RecoveryExhausted` | 1 (hard)    | リカバリ試行上限到達 = 環境故障で進行不能 (02-recovery-budget)。soft timeout(2) と区別 — 成果は出ておらず進行も不能 |
-///
-/// `MaxIterations` 注記 (04-studio-maxiters-outcome / F6): exit code 上は非ゴール
-/// モードの `MaxIterations` を success(0) のまま保持する (CI の `run` 呼出意味論を
-/// 断片化させない)。**成果ゼロ打ち切り (fired_count == 0) の誤成功**は exit code
-/// ではなく run レポート (`--report-file` の report.json: 停止理由 + 発火回数) を
-/// 読む側 (anaden-studio `history::classify_outcome` → `RunOutcome::BudgetExhausted`)
-/// で分類する — 終了コード表と停止理由の対応は本表に 1:1 集約し、studio 側分類は
-/// 本表の `MaxIterations = 0` 契約と整合する補助情報源として扱う。
-///
-/// # 設計意図(pre-T5 決定ゲート: org-feedback estimate approval)
-///
-/// **非ゴールパスは今日の exit 0 を保存**しゼロ以外終了コードはゴール活性時のみ表面化
-/// する方針を取る。これにより既存 CI の `run` 呼出意味論を断片化させない。
-/// `GoalReached` / `GoalTimeout` は Issue #37 T3 で追加済み、`Interrupted` は
-/// Ctrl+C/SIGINT ガード、`RecoveryExhausted` は 02-recovery-budget で追加済み
-/// (いずれも本表どおりの射影)。
-///
-/// # 純粋性
-///
-/// 本関数はデバイス I/O を持たず決定論的。`tests/` からデバイスなしで検証可能。
-/// 借用(`&LoopStopReason`)で受け取るため呼出側は同一の reason をラベル化等へ再利用できる。
 pub fn run_exit_code(reason: &anaden_engine::LoopStopReason) -> i32 {
     match reason {
-        // 宣言的終端への正常収束 = CI success。今日の run 挙動(exit 0)を保持。
         anaden_engine::LoopStopReason::Stop => EXIT_RUN_SUCCESS,
         anaden_engine::LoopStopReason::TerminalTask => EXIT_RUN_SUCCESS,
-        // 非ゴールモードの最大イテレーション到達は今日の exit 0 を保存。
-        // (ゴール活性時の timeout 扱いは T3 でバリアント追加後に再検討。
-        //  成果ゼロ打ち切りの誤成功分類は exit code でなく report 停止理由を
-        //  読む側 = anaden-studio history::classify_outcome の担当 — Doc 表参照)
         anaden_engine::LoopStopReason::MaxIterations => EXIT_RUN_SUCCESS,
-        // 宣言的ゴール到達 = CI success(Issue #37 T3/T4)。
         anaden_engine::LoopStopReason::GoalReached => EXIT_RUN_SUCCESS,
-        // ゴール活性時のタイムアウト(成果物出たがゴール未到達) = soft failure(2)。
         anaden_engine::LoopStopReason::GoalTimeout => EXIT_RUN_TIMEOUT,
-        // 外部キャンセル(Ctrl+C / SIGINT) = soft failure(2)。正常終端ではないが
-        // IO 系ハードエラー(1) とも区別する(ユーザー意図の中断)。
         anaden_engine::LoopStopReason::Interrupted => EXIT_RUN_TIMEOUT,
-        // IO 系ハードエラー = exit 1。
         anaden_engine::LoopStopReason::CaptureError => EXIT_RUN_HARDCERROR,
         anaden_engine::LoopStopReason::ExecuteError => EXIT_RUN_HARDCERROR,
-        // リカバリ試行上限到達 (健全サイクル無しでゲーム再起動を試み尽くした =
-        // 環境故障で進行不能) = IO 系ハードエラーと同じ exit 1 (02-recovery-budget)。
-        // soft timeout(2) ではない — timeout は「成果物は出た」が、こちらは進行不能。
         anaden_engine::LoopStopReason::RecoveryExhausted => EXIT_RUN_HARDCERROR,
     }
 }
 
-/// `run` サブコマンドが `PipelineDriver` へ渡す前にゴールを検証する純粋関数
-/// (Issue #37 T4: run_loop signature threading)。
-///
-/// `run_driver` は宣言的ゴールを [`anaden_engine::PipelineDriver`] の run loop へ渡す
-/// 共通末尾だが、driver へ手渡す前に必ず本関数で不変量を検証する。これにより
-/// 「`Goal::validate()` が `Err` を返すゴール」が driver tick へ流入するのを防ぐ
-/// (driver 内の `evaluate` は純粋呼出だが、caller 責務で invalid を弾く契約)。
-///
-/// # 引数
-/// - `goal`: CLI / manifest / flag 由来の宣言的ゴール([`Option<anaden_core::Goal>`])。
-///   [`None`] は非ゴールモード(従来の無限ループ / max_iterations 停止)。
-///
-/// # 戻り値
-/// - `Ok(())`: `goal == None`(非ゴールモード)、または `Some(goal)` かつ
-///   [`anaden_core::Goal::validate`] が `Ok(())` を返した場合。
-/// - `Err`: `Some(goal)` かつ [`anaden_core::Goal::validate`] が [`anaden_core::GoalError`]
-///   を返した場合。anyhow へ変換し、`GoalError` の Display 文字列を保持する。
-///
-/// # 純粋性
-/// デバイス I/O・時間・乱数に依存せず決定論的。`tests/` からデバイスなしで検証可能。
 pub fn validate_goal(goal: &Option<anaden_core::Goal>) -> Result<(), anyhow::Error> {
     match goal {
         None => Ok(()),

@@ -1,16 +1,9 @@
-//! StudioApp のバッチ評価モード描画 (Issue #174: app_ui.rs 分割)。
-//!
-//! テンプレート × テスト画像で混同行列を作成する Batch モードの UI と
-//! 評価実行。[`crate::app_ui_body`] の [`StudioApp::render_body`] から
-//! Batch 分岐で呼ばれる。
-
 use eframe::egui;
 
 use crate::app_state::StudioApp;
 use crate::batch;
 
 impl StudioApp {
-    /// バッチ評価モードのUI。
     pub(crate) fn batch_ui(&mut self, ui: &mut egui::Ui) {
         egui::Panel::left("batch_controls")
             .resizable(true)
@@ -52,7 +45,6 @@ impl StudioApp {
         });
     }
 
-    /// バッチ評価を実行する。
     fn run_batch(&mut self) {
         let templates = batch::load_templates_for_eval(&self.save_dir);
         if templates.is_empty() {

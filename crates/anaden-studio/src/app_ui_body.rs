@@ -1,10 +1,3 @@
-//! StudioApp の描画エントリ (Issue #174: app_ui.rs 分割)。
-//!
-//! eframe::App impl・modebar (モード切替バー)・モード本体
-//! ([`StudioApp::render_body`]) のディスパッチを持つ。Authoring 本体は
-//! [`crate::app_ui_authoring`]、Tasks ペインは [`crate::app_ui_tasks`]、
-//! Batch は [`crate::app_ui_batch`]。
-
 use eframe::egui;
 
 use crate::app_state::{AppMode, StudioApp};
@@ -17,13 +10,7 @@ impl eframe::App for StudioApp {
 }
 
 impl StudioApp {
-    /// ウィンドウ上限のモード切替バー（modebar）を描画する。
-    ///
-    /// 親レイアウト内への埋め込み（単一ウィンドウ統合 GUI, Issue #119）を想定した
-    /// 公開パネル描画 API。単体テストからは [`Self::mode`] / [`Self::set_mode`]
-    /// 経由で振る舞いを検証する。
     pub fn render_modebar(&mut self, ui: &mut egui::Ui) {
-        // モード切替バー
         egui::Panel::top("modebar")
             .exact_size(30.0)
             .show_inside(ui, |ui| {
@@ -35,20 +22,7 @@ impl StudioApp {
             });
     }
 
-    /// モード本体（Authoring / Batch）を親レイアウト内に描画する埋め込み用 API。
-    ///
-    /// modebar は含まない。呼び出し前に [`Self::render_modebar`] を実行するか、
-    /// 親シェル側でタブ切替してもよい（mode は [`Self::set_mode`] で制御）。
-    ///
-    /// スクリーンショットのテクスチャ生成はここ（描画パスの入口）で行う。
-    /// かつて [`Self::render_modebar`] 内にあったが、統合GUI シェル
-    /// （Issue #119 `UnifiedShell`）は [`Self::render_body`] のみを呼ぶため、
-    /// テクスチャが生成されずキャンバスが永久に空になる欠陥があった
-    /// （作成タブで画像を開いても何も表示されない）。
     pub fn render_body(&mut self, ui: &mut egui::Ui) {
-        // スクリーンショットのテクスチャ生成（未生成時）— 描画パスの入口で必ず走る。
-        // 統合GUIシェル (UnifiedShell) 経由でも render_body は呼ばれるため、
-        // どの起動経路でもキャンバスに画像が表示される (Issue #120 欠陥1修正)。
         if self.screenshot_tex.is_none()
             && let Some(img) = &self.screenshot
         {

@@ -1,22 +1,3 @@
-//! タスク定義 TOML ドメイン (Issue #170: tasks.rs 分割)。
-//!
-//! `templates/tasks/*.toml` の定義読み込み・パース・検証と、タスク有効化
-//! (task TOML 書き戻し) を担う。
-//!
-//! - TaskDefinition: `templates/tasks/*.toml` の 1 タスク定義。
-//! - TaskKind: 異種実行経路の分岐 (`LaunchSubcommand` = `anaden launch` standalone、
-//!   `PipelineRun` = `anaden run <pipeline_dir>` )。
-//! - fail-closed: TOML 欠損・不正 kind はエラー。`implemented = false` は選択不可
-//!   (グレー表示) — 嘘の動作可能表示は禁止 (CEO 確定)。
-//! - enable_task (Issue #160 UC-3): task TOML の implemented フリップ +
-//!   pipeline_dir 紐付け書き戻し (コメント保全の外科的行編集・load 検証は
-//!   fail-closed)。
-//!
-//! チェック順キュー組み立て・逐次実行の状態機械は [`crate::tasks_queue`] へ、
-//! 表示モデル純関数は [`crate::tasks_view`] へ、TOML 外科的行編集の純粋関数は
-//! [`crate::tasks_toml`] へ分割済み。[`crate::tasks`] はこれらの公開シンボルを
-//! re-export する facade である (呼び出し元パス不変)。
-
 use std::path::{Path, PathBuf};
 
 use serde::Deserialize;
@@ -24,62 +5,46 @@ use thiserror::Error;
 
 use crate::tasks_toml::{edit_task_toml_source, normalize_pipeline_dir_rel};
 
-/// タスク定義の読み込み・パース・キュー組み立てに関するエラー。
 #[derive(Debug, Error)]
 pub enum TaskError {
-    /// タスク定義ディレクトリが存在しない / 読めない。
     #[error("task directory not found or unreadable: {0}")]
     Directory(String),
-    /// ディレクトリ内にタスク定義 TOML が 1 つも無い。
     #[error("no task definitions (*.toml) found in: {0}")]
     NoDefinitions(String),
-    /// 個別 TOML ファイルの読み込み失敗 (IO)。
     #[error("failed to read task file {path}: {source}")]
     Read {
         path: PathBuf,
         source: Box<std::io::Error>,
     },
-    /// 個別 TOML ファイルのパース失敗。
     #[error("failed to parse task file {path}: {source}")]
     Parse {
         path: PathBuf,
         source: Box<toml::de::Error>,
     },
-    /// 不正な kind 文字列 (fail-closed)。
     #[error("invalid kind {kind:?} in {path}: expected \"launch_subcommand\" or \"pipeline_run\"")]
     InvalidKind { kind: String, path: PathBuf },
-    /// pipeline_run タスクなのに pipeline_dir が未定義。
     #[error("pipeline_run task {id:?} is missing `pipeline_dir`")]
     MissingPipelineDir { id: String },
-    /// 未実装タスクを選択しようとした (チェック不可・グレー表示)。
     #[error("task {id:?} is not implemented (implemented = false) and cannot be selected")]
     NotImplemented { id: String },
-    /// 選択に未知のタスク ID が含まれている。
     #[error("unknown task id: {0}")]
     UnknownTask(String),
-    /// タスク有効化: ファイル内 `id` が期待と一致しない (誤ファイル書き換え防止)。
     #[error("task id mismatch in {path}: expected {expected:?}, file declares {actual:?}")]
     IdMismatch {
         expected: String,
         actual: String,
         path: PathBuf,
     },
-    /// タスク有効化: `pipeline_run` 以外は pipeline 紐付け対象外。
     #[error("task {id:?} is not kind = \"pipeline_run\" and cannot be linked to a pipeline")]
     NotPipelineRun { id: String },
-    /// タスク有効化: pipeline_dir が load 不可 (manifest 無し・TaskDef パース不能)。
     #[error("pipeline not loadable: {dir}: {reason}")]
     PipelineNotLoadable { dir: String, reason: String },
-    /// タスク有効化: pipeline_dir に TaskDef TOML が 1 つも無い。
     #[error("pipeline has no TaskDef TOMLs: {0}")]
     PipelineNoTaskDefs(String),
-    /// タスク有効化: pipeline_dir 文字列が TOML 基本文字列として書き込めない。
     #[error("pipeline_dir {dir:?} cannot be written as a TOML string value")]
     InvalidPipelineDir { dir: String },
-    /// タスク有効化: 外科的行編集に失敗 (アンカー欠損・編集結果の検証不一致)。
     #[error("surgical edit of task file {path} failed: {reason}")]
     EditFailed { path: PathBuf, reason: String },
-    /// タスクファイルへの書き戻し IO 失敗。
     #[error("failed to write task file {path}: {source}")]
     Write {
         path: PathBuf,
@@ -87,21 +52,13 @@ pub enum TaskError {
     },
 }
 
-/// タスクの実行経路種別。
-///
-/// MAA 型 UI では「ゲーム起動」(standalone サブコマンド) と
-/// 「パイプライン周回」(pipeline 実行) が異種経路として混在するため、
-/// kind で分岐を明示する (estimate 確定要件)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum TaskKind {
-    /// `anaden launch [--target <t>]` standalone サブコマンド経由。
     LaunchSubcommand,
-    /// `anaden run <pipeline_dir> <start_task>` パイプライン経由。
     PipelineRun,
 }
 
 impl TaskKind {
-    /// kind 文字列からのパース。未知の文字列は [`TaskError::InvalidKind`] で fail-closed。
     pub fn parse(s: &str, path: &Path) -> Result<Self, TaskError> {
         match s {
             "launch_subcommand" => Ok(Self::LaunchSubcommand),
@@ -113,7 +70,6 @@ impl TaskKind {
         }
     }
 
-    /// TOML シリアライズ用の kind 文字列。
     pub fn as_str(&self) -> &'static str {
         match self {
             Self::LaunchSubcommand => "launch_subcommand",
@@ -122,7 +78,6 @@ impl TaskKind {
     }
 }
 
-/// `templates/tasks/*.toml` の (デシリアライズ直後) 生構造。
 #[derive(Debug, Deserialize)]
 struct RawTaskDefinition {
     id: String,
@@ -130,35 +85,27 @@ struct RawTaskDefinition {
     kind: String,
     #[serde(default)]
     implemented: bool,
-    /// `kind = "pipeline_run"` 時必須。
     #[serde(default)]
     pipeline_dir: Option<String>,
-    /// `kind = "pipeline_run"` 時の開始タスク名 (任意)。
     #[serde(default)]
     start_task: Option<String>,
 }
 
-/// 検証済みタスク定義。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct TaskDefinition {
     pub id: String,
     pub title: String,
     pub kind: TaskKind,
-    /// `false` のタスクは選択不可 (グレー表示)。
     pub implemented: bool,
-    /// [`TaskKind::PipelineRun`] 時のパイプラインディレクトリ。
     pub pipeline_dir: Option<PathBuf>,
-    /// [`TaskKind::PipelineRun`] 時の開始タスク名。
     pub start_task: Option<String>,
 }
 
 impl TaskDefinition {
-    /// 選択 (チェック) 可能か。`implemented = false` は常に不可。
     pub fn is_selectable(&self) -> bool {
         self.implemented
     }
 
-    /// TOML 文字列からパース (fail-closed: 不正 kind / pipeline_dir 欠損はエラー)。
     pub fn parse_toml(source: &str, path: &Path) -> Result<Self, TaskError> {
         let raw: RawTaskDefinition = toml::from_str(source).map_err(|source| TaskError::Parse {
             path: path.to_path_buf(),
@@ -184,10 +131,6 @@ impl TaskDefinition {
     }
 }
 
-/// ディレクトリから全タスク定義を読み込む。
-///
-/// TOML ファイルが 1 つも無い場合は [`TaskError::NoDefinitions`] で fail-closed
-/// (空リストの黙黙継続はしない)。
 pub fn load_task_definitions(dir: &Path) -> Result<Vec<TaskDefinition>, TaskError> {
     let entries =
         std::fs::read_dir(dir).map_err(|_| TaskError::Directory(dir.display().to_string()))?;
@@ -206,36 +149,10 @@ pub fn load_task_definitions(dir: &Path) -> Result<Vec<TaskDefinition>, TaskErro
     if defs.is_empty() {
         return Err(TaskError::NoDefinitions(dir.display().to_string()));
     }
-    // ファイル名順で決定論的な表示順を保証。
     defs.sort_by(|a, b| a.id.cmp(&b.id));
     Ok(defs)
 }
 
-// ---- Issue #160 Shard 2 (UC-3): タスク有効化 API (task TOML 書き戻し) ----
-
-/// タスク TOML の `implemented` を `true` へフリップし、`pipeline_dir` 紐付けを
-/// 書き戻して [`TaskDefinition`] を返す (UC-3: 作成 pipeline をタスクに紐付け、
-/// ホーム一覧で選択可能にする)。
-///
-/// # 設計制約 (コメント保全)
-///
-/// 既存タスク TOML は先頭に由来コメント (issue 参照等) を持つため
-/// `toml::to_string` による全再生成はコメントを落とす。本関数は
-/// **implemented 行・pipeline_dir 行のみを外科的に置換する行編集**を行い、
-/// コメント行・インラインコメント・キー順・CRLF 改行をそのまま保存する
-/// (`tasks_toml::edit_task_toml_source`)。
-///
-/// # fail-closed (嘘の動作可能表示禁止)
-///
-/// - ファイル内 `id` が `expected_id` と不一致なら 1 バイトも書き換えない。
-/// - `kind = "launch_subcommand"` は pipeline 紐付け対象外として拒否。
-/// - `root.join(pipeline_dir_rel)` が load 不可 (manifest `pipeline.toml` 無し /
-///   TaskDef ゼロ / TaskDef パース不能) なら有効化を拒否。
-/// - 編集後ソースを書き込み前に [`TaskDefinition::parse_toml`] で完全検証し、
-///   parse 不能・期待と異なる場合は書き込まない。
-///
-/// `pipeline_dir_rel` は TOML 規約 (repo root 相対・forward slash) で書き戻す。
-/// Windows 区切りの backslash は forward slash へ正規化する。
 pub fn enable_task(
     task_path: &Path,
     expected_id: &str,
@@ -247,9 +164,6 @@ pub fn enable_task(
         path: task_path.to_path_buf(),
         source: Box::new(source),
     })?;
-    // RawTaskDefinition (緩い検証) で読む: pipeline_dir 未宣言の pipeline_run は
-    // 通常 [`TaskDefinition::parse_toml`] が MissingPipelineDir で拒否するが、
-    // 有効化は「pipeline_dir をこれから書き込む」操作のため kind 検証までで止める。
     let raw: RawTaskDefinition = toml::from_str(&source).map_err(|source| TaskError::Parse {
         path: task_path.to_path_buf(),
         source: Box::new(source),
@@ -266,7 +180,6 @@ pub fn enable_task(
             id: expected_id.to_string(),
         });
     }
-    // fail-closed: 紐付け先 pipeline が load 可能 (manifest + TaskDef 1 件以上) か。
     let abs_dir = root.join(&dir_value);
     anaden_vision::load_pipeline_manifest(&abs_dir).map_err(|e| {
         TaskError::PipelineNotLoadable {
@@ -283,7 +196,6 @@ pub fn enable_task(
     {
         return Err(TaskError::PipelineNoTaskDefs(dir_value));
     }
-    // 外科的行編集 → 書き込み前の完全検証 → 書き戻し。
     let edited = edit_task_toml_source(&source, &dir_value, task_path)?;
     let def = TaskDefinition::parse_toml(&edited, task_path)?;
     if !def.implemented || def.pipeline_dir.as_deref() != Some(Path::new(&dir_value)) {
@@ -301,7 +213,6 @@ pub fn enable_task(
     Ok(def)
 }
 
-/// タスク定義テスト共有フィクスチャ ([`crate::tasks_queue`] のテストからも利用)。
 #[cfg(test)]
 pub(crate) mod test_util {
     pub(crate) const LAUNCH_TOML: &str = r#"

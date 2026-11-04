@@ -1,26 +1,15 @@
-//! 画像表示 + ドラッグROI選択 + ヒートマップオーバーレイウィジェット。
-//!
-//! スクリーンショット上でマウスドラッグすると矩形ROIを選択できる。
-//! 座標は egui 表示座標 ↔ 元画像ピクセル座標 を相互変換する。
-//! ヒートマップは score_map（テンプレートが画面のどこにマッチするか）を可視化する。
-
 use eframe::egui;
 
 use anaden_core::ScreenRegion;
 
-/// ドラッグ中のROI編集状態（元画像ピクセル座標）。
 #[derive(Clone, Copy, Debug, Default)]
 pub struct RoiEdit {
-    /// ドラッグ開始点。
     pub anchor: Option<(u32, u32)>,
-    /// 現在のポインタ位置。
     pub current: Option<(u32, u32)>,
-    /// 今フレームでドラッグ中か。
     pub dragging: bool,
 }
 
 impl RoiEdit {
-    /// 確定したROI矩形。両端が揃っていて面積が正の場合のみ。
     pub fn rect(&self) -> Option<ScreenRegion> {
         let (a, c) = (self.anchor?, self.current?);
         let x0 = a.0.min(c.0);
@@ -34,15 +23,11 @@ impl RoiEdit {
     }
 }
 
-/// ヒートマップオーバーレイの描画データ。
 pub struct HeatmapView {
-    /// 着色済みスコアマップのテクスチャID。
     pub tex: egui::TextureId,
-    /// スコアマップが対応する探索領域（元画像座標）。
     pub search: ScreenRegion,
 }
 
-/// 画像を表示し、ドラッグでROIを選択する。ヒートマップと最良マッチ位置も重ね描き。
 pub fn show(
     ui: &mut egui::Ui,
     tex: &egui::TextureHandle,
@@ -54,7 +39,6 @@ pub fn show(
 ) {
     let avail = ui.available_size();
     let aspect = img_w as f32 / img_h as f32;
-    // アスペクト比を保って available size に収める
     let mut display = avail;
     if display.x / display.y > aspect {
         display.x = display.y * aspect;
@@ -62,10 +46,6 @@ pub fn show(
         display.y = display.x / aspect;
     }
 
-    // Image widget で画像を描画（uv=[0,0]..[1,1] の安全な経路）。
-    // fit_to_exact_size(display) + maintain_aspect_ratio(false) で、
-    // 既存手計算の display 矩形に一致させ、オーバーレイ座標(img_to_screen)とピクセル単位で合わせる。
-    // sense(drag) で ROIドラッグの response を得る。
     let img_widget = egui::Image::from_texture(egui::load::SizedTexture::new(
         tex.id(),
         [img_w as f32, img_h as f32],
@@ -80,7 +60,6 @@ pub fn show(
 
     roi.dragging = response.dragged();
 
-    // egui 表示座標 → 元画像ピクセル座標
     let to_img = |p: egui::Pos2| -> Option<(u32, u32)> {
         if !rect.contains(p) {
             return None;
@@ -103,8 +82,6 @@ pub fn show(
         roi.current = Some(pos);
     }
 
-    // ヒートマップオーバーレイ（探索領域に合わせて引き伸ばし）
-    // uv は [0,0]..[1,1] を明示的に渡す（Rect::EVERYTHING は絶対NG）。
     if let Some(hm) = heatmap {
         let tl = img_to_screen(rect, img_w, img_h, (hm.search.x, hm.search.y));
         let br = img_to_screen(rect, img_w, img_h, (hm.search.right(), hm.search.bottom()));
@@ -116,7 +93,6 @@ pub fn show(
         );
     }
 
-    // 最良マッチ位置をシアンの枠でマーク
     if let Some(bm) = best_match {
         let tl = img_to_screen(rect, img_w, img_h, (bm.x, bm.y));
         let br = img_to_screen(rect, img_w, img_h, (bm.right(), bm.bottom()));
@@ -128,7 +104,6 @@ pub fn show(
         );
     }
 
-    // 選択矩形を描画（黄）
     if let Some(r) = roi.rect() {
         let tl = img_to_screen(rect, img_w, img_h, (r.x, r.y));
         let br = img_to_screen(rect, img_w, img_h, (r.right(), r.bottom()));
@@ -141,7 +116,6 @@ pub fn show(
     }
 }
 
-/// 元画像ピクセル座標 → egui 表示座標。
 fn img_to_screen(rect: egui::Rect, iw: u32, ih: u32, p: (u32, u32)) -> egui::Pos2 {
     egui::pos2(
         rect.left() + (p.0 as f32 / iw as f32) * rect.width(),
@@ -149,9 +123,6 @@ fn img_to_screen(rect: egui::Rect, iw: u32, ih: u32, p: (u32, u32)) -> egui::Pos
     )
 }
 
-/// スコアマップ(GrayImage, 0-255) をヒートマップ(ColorImage RGBA)に変換する。
-///
-/// 値が高いほど白く不透明（赤→橙→黄→白）、低いほど透明。
 pub fn score_map_to_heatmap(map: &image::GrayImage) -> egui::ColorImage {
     let (w, h) = (map.width() as usize, map.height() as usize);
     let mut pixels = Vec::with_capacity(w * h * 4);
@@ -162,7 +133,6 @@ pub fn score_map_to_heatmap(map: &image::GrayImage) -> egui::ColorImage {
             let r = 255u8;
             let g = ((t - 0.3).max(0.0) / 0.7 * 255.0).min(255.0) as u8;
             let b = ((t - 0.6).max(0.0) / 0.4 * 255.0).min(255.0) as u8;
-            // 高スコアほど不透明。低スコアは背景が透けて見える。
             let a = (t * t * 170.0) as u8;
             pixels.extend_from_slice(&[r, g, b, a]);
         }
