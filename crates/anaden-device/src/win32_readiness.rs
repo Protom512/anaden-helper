@@ -17,10 +17,13 @@
 
 #![cfg(windows)]
 
+use std::mem::size_of;
 use std::time::Duration;
 
 use tracing::{info, warn};
-use windows::Win32::NetworkManagement::IpHelper::{GetExtendedTcpTable, TCP_TABLE_OWNER_PID_ALL};
+use windows::Win32::NetworkManagement::IpHelper::{
+    GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
+};
 use windows::Win32::Networking::WinSock::{AF_INET, AF_INET6};
 
 use crate::error::DeviceError;
@@ -146,15 +149,10 @@ fn resolve_pids(process: &str) -> Result<Vec<u32>, DeviceError> {
 ///
 /// 手動 probe の `netstat -ano` 行数カウントに相当する。
 pub fn count_tcp_sockets(pids: &[u32]) -> Result<u32, DeviceError> {
-    let v4 = count_tcp_table(pids, AF_INET.0 as u32, ROW_SIZE_V4)?;
-    let v6 = count_tcp_table(pids, AF_INET6.0 as u32, ROW_SIZE_V6)?;
+    let v4 = count_tcp_table(pids, AF_INET.0 as u32, size_of::<MIB_TCPROW_OWNER_PID>())?;
+    let v6 = count_tcp_table(pids, AF_INET6.0 as u32, size_of::<MIB_TCP6ROW_OWNER_PID>())?;
     Ok(v4 + v6)
 }
-
-/// `MIB_TCPROW_OWNER_PID` のサイズ (u32 x 6、パディング無し)。
-const ROW_SIZE_V4: usize = 24;
-/// `MIB_TCP6ROW_OWNER_PID` のサイズ (16+4+4+16+4+4+4、パディング無し)。
-const ROW_SIZE_V6: usize = 52;
 
 /// `GetExtendedTcpTable` (TCP_TABLE_OWNER_PID_ALL) で指定アドレスファミリの
 /// テーブルを取得し、`pids` が所有する行数を数える。
