@@ -9,6 +9,8 @@
 
 mod ensure;
 mod error;
+// readiness (splash-hang) 判定コア。純関数のみでプラットフォーム非依存 (Issue #275)。
+mod readiness;
 // PC版(Windows) Win32 バックエンド。capture/input/launch の3モジュール。
 // 全体を cfg(windows) で gating し、Linux ではコンパイル対象外とする。
 #[cfg(windows)]
@@ -35,6 +37,10 @@ mod win32_terminate;
 pub use ensure::EnsureOutcome;
 /// capture / input / launch 共通のデバイス操作エラー。
 pub use error::DeviceError;
+/// readiness (splash-hang) 判定のコア型と純関数 (Issue #275)。
+pub use readiness::{
+    FrameDigest, ReadinessSample, ReadinessVerdict, classify_readiness, frame_digest,
+};
 /// PC版(Windows) `PrintWindow` ベースのキャプチャ（`DEFAULT_PROCESS_NAME` = 対象プロセス名）。
 #[cfg(windows)]
 pub use win32_capture::{DEFAULT_PROCESS_NAME, Win32Capture};

@@ -18,3 +18,5 @@ windows = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
+# readiness_tests (Issue #275): メモリ上での DynamicImage 構築に使用。
+image = { workspace = true }
