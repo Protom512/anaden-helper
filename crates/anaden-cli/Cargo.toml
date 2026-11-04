@@ -23,24 +23,17 @@ anaden-vision = { workspace = true }
 anaden-engine = { workspace = true }
 anaden-strategies = { workspace = true }
 tokio = { workspace = true }
-# Ctrl+C / SIGINT の協調的キャンセル。CancellationToken はデフォルト feature に含まれる。
-# main.rs で tokio::signal::ctrl_c を受け取り token.cancel() し、PipelineDriver::with_cancel へ配線。
 tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-subscriber = { workspace = true }
 anyhow = { workspace = true }
 toml = { workspace = true }
-# UC-2 E2E 証跡 (Issue #139 T6): EvidenceCapture デコレータの Capture trait 実装に使用。
 async-trait = { workspace = true }
 clap = { version = "4", features = ["derive"] }
 image = { workspace = true }
 imageproc = { workspace = true }
-# 03-report-channel: run 成果物 (report.json) の機械可読シリアライズ。
 serde_json = { workspace = true }
-# plan 系ツール (Issue #248): data/*.toml スキーマの derive。
 serde = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# Issue #188: capture-scrcpy feature (Android 常駐 capture) は Android サポート削除に
-# 伴い廃止。PC (Windows) 専用のため feature 分岐は不要。

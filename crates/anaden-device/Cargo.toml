@@ -11,12 +11,9 @@ image = { workspace = true }
 thiserror = { workspace = true }
 tracing = { workspace = true }
 
-# PC版 Windows API プローブ(入力/キャプチャ/起動)。features はルート [workspace.dependencies]
-# で一括定義。Windows 専用コードは cfg(windows) で囲む。Linux ビルドには依存しない。
 [target.'cfg(windows)'.dependencies]
 windows = { workspace = true }
 
 [dev-dependencies]
 tempfile = { workspace = true }
-# readiness_tests (Issue #275): メモリ上での DynamicImage 構築に使用。
 image = { workspace = true }

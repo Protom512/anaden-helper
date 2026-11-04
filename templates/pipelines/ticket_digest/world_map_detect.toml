@@ -1,29 +1,8 @@
 name      = "WorldMapDetectPc"
 state     = "world_map_pc"
 algorithm = "ccoeff"
-# ticket_digest pipeline v0 (Issue #248) — 画面検出アンカー群 (atlas seed)。
-# ワールドマップ画面の到達検出。共通タスクチェーン (field_hud → menu →
-# world_map → dungeon_select) の第 3 スクリーンで、チェーン内で fixture が
-# commit 済みなのにアンカーが存在しない唯一の画面。2026-11-03 実機キャプチャ
-# (2880x1620 PrintWindow → raw-1258 正規化) から生成。
-# 座標系: RAW 1258x708 ピクセル空間 (PC版クライアント実測)。
 template  = "world_map_title.png"
-# 検出 ROI: 「ワールドマップ」タイトルバナー帯 (558x36・白文字 + 濃色グラデ枠) を
-# 囲むスラック窓 (±10px。Issue #208 教訓: needle==roi のぴったり窓は配置ドリフトで
-# conf が崩れる)。needle 幅はタイトル plaque (x448-808) + バナー余白を含む 558px:
-# 自己一致 (本番前処理経路) が text 単体 crop (270px 幅) で 0.9366・バナー帯で
-# 0.9705 と実測され、Lanczos3 needle リサイズと haystack 正規化のフィルタ差を
-# 広い面積で希釈するため (Issue #184 の stddev 監査は 41.3 で充足)。
-# キャプチャ上端の白帯 (y0-12・輝度 stddev 0) はウィンドウ枠由来でゲーム UI では
-# ないため needle に含めない。
-#
-# 生成コマンド (絶対命令: 生成コマンドをログに残す):
-#   resize_crop_template world_map_live_2880x1620.png \
-#       templates/pipelines/ticket_digest/world_map_title.png \
-#       --letterbox 10 --roi 350,14,558,36
 roi       = [340, 4, 578, 56]
 threshold = 0.85
 action    = { type = "do_nothing" }
-# v0 は検出で終端 (画面到達確認パイプライン)。dungeon_select 等の後続アンカーは
-# live テンプレート収集後に追加する (Issue #248 チェックリスト参照)。
 next      = []

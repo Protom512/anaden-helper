@@ -1,9 +1,6 @@
 name      = "HardRowDetectPc"
 state     = "ad_select_pc"
 algorithm = "ccoeff"
-# ticket_digest v0 — 難易度行「ハード」(緑鍵アイコン込み)。
-# スキップ周回の対象難易度選択ボタンの位置特定用アンカー。
-# バナー行の実テクスチャ (半透明でなく不透明) で cross-day 安定性が高い。
 template  = "hard_row.png"
 roi       = [896, 318, 225, 53]
 threshold = 0.85

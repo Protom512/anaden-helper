@@ -11,6 +11,19 @@ const EXT_LANG = new Map([
   ['.sh', 'shell'],
 ]);
 
+const CONFIG_EXT_LANG = new Map([
+  ['.toml', 'toml'],
+  ['.yml', 'yaml'],
+  ['.yaml', 'yaml'],
+]);
+
+const CODE_SKIP_DIRS = new Set(['target', 'node_modules']);
+const CONFIG_SKIP_DIRS = new Set(['target', 'node_modules', 'ast-grep-tests', 'references']);
+const CONFIG_HIDDEN_DIRS = new Set(['.cargo', '.github']);
+
+const configSkipDir = (name) =>
+  CONFIG_SKIP_DIRS.has(name) || (name.startsWith('.') && !CONFIG_HIDDEN_DIRS.has(name));
+
 const isIdent = (c) => /[A-Za-z0-9_]/.test(c);
 
 function skipCookedString(src, start) {
@@ -292,7 +305,74 @@ export function lexShell(src) {
   return segs;
 }
 
-const LEXERS = { rust: lexRust, js: lexJs, shell: lexShell };
+export function lexToml(src) {
+  const segs = [];
+  const n = src.length;
+  let i = 0;
+  let codeStart = 0;
+  const code = (to) => { if (to > codeStart) segs.push({ type: 'code', start: codeStart, end: to }); };
+  const comment = (from, to) => { code(from); segs.push({ type: 'comment', start: from, end: to, newline: true }); codeStart = to; };
+
+  while (i < n) {
+    const c = src[i];
+    if (c === '#') {
+      let j = src.indexOf('\n', i);
+      if (j === -1) j = n;
+      comment(i, j);
+      i = j;
+      continue;
+    }
+    if (c === '"') {
+      if (src.startsWith('"""', i)) {
+        const k = src.indexOf('"""', i + 3);
+        i = k === -1 ? n : k + 3;
+        continue;
+      }
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === '\\') { j += 2; continue; }
+        if (src[j] === '"' || src[j] === '\n') { j += 1; break; }
+        j += 1;
+      }
+      i = j;
+      continue;
+    }
+    if (c === "'") {
+      if (src.startsWith("'''", i)) {
+        const k = src.indexOf("'''", i + 3);
+        i = k === -1 ? n : k + 3;
+        continue;
+      }
+      const k = src.indexOf("'", i + 1);
+      i = k === -1 ? n : k + 1;
+      continue;
+    }
+    i += 1;
+  }
+  code(n);
+  return segs;
+}
+
+export function lexYaml(src) {
+  const segs = [];
+  const n = src.length;
+  let i = 0;
+  let codeStart = 0;
+  const code = (to) => { if (to > codeStart) segs.push({ type: 'code', start: codeStart, end: to }); };
+  const comment = (from, to) => { code(from); segs.push({ type: 'comment', start: from, end: to, newline: true }); codeStart = to; };
+
+  while (i < n) {
+    const lineEnd = src.indexOf('\n', i);
+    const end = lineEnd === -1 ? n : lineEnd;
+    const m = src.slice(i, end).match(/^[ \t]*#/);
+    if (m) comment(i + m[0].length - 1, end);
+    i = end === n ? n : end + 1;
+  }
+  code(n);
+  return segs;
+}
+
+const LEXERS = { rust: lexRust, js: lexJs, shell: lexShell, toml: lexToml, yaml: lexYaml };
 
 export function findComments(src, lang) {
   const lex = LEXERS[lang];
@@ -316,24 +396,72 @@ export function codeFingerprint(src, lang) {
   return out.replace(/\s+/g, '');
 }
 
-export function scopeFiles(root = ROOT) {
-  const dirs = ['crates', 'scripts'];
-  const out = [];
-  const walk = (dir) => {
-    let entries;
-    try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
-    for (const e of entries) {
-      const p = path.join(dir, e.name);
-      if (e.isDirectory()) {
-        if (e.name === 'target' || e.name === 'node_modules') continue;
-        walk(p);
-        continue;
-      }
-      const lang = EXT_LANG.get(path.extname(e.name));
-      if (lang) out.push({ path: p, lang });
+export function stripComments(src, lang) {
+  const comments = findComments(src, lang);
+  if (comments.length === 0) return src;
+  const removed = new Uint8Array(src.length);
+  for (const c of comments) {
+    const lineStart = src.lastIndexOf('\n', c.start) + 1;
+    let lineEnd = src.indexOf('\n', c.end);
+    if (lineEnd === -1) lineEnd = src.length;
+    const codeBefore = src.slice(lineStart, c.start);
+    const codeAfter = src.slice(c.end, lineEnd).replace(/\r$/, '');
+    if (codeBefore.trim() === '' && codeAfter.trim() === '') {
+      for (let k = lineStart; k <= lineEnd && k < src.length; k += 1) removed[k] = 1;
+    } else {
+      const endNoCr = src[c.end - 1] === '\r' ? c.end - 1 : c.end;
+      for (let k = c.start; k < endNoCr; k += 1) removed[k] = 1;
+      for (let k = c.start - 1; k >= lineStart && /[ \t]/.test(src[k]); k -= 1) removed[k] = 1;
     }
-  };
-  for (const d of dirs) walk(path.join(root, d));
+  }
+  const parts = [];
+  let chunkStart = -1;
+  for (let k = 0; k <= src.length; k += 1) {
+    const gone = k === src.length || removed[k] === 1;
+    if (!gone && chunkStart === -1) chunkStart = k;
+    if (gone && chunkStart !== -1) { parts.push(src.slice(chunkStart, k)); chunkStart = -1; }
+  }
+  return parts.join('');
+}
+
+const FIXABLE_LANGS = new Set(['toml', 'yaml']);
+
+export function applyFixes(root = ROOT) {
+  let commentsStripped = 0;
+  let filesChanged = 0;
+  for (const f of scopeFiles(root)) {
+    if (!FIXABLE_LANGS.has(f.lang)) continue;
+    const src = fs.readFileSync(f.path, 'utf8');
+    const stripped = stripComments(src, f.lang);
+    if (stripped === src) continue;
+    fs.writeFileSync(f.path, stripped);
+    filesChanged += 1;
+    commentsStripped += findComments(src, f.lang).length;
+  }
+  return { comments: commentsStripped, files: filesChanged };
+}
+
+function walkTree(dir, extLang, skipDir, out) {
+  let entries;
+  try { entries = fs.readdirSync(dir, { withFileTypes: true }); } catch { return; }
+  for (const e of entries) {
+    const p = path.join(dir, e.name);
+    if (e.isDirectory()) {
+      if (skipDir(e.name)) continue;
+      walkTree(p, extLang, skipDir, out);
+      continue;
+    }
+    const lang = extLang.get(path.extname(e.name));
+    if (lang) out.push({ path: p, lang });
+  }
+}
+
+export function scopeFiles(root = ROOT) {
+  const out = [];
+  const codeSkip = (name) => CODE_SKIP_DIRS.has(name);
+  walkTree(path.join(root, 'crates'), EXT_LANG, codeSkip, out);
+  walkTree(path.join(root, 'scripts'), EXT_LANG, codeSkip, out);
+  walkTree(root, CONFIG_EXT_LANG, configSkipDir, out);
   out.sort((a, b) => a.path.localeCompare(b.path));
   return out;
 }
@@ -352,10 +480,14 @@ export function check(root = ROOT) {
   return { ok: findings.length === 0, filesChecked, findings };
 }
 
-export function main() {
+export function main(argv = process.argv.slice(2)) {
+  if (argv.includes('--fix')) {
+    const fix = applyFixes();
+    console.log(`comment-gate: --fix stripped ${fix.comments} comment(s) from ${fix.files} file(s) (toml/yaml only)`);
+  }
   const result = check();
   if (!result.ok) {
-    console.error(`comment-gate: ${result.findings.length} comment(s) in ${result.findings.length > 0 ? result.findings[0].file.split(path.sep).slice(0, 2).join(path.sep) : 'scope'} code (crates/ + scripts/):`);
+    console.error(`comment-gate: ${result.findings.length} comment(s) in ${result.findings.length > 0 ? result.findings[0].file.split(path.sep).slice(0, 2).join(path.sep) : 'scope'} code (crates/ + scripts/ + repo toml/yml):`);
     for (const f of result.findings.slice(0, 200)) {
       console.error(`  ${path.relative(ROOT, f.file).replace(/\\/g, '/')}:${f.line}`);
     }

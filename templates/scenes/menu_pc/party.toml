@@ -2,25 +2,5 @@ name      = "MenuPcParty"
 state     = "menu_pc"
 algorithm = "sse"
 template  = "party.png"
-# PC版(Windows 16:9) menu シーン参照テンプレ (Task #28 / Issue #6 / 親 Issue #5)。
-# Issue #268: ゲーム 3.17.50 がメニューバーを旧単列7アイコン (roi x703-1213, y579-652,
-# 旧並び party/bag/board/grasta/gacha/record/info) から多アイコン横並びタイルバーへ変更し
-# 旧アンカー7件が全件非マッチになったため、2026-11-03 live キャプチャ
-# (.anaden-run/2026-11-03-e5e7-atlas3-r2/e5_menu_now.png, 2880x1620 PrintWindow・左黒帯10px)
-# から再導出した。
-#
-# 座標系: **RAW 1258x708 ピクセル空間** (resize_crop_template --letterbox 10 と同一空間)。
-# ROI は RAW 1258 空間で定義し、detect が roi_to_normalized で1280幅基準へスケールする
-# (ScreenScaler は常に1280幅基準へリサイズ — 早期return廃止)。20:9 legacy scenes/menu は共存(非破壊)。
-#
-# ROI 導出 (r2 session §3 と同じ機械的手法): 列輝度プロファイル + タイル間暗ギャップ検出で
-# タイル格子を特定。バー帯 y566-660、ギャップ中心 x=136,246,356,465,575,684,794,908 (110px ピッチ)。
-# party = 左から1タイル目 (ラベル「パーティ」— 4x ズームクロップで判読)。
-# 新バー全12タイル: パーティ/グラスタ/ボード/夢見/持ち物/記録/お知らせ/その他 + 右端小タイル
-# ショップ/ねこ/食事/ボックス。スクロール矢印なし (右端はボックスで終端)。
-#
-# 生成コマンド (絶対命令: 生成コマンドをログに残す):
-#   resize_crop_template e5_menu_now.png templates/scenes/menu_pc/party.png \
-#       --letterbox 10 --roi 35,567,92,93
 roi       = [35, 567, 92, 93]
 threshold = 0.95

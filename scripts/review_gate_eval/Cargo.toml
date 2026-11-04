@@ -5,7 +5,6 @@ edition = "2024"
 license = "MIT"
 description = "review-gate 定量評価メトリクス集計 (recall / false positive rate / consensus validity)"
 
-# 評価用スクリプト群のため workspace には含めない（crate 依存・結合原則への影響ゼロ）。
 [workspace]
 
 [dependencies]

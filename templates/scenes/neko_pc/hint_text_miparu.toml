@@ -1,16 +1,7 @@
 name      = "NekoHintMiparuPc"
 state     = "neko_diary_pc"
 algorithm = "ccoeff"
-# ねこにっき ヒント文言アンカー #1 (Issue #260 E5 実証 / ui-atlas §2 hint_text 系)。
-# 2026-11-03 live キャプチャ (2880x1620 PrintWindow, 左黒帯 10px) の No.01 行
-# 冒頭「ミ・パル」グリフ群 (x585-678, y164-194) から resize_crop_template
-# --letterbox 10 --roi 578,160,108,38 で生成。
-# 座標系: RAW 1258x708 ピクセル空間 (PC版クライアント実測)。
-# 73 種の固定文言コレクションの 1 番目。data/nekonikki_hints.toml 管理は #248 以降の
-# neko_nikki 実装 unit で行う (この時点では未作成)。
 template  = "hint_text_miparu.png"
-# 検出 ROI: グリフ群を囲むスラック窓 (±12px。Issue #208: ぴったり窓は配置
-# ドリフトで conf が崩れる。広すぎると隣接行の文言と誤対する)。
 roi       = [566, 148, 132, 62]
 threshold = 0.90
 action    = { type = "do_nothing" }

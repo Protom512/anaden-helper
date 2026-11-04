@@ -1,14 +1,6 @@
-# ticket_digest pipeline manifest v0 (Issue #248)。
-#
-# v0 = 画面検出アンカー群 (atlas seed): AD 選択画面とリザルト画面の到達検出のみ。
-# スキップ消化 FSM (skip_btn → difficulty 分岐 → result 多段) は #260 E5-E7 と
-# 併せた live テンプレート収集後に拡張する (Issue #248 チェックリスト参照)。
-# watch (ポップアップ常時監視) は close_btn 系テンプレ収集後に manifest へ追加する。
 
 start_task = "AdSelectDetectPc"
 
-# AD 選択画面への到達 (または 10 分安全弁) で停止する「画面待機」パイプライン。
-# live セッションで画面遷移の実証に使う (検出 → TerminalTask/GoalReached 停止)。
 [[goal]]
 name = "ad_select_reached"
 [goal.stop.Any]

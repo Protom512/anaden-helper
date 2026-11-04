@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findComments, codeFingerprint, lexRust, lexJs, lexShell, scopeFiles } from './comment_gate.mjs';
+import { findComments, codeFingerprint, lexRust, lexJs, lexShell, lexToml, lexYaml, stripComments, scopeFiles } from './comment_gate.mjs';
 
 const NL = '\n';
 
@@ -111,11 +111,74 @@ test('shell: nested quoting inside $( ) does not desync comment detection', () =
   assert.equal(src.slice(comments[0].start, comments[0].end), '# real comment');
 });
 
-test('scopeFiles covers crates and scripts code extensions only', () => {
+test('toml: line and inline comments are found', () => {
+  const src = '# header' + NL + 'key = "v" # trailing' + NL + '[table]';
+  const comments = findComments(src, 'toml');
+  assert.equal(comments.length, 2);
+  assert.equal(src.slice(comments[0].start, comments[0].end), '# header');
+  assert.equal(src.slice(comments[1].start, comments[1].end), '# trailing');
+  const code = lexToml(src).filter((s) => s.type === 'code').map((s) => src.slice(s.start, s.end)).join('');
+  assert.ok(code.includes('key = "v"'));
+});
+
+test('toml: hashes inside strings are not comments', () => {
+  const src = 'url = "https://x/#frag"' + NL + "lit = 'a#b'" + NL + 'multi = """' + NL + '# inside block' + NL + '"""';
+  assert.deepEqual(findComments(src, 'toml'), []);
+});
+
+test('toml: fingerprint ignores comments and whitespace', () => {
+  const withComments = 'a = 1 # one' + NL + '# two' + NL + 'b = 2';
+  const bare = 'a = 1' + NL + 'b = 2';
+  assert.equal(codeFingerprint(withComments, 'toml'), codeFingerprint(bare, 'toml'));
+});
+
+test('toml: unterminated string swallows to EOF without false comments', () => {
+  const src = 'a = "unterminated # nope';
+  assert.deepEqual(findComments(src, 'toml'), []);
+});
+
+test('yaml: line-leading comments are found', () => {
+  const src = 'ruleDirs: [rules]' + NL + '# note' + NL + '  # indented';
+  const comments = findComments(src, 'yaml');
+  assert.equal(comments.length, 2);
+  assert.equal(src.slice(comments[0].start, comments[0].end), '# note');
+  const code = lexYaml(src).filter((s) => s.type === 'code').map((s) => src.slice(s.start, s.end)).join('');
+  assert.ok(code.includes('ruleDirs'));
+});
+
+test('yaml: hash inside a plain value line is not flagged', () => {
+  const src = 'message: value with # inline';
+  assert.deepEqual(findComments(src, 'yaml'), []);
+});
+
+test('stripComments drops comment-only lines entirely and trims inline spans', () => {
+  const src = '# top' + NL + 'a = 1 # one' + NL + 'b = 2' + NL;
+  assert.equal(stripComments(src, 'toml'), 'a = 1' + NL + 'b = 2' + NL);
+});
+
+test('stripComments keeps CRLF line endings intact', () => {
+  const src = '# top\r\na = 1 # one\r\nb = 2\r\n';
+  assert.equal(stripComments(src, 'toml'), 'a = 1\r\nb = 2\r\n');
+});
+
+test('stripComments is a no-op on clean sources', () => {
+  const src = 'a = 1' + NL + 'b = 2' + NL;
+  assert.equal(stripComments(src, 'toml'), src);
+});
+
+test('scopeFiles covers crates/scripts code plus repo toml and config yml', () => {
   const files = scopeFiles();
-  assert.ok(files.length > 100);
+  assert.ok(files.length > 150);
+  const paths = files.map((f) => f.path.replace(/\\/g, '/'));
+  assert.ok(paths.some((p) => p.endsWith('/Cargo.toml')), 'root Cargo.toml');
+  assert.ok(paths.some((p) => p.endsWith('/cccc.toml')), 'cccc.toml');
+  assert.ok(paths.some((p) => p.endsWith('/sgconfig.yml')), 'sgconfig.yml');
+  assert.ok(paths.some((p) => p.includes('/templates/pipelines/')), 'templates pipelines');
+  assert.ok(paths.some((p) => p.includes('/data/')), 'data');
+  assert.ok(!paths.some((p) => p.includes('/ast-grep-tests/')), 'ast-grep-tests excluded');
+  assert.ok(!paths.some((p) => p.includes('/references/')), 'references vendored tree excluded');
+  assert.ok(paths.some((p) => p.includes('/.cargo/')), '.cargo included');
   for (const f of files) {
-    assert.ok(f.path.includes('crates') || f.path.includes('scripts'), f.path);
-    assert.ok(['.rs', '.mjs', '.sh'].some((e) => f.path.endsWith(e)), f.path);
+    assert.ok(['.rs', '.mjs', '.sh', '.toml', '.yml', '.yaml'].some((e) => f.path.endsWith(e)), f.path);
   }
 });
