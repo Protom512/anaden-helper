@@ -48,12 +48,14 @@ test('drift guard: inline evaluateTicketPrecheck matches canonical across input 
     [['', '   '], ['a.rs']],
     [['a.rs', 42], ['a.rs']],
   ];
-  for (const [d, c] of cases) {
-    assert.deepEqual(
-      inline.evaluateTicketPrecheck(d, c),
-      evaluateTicketPrecheck(d, c),
-      `evaluateTicketPrecheck(${JSON.stringify(d)}, ${JSON.stringify(c)}) diverged from canonical`
-    );
+  for (const mode of ['strict', 'pre-implementation']) {
+    for (const [d, c] of cases) {
+      assert.deepEqual(
+        inline.evaluateTicketPrecheck(d, c, mode),
+        evaluateTicketPrecheck(d, c, mode),
+        `evaluateTicketPrecheck(${JSON.stringify(d)}, ${JSON.stringify(c)}, '${mode}') diverged from canonical`
+      );
+    }
   }
 });
 
