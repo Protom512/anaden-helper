@@ -1,7 +1,3 @@
-//! 検証ヘルパ: haystack(実キャプチャ)を ScreenScaler で1280正規化し、
-//! 720p基準テンプレ needle で CcoeffVisionEngine(TM_CCOEFF_NORMED) マッチング。
-//! run-pipeline の内部挙動と同一条件で、座標・スコアを実値出力する。
-//! ROI 指定時は haystack を crop してからマッチ(roi_to_region と同等)。
 use anaden_core::{MatchConfidence, ScreenRegion};
 use anaden_vision::{CcoeffVisionEngine, ScreenScaler, VisionEngine};
 

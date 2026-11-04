@@ -881,10 +881,6 @@ async fn main() -> Result<()> {
 mod tests {
     use super::*;
 
-    // ---- resolve_pipeline_dir (Issue #139 T2, cwd 非依存の決定的解決) ----
-
-    /// routine 既定永続化の基準ディレクトリ抽出 (loop 10)。
-    /// 親を持つパスは親、ベアファイル名は `.` へフォールバック。
     #[test]
     fn routine_artifacts_base_dir_parent_or_dot() {
         assert_eq!(
@@ -938,8 +934,6 @@ mod tests {
         assert_eq!(resolve_pipeline_dir(&input, root.path()), input);
     }
 
-    /// 実機 workspace ルートでカタログの PC 版パイプラインの相対指定がすべて解決される
-    /// (Issue #188 で android 用 4 ディレクトリを削除済み)。
     #[test]
     fn resolve_pipeline_dir_supports_all_real_pipelines_on_real_root() {
         let root = cli_workspace_root();
@@ -951,7 +945,6 @@ mod tests {
                 "{id}: not resolved to existing dir: {}",
                 got.display()
             );
-            // bare name 指定も同一ディレクトリへ解決される。
             let bare = resolve_pipeline_dir(&PathBuf::from(id), &root);
             assert!(
                 bare.is_dir(),
@@ -960,11 +953,6 @@ mod tests {
             );
         }
     }
-
-    // ---- ensure_outcome_label (pure contract, device-free) ----
-    // この純粋関数が `run` パスと standalone サブコマンドの
-    // 「EnsureOutcome → 人間可読メッセージ」唯一の真実の源(single source of truth)。
-    // 両経路のドリフトを防ぐため、ラベル化は必ずこの関数へ集中させる。
 
     #[test]
     fn label_already_open() {
@@ -992,28 +980,19 @@ mod tests {
 
     #[test]
     fn label_covers_all_variants() {
-        // EnsureOutcome へ新バリアントが追加された際、このテストがラベル未対応を検出する。
         let variants = [
             anaden_device::EnsureOutcome::AlreadyOpen,
             anaden_device::EnsureOutcome::Launched,
             anaden_device::EnsureOutcome::Timeout,
         ];
         for v in &variants {
-            // 各バリアントが空でないラベルへ解決されること(フォールバック漏れ検出)。
             let label = ensure_outcome_label(v);
             assert!(!label.is_empty(), "variant {:?} produced empty label", v);
         }
     }
 
-    // ---- ensure_open_exit_code (Issue #21 exit-code contract, device-free) ----
-    // 契約: AlreadyOpen=0, Launched=0, Timeout=2(非0・ハードエラー1とは区別)。
-    // ハードエラー(spawn/OpenProcess 失敗)は standalone_exit_code が Err を
-    // EXIT_HARDCERROR(1) へ射影する(main exit_standalone の真経路・AC4)。本テストは
-    // 「ソフト成果物の exit code」のみ検証し、Err 側は ensure_open_cli.rs の真正テストが担う。
-
     #[test]
     fn exit_code_already_open_is_zero() {
-        // CI gate は AlreadyOpen を success とみなす(UC-1: 起動スキップ)。
         assert_eq!(
             anaden_cli_contract::ensure_open_exit_code(&anaden_device::EnsureOutcome::AlreadyOpen),
             0
@@ -1022,7 +1001,6 @@ mod tests {
 
     #[test]
     fn exit_code_launched_is_zero() {
-        // CI gate は Launched を success とみなす(UC-2: 起動+生存確認)。
         assert_eq!(
             anaden_cli_contract::ensure_open_exit_code(&anaden_device::EnsureOutcome::Launched),
             0
@@ -1031,8 +1009,6 @@ mod tests {
 
     #[test]
     fn exit_code_timeout_is_non_zero_and_distinct_from_hard_error() {
-        // UC-3: Timeout は CI gate 失敗(非0)。推奨契約値 2 はハードエラー(exit 1 via
-        // standalone_exit_code)と区別される「ソフト失敗」。この分離が run-vs-standalone の意味の分裂の核。
         let code =
             anaden_cli_contract::ensure_open_exit_code(&anaden_device::EnsureOutcome::Timeout);
         assert_ne!(code, 0, "Timeout must be non-zero for CI gate");
@@ -1049,30 +1025,11 @@ mod tests {
 
     #[test]
     fn exit_code_success_variants_share_zero() {
-        // AlreadyOpen と Launched は CI gate 上同一个(success)。両者が異なる exit code だと
-        // スクリプト分岐が無用に複雑になる。同一の 0 に揃っていることを検証。
         assert_eq!(
             anaden_cli_contract::ensure_open_exit_code(&anaden_device::EnsureOutcome::AlreadyOpen),
             anaden_cli_contract::ensure_open_exit_code(&anaden_device::EnsureOutcome::Launched)
         );
     }
-
-    // ---- parse_goal_flag (T4 option B: CLI flag --goal / --goal-file) ----
-    //
-    // Issue #37 acceptance: `run` コマンドが宣言的 Goal を受け取れること。
-    // T4-design-gate で option (B) CLI flag を選定した根拠 (当時):
-    //   - load_pipeline_manifest/PipelineManifest は Issue #38 で削除対象とされ
-    //     manifest reader は greenfield な dead-code になる懸念があった。
-    //   その後 manifest は anaden-vision に (再)実装され studio が保存するように
-    //   なったため、DEF-004 (07-manifest-goal) で resolve_goal が manifest 既定
-    //   採用を担当し、本関数は明示フラグ解決として存続する。
-    //
-    // 本 helper は純粋関数(I/O は --goal-file の fs::read_to_string のみ)で、
-    // --goal と --goal-file の両方 None なら None を返す(後方互換: 無限ループ維持)。
-
-    // ---- --version 表示 (軽量自己完結機能, Issue #61) ----
-    // 従来 `anaden --version` は "unexpected argument" エラーになった(version 属性未設定)。
-    // `#[command(version)]` により Cargo.toml の version が表示されることを検証する。
 
     #[test]
     fn version_flag_renders_crate_version() {
@@ -1094,14 +1051,12 @@ mod tests {
 
     #[test]
     fn parse_goal_flag_both_none_returns_none() {
-        // --goal も --goal-file も未指定 → None(ゴール無し = 従来の無限ループ挙動)。
         let parsed = parse_goal_flag(None, None).expect("both-none must be Ok(None)");
         assert!(parsed.is_none(), "no flag → no goal (backcompat)");
     }
 
     #[test]
     fn parse_goal_flag_inline_goal_parses() {
-        // --goal <inline-toml>: toml::from_str::<Goal> でパース + validate Ok。
         let inline = r#"
         name = "farm50"
         [stop]
@@ -1118,7 +1073,6 @@ mod tests {
 
     #[test]
     fn parse_goal_flag_inline_goal_validates() {
-        // validate が失敗する Goal(target=0)は Err。純粋ドメイン検証を経ることの証明。
         let inline = r#"
         name = "bad"
         [stop]
@@ -1133,14 +1087,12 @@ mod tests {
 
     #[test]
     fn parse_goal_flag_inline_invalid_toml_is_err() {
-        // 不正 TOML 構文は Err(panic しない)。
         let err = parse_goal_flag(Some("not = valid = toml"), None).expect_err("bad toml");
         assert!(!format!("{err}").is_empty());
     }
 
     #[test]
     fn parse_goal_flag_inline_unknown_field_rejected() {
-        // deny_unknown_fields: 未知トップレベルフィールドは Err。
         let inline = r#"
         name = "g"
         bogus = true
@@ -1152,7 +1104,6 @@ mod tests {
 
     #[test]
     fn parse_goal_flag_file_reads_and_parses() {
-        // --goal-file <path>: ファイルを読んでパース。
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("goal.toml");
         std::fs::write(
@@ -1179,7 +1130,6 @@ mod tests {
 
     #[test]
     fn parse_goal_flag_file_missing_is_err() {
-        // 存在しないファイルは Err(panic しない)。
         let err = parse_goal_flag(
             None,
             Some(std::path::Path::new("/nonexistent/does/not/exist.toml")),
@@ -1193,7 +1143,6 @@ mod tests {
 
     #[test]
     fn parse_goal_flag_both_set_is_err() {
-        // --goal と --goal-file の同時指定は曖昧なので Err(排他)。
         let inline = r#"
         name = "g"
         [stop]
@@ -1207,9 +1156,6 @@ mod tests {
         );
     }
 
-    // ---- resolve_goal: manifest 既定ゴール (DEF-004 / US-GOAL-01) ----
-
-    /// fixture: pipeline.toml に goals を持つ pipeline dir を作る。
     fn manifest_goal_dir(goals_toml: &str) -> tempfile::TempDir {
         let tmp = tempfile::tempdir().unwrap();
         std::fs::write(
@@ -1220,8 +1166,6 @@ mod tests {
         tmp
     }
 
-    /// DEF-004: フラグ未指定時は manifest の goals が既定ゴールとして採用される
-    /// (単一 goal はそのまま — 名前も維持)。
     #[test]
     fn resolve_goal_manifest_single_goal_used_when_flags_absent() {
         let dir = manifest_goal_dir(
@@ -1237,8 +1181,6 @@ mod tests {
         ));
     }
 
-    /// DEF-004: goals 無宣言 (= 空) の manifest は従来どおりゴール無し
-    /// (無限ループ / MaxIterations 挙動の後方互換)。
     #[test]
     fn resolve_goal_manifest_empty_goals_returns_none() {
         let dir = manifest_goal_dir("");
@@ -1249,7 +1191,6 @@ mod tests {
         );
     }
 
-    /// DEF-004: manifest 不在 pipeline は従来どおりゴール無し。
     #[test]
     fn resolve_goal_manifest_missing_returns_none() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1260,7 +1201,6 @@ mod tests {
         );
     }
 
-    /// DEF-004: 明示フラグは manifest より優先 (マージしない・単一情報源)。
     #[test]
     fn resolve_goal_explicit_flag_overrides_manifest() {
         let dir = manifest_goal_dir(
@@ -1276,8 +1216,6 @@ mod tests {
         assert_eq!(g.name, "flag_goal", "明示 --goal が manifest に勝つ");
     }
 
-    /// DEF-004: manifest が存在して parse 不能なら Err (fail-closed)。
-    /// 壊れた manifest に黙ってゴール無しで実行し続けない。
     #[test]
     fn resolve_goal_broken_manifest_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1289,9 +1227,6 @@ mod tests {
         );
     }
 
-    /// DEF-004: 複数 [[goal]] は終端条件リスト = Any 合成 (いずれかで停止)。
-    /// goal-manifest.md の「[[goal]] = ゴール(終端条件)」宣言と、login の
-    /// Any パターン (Field到達 OR Timeout 安全弁) と同一セマンティクス。
     #[test]
     fn resolve_goal_multiple_goals_composed_as_any() {
         let dir = manifest_goal_dir(
@@ -1318,8 +1253,6 @@ mod tests {
         }
     }
 
-    /// DEF-004: リポジトリ実 manifest (login) の goals が解決される結合検証。
-    /// login の goal は Any (Field 到達 OR 120s 安全弁)。
     #[test]
     fn resolve_goal_repo_login_manifest_resolves() {
         let root = cli_workspace_root();
@@ -1329,10 +1262,6 @@ mod tests {
         assert!(matches!(g.stop, anaden_core::StopCondition::Any { .. }));
     }
 
-    // ---- run レポート永続化 (03-report-channel) ----
-
-    /// デバイス不要の fake バックエンド (engine テストの FakeCapture 相当)。
-    /// capture 常時失敗 → recovery 無しで CaptureError 即停止を引き出す。
     mod fake_backend {
         use anaden_core::InputAction;
         use anaden_device::DeviceError;
@@ -1360,15 +1289,11 @@ mod tests {
         }
     }
 
-    /// 統合 (デバイス不要の fake pipeline): run_driver がループ終了後に
-    /// report.json を書き、停止理由・サイクル数・発火数が機械可読形式で
-    /// 入っていること。既定永続化 (report.json + run.log) も同時に検証。
     #[tokio::test]
     async fn run_driver_writes_report_file_with_stop_reason() {
         let dir = tempfile::tempdir().unwrap();
         let pipeline_dir = dir.path().join("pl");
         std::fs::create_dir_all(&pipeline_dir).unwrap();
-        // 既定永続化経路 (report.json + run.log) を解決して事前作成。
         let artifacts =
             run_report::resolve_run_artifacts(&pipeline_dir, None, false, "20260101-000000");
         artifacts.prepare().unwrap();
@@ -1385,7 +1310,6 @@ mod tests {
             .await
             .unwrap();
 
-        // 既定場所に report.json + run.log が存在する。
         let base = pipeline_dir.join(".anaden-run").join("20260101-000000");
         assert!(base.join("run.log").is_file(), "run.log missing");
         let file = std::fs::File::open(base.join("report.json")).unwrap();
@@ -1398,7 +1322,6 @@ mod tests {
         assert_eq!(report.fired_count, 0);
     }
 
-    /// 統合: `--no-persist` 相当 (artifacts 無効) では何も書かない。
     #[tokio::test]
     async fn run_driver_no_persist_writes_nothing() {
         let dir = tempfile::tempdir().unwrap();
@@ -1424,9 +1347,6 @@ mod tests {
         );
     }
 
-    // ===== Issue #252: watch タスク名の manifest 解決 (fail-closed 検証) =====
-
-    /// manifest 不在 → watch 空 (従来挙動)。
     #[test]
     fn resolve_watch_tasks_without_manifest_returns_empty() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1434,7 +1354,6 @@ mod tests {
         assert!(got.is_empty());
     }
 
-    /// watch 未宣言の manifest → watch 空。
     #[test]
     fn resolve_watch_tasks_without_watch_key_returns_empty() {
         let dir = manifest_goal_dir("");
@@ -1442,7 +1361,6 @@ mod tests {
         assert!(got.is_empty());
     }
 
-    /// watch 宣言にある名前が TaskDef に存在しない → Err (run 前 fail-closed)。
     #[test]
     fn resolve_watch_tasks_unknown_name_errors() {
         let tmp = tempfile::tempdir().unwrap();
@@ -1459,7 +1377,6 @@ mod tests {
         );
     }
 
-    /// manifest が parse 不能 → Err (resolve_goal と同一の fail-closed 契約)。
     #[test]
     fn resolve_watch_tasks_broken_manifest_errors() {
         let tmp = tempfile::tempdir().unwrap();

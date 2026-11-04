@@ -1,5 +1,3 @@
-//! 一時検証ヘルパ: 入力PNGを ScreenScaler と同じ方法(幅1280・Triangle)で正規化して保存。
-//! run-pipeline の内部正規化と同一結果を得るため、テンプレ crop 元画像を作る。
 use anaden_vision::ScreenScaler;
 
 fn main() {

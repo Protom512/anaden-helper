@@ -53,8 +53,6 @@ impl StudioApp {
 mod tests {
     use super::*;
 
-    /// ヘッドレス egui コンテキストを用意し、その中に子 Ui を作る。
-    /// GUI バックエンド不要でパネル描画を単体テストできる。
     fn child_ui(ctx: &egui::Context) -> egui::Ui {
         egui::Ui::new(
             ctx.clone(),
@@ -66,8 +64,6 @@ mod tests {
         )
     }
 
-    /// 埋め込み描画 API（render_modebar + render_body）が Authoring モードで
-    /// パニックせず完了することを検証する（Issue #119 shard 1 task 2）。
     #[test]
     fn embed_render_authoring_mode_completes_without_panic() {
         let ctx = egui::Context::default();
@@ -79,7 +75,6 @@ mod tests {
         let _ = ctx.end_pass();
     }
 
-    /// 埋め込み描画 API が Batch モード（混同行列 UI 含む）でも壊れないことを検証する。
     #[test]
     fn embed_render_batch_mode_completes_without_panic() {
         let ctx = egui::Context::default();
@@ -92,8 +87,6 @@ mod tests {
         let _ = ctx.end_pass();
     }
 
-    /// 接続バッジ・チェックボタン・エラー理由パネルを含む Authoring 描画が
-    /// パニックせず完了すること (Issue #139 T3)。
     #[test]
     fn embed_render_connection_panel_completes_without_panic() {
         let ctx = egui::Context::default();
@@ -105,9 +98,6 @@ mod tests {
         let _ = ctx.end_pass();
     }
 
-    /// 実演オーサリングモード (Issue #190 Shard 2) の埋め込み描画が
-    /// パニックせず完了すること (セッション未開始 + スクリーンショット無しの
-    /// 初期状態。ライブビューのガイド表示へ到達する)。
     #[test]
     fn embed_render_live_authoring_mode_completes_without_panic() {
         let ctx = egui::Context::default();
@@ -119,7 +109,6 @@ mod tests {
         let _ = ctx.end_pass();
     }
 
-    /// UI のボタンラベルに Unicode 絵文字が残っていないこと (豆腐排除・機械検証)。
     #[test]
     fn app_button_labels_contain_no_emoji() {
         let labels = [

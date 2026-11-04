@@ -90,10 +90,6 @@ mod tests {
     use super::*;
     use image::Luma;
 
-    // ---- Issue #139 T5: UC-3 作成タブ → pipeline task TOML 保存 ----
-
-    /// pipeline_task_spec は有効な方式文字列から TaskDef を構築する。
-    /// engine_kind.method_str ("sse"/"ccoeff") がそのまま使える。
     #[test]
     fn pipeline_task_spec_builds_from_method_str() {
         let roi = ScreenRegion::new(10, 20, 30, 40);
@@ -127,7 +123,6 @@ mod tests {
         assert_eq!(sse.action, Some(anaden_vision::Action::DoNothing));
     }
 
-    /// 未知の方式文字列は None (fail-closed。黙って sse にフォールバックしない)。
     #[test]
     fn pipeline_task_spec_rejects_unknown_method() {
         assert!(
@@ -143,9 +138,6 @@ mod tests {
         );
     }
 
-    /// save_pipeline_task が書いた TOML は既存 load_pipeline で読み込める (roundtrip)。
-    /// 作成タブで保存した task が実行パイプライン (anaden-cli) からそのまま
-    /// 使えることの結合保証。
     #[test]
     fn save_pipeline_task_roundtrips_through_load_pipeline() {
         let dir = tempfile::tempdir().unwrap();
@@ -172,7 +164,6 @@ mod tests {
         assert_eq!(tasks[0].action, Some(anaden_vision::Action::ClickSelf));
     }
 
-    /// action 種別の label ラウンドトリップ (UI コンボ用)。
     #[test]
     fn pipeline_action_kind_labels_roundtrip() {
         for k in [

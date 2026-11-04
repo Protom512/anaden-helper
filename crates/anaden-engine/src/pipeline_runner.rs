@@ -118,7 +118,6 @@ mod tests {
     use image::{DynamicImage, GrayImage, Luma};
     use std::path::PathBuf;
 
-    /// `(x+y) mod 64` の勾配パターン（pipeline.rs テスト準拠）。
     fn gradient_needle(w: u32, h: u32) -> GrayImage {
         let mut img = GrayImage::new(w, h);
         for y in 0..h {
@@ -130,7 +129,6 @@ mod tests {
         img
     }
 
-    /// 背景の上に needle を `(ox, oy)` に埋め込んだ画像。
     fn embed(
         haystack_w: u32,
         haystack_h: u32,
@@ -153,12 +151,10 @@ mod tests {
         DynamicImage::ImageLuma8(img)
     }
 
-    /// ダミー領域（advance_next テストでは値不問）。
     fn dummy_region() -> ScreenRegion {
         ScreenRegion::new(0, 0, 1, 1)
     }
 
-    /// advance_next テスト用の StepOutcome を構築するヘルパ。
     fn outcome(action: Action, next: Vec<&str>) -> StepOutcome {
         StepOutcome {
             matched_task: "T".into(),
@@ -168,12 +164,6 @@ mod tests {
             matched_confidence: 0.95,
         }
     }
-
-    // ---- (A) action_to_command の全ケース ----
-    //
-    // norm_w/norm_h は ClickRect/Swipe の roi 変換先空間の寸法。ここでは PC版 raw-1258x708 空間
-    // （=PC_CLIENT_*_MEASURED）を渡し恒等変換させ、roi がそのまま中心計算へ渡るようにする。
-    // ClickSelf は matched_region が既に同空間なので norm 値は結果に影響しない。
 
     #[test]
     fn click_self_with_region_taps_center() {
@@ -196,7 +186,6 @@ mod tests {
         let action = Action::ClickRect {
             roi: ScreenRegion::new(520, 320, 240, 80),
         };
-        // matched_region を与えても roi 優先であることを確認。
         let matched = Some(ScreenRegion::new(0, 0, 10, 10));
         assert_eq!(
             action_to_command(&action, matched, FULL_W, FULL_H),
@@ -247,8 +236,6 @@ mod tests {
         );
     }
 
-    // ---- (B) advance_next ----
-
     #[test]
     fn advance_returns_first_next() {
         let out = outcome(Action::ClickSelf, vec!["LoadGame", "Menu"]);
@@ -273,28 +260,16 @@ mod tests {
         assert_eq!(advance_next(&out), Some("X".to_string()));
     }
 
-    // ---- (D) PipelineState::new/current ----
-
     #[test]
     fn state_new_and_current() {
         let s = PipelineState::new("Title");
         assert_eq!(s.current(), "Title");
     }
 
-    // ---- (C) tick: 画像合成を通す統合テスト ----
-    //
-    // 新スケールモデルでは detect は needle/ROI を screenshot 寸法へ動的スケールする。
-    // needle_to_normalized / roi_to_normalized を恒等（sx=sy=1.0）にするため、キャンバスは
-    // PC版実測 raw-1258x708（=PC_CLIENT_*_MEASURED）。これで embed で needle を直接埋め込んでも
-    // detect が needle をスケールせず、埋め込み位置・サイズが保存されたままマッチする。
-    // needle は NEEDLE_PX に小さく保ち、全面 ccoeff 走査（O(N·M)）を単発テストで実用的時間に抑える。
-
     const FULL_W: u32 = 1258;
     const FULL_H: u32 = 708;
-    /// tick 統合テストの needle サイズ（全面走査コスト抑制のため小さく）。
     const NEEDLE_PX: u32 = 16;
 
-    /// テンプレPNGを tempdir に保存し、絶対パスを返す。tempdir は .keep() で永続化する。
     fn write_template_persisted(needle: &GrayImage) -> PathBuf {
         let tmp = tempfile::tempdir().expect("tempdir");
         let p = tmp.path().join("needle.png");
@@ -305,8 +280,6 @@ mod tests {
 
     #[test]
     fn tick_match_emits_command_and_advances() {
-        // ClickRect は matched_region 非依存。needle を含む screenshot でマッチさせ、
-        // roi 中心を Tap する + next[0] へ current が進むことを検証する。
         let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
         let tpl = write_template_persisted(&needle);
@@ -341,7 +314,6 @@ mod tests {
 
     #[test]
     fn tick_no_match_returns_none_and_keeps_current() {
-        // 背景のみ（needle 無）→ run_step None → tick None。current 変更なし。
         let screenshot = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
         let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let tpl = write_template_persisted(&needle);
@@ -396,9 +368,6 @@ mod tests {
         );
     }
 
-    /// F34 (05-template-cache): テンプレート読込エラーは tick を Ok(None) (=NoMatch) に
-    /// 潰さず Err で伝播すること。driver (run_once) はこれを停止系エラーとして扱い、
-    /// リトライ候補の NoMatch と区別する。
     #[test]
     fn tick_missing_template_propagates_err_not_none() {
         let screenshot = luma_dyn(GrayImage::from_pixel(FULL_W, FULL_H, Luma([128u8])));
@@ -440,7 +409,6 @@ mod tests {
             threshold: 0.9,
             base: None,
             action: Some(Action::Stop),
-            // next があっても Stop は next_current=None。
             next: Some(vec!["Ignored".into()]),
         }];
 
@@ -456,8 +424,6 @@ mod tests {
 
     #[test]
     fn click_self_uses_matched_region_in_tick() {
-        // needle を (150,75) に埋め、ClickSelf で tick すると Tap が matched_region の中心
-        // （マッチ左上 + needle wh/2 = (150+20, 75+20) 付近）になることをレンジ検証する。
         let needle = gradient_needle(NEEDLE_PX, NEEDLE_PX);
         let screenshot = luma_dyn(embed(FULL_W, FULL_H, &needle, 150, 75, 128));
         let tpl = write_template_persisted(&needle);
@@ -495,14 +461,6 @@ mod tests {
         assert_eq!(state.current(), "LoadGame");
     }
 
-    // ---- (F) InputCommand の serde Deserialize 境界検証（E0277 回帰ガード） ----
-    //
-    // LoopOutcome.fired_commands: Vec<InputCommand> が serde::Deserialize 境界を満たすには、
-    // InputCommand 自体が Deserialize でなければならない（E0277）。本モジュールは JSON 等の
-    // フォーマットクレート(serde_json/bincode)に依存しないため、汎用デシリアライザを要求する
-    // 関数へ型を渡すことで「Deserialize 境界を満たすこと」を静的に検証する。
-    // T-fix-1 で #[derive(Deserialize)] を外すとこれらのテストはコンパイルエラーとなる。
-
     fn _require_deserialize<'de, T>()
     where
         T: serde::Deserialize<'de>,
@@ -511,20 +469,16 @@ mod tests {
 
     #[test]
     fn input_command_satisfies_serde_deserialize_bound() {
-        // E0277 の直接の再発防止: 型レベルで Deserialize<'de> を要求する関数へ渡す。
         _require_deserialize::<InputCommand>();
     }
 
     #[test]
     fn input_command_vec_satisfies_serde_deserialize_bound() {
-        // Vec<InputCommand> は LoopOutcome.fired_commands の実型。
-        // これが Deserialize 可能であることが E0277 解消の直接の要件。
         _require_deserialize::<Vec<InputCommand>>();
     }
 
     #[test]
     fn input_command_satisfies_serde_serialize_bound() {
-        // Serialize は既存。両 derive が揃っていることを型レベルで担保。
         fn _require_serialize<T>()
         where
             T: serde::Serialize,

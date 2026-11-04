@@ -285,8 +285,6 @@ mod tests {
         ScreenRegion::new(10, 20, 100, 50)
     }
 
-    // ===== validation: StopCondition =====
-
     #[test]
     fn validate_loop_count_ok() {
         let s = StopCondition::LoopCount { target: 50 };
@@ -374,8 +372,6 @@ mod tests {
         assert!(goal.validate().is_err());
     }
 
-    // ===== serde: deny_unknown_fields =====
-
     #[test]
     fn deserialize_loop_count() {
         let toml = r#"
@@ -439,8 +435,6 @@ mod tests {
         assert!(toml::from_str::<Goal>(toml).is_err());
     }
 
-    // ===== GoalStatusContext =====
-
     #[test]
     fn context_new_starts_empty() {
         let ctx = GoalStatusContext::new();
@@ -462,7 +456,6 @@ mod tests {
         let mut ctx = GoalStatusContext::new();
         ctx.tick(Some(("task_a".to_string(), 0.9, region())));
         ctx.tick(None);
-        // last_match は None で上書きされない
         assert_eq!(ctx.last_match, Some(("task_a".to_string(), 0.9, region())));
     }
 
@@ -483,8 +476,6 @@ mod tests {
         ctx.tick(None);
         assert_eq!(ctx.iterations, u64::MAX);
     }
-
-    // ===== evaluate: LoopCount (UC-1) =====
 
     #[test]
     fn evaluate_loop_count_not_yet() {
@@ -522,7 +513,6 @@ mod tests {
 
     #[test]
     fn evaluate_loop_count_reached_at_target() {
-        // target 1: 1 tick で到達
         let goal = Goal {
             name: "once".to_string(),
             stop: StopCondition::LoopCount { target: 1 },
@@ -533,8 +523,6 @@ mod tests {
         };
         assert!(matches!(evaluate(&goal, &ctx, 0), GoalStatus::Reached(_)));
     }
-
-    // ===== evaluate: TemplateMatch (UC-2) =====
 
     #[test]
     fn evaluate_template_match_not_yet_no_match() {
@@ -620,8 +608,6 @@ mod tests {
         assert!(matches!(evaluate(&goal, &ctx, 0), GoalStatus::Reached(_)));
     }
 
-    // ===== evaluate: Timeout (UC-3) =====
-
     #[test]
     fn evaluate_timeout_not_yet() {
         let goal = Goal {
@@ -671,7 +657,6 @@ mod tests {
 
     #[test]
     fn evaluate_timeout_includes_progress_in_report() {
-        // UC-3: タイムアウト時に進捗レポートが含まれる
         let goal = Goal {
             name: "limit".to_string(),
             stop: StopCondition::Timeout { secs: 30 },
@@ -690,8 +675,6 @@ mod tests {
             Some(("boss_half".to_string(), 0.71, region()))
         );
     }
-
-    // ===== validate: composition (All / Any) =====
 
     #[test]
     fn validate_all_with_valid_children_ok() {
@@ -749,7 +732,6 @@ mod tests {
 
     #[test]
     fn validate_all_deeply_nested_recurses() {
-        // All(LoopCount(1), Any(LoopCount(0)))
         let inner_bad = StopCondition::Any {
             conditions: vec![StopCondition::LoopCount { target: 0 }],
         };
@@ -794,8 +776,6 @@ mod tests {
         assert!(!msg.is_empty());
         assert!(msg.contains("All"));
     }
-
-    // ===== serde: composition round-trip =====
 
     #[test]
     fn deserialize_all_inline_table() {
@@ -848,7 +828,6 @@ mod tests {
 
     #[test]
     fn deserialize_all_nested_subtable() {
-        // サブテーブル + [[stop.All.conditions]] 形式の round-trip
         let toml = r#"
         name = "nested"
         [[stop.All.conditions]]
@@ -895,8 +874,6 @@ mod tests {
 
     #[test]
     fn serialize_deserialize_all_roundtrip() {
-        // 再帰的にネストした All(LoopCount, Any(TemplateMatch, Timeout)) の
-        // serialize → deserialize 完全往復テスト (R4 最高リスク項目)
         let goal = Goal {
             name: "rt".to_string(),
             stop: StopCondition::All {
@@ -919,8 +896,6 @@ mod tests {
         assert_eq!(goal, back);
     }
 
-    // ===== evaluate: All/Any 合成（UC-1 AND / UC-2 OR）=====
-
     #[test]
     fn evaluate_all_all_reached_returns_reached() {
         let goal = Goal {
@@ -941,7 +916,6 @@ mod tests {
 
     #[test]
     fn evaluate_all_one_failed_returns_failed() {
-        // Timeout(60) @elapsed=70 → Failed。LoopCount(1)=Reached。All は1つでも Failed で Failed。
         let goal = Goal {
             name: "and".to_string(),
             stop: StopCondition::All {
@@ -963,9 +937,6 @@ mod tests {
 
     #[test]
     fn evaluate_all_failed_before_not_yet_returns_failed() {
-        // Issue #230 回帰: [Failed, NotYet] の評価順では Failed が勝つ (Timeout 安全弁)。
-        // Timeout(60) @elapsed=70 → Failed が先、LoopCount(100)=NotYet が後。
-        // 短絡解除版 (旧バグ) は any_not_yet 常優先で NotYet を返した。
         let goal = Goal {
             name: "and".to_string(),
             stop: StopCondition::All {
@@ -987,7 +958,6 @@ mod tests {
 
     #[test]
     fn evaluate_all_one_not_yet_returns_not_yet() {
-        // LoopCount(1)=Reached、Timeout(60)=NotYet → All NotYet
         let goal = Goal {
             name: "and".to_string(),
             stop: StopCondition::All {
@@ -1006,7 +976,6 @@ mod tests {
 
     #[test]
     fn evaluate_any_one_reached_no_failed_returns_reached() {
-        // LoopCount(1)=Reached、Timeout(60)=NotYet、Failed なし → Any Reached
         let goal = Goal {
             name: "or".to_string(),
             stop: StopCondition::Any {
@@ -1025,7 +994,6 @@ mod tests {
 
     #[test]
     fn evaluate_any_failed_and_reached_prefers_failed() {
-        // Failed 優先: LoopCount(1)=Reached、Timeout(60)@70=Failed → Any Failed
         let goal = Goal {
             name: "or".to_string(),
             stop: StopCondition::Any {
@@ -1044,7 +1012,6 @@ mod tests {
 
     #[test]
     fn evaluate_any_failed_and_reached_prefers_failed_reversed() {
-        // 順序非依存: Timeout(60)@70=Failed、LoopCount(1)=Reached → Any Failed
         let goal = Goal {
             name: "or".to_string(),
             stop: StopCondition::Any {
@@ -1081,7 +1048,6 @@ mod tests {
 
     #[test]
     fn evaluate_any_failed_and_not_yet_returns_failed() {
-        // Timeout(60)@70=Failed、LoopCount(5)=NotYet → Any Failed
         let goal = Goal {
             name: "or".to_string(),
             stop: StopCondition::Any {
@@ -1100,8 +1066,6 @@ mod tests {
 
     #[test]
     fn evaluate_nested_all_any_recurses() {
-        // All{LoopCount(1), Any{Timeout(60), LoopCount(1)}}
-        // iterations=1: LoopCount=Reached、Any(Timeout NotYet, LoopCount Reached)=Reached → All Reached
         let goal = Goal {
             name: "nested".to_string(),
             stop: StopCondition::All {
@@ -1125,7 +1089,6 @@ mod tests {
 
     #[test]
     fn validate_rejects_excessive_composition_depth() {
-        // MAX_COMPOSITION_DEPTH + 2 回 All でラップ → 最深ノード depth = MAX+2(18) > MAX(16) で拒否
         let mut cond = StopCondition::LoopCount { target: 1 };
         for _ in 0..(StopCondition::MAX_COMPOSITION_DEPTH + 2) {
             cond = StopCondition::All {
@@ -1138,7 +1101,6 @@ mod tests {
 
     #[test]
     fn validate_accepts_composition_depth_at_limit() {
-        // MAX_COMPOSITION_DEPTH(16) 回 All でラップ → 最深ノード depth=16（境界値）。許容される。
         let mut cond = StopCondition::LoopCount { target: 1 };
         for _ in 0..StopCondition::MAX_COMPOSITION_DEPTH {
             cond = StopCondition::All {

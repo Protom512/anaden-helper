@@ -1,7 +1,3 @@
-//! format_diagnose_report の整形仕様テスト（Issue #71 Task 2）。
-//!
-//! diagnose.rs の 500 行制限を守るため、レポート整形系のテストはここに分離した。
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::panic)]
 #![allow(clippy::expect_used)]
@@ -48,15 +44,10 @@ mod report_tests {
         let report = format_diagnose_report("top.png", (1280, 720), &entries);
         assert!(report.contains("Low"));
         assert!(report.contains("High"));
-        // ROI 内訳（scaled_roi の座標・寸法）
         assert!(report.contains("(0,0) 200x100"));
-        // ROI なし = full
         assert!(report.contains("full"));
-        // スケール倍率内訳
         assert!(report.contains("(1.017,1.017)"));
-        // needle 寸法
         assert!(report.contains("40x40"));
-        // 領域
         assert!(report.contains("(10,20) 30x40"));
     }
 

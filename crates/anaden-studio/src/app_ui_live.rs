@@ -333,7 +333,6 @@ mod tests {
     use crate::app_state::AppMode;
     use image::{DynamicImage, GrayImage, Luma};
 
-    /// 構造あり合成フレーム (Shard 1 テスト流用)。
     fn gradient_frame(w: u32, h: u32, seed: u32) -> DynamicImage {
         let mut img = GrayImage::new(w, h);
         for y in 0..h {
@@ -345,7 +344,6 @@ mod tests {
         DynamicImage::ImageLuma8(img)
     }
 
-    /// ヘッドレス egui コンテキスト内に子 Ui を作る (app_ui_body テスト流用)。
     fn child_ui(ctx: &egui::Context) -> egui::Ui {
         egui::Ui::new(
             ctx.clone(),
@@ -357,8 +355,6 @@ mod tests {
         )
     }
 
-    /// スクリーンショット + セッション開始 + 未確定ジェスチャ (領域のみ) の状態で
-    /// ライブビュー描画 (オーバーレイ含む) がパニックせず完了すること。
     #[test]
     fn render_live_authoring_with_frame_and_pending_gestures_completes() {
         let ctx = egui::Context::default();
@@ -375,7 +371,6 @@ mod tests {
         ));
         app.set_mode(AppMode::LiveAuthoring);
 
-        // 2 パス描画 (テクスチャ生成パス + 描画パス)。
         for _ in 0..2 {
             ctx.begin_pass(egui::RawInput::default());
             app.render_modebar(&mut child_ui(&ctx));
@@ -384,7 +379,6 @@ mod tests {
         }
     }
 
-    /// thumbnail_scale: 長辺を max_edge へ縮め、小さい画像は等倍のまま。
     #[test]
     fn thumbnail_scale_fits_long_edge() {
         assert!((thumbnail_scale([320, 60], 160.0) - 0.5).abs() < 1e-6);

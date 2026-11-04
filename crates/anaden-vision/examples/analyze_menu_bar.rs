@@ -1,6 +1,3 @@
-//! 一時解析ヘルパ: menu_pc_probe.png の下部 7 アイコン(右クラスタ)を決定論的に検出し、
-//! 各アイコンの [x,y,w,h] ROI (RAW 1258x708 空間) と RGBA 自己クロップ PNG を出力。
-//! usage: analyze_menu_bar <input.png> <out_dir> <n0,n1,...,n6>
 use image::{DynamicImage, GenericImageView, RgbaImage};
 use std::path::Path;
 
@@ -22,14 +19,12 @@ fn main() {
     let gray = img.to_luma8();
     eprintln!("image: {w}x{h}");
 
-    // バー帯 y=579..652 (行スコア解析で特定済み)。上下マージン込みで y=579,h=73 を採用。
     let bar_y: u32 = 579;
     let bar_h: u32 = 73;
     let y_start = bar_y;
     let y_end = bar_y + bar_h;
     let band_h = (y_end - y_start) as usize;
 
-    // 右クラスタ x=640..1258 の列分散を計算。
     let xs: u32 = 640;
     let xe: u32 = w;
     let mut col_var: Vec<u64> = Vec::new();
@@ -58,7 +53,6 @@ fn main() {
         })
         .collect();
 
-    // 「描画あり」連続 run を抽出(閾値 max*0.12)。
     let thr = max_var * 0.12;
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
@@ -73,7 +67,6 @@ fn main() {
             i += 1;
         }
     }
-    // 幅 >=55 の run だけをアイコンとみなす(境界アーティファクトの w<30 を除外)。
     let icons: Vec<(usize, usize)> = runs.into_iter().filter(|(s, e)| e - s >= 55).collect();
     let centers: Vec<u32> = icons.iter().map(|(s, e)| ((*s + *e) / 2) as u32).collect();
     eprintln!("icon runs(>=55px): {} centers={:?}", icons.len(), centers);
@@ -81,7 +74,6 @@ fn main() {
         panic!("expected 7 icons, detected {}", centers.len());
     }
 
-    // 各アイコン ROI: 検出 run の x 範囲をそのまま使う(隙間を含めない)。
     std::fs::create_dir_all(out_dir).expect("mkdir out_dir");
     println!("BAR: y={bar_y} h={bar_h}");
     for (k, (s, e)) in icons.iter().enumerate() {
@@ -91,7 +83,6 @@ fn main() {
         let roi = [rx, bar_y, rw, bar_h];
         println!("{name}: {roi:?}");
 
-        // RGBA 自己クロップ PNG 保存。
         let mut sub: RgbaImage = image::ImageBuffer::new(rw, bar_h);
         for yy in 0..bar_h {
             for xx in 0..rw {

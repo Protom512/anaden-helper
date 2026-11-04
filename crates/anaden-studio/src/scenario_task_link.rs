@@ -197,7 +197,6 @@ mod tests {
     use anaden_vision::{Action, Algorithm, TaskDef};
     use std::fs;
 
-    /// テスト用 TaskDef (scenario_ui テストと同構成)。
     fn task_def(name: &str) -> TaskDef {
         TaskDef {
             name: name.to_string(),
@@ -212,8 +211,6 @@ mod tests {
         }
     }
 
-    /// 検証済みシナリオを `root/templates/pipelines/<name>/` へ保存し、
-    /// その pipeline dir を返す ((a) 段階の再現)。
     fn saved_pipeline(root: &Path, name: &str) -> PathBuf {
         let pipelines_root = root.join("templates/pipelines");
         let mut st = ScenarioEditorState::new(name);
@@ -227,7 +224,6 @@ mod tests {
         crate::scenario_ui::save_scenario(&st, &[], &pipelines_root).expect("save scenario")
     }
 
-    /// 正常系 1: 新規登録 → TOML 往復 (parse_toml) で is_selectable == true。
     #[test]
     fn register_generates_enabled_selectable_task_toml() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -252,7 +248,6 @@ mod tests {
             Some(Path::new("templates/pipelines/fishing2"))
         );
         assert_eq!(def.start_task.as_deref(), Some("Start"));
-        // ディスク上の TOML はヘッダコメント付きで parse_toml 往復可能。
         let source = fs::read_to_string(tasks_dir.join("fishing2.toml")).expect("read");
         assert!(
             source.starts_with('#'),
@@ -265,7 +260,6 @@ mod tests {
         assert_eq!(reparsed.title, "つり (新規)");
     }
 
-    /// 正常系 2: 既存 stub への紐付け有効化 → implemented=true + pipeline_dir 書き戻り。
     #[test]
     fn bind_enables_existing_stub_writing_back_pipeline_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -273,7 +267,6 @@ mod tests {
         let tasks_dir = root.join("templates/tasks");
         fs::create_dir_all(&tasks_dir).expect("mkdir");
         let pipeline = saved_pipeline(root, "fishing2");
-        // 既存 stub (由来コメント・インラインコメント付き = テンプレ実物形式)。
         fs::write(
             tasks_dir.join("neko_nikki.toml"),
             "# ねこにっきタスクのスケルトン (Issue #154)。\n\
@@ -305,7 +298,6 @@ mod tests {
         );
     }
 
-    /// エッジ 1: 同名 task TOML 既存 → 上書き拒否 + 既存ファイルのバイト不変。
     #[test]
     fn register_refuses_existing_task_toml_leaving_file_untouched() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -336,7 +328,6 @@ mod tests {
         );
     }
 
-    /// エッジ 2: 不正 task id (パス区切り・予約文字・空) → 拒否。root 外 pipeline → 拒否。
     #[test]
     fn register_rejects_unsafe_task_id_and_outside_root_pipeline() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -344,7 +335,6 @@ mod tests {
         let tasks_dir = root.join("templates/tasks");
         let pipeline = saved_pipeline(root, "fishing2");
 
-        // パス区切り・`.`/`..`・空・Windows 予約文字・backslash は UnsafeTaskId。
         for bad in ["a/b", "..", "", "a\\b", "a:b", "a<b", "a\"b"] {
             let err = register_and_enable_task(&tasks_dir, root, &pipeline, bad, "t", "Start")
                 .expect_err("must reject");
@@ -353,7 +343,6 @@ mod tests {
                 "bad {bad:?}: {err:?}"
             );
         }
-        // root 配下でない pipeline (共通祖先なし → 絶対パス化) は拒否。
         let outside = if cfg!(windows) {
             PathBuf::from(r"D:\elsewhere\pipeline")
         } else {
@@ -367,9 +356,6 @@ mod tests {
         );
     }
 
-    /// minor-1 (Issue #180): bind_and_enable_task も task id を検証する
-    /// (register_and_enable_task と対称)。不正 id (パス区切り・予約文字・空) は
-    /// `tasks_dir.join` される前に UnsafeTaskId で拒否される。
     #[test]
     fn bind_rejects_unsafe_task_id_before_path_join() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -386,25 +372,19 @@ mod tests {
                 "bad {bad:?}: {err:?}"
             );
         }
-        // tasks_dir には何も書かれていない (検査はパス構築後の IO より前段)。
         assert!(
             fs::read_dir(&tasks_dir).expect("read_dir").next().is_none(),
             "不正 id では一切の副作用を残さない"
         );
     }
 
-    /// minor-2 (Issue #180): TOML write 失敗も補償削除対象。id としては安全
-    /// (単一パス要素・予約文字なし) だがファイル名が FS のパス成分長上限
-    /// (255 文字) を超える id で write を失敗させ、部分ファイルを含む残留
-    /// ゼロを検証する (部分書き込みそのものは std::fs を差し替えられない
-    /// ため再現不可 — write 失敗経路の補償挙動を実パスで確認)。
     #[test]
     fn register_compensates_task_toml_on_write_failure() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         let tasks_dir = root.join("templates/tasks");
         let pipeline = saved_pipeline(root, "fishing2");
-        let long_id = "A".repeat(300); // `<id>.toml` = 304 文字 > 255
+        let long_id = "A".repeat(300);
 
         let err =
             register_and_enable_task(&tasks_dir, root, &pipeline, &long_id, "長い名前", "Start")
@@ -423,8 +403,6 @@ mod tests {
         );
     }
 
-    /// minor-2 (create 系エラーパス): tasks_dir 自体が既存ファイルなら
-    /// create_dir_all が失敗する。前提資産 (そのファイル) は 1 バイトも変わらない。
     #[test]
     fn register_write_failure_keeps_preexisting_tasks_dir_file_intact() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -449,13 +427,11 @@ mod tests {
         );
     }
 
-    /// エッジ 3: pipeline が load 不能 → enable_task エラーが伝播 + 補償削除。
     #[test]
     fn register_propagates_enable_error_and_cleans_up_created_toml() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path();
         let tasks_dir = root.join("templates/tasks");
-        // pipeline を保存しない (= manifest 無しで load 不能)。
         let ghost = root.join("templates/pipelines/ghost");
 
         let err =
@@ -475,7 +451,6 @@ mod tests {
         );
     }
 
-    /// 補助: stub_options は未実装 pipeline_run のみを抽出する。
     #[test]
     fn stub_options_filter_unimplemented_pipeline_run_only() {
         let parse =
@@ -500,7 +475,6 @@ mod tests {
         assert_eq!(stubs[0].title, "スタブ");
     }
 
-    /// 補助: 空タイトルは task id へフォールバック (フォーム既定値欠落耐性)。
     #[test]
     fn register_uses_task_id_as_title_when_title_empty() {
         let tmp = tempfile::tempdir().expect("tempdir");

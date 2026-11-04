@@ -206,7 +206,6 @@ mod tests {
     use super::*;
     use image::{GrayImage, Luma};
 
-    /// (x+y) mod 64 の勾配パターン（denomT≠0 を保証。pipeline.rs テスト準拠）。
     fn gradient_needle(w: u32, h: u32) -> GrayImage {
         let mut img = GrayImage::new(w, h);
         for y in 0..h {
@@ -261,7 +260,6 @@ mod tests {
     fn diagnose_task_reports_scaled_roi_and_high_conf_for_embedded_needle() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let needle = gradient_needle(40, 40);
-        // screenshot 1258x708 → roi/needle スケールが恒等 (sx=sy=1.0)
         let screenshot = DynamicImage::ImageLuma8(embed(1258, 708, &needle, 600, 340, 128));
         let tpl = write_template(tmp.path(), "n1.png", &needle);
         let t = task("T", tpl, Algorithm::Ccoeff, Some([520, 320, 240, 80]));
@@ -293,15 +291,10 @@ mod tests {
 
         let e = diagnose_task(&t, &screenshot);
 
-        // sx = 1280/1258, sy = 720/708
         assert!((e.scale_factors.0 - 1280.0 / 1258.0).abs() < 1e-6);
         assert!((e.scale_factors.1 - 720.0 / 708.0).abs() < 1e-6);
-        // ROI: 520*1280/1258=529.1→529, 320*720/708=325.4→325, w 244, h 244
         assert_eq!(e.scaled_roi, Some(ScreenRegion::new(529, 325, 244, 81)));
-        // needle 40x40 → 40*1280/1258=40.7→41 x 40*720/708=40.7→41
         assert_eq!(e.needle_scaled_size, Some((41, 41)));
-        // needle は 41x41 へリスケールされるが screenshot 内の埋込は 40x40 のまま
-        // （サブピクセル差）のため、conf の高さは保証しない。取得できること自体を検証。
         assert!(
             e.best_confidence.is_some(),
             "threshold=0.0 で必ず conf を取得"
@@ -311,9 +304,6 @@ mod tests {
     #[test]
     fn diagnose_task_needle_larger_than_screen_is_skipped() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // needle がスケール後も画面より大きい → skipped。
-        // needle_to_normalized は raw-1258 基準で縮小するため、2000x2000 でも
-        // 100x100 画面には収まらない寸法を使う。
         let big = gradient_needle(2000, 2000);
         let screenshot =
             DynamicImage::ImageLuma8(embed(100, 100, &gradient_needle(10, 10), 0, 0, 200));
@@ -347,10 +337,8 @@ mod tests {
     fn diagnose_all_sorts_descending_by_confidence() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let good = gradient_needle(30, 30);
-        // good は埋め込む、bad は埋め込まない（低 conf）
         let screenshot = DynamicImage::ImageLuma8(embed(1258, 708, &good, 100, 100, 128));
         let tpl_good = write_template(tmp.path(), "good.png", &good);
-        // bad は反転勾配（低 conf）にする
         let mut inverted = GrayImage::new(30, 30);
         for y in 0..30 {
             for x in 0..30 {

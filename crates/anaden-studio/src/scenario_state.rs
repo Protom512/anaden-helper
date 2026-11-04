@@ -165,7 +165,6 @@ mod tests {
     use crate::scenario_validate::ScenarioValidationError;
     use anaden_vision::{Action, Algorithm};
 
-    /// テスト用 TaskDef (roi=[10,20,100,50]・threshold=0.8・click_self)。
     fn task_def(name: &str, next: Option<Vec<&str>>) -> TaskDef {
         TaskDef {
             name: name.to_string(),
@@ -187,7 +186,6 @@ mod tests {
         }
     }
 
-    /// OS ごとの workspace 風ルート (`/work/...` or `C:\work\...`)。
     fn pipelines_root() -> PathBuf {
         if cfg!(windows) {
             PathBuf::from(r"C:\work\templates\pipelines")

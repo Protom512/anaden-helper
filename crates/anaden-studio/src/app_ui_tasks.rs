@@ -211,8 +211,6 @@ mod tests {
     use crate::childproc::SpawnSpec;
     use crate::tasks::QueueEntry;
 
-    /// ヘッドレス egui コンテキストを用意し、その中に子 Ui を作る。
-    /// GUI バックエンド不要でパネル描画を単体テストできる。
     fn child_ui(ctx: &egui::Context) -> egui::Ui {
         egui::Ui::new(
             ctx.clone(),
@@ -232,7 +230,6 @@ mod tests {
             .join("tasks")
     }
 
-    /// 長時間 (約30秒) 生きる子の SpawnSpec (ping は両 OS に存在)。
     fn long_spec() -> SpawnSpec {
         if cfg!(windows) {
             SpawnSpec::new(
@@ -254,7 +251,6 @@ mod tests {
         }
     }
 
-    /// タスク一覧 UI (チェックボックス・開始ボタン含む) がパニックせず描画できる。
     #[test]
     fn embed_render_task_list_completes_without_panic() {
         let ctx = egui::Context::default();
@@ -265,7 +261,6 @@ mod tests {
         let _ = ctx.end_pass();
     }
 
-    /// UC-4: キュー実行中の描画 (進行表示・失敗ボタン・ログ) もパニックしない。
     #[test]
     fn embed_render_task_list_with_active_queue_completes_without_panic() {
         let ctx = egui::Context::default();
@@ -275,15 +270,11 @@ mod tests {
         app.render_task_list(&mut child_ui(&ctx));
         let _ = ctx.end_pass();
         app.abort_task_queue();
-        // 中止後の描画も安定していること。
         ctx.begin_pass(egui::RawInput::default());
         app.render_task_list(&mut child_ui(&ctx));
         let _ = ctx.end_pass();
     }
 
-    /// UC-3: 詳細展開ビュー (kind/pipeline_dir/start_task/引数プレビュー) を
-    /// 含む描画がパニックなく完了する。collapsing header 展開時に描画される
-    /// ボディを全タスク分直接描画 + 選択済み一覧 (実行順リスト含む) 全体描画。
     #[test]
     fn embed_render_task_list_with_detail_view_completes_without_panic() {
         let ctx = egui::Context::default();

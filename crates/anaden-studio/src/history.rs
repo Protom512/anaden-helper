@@ -231,8 +231,6 @@ mod tests {
         )
     }
 
-    // --- 正常系 ---
-
     #[test]
     fn append_persists_and_reload_returns_record() {
         let dir = tempfile::tempdir().unwrap();
@@ -252,7 +250,6 @@ mod tests {
         let h = RunHistory::open(&path, DEFAULT_MAX_RECORDS);
         let rs = h.records();
         assert_eq!(rs.len(), 2);
-        // 新しい順
         assert_eq!(rs[0].strategy, "main_story");
         assert_eq!(rs[0].outcome, RunOutcome::Failed);
         assert_eq!(rs[0].exit_code, Some(1));
@@ -265,11 +262,7 @@ mod tests {
 
     #[test]
     fn history_path_respects_env_override() {
-        // env-var テストは並列実行と競合しうるため一時的に排他は諦め、
-        // 値を設定して即検証・復元する (他テストは open(path) 直指定で環境非依存)。
         let orig = std::env::var(HISTORY_ENV_VAR).ok();
-        // safety: テストバイナリ内で他スレッドが環境変数を読み書きしていない
-        // (当テストモジュールの他テストは環境非依存)。単一テスト内で完結。
         unsafe {
             std::env::set_var(HISTORY_ENV_VAR, "/tmp/custom-history.jsonl");
         }
@@ -293,17 +286,12 @@ mod tests {
         assert_eq!(back, r);
     }
 
-    // --- evidence_run_id (Issue #202 UC-1) ---
-
-    /// 未採取 (None) の record は evidence_run_id を JSON に出力しない
-    /// (通常の pipeline 実行履歴の互換性: フィールド追加前と同一 JSON)。
     #[test]
     fn record_without_evidence_omits_field_in_json() {
         let json = serde_json::to_string(&sample_record("fishing", 1)).unwrap();
         assert!(!json.contains("evidence_run_id"), "{json}");
     }
 
-    /// 付与した record は round-trip で run-id が復元される。
     #[test]
     fn record_with_evidence_round_trips_run_id() {
         let r = sample_record("routine:daily", 2)
@@ -317,8 +305,6 @@ mod tests {
         assert_eq!(back, r);
     }
 
-    /// 本フィールド追加前の旧履歴ファイル行 (evidence_run_id なし) は
-    /// None で復元される (history.jsonl 後方互換)。
     #[test]
     fn legacy_record_without_field_deserializes_to_none() {
         let legacy = r#"{"started_at_unix":1,"strategy":"fishing","outcome":"Success","exit_code":0,"log_tail":["l"]}"#;
@@ -327,9 +313,6 @@ mod tests {
         assert_eq!(r.strategy, "fishing");
     }
 
-    // --- report 由来フィールド (03-report-channel) ---
-
-    /// 付与した record は report サマリ (停止理由・発火回数) を round-trip する。
     #[test]
     fn record_with_report_summary_round_trips() {
         let r = sample_record("field_loop_pc", 1)
@@ -344,8 +327,6 @@ mod tests {
         assert_eq!(back, r);
     }
 
-    /// 未付与 (None) の record は report フィールドを JSON に出力しない
-    /// (フィールド追加前と同一 JSON = 互換)。
     #[test]
     fn record_without_report_omits_fields_in_json() {
         let json = serde_json::to_string(&sample_record("fishing", 1)).unwrap();
@@ -353,7 +334,6 @@ mod tests {
         assert!(!json.contains("fired_count"), "{json}");
     }
 
-    /// 本フィールド追加前の旧履歴ファイル行は None で復元される。
     #[test]
     fn legacy_record_without_report_fields_deserializes_to_none() {
         let legacy = r#"{"started_at_unix":1,"strategy":"fishing","outcome":"Success","exit_code":0,"log_tail":["l"]}"#;
@@ -362,7 +342,6 @@ mod tests {
         assert_eq!(r.fired_count, None);
     }
 
-    /// new_report_path は app data dir 配下の reports/ に一意な JSON パスを返す。
     #[test]
     fn new_report_path_is_under_reports_dir_with_json_ext() {
         let p = new_report_path();
@@ -372,13 +351,9 @@ mod tests {
             "unexpected path: {}",
             p.display()
         );
-        // 連続発行で異なるパス (再実行で上書きしない)。
         assert_ne!(new_report_path(), p);
     }
 
-    // --- 成否分類 classify_outcome (04-studio-maxiters-outcome・F6) ---
-
-    /// テスト用の最小 ProgressReport (停止理由・発火回数のみ可変)。
     fn report(
         reason: Option<anaden_engine::LoopStopReason>,
         fired: u64,
@@ -398,7 +373,6 @@ mod tests {
         }
     }
 
-    /// exit 0 + MaxIterations + fired=0 → BudgetExhausted (誤成功の排除)。
     #[test]
     fn classify_outcome_max_iterations_zero_fired_is_budget_exhausted() {
         let r = report(Some(anaden_engine::LoopStopReason::MaxIterations), 0);
@@ -408,14 +382,12 @@ mod tests {
         );
     }
 
-    /// exit 0 + MaxIterations + fired>0 → Success (成果を伴う打ち切りは成果あり)。
     #[test]
     fn classify_outcome_max_iterations_with_fired_is_success() {
         let r = report(Some(anaden_engine::LoopStopReason::MaxIterations), 7);
         assert_eq!(classify_outcome(Some(0), Some(&r)), RunOutcome::Success);
     }
 
-    /// exit 非零は report より優先 — MaxIterations 表示でも Failed。
     #[test]
     fn classify_outcome_nonzero_exit_is_failed_even_with_report() {
         let r = report(Some(anaden_engine::LoopStopReason::MaxIterations), 7);
@@ -423,13 +395,11 @@ mod tests {
         assert_eq!(classify_outcome(None, Some(&r)), RunOutcome::Failed);
     }
 
-    /// report 無し (古い anaden バイナリ・routine 実行) の exit 0 は従来通り Success。
     #[test]
     fn classify_outcome_no_report_exit_zero_is_success() {
         assert_eq!(classify_outcome(Some(0), None), RunOutcome::Success);
     }
 
-    /// 他の正常停止理由 (GoalReached / Stop / TerminalTask) は Success のまま。
     #[test]
     fn classify_outcome_goal_reached_and_stop_are_success() {
         for reason in [
@@ -446,7 +416,6 @@ mod tests {
         }
     }
 
-    /// BudgetExhausted は独自の serde ラベルで往復する (history.jsonl 互換)。
     #[test]
     fn budget_exhausted_outcome_serializes_as_distinct_label() {
         let json = serde_json::to_string(&RunOutcome::BudgetExhausted).unwrap();
@@ -454,8 +423,6 @@ mod tests {
         let back: RunOutcome = serde_json::from_str(&json).unwrap();
         assert_eq!(back, RunOutcome::BudgetExhausted);
     }
-
-    // --- エッジケース ---
 
     #[test]
     fn max_records_limit_drops_oldest() {
@@ -466,7 +433,6 @@ mod tests {
             h.append(sample_record("s", i)).unwrap();
         }
         assert_eq!(h.records().len(), 3);
-        // 最新 3 件 (4, 3, 2) が残る
         assert_eq!(
             h.records()
                 .iter()
@@ -474,7 +440,6 @@ mod tests {
                 .collect::<Vec<_>>(),
             vec![4, 3, 2]
         );
-        // 再読み込み後も件数維持
         let h2 = RunHistory::open(&path, 3);
         assert_eq!(h2.records().len(), 3);
     }

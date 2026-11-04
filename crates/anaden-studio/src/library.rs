@@ -134,7 +134,6 @@ mod tests {
         let content = std::fs::read_to_string(&toml_path).unwrap();
         assert!(content.contains("name = \"logo\""));
         assert!(content.contains("state = \"title\""));
-        // f32 0.95 は TOML 上で 0.9499999... と展開されるため、行の存在のみ検証
         assert!(content.contains("threshold ="));
     }
 }

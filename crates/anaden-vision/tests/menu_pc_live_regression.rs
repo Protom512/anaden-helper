@@ -1,37 +1,7 @@
-//! Issue #268 (menu_pc アンカー陳腐化) のゲートテスト: ゲーム 3.17.50 がメニューバー
-//! UI を変更したことで旧アンカー7件が全件非マッチになったため、2026-11-03 実機キャプチャ
-//! から再導出した 6 アンカー (party/grasta/board/bag/record/info) が本番前処理
-//! (ScreenScaler::normalize_capture) → roi 付き detect の経路で閾値以上にマッチすることを
-//! 機械保証する (neko_nikki_live_regression と同一形式)。
-//!
-//! ## 資産の由来
-//!
-//! - メニュー画面: 2026-11-03 live セッション (r2) の 2880x1620 PrintWindow キャプチャ
-//!   (左黒帯 10px)。3.17.50 の新メニューバーは 110px ピッチのタイル列
-//!   (パーティ/グラスタ/ボード/夢見/持ち物/記録/お知らせ/その他 + 右端小タイル
-//!   ショップ/ねこ/食事/ボックス、スクロール矢印なし)。
-//! - テンプレートは正規ツール (anaden-device/examples/resize_crop_template,
-//!   `--letterbox 10` → raw-1258 リサイズ → ROI クロップ) で生成。生成コマンドは各 TOML
-//!   コメントに記録 (絶対命令: 生成コマンドをログに残す)。
-//! - MenuPcGacha は新バーに「ガチャ」タイルが存在しないため再導出対象外 (旧テンプレの
-//!   まま stale 保持 — Issue #268 の live フォローアップ項目)。
-//!
-//! ## 保証内容
-//!
-//! 1. 再導出 6 アンカーが live メニュー fixture 上で threshold (0.95) かつ品質バッファ
-//!    0.95 を超える (自己一致 — テンプレは同一キャプチャの自己クロップ)。
-//! 2. タイル識別: 隣接タイルの ROI にはマッチしない (全タイルが同一石枠フレームを共有
-//!    するため、アイコン+ラベル差で識別されることが bar 内誤対排除の契約)。
-//! 3. 画面識別: 異画面 fixture (記録/ワールドマップ/フィールド/ねこにっき) にマッチしない。
-//!
-//! fixture は `templates/` バンク外 (`tests/fixtures/`) なので template_bank_audit
-//! の対象外。実際のテンプレート資産は `templates/scenes/menu_pc/`。
-
 use std::path::{Path, PathBuf};
 
 use anaden_vision::{ScreenScaler, TaskDef, load_pipeline};
 
-/// workspace ルート (crates/anaden-vision から `../../`)。
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -60,7 +30,6 @@ fn find_task<'a>(tasks: &'a [TaskDef], name: &str) -> &'a TaskDef {
         .unwrap_or_else(|| panic!("{name} must exist in menu_pc templates"))
 }
 
-/// Issue #268 で再導出した 6 アンカー (gacha は新バーにタイル不在のため対象外)。
 const REBUILT: &[&str] = &[
     "MenuPcParty",
     "MenuPcGrasta",
@@ -70,15 +39,12 @@ const REBUILT: &[&str] = &[
     "MenuPcInfo",
 ];
 
-/// タスクを正規化済み画像に detect し、(マッチしたら conf, 非マッチなら None) を返す。
 fn detect_conf(task: &TaskDef, normalized: &image::DynamicImage) -> Option<f32> {
     task.detect(normalized, Path::new(""))
         .unwrap_or_else(|e| panic!("{} detect error: {e}", task.name))
         .map(|m| m.confidence.0)
 }
 
-/// 生キャプチャ (2026-11-03 r2 セッション、2880x1620・左黒帯 10px) を本番経路
-/// (黒帯クロップ + 基準幅 1280 正規化) へ通す。
 fn normalize_live_fixture(name: &str) -> image::DynamicImage {
     let path = fixture(name);
     let raw = image::open(&path)
@@ -98,8 +64,6 @@ fn normalize_live_fixture(name: &str) -> image::DynamicImage {
     normalized
 }
 
-/// 再導出 6 アンカーが live メニュー fixture 上で 0.95 以上 (threshold 0.95 + 品質バッファ)
-/// にマッチする。テンプレは同一キャプチャ由来の自己クロップのため、0.95 未満は資産破損扱い。
 #[test]
 #[allow(clippy::unwrap_used)]
 fn rebuilt_anchors_match_live_menu_fixture_through_production_preprocessing() {
@@ -121,8 +85,6 @@ fn rebuilt_anchors_match_live_menu_fixture_through_production_preprocessing() {
     }
 }
 
-/// タイル識別: 全タイルが同一の石枠フレームを共有するため、アンカーが隣接タイルの ROI に
-/// 誤対してはならない (バー内 12 タイルの識別はアイコン+ラベル差のみに載る)。
 #[test]
 #[allow(clippy::unwrap_used)]
 fn rebuilt_anchors_do_not_cross_match_neighbor_tile_rois() {
@@ -146,8 +108,6 @@ fn rebuilt_anchors_do_not_cross_match_neighbor_tile_rois() {
     }
 }
 
-/// 画面識別: メニューバーのタイルアンカーは、メニューを開いていない実機画面
-/// (記録 / ワールドマップ / フィールド / フィールドHUD / ねこにっき) にマッチしない。
 #[test]
 #[allow(clippy::unwrap_used)]
 fn rebuilt_anchors_do_not_match_other_live_screens() {

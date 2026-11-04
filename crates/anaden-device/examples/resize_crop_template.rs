@@ -1,27 +1,7 @@
 #![cfg(windows)]
-//! テンプレート再切り出しユーティリティ (PC版 version_label 差し替え用)。
-//!
-//! 生キャプチャ (PrintWindow/probe 出力 PNG) を letterbox クロップ →
-//! 1258x708 (raw-1258 空間) へリサイズ → ROI クロップし、テンプレート PNG を生成する。
-//!
-//! ## 使い方 (リポジトリルートから実行)
-//!
-//! ```text
-//! cargo run --example resize_crop_template -p anaden-device -- \
-//!     probe_live5.png templates/scenes/title_pc/version_label.png \
-//!     --letterbox 10 --roi 8,2,138,20
-//! ```
-//!
-//! - 入力/出力パスはコマンドライン引数で指定 (相対パスはカレントディレクトリ基準)
-//! - `--letterbox N`: 左黒帯 N px を除去してからリサイズ (デフォルト 10)
-//! - `--roi x,y,w,h`: raw-1258 空間での ROI (デフォルト 8,2,138,20 = version_label
-//!   左上 ID 表示帯。Issue #182 でアンカー再選択 — 旧 version 帯 65,7,121,35 の
-//!   テンプレは無構造 stddev 3.76 で恒久 NoMatch だった)
-//! - `--size WxH`: リサイズ後サイズ (デフォルト 1258x708)
 
 use image::imageops::FilterType;
 
-/// コマンドライン引数。
 struct Args {
     input: String,
     output: String,
@@ -37,7 +17,6 @@ fn print_usage() {
     );
 }
 
-/// `--key value` 形式のフラグを args から取り出す。
 fn take_flag(args: &mut Vec<String>, key: &str) -> Option<String> {
     let pos = args.iter().position(|a| a == key)?;
     if pos + 1 >= args.len() {
@@ -48,13 +27,11 @@ fn take_flag(args: &mut Vec<String>, key: &str) -> Option<String> {
     Some(value)
 }
 
-/// `WxH` 形式をパースする。失敗時は None。
 fn parse_size(s: &str) -> Option<(u32, u32)> {
     let (w, h) = s.split_once('x')?;
     Some((w.parse().ok()?, h.parse().ok()?))
 }
 
-/// `x,y,w,h` 形式をパースする。失敗時は None。
 fn parse_roi(s: &str) -> Option<(u32, u32, u32, u32)> {
     let parts: Vec<&str> = s.split(',').collect();
     if parts.len() != 4 {
@@ -68,7 +45,6 @@ fn parse_roi(s: &str) -> Option<(u32, u32, u32, u32)> {
     ))
 }
 
-/// コマンドライン引数をパースする。不正な場合は None (usage 表示済み)。
 fn parse_args(argv: &[String]) -> Option<Args> {
     if argv.len() < 2 {
         print_usage();
@@ -101,15 +77,12 @@ fn run(args: &Args) -> Result<(), image::ImageError> {
     let img = image::open(&args.input)?;
     println!("input: {} ({}x{})", args.input, img.width(), img.height());
 
-    // letterbox crop: 左黒帯を除去
     let w = img.width().saturating_sub(args.letterbox);
     let cropped = image::imageops::crop_imm(&img, args.letterbox, 0, w, img.height()).to_image();
 
-    // raw-1258 空間へリサイズ
     let dyn_img = image::DynamicImage::ImageRgba8(cropped);
     let resized = dyn_img.resize_exact(args.width, args.height, FilterType::Triangle);
 
-    // ROI クロップ (ROI がリサイズ後画像内に収まること)
     let (rx, ry, rw, rh) = args.roi;
     if rx + rw > args.width || ry + rh > args.height {
         eprintln!(

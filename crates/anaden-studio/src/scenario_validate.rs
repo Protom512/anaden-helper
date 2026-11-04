@@ -149,7 +149,6 @@ mod tests {
     use anaden_vision::{Action, Algorithm};
     use std::path::PathBuf;
 
-    /// テスト用 TaskDef (roi=[10,20,100,50]・threshold=0.8・click_self)。
     fn task_def(name: &str, next: Option<Vec<&str>>) -> anaden_vision::TaskDef {
         anaden_vision::TaskDef {
             name: name.to_string(),
@@ -175,7 +174,6 @@ mod tests {
     fn validate_ok_for_complete_scenario() {
         let mut st = ScenarioEditorState::new("fishing2");
         st.add_task(task_def("Start", Some(vec!["Loop"])));
-        // roi: None (= 全面) も有効。
         st.add_task(anaden_vision::TaskDef {
             roi: None,
             ..task_def("Loop", Some(vec!["Start"]))
@@ -202,7 +200,6 @@ mod tests {
 
     #[test]
     fn validate_flags_unsafe_directory_name() {
-        // パス区切り・`.`/`..` は保存先ディレクトリ名として不適。
         for bad in ["a/b", "..", ".", "a\\b", "abc/"] {
             let mut st = ScenarioEditorState::new(bad);
             st.add_task(task_def("A", None));
@@ -214,7 +211,6 @@ mod tests {
                 "name {bad:?} must be flagged unsafe"
             );
         }
-        // 通常の名前は UnsafeName を出さない。
         let mut ok = ScenarioEditorState::new("my_scenario");
         ok.add_task(task_def("A", None));
         assert!(
@@ -293,15 +289,8 @@ mod tests {
         }));
     }
 
-    // ---- UC-4 (Shard 5): baseline ゲーティング (既存 pipeline ロード編集は
-    // scenario_panel のテストで担保) ----
-
-    /// baseline (loaded_task_names) 外の名前 (= 新規追加・リネーム後) のみ
-    /// 命名規約・ROI 画面内検査の対象。既存名は変更しない限り警告しない。
     #[test]
     fn naming_and_roi_checks_apply_only_to_non_baseline_tasks() {
-        // 20:9 pipeline 相当: ROI [1080,150,180,150] は x+w=1260 > 1258
-        // (1280 基準座標系 = PC 1258x708 契約外)。
         let mut st = ScenarioEditorState::new("field_loop");
         let mut loaded = task_def("TapHudTr", None);
         loaded.roi = Some([1080, 150, 180, 150]);
@@ -313,7 +302,6 @@ mod tests {
             st.validation_issues()
         );
 
-        // リネーム (baseline 外の新名) は命名規約で拒否。
         st.task_mut("TapHudTr").unwrap().name = "tap_hud_v2".to_string();
         assert!(
             st.validation_issues()
@@ -321,7 +309,6 @@ mod tests {
                 .any(|i| matches!(i, ScenarioValidationError::TaskNaming { .. }))
         );
 
-        // PascalCase へ直しても baseline 外なので ROI 検査が再有効。
         st.task_mut("tap_hud_v2").unwrap().name = "FieldHudWidePc".to_string();
         assert!(
             st.validation_issues()
@@ -331,12 +318,11 @@ mod tests {
         );
     }
 
-    /// baseline 無し (新規シナリオ) は全タスクが命名規約の対象。
     #[test]
     fn new_scenario_names_are_all_validated() {
         let mut st = ScenarioEditorState::new("s");
-        st.add_task(task_def("Start", None)); // PascalCase: OK
-        st.add_task(task_def("confirm_now", None)); // snake_case: 拒否
+        st.add_task(task_def("Start", None));
+        st.add_task(task_def("confirm_now", None));
         let issues = st.validation_issues();
         assert!(!issues.iter().any(|i| matches!(
             i,

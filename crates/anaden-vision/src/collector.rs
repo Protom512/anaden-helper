@@ -501,25 +501,19 @@ mod tests {
 
     #[test]
     fn extract_stable_tiles_from_uniform_group() {
-        // 全く同じ画像（真っ白）のグループ → 全ピクセル分散ゼロ → 安定
         let mut captures = Vec::new();
         for _ in 0..5 {
             captures.push(white_image(600, 270));
         }
         let group = ScreenGroup { captures, index: 0 };
         let _tiles = extract_stable_tiles(&group);
-        // 真っ白画像はエッジ密度がほぼゼロなので、候補が少ないはず
-        // （edge_density > 0.01 の条件で除外される）
-        // これは期待される動作: 真っ白な領域はテンプレートとして役に立たない
     }
 
     #[test]
     fn extract_stable_tiles_with_content() {
-        // 異なる内容のタイルを含む画像
         let mut captures = Vec::new();
         for _ in 0..5 {
             let mut img = RgbImage::new(300, 200);
-            // 左上に黒い四角（安定した特徴）
             for y in 10..60 {
                 for x in 10..60 {
                     img.put_pixel(x, y, image::Rgb([0, 0, 0]));
@@ -529,7 +523,6 @@ mod tests {
         }
         let group = ScreenGroup { captures, index: 0 };
         let tiles = extract_stable_tiles(&group);
-        // 黒い四角を含むタイルが候補として抽出されるはず
         assert!(
             !tiles.is_empty(),
             "Group with stable content should produce tile candidates"
@@ -538,7 +531,6 @@ mod tests {
 
     #[test]
     fn verify_rejects_template_matching_other_group() {
-        // グループA: 黒画像
         let group_a = ScreenGroup {
             captures: vec![
                 black_image(300, 200),
@@ -547,7 +539,6 @@ mod tests {
             ],
             index: 0,
         };
-        // グループB: 白画像
         let group_b = ScreenGroup {
             captures: vec![
                 white_image(300, 200),
@@ -559,7 +550,6 @@ mod tests {
 
         let matcher = TemplateMatcher::threshold_only(MatchConfidence::new(0.5));
 
-        // グループAの黒いタイル候補
         let candidate = TileCandidate {
             image: black_image(50, 50),
             position: (0, 0),
@@ -569,7 +559,6 @@ mod tests {
 
         let results = verify_templates(vec![candidate], &group_a, &[&group_b], &matcher);
 
-        // 黒いタイルは白い画像にマッチしない → 特異性OK → 通過するはず
         assert_eq!(results.len(), 1, "Should have 1 result");
         assert!(
             results[0].passed,

@@ -89,7 +89,6 @@ mod tests {
             .score_map(&haystack, &needle)
             .expect("score map should exist");
 
-        // ダウンスケール1（threshold_only）なので (100-20+1)^2
         assert_eq!(map.dimensions(), (81, 81));
     }
 

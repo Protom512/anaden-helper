@@ -187,7 +187,6 @@ impl PipelineRunnerApp {
 mod tests {
     use super::*;
 
-    /// LogLevel → 表示色の対応（色分け描画の純ロジック部分）。
     #[test]
     fn test_level_color_varies_by_level() {
         assert_ne!(level_color(LogLevel::Error), level_color(LogLevel::Warn));
@@ -195,7 +194,6 @@ mod tests {
         assert_ne!(level_color(LogLevel::Error), level_color(LogLevel::Info));
     }
 
-    /// ルーチンセクションの状態行 (Issue #199: 実行中は起動不可の注記)。
     #[test]
     fn test_routine_status_line_reflects_running_state() {
         assert!(routine_status_line(true).contains("実行中"));

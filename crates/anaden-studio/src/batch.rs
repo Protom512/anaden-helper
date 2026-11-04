@@ -351,7 +351,6 @@ mod tests {
 
     #[test]
     fn single_template_predicts_own_state_and_unknown_for_others() {
-        // テンプレ: 黒四角 → title。白画面にはマッチしない（scoring テストで確認済み <0.5）
         let templates = vec![LoadedTemplate {
             spec: spec("black", "title"),
             image: black_template(),
@@ -381,7 +380,6 @@ mod tests {
             spec: spec("black", "title"),
             image: black_template(),
         }];
-        // 白画面に黒テンプレ → 低スコア → 閾値超えず unknown
         let tests = vec![TestImage {
             true_label: "field".into(),
             image: Arc::new(DynamicImage::ImageLuma8(GrayImage::from_pixel(
@@ -393,7 +391,6 @@ mod tests {
         let cm = evaluate(&engine(), &templates, &tests, 0.99);
         let unk = cm.index_of("unknown").unwrap();
         let field = cm.index_of("field").unwrap();
-        // 真field → 予測unknown
         assert_eq!(cm.matrix[field][unk], 1);
     }
 
@@ -403,7 +400,6 @@ mod tests {
             spec: spec("black", "title"),
             image: black_template(),
         }];
-        // 正例2枚(黒四角含む) + 負例1枚(白)
         let tests = vec![
             TestImage {
                 true_label: "title".into(),

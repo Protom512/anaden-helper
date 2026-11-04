@@ -198,8 +198,6 @@ mod tests {
         workspace_root()
     }
 
-    // ---- discover_routines ----
-
     #[test]
     fn discover_finds_sample_daily_on_real_root() {
         let found = discover_routines(&real_root());
@@ -226,8 +224,6 @@ mod tests {
         assert_eq!(found.len(), 1, "{found:?}");
         assert_eq!(found[0].0, "a");
     }
-
-    // ---- RoutinePanel 状態操作 (egui 非依存) ----
 
     #[test]
     fn panel_defaults_discover_real_root_and_select_none() {
@@ -256,8 +252,6 @@ mod tests {
         assert_eq!(panel.summary(), "routine=morning");
     }
 
-    // ---- build_routine_args (子プロセス引数契約) ----
-
     #[test]
     fn build_routine_args_from_absolute_path() {
         let abs = real_root().join(ROUTINES_DIR).join("daily.toml");
@@ -280,7 +274,6 @@ mod tests {
         );
     }
 
-    /// 実在 daily.toml から組んだ引数のパスが実ファイルを指すこと (spawn 前提の保証)。
     #[test]
     fn build_routine_args_points_at_existing_daily_file() {
         let panel = RoutinePanel::default();
@@ -294,15 +287,10 @@ mod tests {
         assert!(Path::new(&args[1]).is_file(), "{}", args[1]);
     }
 
-    // ---- evidence 採取 (Issue #202 UC-1) ----
-
-    /// チェック ON/OFF の args 契約: ON は `--evidence-run-id routine-<ts>` 付与・
-    /// OFF は `routine <path>` のみ (run-id は timestamp 注入で決定的)。
     #[test]
     fn build_routine_args_evidence_on_off_contract() {
         let daily = real_root().join(ROUTINES_DIR).join("daily.toml");
 
-        // ON: フラグ + run-id がパスの後ろに付く。
         let run_id = evidence_run_id("20260914-013000");
         assert_eq!(run_id, "routine-20260914-013000");
         let args_on = build_routine_args(&daily, Some(&run_id));
@@ -315,15 +303,11 @@ mod tests {
         assert_eq!(args_on[flag_at + 1], "routine-20260914-013000");
         assert_eq!(args_on.len(), 4, "{args_on:?}");
 
-        // OFF: フラグなし (routine <path> のみ)。
         let args_off = build_routine_args(&daily, None);
         assert!(!args_off.iter().any(|a| a == "--evidence-run-id"));
         assert_eq!(args_off.len(), 2, "{args_off:?}");
     }
 
-    /// パネルの evidence チェックは既定 ON・set_evidence_enabled で切替可能。
-    /// (Issue #204 以降、run-id の発行は runner_exec::RunRequest::build_spawn に
-    /// 集約されているため、パネルはチェック状態の保持のみ担う。)
     #[test]
     fn panel_evidence_check_defaults_on_and_toggles() {
         let mut panel = RoutinePanel::default();
@@ -334,26 +318,20 @@ mod tests {
         assert!(panel.evidence_enabled());
     }
 
-    /// compact_utc_timestamp の既知値検証 (civil-from-days 手書き変換の保証)。
     #[test]
     fn compact_utc_timestamp_known_values() {
         assert_eq!(compact_utc_timestamp(0), "19700101-000000");
-        // 2000-01-01T00:00:00Z
         assert_eq!(compact_utc_timestamp(946_684_800), "20000101-000000");
-        // 2001-09-09T01:46:40Z (unix 1000000000 の既知値)
         assert_eq!(compact_utc_timestamp(1_000_000_000), "20010909-014640");
-        // 2024-02-29T12:34:56Z (うるう年・'YYYYMMDD-HHMMSS' 形式の桁揃え)
         assert_eq!(compact_utc_timestamp(1_709_210_096), "20240229-123456");
     }
 
-    /// new_evidence_run_id は `routine-<15桁タイムスタンプ>` 形式を満たす。
     #[test]
     fn new_evidence_run_id_shape() {
         let id = new_evidence_run_id();
         let rest = id
             .strip_prefix("routine-")
             .unwrap_or_else(|| panic!("{id}"));
-        // YYYYMMDD-HHMMSS = 8 + 1 + 6 桁。
         assert_eq!(rest.len(), 15, "{id}");
         assert_eq!(rest.as_bytes()[8], b'-', "{id}");
         assert!(

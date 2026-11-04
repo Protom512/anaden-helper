@@ -1,16 +1,3 @@
-// Duplication gate for the anaden-helper workspace (Issue #214, Phase 0 / T2).
-//
-// Runs `similarity-rs crates -t 0.80 -m 15 --skip-test`, keeps only pairs where
-// BOTH functions live in production scope (test regions, `tests/` dirs and
-// `benches/` are machine-excluded — similarity's --skip-test only skips
-// #[test] functions, not helpers inside `#[cfg(test)] mod tests`), then fails
-// (exit 1) when a non-allowlisted production pair is >= 0.85 similar.
-// Pairs in 0.80-0.84 are advisory only.
-//
-// Exit codes: 0 = green, 1 = violations, 2 = environment/tool error (fail-closed).
-//
-// Test-region semantics are shared with complexity_gate.mjs (single lexer /
-// region algorithm — import, do not duplicate).
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -21,9 +8,6 @@ const SIMILARITY_BIN = 'similarity-rs';
 const SIMILARITY_ARGS = ['crates', '-t', '0.80', '-m', '15', '--skip-test'];
 const VIOLATION_THRESHOLD = 0.85;
 
-// ---------------------------------------------------------------------------
-// similarity-rs output parsing
-// ---------------------------------------------------------------------------
 
 const PAIR_LINE =
   /^  (\S+?):(\d+)-(\d+) (\w+) (\S+) <-> (\S+?):(\d+)-(\d+) (\w+) (\S+)$/;
@@ -31,12 +15,6 @@ const SIMILARITY_LINE = /^  Similarity: ([\d.]+)%$/;
 
 const normalizePath = (p) => String(p).replace(/\\/g, '/');
 
-/**
- * Parses similarity-rs text output into pairs:
- * `{ a: {file,start,end,kind,name}, b: {...}, similarity }` where `similarity`
- * is 0..1 (percent / 100). Header lines, separators and `Classes:` context
- * lines are ignored. Paths are normalized to `/` separators.
- */
 export function parseSimilarityOutput(text) {
   const pairs = [];
   let pending = null;
@@ -71,15 +49,7 @@ export function parseSimilarityOutput(text) {
   return pairs;
 }
 
-// ---------------------------------------------------------------------------
-// Allowlist
-// ---------------------------------------------------------------------------
 
-/**
- * Returns the matching allowlist entry when the pair's file matches (on EITHER
- * side — Issue #241: similarity-rs may swap a/b order across runs) and both
- * function names appear in the entry's `functions` list, else null.
- */
 export function isAllowlisted(pair, entries) {
   for (const entry of entries ?? []) {
     const entryFile = normalizePath(entry.file);
@@ -90,19 +60,9 @@ export function isAllowlisted(pair, entries) {
   return null;
 }
 
-// ---------------------------------------------------------------------------
-// Gate evaluation
-// ---------------------------------------------------------------------------
 
 const isWithin = (fn, region) => fn.start >= region.start && fn.end <= region.end;
 
-/**
- * Evaluates duplication pairs against production scope.
- * A pair is production only when BOTH sides are outside test regions and not
- * in `tests/` or `benches/` paths. `sources` maps normalized paths to contents
- * for every scanned file that appears in a pair; a missing source throws
- * (callers must fail closed instead of guessing the pair is production).
- */
 export function evaluateDuplication({ pairs, sources, allowlist = [], violationThreshold = VIOLATION_THRESHOLD }) {
   const regionsByFile = new Map();
   const regionsFor = (file) => {
@@ -172,9 +132,6 @@ export function evaluateDuplication({ pairs, sources, allowlist = [], violationT
   return result;
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -182,12 +139,6 @@ const formatPair = (pair) =>
   `  ${pair.a.file}:${pair.a.start}-${pair.a.end} ${pair.a.name} <-> ` +
   `${pair.b.file}:${pair.b.start}-${pair.b.end} ${pair.b.name}  ${(pair.similarity * 100).toFixed(2)}%`;
 
-/**
- * CLI entry point. Returns the process exit code (0/1/2).
- * `opts` exists for tests: `{ root, similarityOutput, allowlist }` injects the
- * repo root, the raw similarity-rs stdout and the parsed allowlist so no
- * external tool is executed.
- */
 export function main(argv = [], opts = {}) {
   const root = opts.root ?? path.resolve(scriptDir, '..', '..');
 
@@ -210,8 +161,6 @@ export function main(argv = [], opts = {}) {
       return 2;
     }
     similarityOutput = run.stdout ?? '';
-    // Issue #241: similarity 出力に pair line が 1 件も無い = 出力形式 drift
-    // → 黙って green にしない (fail-open 対策)。
     if (!similarityOutput.includes('<->')) {
       console.error(`duplication gate: '${SIMILARITY_BIN} ${SIMILARITY_ARGS.join(' ')}' output contains no pair lines — format drift? (fail-closed)`);
       return 2;

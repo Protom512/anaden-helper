@@ -501,7 +501,6 @@ mod tests {
 
     #[test]
     fn make_lparam_packs_x_low_y_high() {
-        // MAKELPARAM: 下位16bit=x, 高位16bit=y。
         let lp = make_lparam(100, 200);
         let raw = lp.0 as u32;
         assert_eq!(raw & 0xFFFF, 100);
@@ -510,11 +509,9 @@ mod tests {
 
     #[test]
     fn to_absolute_uses_65535_formula() {
-        // extent=65536 の仮想デスクトップで (0,0) → (0,0)、(65535,65535) → (65535,65535)。
         let (ax, ay) = to_absolute(0, 0, 65536, 65536);
         assert_eq!((ax, ay), (0, 0));
         let (bx, by) = to_absolute(32767, 32767, 65536, 65536);
-        // (32767 * 65535) / 65535 = 32767
         assert_eq!((bx, by), (32767, 32767));
     }
 
@@ -523,16 +520,12 @@ mod tests {
         assert_eq!(InputMethod::default(), InputMethod::SendInput);
     }
 
-    /// `new_without_dpi`: DPI アウェア化を伴わない生成 (メソッドは既定 SendInput)。
     #[test]
     fn new_without_dpi_keeps_default_method() {
         let executor = Win32InputExecutor::new_without_dpi("AnotherEden.exe");
         assert_eq!(executor.method(), InputMethod::SendInput);
     }
 
-    /// `execute_blocking`: Wait は FFI を伴わない (run_action_sync の Wait 分岐は
-    /// 即 Ok) ので、ランタイム無し・実機入力無しで同期経路の疎通だけ検証できる。
-    /// Tap 火球の実注入を伴うテストは書かない (実機 E2E は studio Shard 3)。
     #[test]
     fn execute_blocking_wait_returns_ok_without_runtime() {
         let executor = Win32InputExecutor::new_without_dpi("AnotherEden.exe");
@@ -541,71 +534,41 @@ mod tests {
             .unwrap();
     }
 
-    /// ガード2: foreground_belongs_to の実機手動検証(#[ignore])。
-    ///
-    /// FFI(GetForegroundWindow / GetWindowThreadProcessId)に依存しモック不可のため
-    /// 自動実行対象外。手順:
-    /// 1. `cargo nextest run -p anaden-device foreground_belongs_to_real --run-ignored all`
-    ///    を実行中のプロセス(PID を下記 CURRENT_PID に埋める)前景状態で確認 → true 期待。
-    /// 2. テスト実行直後に別ウィンドウ(エクスプローラ等)をクリックして前景を奪うか、
-    ///    存在しない PID(0xFFFF_FFFF 等)を渡して → false 期待。
-    ///
-    /// ここでは「存在しない PID を渡した場合は、たとえフォアグラウンドが何であれ
-    /// 自プロセス以外なら false」という安全側の振る舞いを、確実に false になる
-    /// 存在しない PID で検証する(前景が何であれ PID 0xFFFFFFFF と一致することは実質ない)。
     #[cfg(windows)]
     #[test]
     #[ignore = "FFI 依存。foreground_belongs_to の実機手動検証用スタブ"]
     fn foreground_belongs_to_real_nonexistent_pid_is_false() {
-        // 存在しえない PID。GetWindowThreadProcessId が返す PID と一致しないため false。
-        // (プロセステーブルの最大 PID 65535(0xFFFF) を超える値で安全側を確認。)
         let bogus = 0xFFFF_FFFF;
         let result = foreground_belongs_to(bogus);
-        // 前景ウィンドウが存在する限り、その PID が 0xFFFFFFFF と一致することは実質ない。
-        // 前景ウィンドウが取得できない(null)場合も false になるため、どちらにせよ false。
         assert!(!result, "存在しない PID では false(注入中止)になるべき");
     }
 
-    /// ガード2: resolve_pid_and_hwnd がプロセス不存在時に CommandFailed を返すこと。
-    ///
-    /// FFI(CreateToolhelp32Snapshot)には依存するが、存在しえないプロセス名を与えれば
-    /// スナップショット成功時は None → CommandFailed へ包まれる。これは resolve_hwnd の
-    /// 分割後もエラー伝播経路が保たれていることを検証する(純粋ロジック寄りの部分)。
     #[cfg(windows)]
     #[test]
     fn resolve_pid_and_hwnd_missing_process_errors() {
         let err = resolve_pid_and_hwnd("__definitely_not_a_real_process__.exe").unwrap_err();
         let msg = format!("{err}");
-        // プロセスが見つからないメッセージが返ること(CommandFailed への包み込み確認)。
         assert!(
             msg.contains("プロセスが見つかりません"),
             "missing process must surface as CommandFailed, got: {msg}"
         );
     }
 
-    /// ガード3: rect_contains の境界内/外を検証する純粋関数テスト。
     #[test]
     fn rect_contains_inside_and_outside() {
-        // 画面座標 (100,100)-(800,600) の矩形。
         let rect = RECT {
             left: 100,
             top: 100,
             right: 800,
             bottom: 600,
         };
-        // 内部(中央)。
         assert!(rect_contains(&rect, 400, 350));
-        // 左上より外。
         assert!(!rect_contains(&rect, 50, 50));
-        // 右下より外。
         assert!(!rect_contains(&rect, 900, 700));
-        // x だけ外。
         assert!(!rect_contains(&rect, 50, 350));
-        // y だけ外。
         assert!(!rect_contains(&rect, 400, 50));
     }
 
-    /// ガード3: rect_contains のコーナー/辺上は閉区間で許容されることを検証。
     #[test]
     fn rect_contains_corners_and_edges_are_inclusive() {
         let rect = RECT {
@@ -614,21 +577,16 @@ mod tests {
             right: 800,
             bottom: 600,
         };
-        // 4隅(辺上 = 閉区間で true)。
         assert!(rect_contains(&rect, 100, 100), "左上角");
         assert!(rect_contains(&rect, 800, 100), "右上角");
         assert!(rect_contains(&rect, 100, 600), "左下角");
         assert!(rect_contains(&rect, 800, 600), "右下角");
-        // 辺上の中央。
         assert!(rect_contains(&rect, 450, 100), "上辺");
         assert!(rect_contains(&rect, 800, 350), "右辺");
-        // 辺の1px外側は false。
         assert!(!rect_contains(&rect, 99, 350), "左辺の1px外");
         assert!(!rect_contains(&rect, 801, 350), "右辺の1px外");
     }
 
-    /// ガード3: point_in_window_rect は null HWND で安全側 false を返すこと。
-    /// (FFI の GetWindowRect には到達せず、null 判定で落とす経路。)
     #[test]
     fn point_in_window_rect_null_hwnd_is_false() {
         let null_hwnd = HWND(std::ptr::null_mut());

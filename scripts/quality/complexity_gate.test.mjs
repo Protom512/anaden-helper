@@ -1,6 +1,3 @@
-// Unit + integration tests for scripts/quality/complexity_gate.mjs
-// Contract source: approved T1 spec (Issue #214, branch refactor/complexity-gate).
-// Run: node --test scripts/quality/
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -15,27 +12,24 @@ import {
   main,
 } from './complexity_gate.mjs';
 
-// ---------------------------------------------------------------------------
-// computeTestRegions — normal cases (spec §3.1, 1–7)
-// ---------------------------------------------------------------------------
 
 test('workspace convention: cfg(test) + allow x3 + blank + mod tests -> region from mod line to closing brace (attrs excluded)', () => {
   const src = [
-    'use super::*;', // 1
-    '', // 2
-    '#[cfg(test)]', // 3
-    '#[allow(clippy::unwrap_used)]', // 4
-    '#[allow(clippy::panic)]', // 5
-    '#[allow(clippy::expect_used)]', // 6
-    '', // 7
-    'mod tests {', // 8 <- start (attribute lines NOT included)
-    '    use super::*;', // 9
-    '', // 10
-    '    #[test]', // 11
-    '    fn foo() {', // 12
-    '        assert_eq!(1, 1);', // 13
-    '    }', // 14
-    '}', // 15 <- end
+    'use super::*;',
+    '',
+    '#[cfg(test)]',
+    '#[allow(clippy::unwrap_used)]',
+    '#[allow(clippy::panic)]',
+    '#[allow(clippy::expect_used)]',
+    '',
+    'mod tests {',
+    '    use super::*;',
+    '',
+    '    #[test]',
+    '    fn foo() {',
+    '        assert_eq!(1, 1);',
+    '    }',
+    '}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions.length, 1);
@@ -46,9 +40,9 @@ test('workspace convention: cfg(test) + allow x3 + blank + mod tests -> region f
 
 test('cfg(all(test, windows)) + mod tests -> region', () => {
   const src = [
-    '#[cfg(all(test, windows))]', // 1
-    'mod tests {', // 2
-    '}', // 3
+    '#[cfg(all(test, windows))]',
+    'mod tests {',
+    '}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions.length, 1);
@@ -58,14 +52,13 @@ test('cfg(all(test, windows)) + mod tests -> region', () => {
 });
 
 test('cfg(test) fn helper mid-file -> region covers only that fn; following production fn is outside', () => {
-  // Pattern from crates/anaden-studio/src/runner_exec.rs:449
   const src = [
-    'pub fn alpha() -> u32 { 1 }', // 1 production
-    '', // 2
-    '#[cfg(test)]', // 3
-    'fn unresolved() -> Option<u32> { None }', // 4 <- region start
-    '', // 5
-    'pub fn beta() -> u32 { 2 }', // 6 production — must be OUTSIDE
+    'pub fn alpha() -> u32 { 1 }',
+    '',
+    '#[cfg(test)]',
+    'fn unresolved() -> Option<u32> { None }',
+    '',
+    'pub fn beta() -> u32 { 2 }',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions.length, 1);
@@ -76,12 +69,11 @@ test('cfg(test) fn helper mid-file -> region covers only that fn; following prod
 });
 
 test('pub(crate) mod test_util with visibility modifier -> region', () => {
-  // Pattern from crates/anaden-engine/src/tasks_def.rs:305
   const src = [
-    '#[cfg(test)]', // 1
-    'pub(crate) mod test_util {', // 2
-    '    pub fn helper() {}', // 3
-    '}', // 4
+    '#[cfg(test)]',
+    'pub(crate) mod test_util {',
+    '    pub fn helper() {}',
+    '}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions.length, 1);
@@ -92,17 +84,17 @@ test('pub(crate) mod test_util with visibility modifier -> region', () => {
 
 test('cfg(test) mod tests nested inside another mod -> region closes at its own brace', () => {
   const src = [
-    'mod outer {', // 1
-    '    pub fn prod() {}', // 2
-    '', // 3
-    '    #[cfg(test)]', // 4
-    '    mod tests {', // 5 <- start
-    '        #[test]', // 6
-    '        fn inner() {}', // 7
-    '    }', // 8 <- end
-    '', // 9
-    '    pub fn prod2() {}', // 10
-    '}', // 11
+    'mod outer {',
+    '    pub fn prod() {}',
+    '',
+    '    #[cfg(test)]',
+    '    mod tests {',
+    '        #[test]',
+    '        fn inner() {}',
+    '    }',
+    '',
+    '    pub fn prod2() {}',
+    '}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions.length, 1);
@@ -113,10 +105,10 @@ test('cfg(test) mod tests nested inside another mod -> region closes at its own 
 
 test('mod tests; without body -> single-line region', () => {
   const src = [
-    '#[cfg(test)]', // 1
-    'mod tests;', // 2
-    '', // 3
-    'pub fn prod() {}', // 4
+    '#[cfg(test)]',
+    'mod tests;',
+    '',
+    'pub fn prod() {}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions.length, 1);
@@ -127,12 +119,12 @@ test('mod tests; without body -> single-line region', () => {
 
 test('doc comments (///), line comments (//) and blank lines between cfg and item are skipped', () => {
   const src = [
-    '#[cfg(test)]', // 1
-    '/// doc for the module', // 2
-    '// plain comment', // 3
-    '', // 4
-    'mod tests {', // 5 <- start
-    '}', // 6
+    '#[cfg(test)]',
+    '/// doc for the module',
+    '// plain comment',
+    '',
+    'mod tests {',
+    '}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions.length, 1);
@@ -140,9 +132,6 @@ test('doc comments (///), line comments (//) and blank lines between cfg and ite
   assert.equal(regions[0].end, 6);
 });
 
-// ---------------------------------------------------------------------------
-// computeTestRegions — lexer-trap edge cases (spec §3.1, 8–13)
-// ---------------------------------------------------------------------------
 
 test('brace inside ordinary string literal does not shift region end', () => {
   const src = ['#[cfg(test)]', 'mod tests {', '    let s = "}";', '}'].join('\n');
@@ -157,16 +146,14 @@ test('brace inside raw string r#"} {"# does not shift region end', () => {
 });
 
 test('backslash + newline line-continuation inside string does not drift line numbers', () => {
-  // Verified trap from real data (pipeline_driver.rs logs): a naive escape skip
-  // that eats the newline without counting it shifts every later line by -1.
   const src = [
-    '#[cfg(test)]', // 1
-    'mod tests {', // 2 <- start
-    '    fn a() {', // 3
-    '        let s = "x\\', // 4  (string continues across the newline)
-    'y"; let t = 1;', // 5  (string ends here)
-    '    }', // 6
-    '}', // 7 <- end WITH correct counting
+    '#[cfg(test)]',
+    'mod tests {',
+    '    fn a() {',
+    '        let s = "x\\',
+    'y"; let t = 1;',
+    '    }',
+    '}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions[0].start, 2);
@@ -175,13 +162,13 @@ test('backslash + newline line-continuation inside string does not drift line nu
 
 test('char literal brace, escaped char and lifetime mixed -> brace depth not broken', () => {
   const src = [
-    '#[cfg(test)]', // 1
-    'mod tests {', // 2
-    "    let c = '{';", // 3
-    "    let n = '\\n';", // 4
-    "    let b = b'{';", // 5
-    "    fn f<'a>(x: &'a str) -> &'a str { x }", // 6
-    '}', // 7
+    '#[cfg(test)]',
+    'mod tests {',
+    "    let c = '{';",
+    "    let n = '\\n';",
+    "    let b = b'{';",
+    "    fn f<'a>(x: &'a str) -> &'a str { x }",
+    '}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions[0].end, 7);
@@ -189,26 +176,23 @@ test('char literal brace, escaped char and lifetime mixed -> brace depth not bro
 
 test('braces inside nested block comments are ignored', () => {
   const src = [
-    '#[cfg(test)]', // 1
-    'mod tests {', // 2
-    '    /* { /* } */ let x = 1; /* } */', // 3
-    '}', // 4
+    '#[cfg(test)]',
+    'mod tests {',
+    '    /* { /* } */ let x = 1; /* } */',
+    '}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions[0].end, 4);
 });
 
 test('region reports attrStart at the cfg(test) attribute line (for tests-untouched guard)', () => {
-  // T3 contract: editing the #[cfg(test)] attribute line itself must be
-  // detectable, so the region exposes the attribute line in addition to the
-  // item-line-based [start, end].
   const src = [
-    'pub fn prod() {}', // 1
-    '', // 2
-    '#[cfg(test)]', // 3 <- attrStart
-    '#[allow(clippy::unwrap_used)]', // 4
-    'mod tests {', // 5 <- start
-    '}', // 6 <- end
+    'pub fn prod() {}',
+    '',
+    '#[cfg(test)]',
+    '#[allow(clippy::unwrap_used)]',
+    'mod tests {',
+    '}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions.length, 1);
@@ -219,19 +203,16 @@ test('region reports attrStart at the cfg(test) attribute line (for tests-untouc
 
 test('non-cfg attribute alone does not create a region', () => {
   const src = [
-    '#[allow(dead_code)]', // 1
-    'pub fn unused() {}', // 2
-    '', // 3
-    '#[cfg(not(test))]', // 4
-    'pub fn other() {}', // 5
+    '#[allow(dead_code)]',
+    'pub fn unused() {}',
+    '',
+    '#[cfg(not(test))]',
+    'pub fn other() {}',
   ].join('\n');
   const regions = computeTestRegions(src);
   assert.equal(regions.length, 0);
 });
 
-// ---------------------------------------------------------------------------
-// parseCcccToml
-// ---------------------------------------------------------------------------
 
 test('parseCcccToml: defaults when keys are missing', () => {
   const parsed = parseCcccToml('');
@@ -255,9 +236,6 @@ test('parseCcccToml: invalid lines are ignored, non-numeric threshold falls back
   assert.equal(parsed.maxCognitive, 20);
 });
 
-// ---------------------------------------------------------------------------
-// classifyPath
-// ---------------------------------------------------------------------------
 
 test('classifyPath: tests-dir / bench / scan', () => {
   assert.equal(classifyPath('crates/anaden-cli/tests/e2e.rs'), 'tests-dir');
@@ -266,9 +244,6 @@ test('classifyPath: tests-dir / bench / scan', () => {
   assert.equal(classifyPath('crates/anaden-vision/examples/bench_match.rs'), 'scan');
 });
 
-// ---------------------------------------------------------------------------
-// flattenFunctions
-// ---------------------------------------------------------------------------
 
 test('flattenFunctions: children recursion with parentPath labels and path normalization', () => {
   const files = [
@@ -328,18 +303,15 @@ test('flattenFunctions: no children still yields every top-level function', () =
   );
 });
 
-// ---------------------------------------------------------------------------
-// evaluateGate
-// ---------------------------------------------------------------------------
 
 const SRC_WITH_REGIONS = [
-  'pub fn prod_ok() {}', // 1
-  '', // 2
-  '#[cfg(test)]', // 3
-  'mod tests {', // 4
-  '    #[test]', // 5
-  '    fn t() {}', // 6
-  '}', // 7
+  'pub fn prod_ok() {}',
+  '',
+  '#[cfg(test)]',
+  'mod tests {',
+  '    #[test]',
+  '    fn t() {}',
+  '}',
 ].join('\n');
 
 const SRC_NO_REGIONS = ['pub fn only() {}'].join('\n');
@@ -476,9 +448,6 @@ test('evaluateGate: thresholds are injectable', () => {
   assert.equal(loose.counts.violations, 0);
 });
 
-// ---------------------------------------------------------------------------
-// CLI integration (main) with tmpdir fixtures — cccc-rs is NOT executed
-// ---------------------------------------------------------------------------
 
 function makeTmpRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'cccc-gate-'));
@@ -490,13 +459,13 @@ test('main: violation fixture exits 1, writes report, classifies regions', () =>
     fs.mkdirSync(path.join(root, 'src'), { recursive: true });
     fs.mkdirSync(path.join(root, 'tests'), { recursive: true });
     const libSrc = [
-      'pub fn violating() {', // 1
-      '    if true {} if true {} if true {}', // 2
-      '}', // 3
-      '#[cfg(test)]', // 4
-      'mod tests {', // 5
-      '    fn huge() {}', // 6 — inside region
-      '}', // 7
+      'pub fn violating() {',
+      '    if true {} if true {} if true {}',
+      '}',
+      '#[cfg(test)]',
+      'mod tests {',
+      '    fn huge() {}',
+      '}',
     ].join('\n');
     fs.writeFileSync(path.join(root, 'src', 'lib.rs'), libSrc);
     fs.writeFileSync(path.join(root, 'tests', 'integ.rs'), 'fn t() {}\n');

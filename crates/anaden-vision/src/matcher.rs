@@ -251,7 +251,6 @@ mod tests {
 
         assert!(best.is_some());
         assert!(!all.is_empty());
-        // find_best_match の結果が find_matches の最高信頼度と一致する
         assert!((best.unwrap().confidence.0 - all[0].confidence.0).abs() < 0.001);
     }
 
@@ -260,7 +259,6 @@ mod tests {
         let haystack = DynamicImage::ImageLuma8(solid_image(100, 100, Luma([255])));
         let needle = DynamicImage::ImageLuma8(solid_image(20, 20, Luma([0])));
 
-        // 白い画面に黒いテンプレート → 高閾値ならマッチしない
         let matcher = TemplateMatcher::threshold_only(MatchConfidence::new(0.999));
         let result = matcher.find_best_match(&haystack, &needle);
 

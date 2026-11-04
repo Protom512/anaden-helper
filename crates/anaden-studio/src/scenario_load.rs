@@ -173,7 +173,6 @@ mod tests {
     use anaden_core::{Goal, StopCondition};
     use std::fs;
 
-    /// テスト用 TaskDef TOML 本体。
     fn task_toml(name: &str, template: &str) -> String {
         format!(
             "name = \"{name}\"\nstate = \"Field\"\nalgorithm = \"ccoeff\"\n\
@@ -181,10 +180,8 @@ mod tests {
         )
     }
 
-    /// 命名バリデータ: 受容・拒否テーブル (設計ノート C)。
     #[test]
     fn task_name_issue_accepts_pascalcase_and_rejects_conventions() {
-        // PascalCase (既存 pipeline 実名含む) は受容。
         for ok in [
             "Start",
             "Loop",
@@ -199,7 +196,6 @@ mod tests {
         ] {
             assert_eq!(task_name_issue(ok), None, "{ok} must be accepted");
         }
-        // snake_case / camelCase / 数字開始 / 空・空白 / 非英数。
         for bad in [
             "tap_hud",
             "template_01",
@@ -212,11 +208,9 @@ mod tests {
         ] {
             assert!(task_name_issue(bad).is_some(), "{bad:?} must be rejected");
         }
-        // 連番 (英単語 1 語 + 末尾数字)。
         for seq in ["Node1", "Task2", "A1", "Field2"] {
             assert!(task_name_issue(seq).is_some(), "{seq} must be rejected");
         }
-        // 過汎用名 (単体)。
         for generic in ["Confirm", "Check", "Click"] {
             assert!(
                 task_name_issue(generic).is_some(),
@@ -225,7 +219,6 @@ mod tests {
         }
     }
 
-    /// list_pipeline_dirs: サブディレクトリのみ辞書順・隠し/ファイル除外。
     #[test]
     fn list_pipeline_dirs_returns_sorted_visible_dirs_only() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -241,9 +234,6 @@ mod tests {
         assert!(list_pipeline_dirs(&root.join("ghost")).is_empty());
     }
 
-    /// manifest 無し pipeline: start_task は resolve_start_task と同一規則
-    /// (辞書順先頭 stem) のファイルの TaskDef name。stem ≠ name (tap_bottom →
-    /// TapBottomStable) でも name が入る (CLI 契約 t.name == start_task)。
     #[test]
     fn manifestless_load_derives_start_task_from_first_stem_taskdef_name() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -261,7 +251,6 @@ mod tests {
         .expect("write");
 
         let st = load_scenario_from_dir(&dir).expect("load");
-        // 辞書順先頭 stem = tap_bottom → その TaskDef name。
         assert_eq!(
             crate::tasks::resolve_start_task(&dir).as_deref(),
             Some("tap_bottom")
@@ -269,16 +258,13 @@ mod tests {
         assert_eq!(st.start_task, "TapBottomStable");
         assert!(st.goals.is_empty(), "manifest 無しは goals 空");
         assert_eq!(st.name, "field_loop");
-        // 決定論的ソート + baseline 記録。
         assert_eq!(st.task_names(), vec!["TapBottomStable", "TapHudTr"]);
         assert_eq!(st.loaded_task_names, vec!["TapBottomStable", "TapHudTr"]);
         assert!(
             st.loaded_task_files
                 .contains(&("TapBottomStable".to_string(), "tap_bottom".to_string()))
         );
-        // template は load_pipeline が絶対化済み。
         assert!(st.task("TapHudTr").unwrap().template.is_absolute());
-        // manifest 無し (goals 空) でも検証を通る (無限ループ互換)。
         assert!(
             st.validate().is_ok(),
             "issues: {:?}",
@@ -286,7 +272,6 @@ mod tests {
         );
     }
 
-    /// manifest 付き pipeline: start_task + goals をそのまま運ぶ。
     #[test]
     fn manifest_load_carries_start_task_and_goals() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -314,20 +299,16 @@ mod tests {
         );
     }
 
-    /// エッジ: 不在 dir / TaskDef ゼロ (manifest のみ) / 不正 TOML / 壊れ manifest。
     #[test]
     fn load_fails_closed_on_missing_empty_and_broken_inputs() {
         let tmp = tempfile::tempdir().expect("tempdir");
-        // 不在ディレクトリ → load_pipeline は空 Vec → NoTaskDefs。
         let e = load_scenario_from_dir(&tmp.path().join("ghost")).unwrap_err();
         assert!(matches!(e, ScenarioLoadError::NoTaskDefs { .. }), "{e:?}");
-        // manifest のみ (TaskDef ゼロ) → NoTaskDefs。
         let only = tmp.path().join("only_manifest");
         fs::create_dir_all(&only).expect("mkdir");
         fs::write(only.join("pipeline.toml"), "start_task = \"X\"\n").expect("write");
         let e = load_scenario_from_dir(&only).unwrap_err();
         assert!(matches!(e, ScenarioLoadError::NoTaskDefs { .. }), "{e:?}");
-        // 不正 TaskDef TOML (未知フィールド) → Vision(ParseFailed)。
         let broken = tmp.path().join("broken");
         fs::create_dir_all(&broken).expect("mkdir");
         fs::write(
@@ -343,7 +324,6 @@ mod tests {
             ),
             "{e:?}"
         );
-        // manifest 在るのに parse 不能 → fail-closed (manifest-less 扱いにしない)。
         let badm = tmp.path().join("bad_manifest");
         fs::create_dir_all(&badm).expect("mkdir");
         fs::write(badm.join("t.toml"), task_toml("T", "t.png")).expect("write");

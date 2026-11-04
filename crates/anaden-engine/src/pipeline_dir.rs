@@ -39,8 +39,6 @@ mod tests {
         dir
     }
 
-    // ---- 候補 1: パス自体 ----
-
     #[test]
     fn resolves_existing_cwd_relative_path_as_is() {
         let dir = tempfile::tempdir().unwrap();
@@ -58,8 +56,6 @@ mod tests {
         );
     }
 
-    // ---- 候補 2: root 相対 ----
-
     #[test]
     fn relative_template_path_falls_back_to_workspace_root() {
         let root = tempfile::tempdir().unwrap();
@@ -76,8 +72,6 @@ mod tests {
         assert_eq!(resolve_pipeline_dir(&input, root.path()), Some(dir));
     }
 
-    // ---- 候補 3: templates/pipelines 基準 ----
-
     #[test]
     fn bare_pipeline_name_resolves_under_templates_pipelines() {
         let root = tempfile::tempdir().unwrap();
@@ -88,7 +82,6 @@ mod tests {
 
     #[test]
     fn nested_relative_path_also_tries_templates_pipelines() {
-        // `run` (CLI) 従来契約: 相対パスは候補 3 でもテンプレ基準で試す。
         let root = tempfile::tempdir().unwrap();
         let dir = root
             .path()
@@ -100,8 +93,6 @@ mod tests {
         let input = PathBuf::from("a/b");
         assert_eq!(resolve_pipeline_dir(&input, root.path()), Some(dir));
     }
-
-    // ---- fail-closed ----
 
     #[test]
     fn nonexistent_relative_returns_none() {
@@ -121,8 +112,6 @@ mod tests {
 
     #[test]
     fn templates_prefixed_path_does_not_double_join_prefix() {
-        // `templates/pipelines/x` が非実在の場合、候補 3 で
-        // `templates/pipelines/templates/pipelines/x` は試さない (無駄打ち検証)。
         let root = tempfile::tempdir().unwrap();
         let dir = root
             .path()
@@ -136,16 +125,12 @@ mod tests {
         assert_eq!(resolve_pipeline_dir(&input, root.path()), None);
     }
 
-    // ---- 実ワークスペース (manifest 由来ルート) ----
-
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
             .join("..")
     }
 
-    /// 実在 pipeline の相対指定・bare name 指定がすべて実ディレクトリへ解決される
-    /// (Issue #188 で android 用 4 ディレクトリを削除済みの現行構成)。
     #[test]
     fn all_real_pipelines_resolve_on_real_root() {
         let root = workspace_root();
