@@ -122,8 +122,6 @@ impl RunStatus {
 mod tests {
     use super::*;
 
-    // ---- RunStatus ----
-
     #[test]
     fn status_start_line_sets_running_and_goal() {
         let mut s = RunStatus::new();
@@ -176,10 +174,6 @@ mod tests {
         assert_eq!(s.goal.as_deref(), Some("g2"));
     }
 
-    // ---- apply_report (03-report-channel: report を第一ソース化) ----
-
-    /// report.json fixture から終端状態 (サイクル数・停止理由) が構築できる。
-    /// stdout の開始行由来の goal は report に無い情報のためフォールバック保持。
     #[test]
     fn status_builds_from_report_fixture() {
         let dir = tempfile::tempdir().expect("tempdir");
@@ -202,7 +196,6 @@ mod tests {
         assert_eq!(s.goal.as_deref(), Some("farm50"));
     }
 
-    /// report の値は stdout 行解析の結果を上書きする (report が第一ソース)。
     #[test]
     fn status_report_overrides_stdout_parsed_values() {
         let report = anaden_engine::ProgressReport {
@@ -220,7 +213,6 @@ mod tests {
         };
         let mut s = RunStatus::new();
         s.observe("run_loop 開始: interval=1s goal=g");
-        // stdout 解析で誤った値が入った状態をシミュレート。
         s.observe("サイクル数: 999");
         s.observe("停止理由:   宣言的ゴール到達(正常)");
         s.apply_report(&report);
@@ -229,7 +221,6 @@ mod tests {
         assert!(!s.running);
     }
 
-    /// 旧成果物由来 (stop_reason 無し) の report は stdout 解析結果を維持。
     #[test]
     fn status_report_without_stop_reason_keeps_stdout_value() {
         let mut s = RunStatus::new();
@@ -245,8 +236,6 @@ mod tests {
         assert_eq!(s.iterations, Some(3));
     }
 
-    /// routine レポート (RoutineSummary) も終端状態を上書きする:
-    /// iterations = 全ステップ合計・停止理由 = 全体成否ラベル (routine 版契約)。
     #[test]
     fn status_routine_report_overrides_with_totals_and_outcome_label() {
         let step = || anaden_engine::RoutineStepResult {
@@ -275,8 +264,6 @@ mod tests {
         assert_eq!(s.iterations, Some(15));
         assert_eq!(s.stop_reason.as_deref(), Some("routine 完了 (2/2)"));
     }
-
-    // ---- AutoScrollFollow (T4: 自動スクロール追従の純ロジック) ----
 
     #[test]
     fn follow_defaults_enabled_with_no_pending() {

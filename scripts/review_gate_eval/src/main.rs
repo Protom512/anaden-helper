@@ -1,5 +1,3 @@
-//! CLI: `review-gate-eval <input.json>` → メトリクス JSON を stdout へ。
-//! 入力スキーマは `EvalInput` (lib.rs) 参照。exit codes: 0=成功, 1=IO/解析/集計エラー。
 
 use std::process::ExitCode;
 

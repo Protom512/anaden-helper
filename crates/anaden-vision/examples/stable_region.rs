@@ -1,5 +1,3 @@
-//! 2枚の正規化済み画面の差分を取り、フレーム間で安定(差分小)なブロックを列挙。
-//! テンプレ候補領域をデータ駆動で特定するための検証ヘルパ。
 use anaden_vision::ScreenScaler;
 
 fn main() {
@@ -14,10 +12,8 @@ fn main() {
     let topn: usize = args.get(4).and_then(|s| s.parse().ok()).unwrap_or(15);
     assert_eq!(a.dimensions(), b.dimensions(), "dim mismatch");
     let (w, h) = a.dimensions();
-    // 各タイルの平均輝度(テクスチャ指標=輝度分散)と、2枚間の差分平均を計算。
-    // 安定かつテクスチャ豊富(認識しやすい)なタイルを探す。
     let mut rows: Vec<(f32, u32, u32, f32, f32)> = Vec::new();
-    let _ = ScreenScaler::new(); // scale参照解決(未使用警告回避)
+    let _ = ScreenScaler::new();
     let mut ty = 0;
     while ty < h {
         let mut tx = 0;
@@ -40,18 +36,15 @@ fn main() {
                 }
             }
             let mean = lum_sum as f32 / n as f32;
-            let var = (lum_sq as f32 / n as f32) - mean * mean; // テクスチャ量
-            let diff_avg = diff_sum as f32 / n as f32; // フレーム間差分(小さいほど安定)
-            // score: 安定(diff小) かつ テクスチャ豊富(var大)
+            let var = (lum_sq as f32 / n as f32) - mean * mean;
+            let diff_avg = diff_sum as f32 / n as f32;
             let score = -diff_avg + var * 0.05;
             rows.push((score, tx, ty, diff_avg, var));
-            // unpack later
             let _ = (tw, th);
             tx += tile;
         }
         ty += tile;
     }
-    // score降順でtopN
     rows.sort_by(|x, y| y.0.partial_cmp(&x.0).unwrap());
     println!("tile={} top{} (score desc):", tile, topn);
     println!("rank  x    y    diff_avg  lumvar");

@@ -178,8 +178,6 @@ mod tests {
     use super::*;
     use image::{DynamicImage, ImageBuffer, Rgb, Rgba, RgbaImage};
 
-    /// `w x h` のベース画像の外周に `bar` ピクセルの黒帯を追加した RGBA 画像を作る。
-    /// 中央は輝度の高い（黒帯判定されない）灰色で埋める。
     fn synthetic_with_bars(w: u32, h: u32, bar: u32) -> DynamicImage {
         let full_w = w + 2 * bar;
         let full_h = h + 2 * bar;
@@ -196,20 +194,15 @@ mod tests {
 
     #[test]
     fn crop_removes_top_bottom_bars() {
-        // 中央 200x112(16:9) ＋ 上下左右 15px 黒帯 → 230x142。
-        // コンテンツ残り寸法が MIN_CONTENT_PX(64) を十分に超えるよう十分大きな画像。
         let img = synthetic_with_bars(200, 112, 15);
         assert_eq!(img.dimensions(), (230, 142));
 
         let out = crop_to_content(&img);
-        // 上下左右それぞれ 15px 黒帯 ＋ MARGIN_PX(2) 内側寄せ。
-        // remaining = 230 - 2*(15+2) = 196, 142 - 2*(15+2) = 108
         assert_eq!(out.dimensions(), (196, 108));
     }
 
     #[test]
     fn crop_removes_only_horizontal_bars_letterbox() {
-        // レターボックス: 上下のみ黒帯。中央 160x90(16:9) ＋ 上下 20px。
         let mut img: RgbaImage = ImageBuffer::new(160, 130);
         for y in 0..130 {
             for x in 0..160 {
@@ -220,14 +213,12 @@ mod tests {
         }
         let dyn_img = DynamicImage::ImageRgba8(img);
         let out = crop_to_content(&dyn_img);
-        // 左右は黒帯なし → crop_left/right = 0。上下 20 + MARGIN 2 = 22 ずつ。
         assert_eq!(out.width(), 160, "左右黒帯なしなので幅は維持");
         assert_eq!(out.height(), 130 - 2 * (20 + 2));
     }
 
     #[test]
     fn crop_removes_only_vertical_bars_pillarbox() {
-        // ピラーボックス: 左右のみ黒帯。中央 100x75(4:3) ＋ 左右 15px。
         let mut img: RgbaImage = ImageBuffer::new(130, 75);
         for y in 0..75 {
             for x in 0..130 {
@@ -244,7 +235,6 @@ mod tests {
 
     #[test]
     fn crop_no_bars_returns_clone() {
-        // 黒帯なし全体画像。クロップされず寸法維持。
         let img =
             DynamicImage::ImageRgb8(ImageBuffer::from_fn(200, 112, |_, _| Rgb([64, 96, 128])));
         let out = crop_to_content(&img);
@@ -260,7 +250,6 @@ mod tests {
 
     #[test]
     fn crop_all_black_falls_back_to_clone() {
-        // 全面黒画像。クロップ残りが MIN_CONTENT_PX を下回る → フォールバック。
         let img = DynamicImage::ImageRgb8(ImageBuffer::from_fn(100, 100, |_, _| Rgb([0, 0, 0])));
         let out = crop_to_content(&img);
         assert_eq!(
@@ -272,11 +261,9 @@ mod tests {
 
     #[test]
     fn crop_dark_content_interior_not_mistaken_for_bars() {
-        // 端は明るく、中央付近に暗部がある画像。端が黒くないので黒帯検出されない。
         let mut img: RgbaImage = ImageBuffer::new(80, 80);
         for y in 0..80 {
             for x in 0..80 {
-                // 端 5px は明るい、中央 30..50 は暗い（連続黒ではない）。
                 let edge = !(5..75).contains(&x) || !(5..75).contains(&y);
                 let dark_center = (30..50).contains(&x) && (30..50).contains(&y);
                 let v = if edge {
@@ -298,13 +285,6 @@ mod tests {
         );
     }
 
-    // ---- 実画像検証（capture_probe_live.png = 1918x1048, 黒帯入り実測） ----
-    //
-    // ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
-    // `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
-    // プローブ不在時は absence-skip せず image::open が fail-loud で panic する
-    // (CI/fresh-clone が missing-probe を偽 green で報告しないための不変量)。
-
     #[test]
     #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn crop_real_probe_image_removes_letterbox() {
@@ -324,15 +304,11 @@ mod tests {
             16.0 / 9.0
         );
 
-        // クロップ後は元より小さくなるはず（黒帯が除去される）。
         assert!(cw <= w, "クロップ後幅は元以下");
         assert!(ch <= h, "クロップ後高さは元以下");
-        // 最小寸法は維持（フォールバックでない）。
         assert!(cw >= MIN_CONTENT_PX);
         assert!(ch >= MIN_CONTENT_PX);
 
-        // 1918x1048 のアスペクト比 1.831 は 16:9(1.778) より横長 = 左右に黒帯があるはず。
-        // クロップ後は 16:9(1.778) に近づく、あるいは上下クロップで 1.778 前後になる。
         let src_aspect = w as f64 / h as f64;
         let out_aspect = cw as f64 / ch as f64;
         let target = 16.0 / 9.0;
@@ -345,11 +321,8 @@ mod tests {
         );
     }
 
-    // ---- CropInfo: crop_to_content_with_info ----
-
     #[test]
     fn crop_info_no_bars_is_full_with_zero_offset() {
-        // 黒帯なし画像 → CropInfo は offset=(0,0), size=元画像寸法。
         let img =
             DynamicImage::ImageRgb8(ImageBuffer::from_fn(200, 112, |_, _| Rgb([64, 96, 128])));
         let (out, info) = crop_to_content_with_info(&img);
@@ -363,29 +336,22 @@ mod tests {
 
     #[test]
     fn crop_info_with_bars_reports_content_offset_and_size() {
-        // 中央 200x112 ＋ 上下左右 15px 黒帯 → 230x142。
-        // crop_to_content は黒帯 15px + MARGIN_PX(2) = 17px ずつ内側へ寄せる。
         let img = synthetic_with_bars(200, 112, 15);
         assert_eq!(img.dimensions(), (230, 142));
         let (out, info) = crop_to_content_with_info(&img);
-        // 画像寸法は crop_to_content と同一。
         assert_eq!(out.dimensions(), (196, 108));
-        // CropInfo: offset = 17(=15+2), size = 残り寸法。
         assert_eq!(info.offset_x, 17);
         assert_eq!(info.offset_y, 17);
         assert_eq!(info.width, 196);
         assert_eq!(info.height, 108);
-        // コンテンツ右端 = offset + size は元画像内に収まる（右黒帯17px分の余裕）。
         assert!(info.offset_x + info.width <= 230);
         assert!(info.offset_y + info.height <= 142);
-        // コンテンツ右端 + 右黒帯(17) = 元画像寸法（境界整合）。
         assert_eq!(info.offset_x + info.width + 17, 230);
         assert_eq!(info.offset_y + info.height + 17, 142);
     }
 
     #[test]
     fn crop_info_letterbox_only_vertical_bars_zero_horizontal_offset() {
-        // レターボックス（上下のみ）。左右黒帯なし → offset_x=0, width=元幅。
         let mut img: RgbaImage = ImageBuffer::new(160, 130);
         for y in 0..130 {
             for x in 0..160 {
@@ -398,14 +364,12 @@ mod tests {
         let (_out, info) = crop_to_content_with_info(&dyn_img);
         assert_eq!(info.offset_x, 0, "左右黒帯なしなので offset_x=0");
         assert_eq!(info.width, 160, "左右黒帯なしなので width=元幅");
-        // 上下は 20+2=22 ずつ。
         assert_eq!(info.offset_y, 22);
         assert_eq!(info.height, 130 - 2 * 22);
     }
 
     #[test]
     fn crop_info_fallback_all_black_is_full_with_zero_offset() {
-        // 全面黒 → フォールバック。CropInfo は元画像全体（offset=0）。
         let img = DynamicImage::ImageRgb8(ImageBuffer::from_fn(100, 100, |_, _| Rgb([0, 0, 0])));
         let (out, info) = crop_to_content_with_info(&img);
         assert_eq!(out.dimensions(), (100, 100));
@@ -420,10 +384,6 @@ mod tests {
         assert_eq!(info, CropInfo::default());
     }
 
-    // ---- crop_to_canvas_with_info: キャンバス アスペクト保護 (Issue #212) ----
-
-    /// 中央に 16:9 コンテンツ + 左右黒帯のある画像 (真のピラーボックス) を作る。
-    /// コンテンツ 320x180 (16:9) + 左右 bar px → 全面 (320+2*bar)x180。
     fn pillarbox_16_9(bar: u32) -> DynamicImage {
         let w = 320 + 2 * bar;
         let mut img: RgbaImage = ImageBuffer::new(w, 180);
@@ -437,7 +397,6 @@ mod tests {
         DynamicImage::ImageRgba8(img)
     }
 
-    /// 16:9 全面画像の下側 `bottom_black` 行だけ黒 (キャンバス内部の未描画領域を模擬)。
     fn canvas_with_unpainted_bottom(bottom_black: u32) -> DynamicImage {
         let mut img: RgbaImage = ImageBuffer::new(320, 180);
         for y in 0..180 {
@@ -449,39 +408,31 @@ mod tests {
         DynamicImage::ImageRgba8(img)
     }
 
-    /// 真のピラーボックス (左右黒帯・中身は 16:9) はクロップが受理される。
-    /// クロップ後 320x180 ≒ 16:9 (誤差 0) → guard を通過。
     #[test]
     fn canvas_guard_accepts_genuine_pillarbox() {
         let img = pillarbox_16_9(20);
         assert_eq!(img.dimensions(), (360, 180));
         let (out, info) = crop_to_canvas_with_info(&img);
-        // 黒帯 20px + MARGIN_PX 2 = 左右 22px 除去 → 316x180 (アスペクト 1.7556・16:9 比 -1.2%)。
         assert_eq!(out.dimensions(), (316, 180));
         assert_eq!(info.offset_x, 22);
         assert_eq!(info.width, 316);
         assert_eq!(info.height, 180);
     }
 
-    /// キャンバス内部の未描画黒 (下 90 行 = 50%) はクロップが棄却され元画像全体になる。
-    /// crop_to_content だけなら 320x88 (アスペクト 3.636・+104%) になり幾何が破壊される。
     #[test]
     fn canvas_guard_rejects_unpainted_in_canvas_black() {
         let img = canvas_with_unpainted_bottom(90);
-        // 素の crop_to_content は (Issue #212 実測と同じ罠) 幾何を壊す — その前提を pin。
         let (raw_cropped, _) = crop_to_content_with_info(&img);
         assert_eq!(
             raw_cropped.dimensions(),
             (320, 88),
             "素 crop は下 90+2 行を除去して非 16:9 になる (guard が必要な理由)"
         );
-        // guard 付きは棄却して全面 (アスペクト 16:9 = 320/180) を返す。
         let (out, info) = crop_to_canvas_with_info(&img);
         assert_eq!(out.dimensions(), (320, 180), "幾何破壊クロップは棄却");
         assert_eq!(info, CropInfo::full(320, 180));
     }
 
-    /// 黒帯なし画像は guard を通っても何も変わらない (恒等)。
     #[test]
     fn canvas_guard_no_bars_is_identity() {
         let img =
@@ -491,7 +442,6 @@ mod tests {
         assert_eq!(info, CropInfo::full(320, 180));
     }
 
-    /// 全面黒フォールバックもそのまま透過する (CropInfo::full)。
     #[test]
     fn canvas_guard_all_black_falls_back_to_full() {
         let img = DynamicImage::ImageRgb8(ImageBuffer::from_fn(100, 100, |_, _| Rgb([0, 0, 0])));
@@ -500,8 +450,6 @@ mod tests {
         assert_eq!(info, CropInfo::full(100, 100));
     }
 
-    /// 左右 8px 程度の小黒帯 (除去後も 16:9 に近い) は受理される。
-    /// pillarbox_16_9(8): 全面 336x180 → 左右 8+2=10px 除去 → 316x180 (+2.5% 偏差)。
     #[test]
     fn canvas_guard_accepts_small_deviations_within_tolerance() {
         let img = pillarbox_16_9(8);
@@ -511,20 +459,15 @@ mod tests {
         assert_eq!(info.offset_x, 10);
     }
 
-    /// ゲート(R1 三値化): デフォルト(`pc-e2e` feature OFF)では #[ignore]。
-    /// `cargo nextest run -p anaden-vision --features pc-e2e --run-ignored all` でのみ実行。
-    /// プローブ不在時は absence-skip せず image::open が fail-loud で panic する。
     #[test]
     #[cfg_attr(not(feature = "pc-e2e"), ignore)]
     fn crop_info_real_probe_image_has_zero_or_nonzero_offset() {
-        // 実画像（1918x1048 黒帯入り）。CropInfo が元画像空間の妥当な矩形を指すことだけ検証。
         let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("../../capture_probe_live.png");
         let img = image::open(&path)
             .unwrap_or_else(|e| panic!("open capture_probe_live.png at {}: {e}", path.display()));
         let (w, h) = img.dimensions();
         let (out, info) = crop_to_content_with_info(&img);
-        // コンテンツ領域は元画像内に収まる。
         assert!(info.offset_x + info.width <= w, "offset_x+width <= 元幅");
         assert!(info.offset_y + info.height <= h, "offset_y+height <= 元高");
         assert_eq!((out.width(), out.height()), (info.width, info.height));

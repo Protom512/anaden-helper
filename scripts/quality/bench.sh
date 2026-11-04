@@ -1,21 +1,4 @@
 #!/usr/bin/env bash
-# Deterministic bench suite (Issue #214, Phase 0 / T5).
-#
-# Primary metric: peak RSS per workload (scripts/quality/rss_bench.ps1,
-# Windows-deterministic). Secondary: criterion bench (log_snapshot_bench)
-# with a named baseline for pre/post-refactor comparison. hyperfine wall
-# times are reference-only (--warmup + multiple runs, still noisy on Windows).
-#
-# Usage:
-#   ./scripts/quality/bench.sh                # release build, RSS x5, criterion, hyperfine
-#   BENCH_PROFILE=debug ./scripts/quality/bench.sh
-#   BENCH_SKIP_CRITERION=1 ./scripts/quality/bench.sh   # RSS + hyperfine only
-#
-# Outputs:
-#   target/quality/bench/routine-bench.toml         deterministic workload fixture
-#   target/quality/bench/rss-<name>.json            peak RSS reports
-#   target/quality/bench/hyperfine-routine.json     wall-time reference (optional)
-#   target/criterion/                               criterion data (--save-baseline)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
@@ -27,7 +10,6 @@ CRITERION_BASELINE="${BENCH_CRITERION_BASELINE:-complexity-phase0}"
 OUT="target/quality/bench"
 mkdir -p "$OUT"
 
-# --- 1) build the CLI (cap build jobs: cold wgpu/eframe parallel builds OOM) ---
 JOBS="${CARGO_BUILD_JOBS:-4}"
 if [[ "$PROFILE" == "release" ]]; then
   echo "bench: building anaden-cli (release, jobs=$JOBS)"
@@ -43,9 +25,6 @@ CLI_W="$(cygpath -w "$ROOT/$CLI")"
 ROOT_W="$(cygpath -w "$ROOT")"
 echo "bench: CLI = $CLI_W"
 
-# --- 2) deterministic routine fixture (headless dry-run workload) ---
-# References real committed pipeline templates; --dry-run never touches a
-# device, making the workload fully deterministic.
 cat > "$OUT/routine-bench.toml" <<'EOF'
 # RSS bench 用 routine (Issue #214 T5 — 決定的ワークロード)。
 # 実パイプラインテンプレート (templates/pipelines/*) を参照する検証のみ

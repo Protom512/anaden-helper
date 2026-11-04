@@ -1,8 +1,3 @@
-// Unit + integration tests for scripts/quality/mutants_gate.mjs
-// Contract source: approved plan Phase 0 item 5 (Issue #214, T4) —
-// gate decision is "zero NEW surviving mutants vs baseline" on the whole
-// workspace. Baseline is snapshotted to target/quality/mutants-baseline.json.
-// Run: node --test scripts/quality/mutants_gate.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -40,9 +35,6 @@ const SAMPLE = {
   ],
 };
 
-// ---------------------------------------------------------------------------
-// parseOutcomes
-// ---------------------------------------------------------------------------
 
 test('parseOutcomes: survivors = MissedMutant + TimeoutMutant, keyed by mutant name', () => {
   const parsed = parseOutcomes(SAMPLE);
@@ -56,7 +48,6 @@ test('parseOutcomes: survivors = MissedMutant + TimeoutMutant, keyed by mutant n
 });
 
 test('parseOutcomes: a run with survivors is usable (success flag is cargo-mutants exit semantics, not integrity)', () => {
-  // The calibration reality: success=false simply because 3 mutants survived.
   const parsed = parseOutcomes({ ...SAMPLE, success: false });
   assert.equal(parsed.survivors.length, 3);
 });
@@ -72,9 +63,6 @@ test('parseOutcomes: inconsistent totals are unusable (throws — fail-closed)',
   );
 });
 
-// ---------------------------------------------------------------------------
-// compareSurvivors
-// ---------------------------------------------------------------------------
 
 test('compareSurvivors: detects new and fixed survivors by name', () => {
   const baseline = [{ name: 'b:2:1: replace x with 2' }, { name: 'e:5:1: replace x with 5' }];
@@ -91,9 +79,6 @@ test('compareSurvivors: identical sets -> no new survivors', () => {
   assert.deepEqual(diff.fixedSurvivors, []);
 });
 
-// ---------------------------------------------------------------------------
-// CLI: snapshot + check (tmpdir integration)
-// ---------------------------------------------------------------------------
 
 function makeTmpRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'mut-gate-'));
@@ -127,10 +112,7 @@ test('main check: no new survivors passes; new survivor fails with exit 1', () =
   try {
     writeOutcomes(root, SAMPLE);
     assert.equal(main(['snapshot'], { root }), 0);
-    // rerun with the same survivor set -> pass
     assert.equal(main(['check'], { root }), 0);
-    // rerun with an extra survivor -> fail (keep totals consistent, as the
-    // real tool would)
     const worse = JSON.parse(JSON.stringify(SAMPLE));
     worse.outcomes.push(outcome('z:9:1: replace y with 0', 'MissedMutant'));
     worse.total_mutants += 1;

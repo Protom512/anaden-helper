@@ -211,15 +211,8 @@ mod tests {
         );
     }
 
-    // T5 ride-along cleanup (#34): load_from_directory must propagate errors via
-    // Result instead of panicking. Why not panic: a malformed template directory
-    // (unreadable entry, non-UTF8 name, missing file stem) must not crash the
-    // whole CLI/studio/engine binary; the caller (orchestrator/template_tool)
-    // already uses `?` and can surface the error gracefully.
-
     #[test]
     fn load_from_directory_returns_zero_for_missing_dir() {
-        // 既存契約の回帰防止: 存在しないディレクトリは Ok(0) (panic しない)。
         let mut store = TemplateStore::new();
         let result = store.load_from_directory(Path::new("/nonexistent/definitely_missing_dir"));
         assert!(result.is_ok());
@@ -228,7 +221,6 @@ mod tests {
 
     #[test]
     fn load_from_directory_loads_images_from_subdirs() {
-        // 正常系: サブディレクトリ名=state, 画像を読み込む。
         let tmp = tempfile::tempdir().unwrap();
         let battle_dir = tmp.path().join("battle");
         std::fs::create_dir_all(&battle_dir).unwrap();
@@ -244,7 +236,6 @@ mod tests {
 
     #[test]
     fn load_from_directory_skips_non_image_files() {
-        // 非画像ファイル (.toml/.txt) はスキップされ panic しない。
         let tmp = tempfile::tempdir().unwrap();
         let field_dir = tmp.path().join("field");
         std::fs::create_dir_all(&field_dir).unwrap();
@@ -259,7 +250,6 @@ mod tests {
 
     #[test]
     fn load_from_directory_handles_empty_subdir() {
-        // 空サブディレクトリは Ok(0)、panic しない (read_dir on empty は有効)。
         let tmp = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(tmp.path().join("empty_state")).unwrap();
 

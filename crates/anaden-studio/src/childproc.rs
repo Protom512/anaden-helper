@@ -126,8 +126,6 @@ mod tests {
     use super::*;
     use std::sync::mpsc::sync_channel;
 
-    /// テスト用の bounded チャネル（容量大: テストは受信しないケースがあるため
-    /// Full 破棄でもreaderは継続する）。
     fn channel() -> (
         std::sync::mpsc::SyncSender<crate::log_view::LogEvent>,
         std::sync::mpsc::Receiver<crate::log_view::LogEvent>,
@@ -135,8 +133,6 @@ mod tests {
         sync_channel(1024)
     }
 
-    /// 長時間(約30秒)生きる子プロセスの SpawnSpec。
-    /// ping は Windows でも Linux でも存在し、`-n`/`-c` の差のみ。
     fn long_running_spec() -> SpawnSpec {
         if cfg!(windows) {
             SpawnSpec::new(
@@ -151,7 +147,6 @@ mod tests {
         }
     }
 
-    /// 即終了する子プロセスの SpawnSpec。
     fn short_spec() -> SpawnSpec {
         if cfg!(windows) {
             SpawnSpec::new(
@@ -193,7 +188,6 @@ mod tests {
     fn test_stop_after_natural_exit_is_ok() {
         let mut cp = ChildProcess::new();
         cp.start(&short_spec(), channel().0).unwrap();
-        // 短命プロセスの自然終了を待つ。
         for _ in 0..50 {
             if !cp.is_running() {
                 break;
@@ -201,7 +195,6 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(100));
         }
         assert!(!cp.is_running());
-        // 自然終了後の stop は Ok。
         cp.stop().unwrap();
     }
 
@@ -218,15 +211,12 @@ mod tests {
         let mut cp = ChildProcess::new();
         cp.start(&short_spec(), channel().0).unwrap();
         cp.stop().unwrap();
-        // 停止後なら再起動できる。
         cp.start(&short_spec(), channel().0).unwrap();
         cp.stop().unwrap();
     }
 
     #[test]
     fn test_stderr_is_drained_with_prefix() {
-        // stderr に 2 行出力して終了する子。reader が drain しないと
-        // 小容量でも保証がないため、接続を検証する。
         let spec = if cfg!(windows) {
             SpawnSpec::new(
                 "cmd",
@@ -247,7 +237,6 @@ mod tests {
         let (tx, rx) = channel();
         let mut cp = ChildProcess::new();
         cp.start(&spec, tx.clone()).unwrap();
-        // 子の自然終了 + reader 回収を待つ。
         for _ in 0..100 {
             if !cp.is_running() {
                 break;
@@ -273,24 +262,9 @@ mod tests {
         );
     }
 
-    /// UC-1: 大量出力でも子プロセスがブロックしない。
-    ///
-    /// 数 MB を stdout/stderr 両方に出力する子を、受信しない bounded チャネル
-    /// （容量 1）で起動する。読み手不在なら OS パイプ容量（Windows 数十 KB）
-    /// を超えた時点で子がブロックし、タイムアウト内に終了しない。
-    /// reader が Full 時に行を破棄して読み続けるため、子は即座に書き切れる。
-    ///
-    /// CI の負荷変動を考慮してタイムアウトは 180 秒。それでも失敗する場合は
-    /// `#[ignore]` 化を検討（Windows CI タイムアウトリスクは承認条件より
-    /// 事前ポリシー: 通常 nextest で実行し、flaky 判定時に ignore へ昇格）。
-    ///
-    /// 2026-08-26: Windows 実機で 60 秒超過の flaky を確認したため
-    /// 事前ポリシーに従い ignore へ昇格。検証時は
-    /// `cargo nextest run -p anaden-studio -E 'test(high_volume)' --run-ignored ignored`。
     #[test]
     #[ignore = "Windows で cmd の for ループ出力が遅く 60s タイムアウトを超える flaky (Issue #85 UC-1 事前ポリシー)"]
     fn test_high_volume_output_does_not_block_child() {
-        // 約 4MB: 各行 64B × 65536 行 × 2 パイプ。
         let spec = if cfg!(windows) {
             SpawnSpec::new(
                 "cmd",
@@ -304,9 +278,8 @@ mod tests {
                  "i=0; while [ $i -lt 65536 ]; do echo aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa; echo bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb >&2; i=$((i+1)); done".to_string()].to_vec(),
             )
         };
-        // 容量 1 の bounded チャネル: テストは受信しない → Full 連発。
         let (tx, rx) = sync_channel::<crate::log_view::LogEvent>(1);
-        std::mem::forget(rx); // Drop でDisconnectedになってもreaderは継続するが、Full経路を主に検証
+        std::mem::forget(rx);
         let mut cp = ChildProcess::new();
         cp.start(&spec, tx.clone()).unwrap();
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(180);

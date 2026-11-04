@@ -278,10 +278,8 @@ mod tests {
     use std::sync::Mutex;
     use std::sync::OnceLock;
 
-    /// 呼出記録 + スクリプト化された応答を返す recording double。
     struct RecordingInvoker {
         calls: OnceLock<Mutex<Vec<String>>>,
-        /// 呼出順に対応する応答。None (= 呼び出し超過) は InvokerError。
         scripted: Vec<Result<LoopOutcome, RoutineError>>,
     }
 
@@ -360,8 +358,6 @@ mod tests {
         }
     }
 
-    // ---- 順序と集計 ----
-
     #[tokio::test]
     async fn runs_steps_in_definition_order() {
         let invoker = RecordingInvoker::new(vec![
@@ -393,7 +389,6 @@ mod tests {
 
     #[tokio::test]
     async fn max_iterations_with_fired_counts_as_completed() {
-        // 成果物 (fired >= 1) がある MaxIterations は従来どおり完了扱い。
         let invoker =
             RecordingInvoker::new(vec![Ok(outcome(LoopStopReason::MaxIterations, 10, 1))]);
         let def = RoutineDef {
@@ -405,10 +400,6 @@ mod tests {
         assert!(summary.all_ok());
     }
 
-    // ---- Issue #210: MaxIterations + fired=0 は no_fire 失敗扱い ----
-
-    /// サイクルを使い切って一度も発火していないステップは NoFire (= 失敗) に分類され、
-    /// routine 全体も all_ok=false (exit 2) になること。
     #[tokio::test]
     async fn max_iterations_zero_fired_is_nofire_failure() {
         let invoker =
@@ -431,18 +422,16 @@ mod tests {
             !summary.all_ok(),
             "no_fire ステップがある routine は exit 2 相当"
         );
-        // ラベルに「発火なし」が明示されること (サマリの誠実表示)。
         let label = step_status_label(&summary.results[0].status);
         assert!(label.contains("発火なし"), "label: {label}");
         assert!(label.contains("失敗"), "label: {label}");
     }
 
-    /// no_fire も on_failure ポリシーの対象: stop なら残りステップをスキップして中止。
     #[tokio::test]
     async fn nofire_failure_follows_on_failure_policy() {
         let invoker = RecordingInvoker::new(vec![
-            Ok(outcome(LoopStopReason::MaxIterations, 10, 0)), // no_fire
-            Ok(outcome(LoopStopReason::Stop, 9, 9)),           // 呼ばれない
+            Ok(outcome(LoopStopReason::MaxIterations, 10, 0)),
+            Ok(outcome(LoopStopReason::Stop, 9, 9)),
         ]);
         let def = two_step_def(OnFailure::Stop);
         let summary = run_routine(&def, &invoker).await;
@@ -453,13 +442,11 @@ mod tests {
         assert_eq!(summary.results[1].status, StepStatus::Skipped);
     }
 
-    // ---- on_failure ポリシー ----
-
     #[tokio::test]
     async fn failure_with_stop_policy_skips_remaining_steps() {
         let invoker = RecordingInvoker::new(vec![
             Ok(outcome(LoopStopReason::CaptureError, 2, 0)),
-            Ok(outcome(LoopStopReason::Stop, 9, 9)), // 呼ばれない
+            Ok(outcome(LoopStopReason::Stop, 9, 9)),
         ]);
         let def = two_step_def(OnFailure::Stop);
         let summary = run_routine(&def, &invoker).await;
@@ -503,7 +490,7 @@ mod tests {
     async fn interrupted_aborts_regardless_of_policy() {
         let invoker = RecordingInvoker::new(vec![
             Ok(outcome(LoopStopReason::Interrupted, 1, 0)),
-            Ok(outcome(LoopStopReason::Stop, 9, 9)), // 呼ばれない
+            Ok(outcome(LoopStopReason::Stop, 9, 9)),
         ]);
         let def = two_step_def(OnFailure::Skip);
         let summary = run_routine(&def, &invoker).await;
@@ -530,15 +517,12 @@ mod tests {
         ));
     }
 
-    // ---- 表示ヘルパ ----
-
     #[tokio::test]
     async fn summary_text_contains_step_and_total_lines() {
         let invoker = RecordingInvoker::new(vec![
             Ok(outcome(LoopStopReason::Stop, 3, 1)),
             Ok(outcome(LoopStopReason::CaptureError, 2, 0)),
         ]);
-        // on_failure=skip: 両ステップ実行・1 失敗。
         let summary = run_routine(&two_step_def(OnFailure::Skip), &invoker).await;
         let text = summary.format_text();
         assert!(text.contains("routine 'rt'"), "{text}");
@@ -577,10 +561,6 @@ mod tests {
         );
     }
 
-    // ---- Serialize (routine --report-file の機械可読契約) ----
-
-    /// RoutineSummary は全 StepStatus バリアントを含めて JSON 往復できる
-    /// (report.json として書いたものが studio 側で同じ構造に読める)。
     #[test]
     fn routine_summary_roundtrips_json_with_all_step_statuses() {
         let summary = RoutineSummary {
@@ -647,7 +627,6 @@ mod tests {
         assert_eq!(back, summary);
     }
 
-    /// outcome_label: all_ok は完了ラベル、失敗系は内訳入り失敗ラベル。
     #[test]
     fn outcome_label_reflects_all_ok_and_failure_breakdown() {
         let ok = RoutineSummary {

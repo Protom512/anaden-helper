@@ -172,7 +172,6 @@ fn validate_step(step: &RoutineStep, root: &Path) -> Result<(), RoutineError> {
 mod tests {
     use super::*;
 
-    /// workspace ルート (anaden-engine manifest から 2 階層上昇)。
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -184,8 +183,6 @@ mod tests {
         std::fs::write(&path, content).unwrap();
         path
     }
-
-    // ---- parse / defaults ----
 
     #[test]
     fn parse_valid_routine_applies_defaults() {
@@ -285,8 +282,6 @@ mod tests {
             .expect_err("missing file");
         assert!(matches!(err, RoutineError::ReadFailed { .. }), "{err}");
     }
-
-    // ---- validation (fail-closed) ----
 
     #[test]
     fn validate_empty_steps_is_error() {
@@ -395,8 +390,6 @@ mod tests {
         ));
     }
 
-    /// 実在 pipeline 2つ (login → nav_to_field_pc) を参照する routine が
-    /// 実 workspace ルートで検証を通る (UC-1 の headless 検証)。
     #[test]
     fn validate_real_two_step_routine_on_real_root() {
         let def = RoutineDef {
@@ -424,7 +417,6 @@ mod tests {
             .expect("real routine validates");
     }
 
-    /// templates/routines/daily.toml (サンプル) が実ルートで load + validate を通る。
     #[test]
     fn sample_daily_toml_loads_and_validates() {
         let path = workspace_root()

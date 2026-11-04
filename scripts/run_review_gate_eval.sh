@@ -1,34 +1,4 @@
 #!/usr/bin/env bash
-# run_review_gate_eval.sh
-#
-# Issue #76 / Feature: review-gate レビュー精度の定量検証 — 実行再現ツール。
-#
-# review-gate workflow (.claude/workflows/review-gate.js) は
-# `git diff --name-only HEAD` / `git diff --name-only --staged`
-# (working tree の変更) を前提としており、マージ済み PR の diff には
-# そのまま実行できない。本スクリプトは指定 PR のマージ結果を一時
-# worktree (detached, ブランチ無し) にチェックアウトし、base commit へ
-# `git reset --soft` することで「PR の変更が staged にある状態」を再現する。
-#
-# workflow 自体は変更しない。セットアップ完了後に Claude Code を
-# worktree 上で起動し review-gate workflow を実行する手順を出力する。
-#
-# Usage:
-#   ./scripts/run_review_gate_eval.sh <pr-number> [<pr-number> ...]
-#   ./scripts/run_review_gate_eval.sh --keep <pr-number>   # worktree を残す
-#
-# Requirements:
-#   - git (worktree 対応), gh CLI (PR メタデータ取得)
-#   - PR はマージ済みであること (merge commit が origin に存在)
-#
-# Exit codes:
-#   0 = 全 PR のセットアップ成功
-#   1 = 前提ツール不足 / PR 解決失敗 / worktree 作成失敗
-#
-# Cleanup:
-#   - デフォルトではスクリプト終了時 (trap EXIT) に worktree を削除する。
-#     Claude Code で review-gate を実行する必要があるため、実際の運用では
-#     --keep を付けて実行し、評価完了後に表示されるコマンドで削除する。
 
 set -euo pipefail
 
@@ -66,17 +36,14 @@ REPO_ROOT="$(git rev-parse --show-toplevel)" || {
   echo "ERROR: not inside a git repository" >&2
   exit 1
 }
-# shellcheck disable=SC2164
 cd "$REPO_ROOT"
 
-# クリーンアップ (git worktree remove のみ。branch は作らないので削除不要)。
 CLEANUP_DIRS=()
 cleanup() {
   local d
   for d in "${CLEANUP_DIRS[@]:-}"; do
     [ -n "$d" ] && [ -d "$d" ] && git worktree remove --force "$d" >/dev/null 2>&1 || true
   done
-  # 孤立した worktree メタデータの掃除 (失敗は無視)
   git worktree prune --expire 1.day >/dev/null 2>&1 || true
 }
 trap cleanup EXIT

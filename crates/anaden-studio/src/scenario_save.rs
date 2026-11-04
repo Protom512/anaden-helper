@@ -201,7 +201,6 @@ mod tests {
     use anaden_vision::{Action, Algorithm, TaskDef};
     use std::fs;
 
-    /// テスト用 TaskDef (roi=[10,20,100,50]・threshold=0.8・click_self)。
     fn task_def(name: &str, next: Option<Vec<&str>>) -> TaskDef {
         TaskDef {
             name: name.to_string(),
@@ -223,7 +222,6 @@ mod tests {
         }
     }
 
-    // AC-1 機械保証: エディタ状態 -> anaden-vision save -> load 往復。
     #[test]
     fn saved_scenario_roundtrips_through_anaden_vision_load() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -279,8 +277,6 @@ mod tests {
         assert_eq!(end.action, Some(Action::ClickSelf));
     }
 
-    /// dir 内の (ファイル名, バイト列) の決定論的スナップショット
-    /// (バイト不変アサーション用)。
     fn dir_snapshot(dir: &Path) -> Vec<(String, Vec<u8>)> {
         let mut out: Vec<_> = fs::read_dir(dir)
             .expect("read_dir")
@@ -295,16 +291,11 @@ mod tests {
         out
     }
 
-    /// minor-3 (Issue #180): stem ≠ name の既存 pipeline へ stem と同名の新規
-    /// タスクを追加すると書き出しパスが衝突する → 保存前に専用エラーで拒否し
-    /// 1 バイトも書かない (バイト不変)。
     #[test]
     fn save_refuses_stem_collision_writing_nothing() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let pipelines_root = tmp.path().join("pipelines");
 
-        // (1) 既存 pipeline を作る: ファイル FieldHudTr.toml の TaskDef name は
-        //     FieldHudWide (stem ≠ name — UC-4 の往復契約と同構成)。
         let mut st = ScenarioEditorState::new("field_hud");
         st.add_task(task_def("FieldHudWide", Some(vec![])));
         st.loaded_task_names = vec!["FieldHudWide".to_string()];
@@ -313,8 +304,6 @@ mod tests {
         let dir = save_scenario(&st, &[], &pipelines_root).expect("initial save");
         let before = dir_snapshot(&dir);
 
-        // (2) ロード → 新規タスク FieldHudTr (= 既存 stem) を追加。
-        //     既存バリデーション (タスク名一意性・命名規約) では検出できない。
         let mut st2 = crate::scenario_load::load_scenario_from_dir(&dir).expect("load");
         st2.add_task(task_def("FieldHudTr", Some(vec![])));
         assert!(
@@ -323,7 +312,6 @@ mod tests {
             st2.validation_issues()
         );
 
-        // (3) 保存拒否 (TaskFileCollision) + dir は 1 バイトも変わらない。
         let err = save_scenario(&st2, &[], &pipelines_root).expect_err("must refuse");
         assert!(
             matches!(
@@ -336,8 +324,6 @@ mod tests {
         assert_eq!(dir_snapshot(&dir), before, "1 バイトも書かない");
     }
 
-    /// minor-3 (ケース違い): ロード済み 2 タスクの stem がケース違いのみ
-    /// (StartPc / startpc) でも Windows では同一ファイル → 衝突として拒否。
     #[test]
     fn save_refuses_case_variant_stem_collision() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -365,9 +351,6 @@ mod tests {
         );
     }
 
-    /// minor-4 (Issue #180): sweep の書き出しパス比較はケースインセンシティブ。
-    /// ケース違い stem (beta.toml vs Beta.toml) は同一ファイル扱いし sweep され
-    /// ない (保存前の stem 衝突検査で本来拒否される組み合わせの二重防御)。
     #[test]
     fn sweep_keeps_case_variant_of_written_task_file() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -376,7 +359,6 @@ mod tests {
         fs::write(dir.join("Alpha.toml"), b"a").expect("write");
         fs::write(dir.join("Beta.toml"), b"b").expect("write");
 
-        // 書き出しパス beta.toml は Beta.toml とケース違いのみ → 同一ファイル扱い。
         sweep_removed_taskdefs(&dir, &[dir.join("beta.toml")]);
 
         assert!(
@@ -389,13 +371,6 @@ mod tests {
         );
     }
 
-    // ---- Issue #184: 無構造テンプレート警告 (保存経路 3・fail-visible) ----
-    //
-    // pending PNG (ROI 追加 crop) と UC-2 参照 PNG の両方を検証し、警告は
-    // ScenarioSaveOutcome::warnings として返る。保存自体はブロックしない。
-    // 判定は anaden-vision の単一実装経由 (library::template_structure_warning)。
-
-    /// 構造ありテンプレート用のグラデーション画像 (stddev 約 57 > 閾値 20)。
     fn gradient_image(w: u32, h: u32) -> DynamicImage {
         let mut img = image::GrayImage::new(w, h);
         for y in 0..h {
@@ -407,13 +382,10 @@ mod tests {
         DynamicImage::ImageLuma8(img)
     }
 
-    /// ほぼ単色画像 (stddev = 0 — Issue #182 の旧テンプレート相当)。
     fn flat_image(w: u32, h: u32) -> DynamicImage {
         DynamicImage::ImageLuma8(image::GrayImage::from_pixel(w, h, image::Luma([250u8])))
     }
 
-    /// 無構造 pending PNG (ROI 追加 crop) を含む保存は成功し、警告 1 件
-    /// (対象タスク名 + 認識不能の恐れ) を返す。PNG 自体は書かれる (ブロックしない)。
     #[test]
     fn save_scenario_with_warnings_flags_flat_pending_png_but_saves() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -442,11 +414,9 @@ mod tests {
             "警告は認識不能の恐れを明示: {}",
             outcome.warnings[0]
         );
-        // 保存はブロックしない → PNG 実体が書かれている。
         assert!(outcome.dir.join("Start.png").exists());
     }
 
-    /// 構造あり pending PNG のみなら警告なし (偽陽性ゼロ)。
     #[test]
     fn save_scenario_with_warnings_structured_png_has_no_warning() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -465,14 +435,11 @@ mod tests {
         );
     }
 
-    /// UC-2 参照割当 (ライブラリ PNG ファイル参照) も検証される: 無構造参照は
-    /// 警告、構造あり参照は警告なし。絶対パス参照 (assign_template 後の保存状態)。
     #[test]
     fn save_scenario_with_warnings_flags_flat_uc2_reference_png() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("pipelines");
 
-        // 参照先ライブラリ PNG (無構造 / 構造あり) を作る。
         let lib_dir = tmp.path().join("lib");
         fs::create_dir_all(&lib_dir).expect("mkdir lib");
         let flat_ref = lib_dir.join("flat_ref.png");
@@ -505,9 +472,6 @@ mod tests {
         );
     }
 
-    /// 参照先ファイルが存在しないタスクは警告なし (存在検証は detect の責務 —
-    /// 本警告は認識品質の予見のみ。fail-visible であり fail-closed ではない)。
-    /// 従来の save_scenario ラッパも引き続き dir のみ返す (互換)。
     #[test]
     fn save_scenario_with_warnings_skips_missing_reference_and_wrapper_keeps_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -526,28 +490,17 @@ mod tests {
             outcome.warnings
         );
 
-        // 従来ラッパ (save_scenario) は PathBuf を返すまま (呼出元互換)。
-        // 連続保存は panel と同様に loaded_from 所有権を設定してから。
         st.loaded_from = Some(outcome.dir.clone());
         let dir = save_scenario(&st, &[], &root).expect("wrapper save");
         assert_eq!(dir, root.join("warn_ghost"));
     }
 
-    // ---- Issue #187: needle が ROI に収まらない警告 (保存経路・fail-visible) ----
-    //
-    // Issue #182 の実再発形態 (テンプレ差し替え 138x20 vs 旧 roi 幅 121) を保存時点で
-    // 予見する。判定は anaden-vision の単一実装経由 (library::needle_roi_warning →
-    // anaden_vision::needle_fits_roi)。保存自体はブロックしない。
-
-    /// pending PNG (ROI 追加 crop) がタスク ROI より大きい場合に警告 1 件
-    /// (寸法と恒久 NoMatch を明示)。crop は書かれる (ブロックしない)。
     #[test]
     fn save_scenario_with_warnings_flags_oversized_pending_png() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("pipelines");
 
         let mut st = ScenarioEditorState::new("warn_fit");
-        // ROI 追加後に roi を狭めた構成 (crop 100x50 > roi 60x40)。
         let mut task = task_def("Big", Some(vec![]));
         task.roi = Some([10, 20, 60, 40]);
         st.add_task(task);
@@ -576,19 +529,16 @@ mod tests {
             "警告は恒久 NoMatch を明示: {}",
             outcome.warnings[0]
         );
-        // 保存はブロックしない → PNG 実体が書かれている。
         assert!(outcome.dir.join("Big.png").exists());
     }
 
-    /// pending PNG が ROI に収まる (等辺含む) 場合は needle/roi 警告なし
-    /// (偽陽性ゼロ — crop == roi の標準形が該当)。
     #[test]
     fn save_scenario_with_warnings_fitting_pending_png_has_no_roi_warning() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("pipelines");
 
         let mut st = ScenarioEditorState::new("warn_fit_ok");
-        st.add_task(task_def("Fits", Some(vec![]))); // roi [10,20,100,50]
+        st.add_task(task_def("Fits", Some(vec![])));
         st.add_goal(loop_goal("g", 3));
         let pngs = vec![("Fits".to_string(), gradient_image(100, 50))];
 
@@ -600,7 +550,6 @@ mod tests {
         );
     }
 
-    /// roi None (全面走査) のタスクは寸法に関わらず警告なし。
     #[test]
     fn save_scenario_with_warnings_fullscreen_roi_never_flags() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -621,15 +570,11 @@ mod tests {
         );
     }
 
-    /// UC-2 参照割当 (ライブラリ PNG ファイル参照) でも needle/roi 収容を検証する:
-    /// 参照 PNG がタスク ROI より大きければ警告 (Issue #182 の共用テンプレ差し替え
-    /// パターン — 参照先の差し替えで消費者 TOML の roi が取り残される形)。
     #[test]
     fn save_scenario_with_warnings_flags_oversized_uc2_reference_png() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("pipelines");
 
-        // 参照先ライブラリ PNG: 構造あり 138x20 (Issue #182 再生成テンプレと同寸法)。
         let lib_dir = tmp.path().join("lib");
         fs::create_dir_all(&lib_dir).expect("mkdir lib");
         let wide_ref = lib_dir.join("wide_ref.png");
@@ -640,7 +585,6 @@ mod tests {
         let mut st = ScenarioEditorState::new("warn_uc2_fit");
         let mut task = task_def("WideRef", Some(vec![]));
         task.template = wide_ref;
-        // roi 幅 121 < needle 幅 138 (Issue #182 の旧 roi 値)。
         task.roi = Some([8, 2, 121, 35]);
         st.add_task(task);
         st.add_goal(loop_goal("g", 1));

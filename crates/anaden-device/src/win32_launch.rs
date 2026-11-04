@@ -299,17 +299,6 @@ mod tests {
     use super::*;
     use std::os::windows::process::CommandExt;
 
-    /// `restart_app` が「既存プロセス終了 → 消失確認 → launcher spawn 1 回」の順に
-    /// 動くことを実プロセスで検証する (Issue #210: 二重起動防止)。
-    ///
-    /// 手順: `ping.exe` を固有名 (`anaden_t210_child_<pid>.exe`) へコピーして
-    /// 約 60 秒生存するダミー子プロセスを起動する。`restart_app` は (1) このプロセスを
-    /// `TerminateProcess` で終了させ消失を確認してから (2) launcher (ping コピー・
-    /// 引数なしなので即終了) を spawn する。検証事項:
-    /// - `restart_app` が `Ok` を返すこと (子の終了待ちが deadline 内に完了)。
-    /// - ダミー子がプロセス一覧から消失していること (= spawn より前に終了確認済み)。
-    ///
-    /// 生存確認のためにプロセス名の衝突を避ける固有名を使うため、並列実行にも安全。
     #[tokio::test]
     async fn restart_app_terminates_existing_child_before_spawn() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -325,7 +314,6 @@ mod tests {
         std::fs::copy(&ping, &child_exe).expect("copy ping as dummy child");
         std::fs::copy(&ping, &launcher_exe).expect("copy ping as dummy launcher");
 
-        // ダミー子プロセス起動 (61 回 ping = 約 60 秒生存・stdio null で出力破棄)。
         let mut spawned = Command::new(&child_exe)
             .args(["-n", "61", "127.0.0.1"])
             .stdin(Stdio::null())
@@ -334,7 +322,6 @@ mod tests {
             .creation_flags(CREATE_NEW_PROCESS_GROUP.0)
             .spawn()
             .expect("spawn dummy child");
-        // 子がプロセス一覧へ出現するまで待つ (最大 10 秒)。
         let appear_deadline = Instant::now() + Duration::from_secs(10);
         while !child_exists(&child_name) {
             assert!(
@@ -354,15 +341,12 @@ mod tests {
             .await
             .expect("restart_app must terminate child then spawn launcher");
 
-        // ダミー子は終了済み (= launcher spawn より前に終了確認が完了した証拠)。
         assert!(
             !child_exists(&child_name),
             "existing child must be terminated (and confirmed gone) before spawn"
         );
-        // std::process::Child も終了を観測できる (kill されていれば即座に返る)。
         let _ = spawned.wait();
 
-        // launcher コピー (引数なし ping = 即終了) の残存を掃除する (fail-safe)。
         let gone_deadline = Instant::now() + Duration::from_secs(10);
         while child_exists(&launcher_name) {
             if Instant::now() >= gone_deadline {

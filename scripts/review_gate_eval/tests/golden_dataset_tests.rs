@@ -1,11 +1,3 @@
-//! golden dataset (data/input.json) の構造検証テスト (Task 3)。
-//!
-//! README 記載の客観的抽出基準に基づいて機械的に検証できる範囲:
-//! - JSON が EvalInput スキーマとしてパースできる
-//! - golden id はグローバル一意
-//! - 対象 PR はマージ済み PR (golden: #54/#55/#56/#58/#62/#72, consensus 追加: #64/#65/#75) のみ
-//! - findings の matched_golden は存在する golden id のみ参照する
-//! - consensus の PR は golden または findings に登場する PR を網羅する
 
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]

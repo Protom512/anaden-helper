@@ -571,7 +571,6 @@ mod tests {
     use anaden_vision::{Action, Algorithm};
     use std::fs;
 
-    /// テスト用 TaskDef (scenario_editor テストと同構成)。
     fn task_def(name: &str, next: Option<Vec<&str>>) -> TaskDef {
         TaskDef {
             name: name.to_string(),
@@ -593,8 +592,6 @@ mod tests {
         }
     }
 
-    /// UC-3 (Shard 4): save() 成功で保存実体 (dir) が記録され、登録フォームの
-    /// 既定値 (task id / title = シナリオ名) が同期される。
     #[test]
     fn save_tracks_saved_scenario_and_syncs_register_form_defaults() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -617,9 +614,6 @@ mod tests {
         assert_eq!(panel.task_title_input, "fishing2");
     }
 
-    // ---- Issue #184: 無構造テンプレート警告 (保存経路 3 の GUI 配線) ----
-
-    /// 構造ありテンプレート用グラデーション画像 (stddev 約 57 > 閾値 20)。
     fn gradient_image(w: u32, h: u32) -> DynamicImage {
         let mut img = image::GrayImage::new(w, h);
         for y in 0..h {
@@ -631,8 +625,6 @@ mod tests {
         DynamicImage::ImageLuma8(img)
     }
 
-    /// 無構造 (ほぼ単色) の ROI 追加タスクを保存すると、status に「認識不能の
-    /// 恐れ」警告が併記され、保存自体は成功する (fail-visible・ブロックなし)。
     #[test]
     fn save_reports_warning_for_flat_pending_template() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -653,7 +645,6 @@ mod tests {
             status.contains("認識不能"),
             "無構造テンプレ警告が status へ出る: {status}"
         );
-        // 保存はブロックされない。
         assert!(panel.saved_pipeline().is_some(), "保存実体を記録: {status}");
         assert!(
             panel.saved_pipeline().unwrap().join("Start.png").exists(),
@@ -661,7 +652,6 @@ mod tests {
         );
     }
 
-    /// 構造ありの ROI 追加タスクは警告なし (偽陽性ゼロ)。
     #[test]
     fn save_reports_no_warning_for_structured_pending_template() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -682,14 +672,10 @@ mod tests {
         );
     }
 
-    /// UC-4: open_existing でロード → 保存先がロード元 dir に固定され、
-    /// 編集なし保存で同 dir へ書き戻る。new_scenario で既定ルートへ復元。
     #[test]
     fn open_existing_fixes_save_target_and_new_scenario_restores_root() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let root = tmp.path().join("pipelines");
-        // ロード対象 pipeline を先に保存しておく (name ≠ file stem の検証も兼ね、
-        // 手書きで stem ファイルを置く)。
         let dir = root.join("fishing2");
         fs::create_dir_all(&dir).expect("mkdir");
         fs::write(
@@ -710,8 +696,6 @@ mod tests {
         assert_eq!(panel.pipeline_dir(), dir, "既定の保存先 = ロード元 dir");
         assert!(panel.saved_pipeline().is_none(), "ロード直後は未保存");
 
-        // 編集なし保存 → 同一 dir へ。stem ファイル (fishing_start.toml) へ書き戻り、
-        // name ファイル (FishingStartPc.toml) は作られない (重複 TaskDef 防止)。
         panel.save(&mut status);
         assert_eq!(panel.saved_pipeline(), Some(dir.as_path()));
         assert!(
@@ -726,7 +710,6 @@ mod tests {
         assert_eq!(defs.len(), 1, "TaskDef が倍化しない");
         assert_eq!(defs[0].name, "FishingStartPc");
 
-        // 新規シナリオへ戻ると既定ルート・空状態へ復元。
         panel.new_scenario(&mut status);
         assert_eq!(panel.pipeline_dir(), root.join("my_scenario"));
         assert!(panel.state.tasks.is_empty());

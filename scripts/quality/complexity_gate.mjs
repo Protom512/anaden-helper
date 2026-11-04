@@ -1,15 +1,3 @@
-// Complexity gate for the anaden-helper workspace (Issue #214, Phase 0 / T1).
-//
-// Runs `cccc-rs crates --ext rs` (moznion/cccc Rust front-end), excludes test
-// regions (`#[cfg(test)]` items and `tests/` directories) and benches from the
-// production scope, then fails (exit 1) when any production function exceeds
-// the thresholds from `cccc.toml` (default: cyclomatic <= 15, cognitive <= 20).
-//
-// Exit codes: 0 = green, 1 = violations, 2 = environment/tool error (fail-closed).
-//
-// Note: the standalone `cccc-rs` 0.4.0 binary reads no config file; cccc.toml
-// is the single source of thresholds for this script and enables cache only
-// when the integrated `cccc` CLI is used.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -20,14 +8,7 @@ const CCCC_ARGS = ['crates', '--ext', 'rs'];
 const DEFAULT_MAX_CYCLOMATIC = 15;
 const DEFAULT_MAX_COGNITIVE = 20;
 
-// ---------------------------------------------------------------------------
-// cccc.toml parsing (flat keys only)
-// ---------------------------------------------------------------------------
 
-/**
- * Parses the flat-key subset of cccc.toml used by this repo.
- * Invalid or missing keys fall back to defaults; `#` comments are stripped.
- */
 export function parseCcccToml(text) {
   const parsed = {
     maxCyclomatic: DEFAULT_MAX_CYCLOMATIC,
@@ -55,21 +36,9 @@ export function parseCcccToml(text) {
   return parsed;
 }
 
-// ---------------------------------------------------------------------------
-// Minimal Rust lexer — yields only "code" characters
-// ---------------------------------------------------------------------------
 
 const isIdentChar = (ch) => /[A-Za-z0-9_]/.test(ch);
 
-/**
- * Yields `{ ch, pos, line }` for characters that are NOT inside string
- * literals, char literals, or comments. Handles the traps verified against
- * this workspace: raw strings (`r"…"`, `r#"…"#`, `br…`), byte strings,
- * char-vs-lifetime disambiguation, nested block comments, and backslash +
- * newline line-continuations inside strings (the newline must still count as
- * a line break or every later line number drifts).
- * `line` is 1-based and computed from `src` start, not from `fromOffset`.
- */
 export function* lexRust(src, fromOffset = 0) {
   let line = 1;
   for (let i = 0; i < fromOffset; i += 1) {
@@ -81,7 +50,6 @@ export function* lexRust(src, fromOffset = 0) {
   while (i < n) {
     const ch = src[i];
 
-    // Newlines advance the line counter and are not yielded as code.
     if (ch === '\n') {
       line += 1;
       i += 1;
@@ -92,13 +60,11 @@ export function* lexRust(src, fromOffset = 0) {
       continue;
     }
 
-    // Line comment: skip to end of line (keep the '\n' for code state).
     if (ch === '/' && src[i + 1] === '/') {
       while (i < n && src[i] !== '\n') i += 1;
       continue;
     }
 
-    // Block comment (nestable): `/* /* */ */`.
     if (ch === '/' && src[i + 1] === '*') {
       i += 2;
       let depth = 1;
@@ -117,7 +83,6 @@ export function* lexRust(src, fromOffset = 0) {
       continue;
     }
 
-    // Raw (byte) strings: r"…", r#"…"#, br"…", br##"…"##.
     const rawPrefix =
       (ch === 'r' && (src[i + 1] === '"' || src[i + 1] === '#')) ||
       (ch === 'b' && src[i + 1] === 'r' && (src[i + 2] === '"' || src[i + 2] === '#'));
@@ -148,26 +113,23 @@ export function* lexRust(src, fromOffset = 0) {
         }
         continue;
       }
-      // Not actually a raw string (e.g. plain identifier `r#foo` macro vars are
-      // not strings); fall through and emit the character as code.
     }
 
-    // Ordinary / byte string literal: "…" and b"…".
     if (ch === 'b' && src[i + 1] === '"' && atIdentBoundary()) {
-      i += 1; // consume 'b', then handle the quote below in the next iteration
+      i += 1;
       continue;
     }
     if (ch === '"') {
       i += 1;
       while (i < n && src[i] !== '"') {
         if (src[i] === '\\') {
-          i += 1; // the escaped character
+          i += 1;
           if (i < n) {
             if (src[i] === '\n') {
               line += 1;
             } else if (src[i] === '\r' && src[i + 1] === '\n') {
               line += 1;
-              i += 1; // consume the '\r'; the loop-end increment takes '\n'
+              i += 1;
             }
           }
           i += 1;
@@ -176,12 +138,10 @@ export function* lexRust(src, fromOffset = 0) {
         if (src[i] === '\n') line += 1;
         i += 1;
       }
-      i += 1; // closing quote
+      i += 1;
       continue;
     }
 
-    // Char literals: 'x', '\n', '\'', b'x'. Everything else starting with a
-    // quote is a lifetime ('a) and stays code.
     const byteChar = ch === 'b' && src[i + 1] === "'" && atIdentBoundary();
     const quoteIdx = byteChar ? i + 1 : ch === "'" ? i : -1;
     if (quoteIdx >= 0) {
@@ -200,22 +160,13 @@ export function* lexRust(src, fromOffset = 0) {
   }
 }
 
-// ---------------------------------------------------------------------------
-// Test-region detection
-// ---------------------------------------------------------------------------
 
-// Issue #233/#240: cfg(test), cfg(all(..., test, ...)), cfg(any(..., test, ...))
-// の引数順任意・ネスト括弧対応。文字列リテラル内の "test" は偽陽性の恐れが
-// あるため、`feature = "..."` / `target_os = "..."` 等の文字列値を除去してから
-// 語彙 `test` の存在を判定する。`cfg(test)` 単体は正確一致。
 const stripStringValues = (s) => s.replace(/"[^"]*"/g, '""');
 const cfgContainsTest = (line) => {
   const header = /^\s*#\[\s*cfg\s*\(\s*/.exec(line);
   if (!header) return false;
   const rest = line.slice(header[0].length);
-  // `cfg(test)` 正確一致
   if (/^test\s*\)/.test(rest)) return true;
-  // `cfg(all(...))` / `cfg(any(...))` — 対応する閉じ括弧まで読む
   const combo = /^(?:all|any)\s*\(/.exec(rest);
   if (!combo) return false;
   let depth = 1;
@@ -226,7 +177,6 @@ const cfgContainsTest = (line) => {
     i += 1;
   }
   const inner = rest.slice(combo[0].length, i - 1);
-  // 文字列値を除去した上で語彙 test の存在を判定
   return /(?:^|[,\s(])test(?:[,\s)]|$)/.test(stripStringValues(inner));
 };
 const ATTRIBUTE_LINE = /^\s*#\[.*\]\s*$/;
@@ -236,12 +186,6 @@ const FN_ITEM =
 const isSkippableBetweenAttrAndItem = (text) =>
   text.trim() === '' || ATTRIBUTE_LINE.test(text) || text.trimStart().startsWith('//');
 
-/**
- * Computes 1-based `{ start, end, kind, note }` line intervals for every
- * `#[cfg(test)]` / `#[cfg(all(test, ...))]` item in a source file.
- * `start` is the item line (attribute lines are NOT included); `end` is the
- * line of the item's closing brace, or the item line itself for `;` items.
- */
 export function computeTestRegions(source) {
   const lines = source.split('\n');
   const lineStarts = [0];
@@ -262,8 +206,8 @@ export function computeTestRegions(source) {
     let kind = 'other';
     if (MOD_ITEM.test(itemText)) kind = 'mod';
     else if (FN_ITEM.test(itemText)) kind = 'fn';
-    const attrStart = ln + 1; // 1-based line of the cfg(test) attribute itself
-    const start = item + 1; // 1-based item line
+    const attrStart = ln + 1;
+    const start = item + 1;
     let end = lines.length;
     let depth = 0;
     let closed = false;
@@ -284,23 +228,15 @@ export function computeTestRegions(source) {
         }
       }
     }
-    if (!closed && depth !== 0) end = lines.length; // unbalanced: exclude to EOF (fail-closed)
+    if (!closed && depth !== 0) end = lines.length;
     regions.push({ start, end, kind, note, attrStart });
   }
   return regions;
 }
 
-// ---------------------------------------------------------------------------
-// Path classification & cccc output flattening
-// ---------------------------------------------------------------------------
 
 const normalizePath = (p) => String(p).replace(/\\/g, '/');
 
-/**
- * Classifies a repo-relative path: `tests/` directory files are test code,
- * `benches/` files are out of scope for the complexity gate, everything else
- * (src/ and examples/) is scanned.
- */
 export function classifyPath(relPath) {
   const p = normalizePath(relPath);
   if (/(^|\/)tests\//.test(p)) return 'tests-dir';
@@ -310,11 +246,6 @@ export function classifyPath(relPath) {
 
 const closureLabel = (fn) => (fn.kind === 'closure' ? `<closure@${fn.line}>` : fn.name);
 
-/**
- * Flattens cccc's nested `functions`/`children` arrays (closures are reported
- * as children of their enclosing function, not at top level). `parentPath`
- * chains enclosing names, labeling closures as `<closure@line>`.
- */
 export function flattenFunctions(ccccFiles) {
   const out = [];
   const walk = (file, fns, parents) => {
@@ -339,19 +270,10 @@ export function flattenFunctions(ccccFiles) {
   return out;
 }
 
-// ---------------------------------------------------------------------------
-// Gate evaluation
-// ---------------------------------------------------------------------------
 
 const severityOrder = (a, b) =>
   b.cognitive - a.cognitive || b.cyclomatic - a.cyclomatic || a.file.localeCompare(b.file) || a.line - b.line;
 
-/**
- * Evaluates the gate against parsed cccc output.
- * `sources` maps normalized paths to file contents (scan files only are
- * consulted; a missing scan source throws — callers must pre-read and
- * fail closed instead of silently treating it as test-free production code).
- */
 export function evaluateGate({ ccccJson, sources, thresholds }) {
   const maxCyclomatic = thresholds?.maxCyclomatic ?? DEFAULT_MAX_CYCLOMATIC;
   const maxCognitive = thresholds?.maxCognitive ?? DEFAULT_MAX_COGNITIVE;
@@ -391,7 +313,7 @@ export function evaluateGate({ ccccJson, sources, thresholds }) {
     if (classification === 'tests-dir') {
       testRegions.files.push({ file, basis: 'tests-dir' });
       counts.testExcluded += fns.length;
-      continue; // whole file is test code — excluded from every violation list
+      continue;
     }
     if (classification === 'bench') {
       counts.benchOutOfScope += fns.length;
@@ -427,9 +349,6 @@ export function evaluateGate({ ccccJson, sources, thresholds }) {
   return { counts, violations, excludedTestViolations, benchViolations, testRegions };
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
 
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 
@@ -438,11 +357,6 @@ function formatViolation(v) {
   return `  ${v.file}:${v.line} ${where} (${v.kind}) cyc=${v.cyclomatic} cog=${v.cognitive}`;
 }
 
-/**
- * CLI entry point. Returns the process exit code (0/1/2).
- * `opts` exists for tests: `{ root, ccccJson }` injects the repo root and the
- * parsed cccc output so no external tool is executed.
- */
 export function main(argv = [], opts = {}) {
   const root = opts.root ?? path.resolve(scriptDir, '..', '..');
 

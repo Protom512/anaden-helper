@@ -136,10 +136,6 @@ mod tests {
         }
     }
 
-    // ---- resolve_run_artifacts (フラグ → パス解決の純契約) ----
-
-    /// 明示 `--report-file` は最優先。run.log (tracing 二重出力) は既定
-    /// 永続化専用のため作らない。
     #[test]
     fn resolve_explicit_report_file_wins() {
         let dir = tempfile::tempdir().unwrap();
@@ -149,7 +145,6 @@ mod tests {
         assert_eq!(got.log_path, None);
     }
 
-    /// `--no-persist` は既定永続化の無効化フラグであり、明示指定には効かない。
     #[test]
     fn resolve_explicit_report_file_survives_no_persist() {
         let dir = tempfile::tempdir().unwrap();
@@ -158,8 +153,6 @@ mod tests {
         assert_eq!(got.report_path, Some(explicit));
     }
 
-    /// 未指定時の既定: `<pipeline_dir>/.anaden-run/<timestamp>/` へ
-    /// report.json + run.log。
     #[test]
     fn resolve_default_artifacts_under_pipeline_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -171,7 +164,6 @@ mod tests {
         assert_eq!(got.log_path, Some(base.join("run.log")));
     }
 
-    /// `--no-persist` (明示指定なし) は何も永続化しない。
     #[test]
     fn resolve_no_persist_disables_all() {
         let dir = tempfile::tempdir().unwrap();
@@ -180,10 +172,6 @@ mod tests {
         assert_eq!(got.log_path, None);
     }
 
-    // ---- resolve_routine_artifacts (routine 既定永続化 — loop 10) ----
-
-    /// 未指定時の既定: `<routine_dir>/.anaden-routine/<timestamp>/` へ
-    /// routine-report.json + routine.log (run の .anaden-run と対称)。
     #[test]
     fn resolve_routine_default_artifacts_under_routine_dir() {
         let dir = tempfile::tempdir().unwrap();
@@ -195,8 +183,6 @@ mod tests {
         assert_eq!(got.log_path, Some(base.join("routine.log")));
     }
 
-    /// 明示 `--report-file` は最優先。routine.log (tracing 二重出力) は
-    /// 既定永続化専用のため作らない (run と同一契約)。
     #[test]
     fn resolve_routine_explicit_report_file_wins() {
         let dir = tempfile::tempdir().unwrap();
@@ -206,7 +192,6 @@ mod tests {
         assert_eq!(got.log_path, None);
     }
 
-    /// `--no-persist` は明示指定には効かない (run と同一契約)。
     #[test]
     fn resolve_routine_explicit_survives_no_persist() {
         let dir = tempfile::tempdir().unwrap();
@@ -215,7 +200,6 @@ mod tests {
         assert_eq!(got.report_path, Some(explicit));
     }
 
-    /// `--no-persist` (明示指定なし) は何も永続化しない。
     #[test]
     fn resolve_routine_no_persist_disables_all() {
         let dir = tempfile::tempdir().unwrap();
@@ -224,8 +208,6 @@ mod tests {
         assert_eq!(got.log_path, None);
     }
 
-    /// prepare は routine 成果物ディレクトリと routine.log を事前作成する
-    /// (report は routine 終了時)。異常終了時も「どこで実行したか」が残る。
     #[test]
     fn prepare_creates_routine_dir_and_log() {
         let dir = tempfile::tempdir().unwrap();
@@ -238,10 +220,6 @@ mod tests {
         assert!(!log.parent().unwrap().join("routine-report.json").is_file());
     }
 
-    // ---- prepare (run.log の事前作成) ----
-
-    /// prepare はディレクトリと run.log を作成する (report は run 終了時)。
-    /// run 中に異常終了しても「どのディレクトリで実行したか」が残る。
     #[test]
     fn prepare_creates_dirs_and_run_log() {
         let dir = tempfile::tempdir().unwrap();
@@ -254,17 +232,12 @@ mod tests {
         assert!(!log.parent().unwrap().join("report.json").is_file());
     }
 
-    /// 永続化なし (None) の prepare は何もしない (Ok)。
     #[test]
     fn prepare_noop_when_disabled() {
         let got = resolve_run_artifacts(Path::new("pl"), None, true, "ts");
         got.prepare().expect("prepare noop");
     }
 
-    // ---- write_report (report.json 書込の機械可読契約) ----
-
-    /// 書込んだ report.json は `serde_json::from_reader::<ProgressReport>` で
-    /// 読め、停止理由・サイクル数・発火数が入っている (studio 消費契約)。
     #[test]
     fn write_report_roundtrips_progress_report() {
         let dir = tempfile::tempdir().unwrap();
@@ -278,14 +251,10 @@ mod tests {
         assert_eq!(report.fired_count, 3);
     }
 
-    // ---- run_artifact_timestamp ----
-
-    /// 既知値: unix 秒 → ファイル名安全な YYYYMMDD-HHMMSS (UTC)。
     #[test]
     fn run_artifact_timestamp_known_values() {
         assert_eq!(run_artifact_timestamp(0), "19700101-000000");
         assert_eq!(run_artifact_timestamp(1_788_220_800), "20260901-000000");
-        // コロンを含まない (Windows パス部品として安全)。
         assert!(!run_artifact_timestamp(3_600).contains(':'));
     }
 }

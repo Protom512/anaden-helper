@@ -1,10 +1,3 @@
-//! Issue #160 UC-3 (Shard 4) 統合テスト — 保存 → タスク登録 → 有効化のパネルフロー。
-//!
-//! MAA 4 段階フロー (a) pipeline 作成 → (b) task エントリ登録 → (c) 有効化 →
-//! (d) queue 追加 (ホーム一覧) を GUI パネル経由で通し検証する。
-//! `load_task_definitions` 再読込後に有効化タスクが選択可能 (selectable) になる
-//! ことを機械保証する (UC-3 受入)。ヘッドレス (ウィンドウ生成なし)。
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::panic)]
 #![allow(clippy::expect_used)]
@@ -20,12 +13,10 @@ use anaden_studio::tasks::TaskDefinition;
 use anaden_vision::TaskDef;
 use image::{DynamicImage, GrayImage, Luma};
 
-/// 単色 GrayImage (scenario_editor_tests.rs と同構成)。
 fn solid_image(w: u32, h: u32, v: u8) -> DynamicImage {
     DynamicImage::ImageLuma8(GrayImage::from_pixel(w, h, Luma([v])))
 }
 
-/// Authoring ペインと同一導出の追加候補 (pipeline_task_spec + crop PNG)。
 fn gui_candidate(name: &str, roi: ScreenRegion) -> (TaskDef, DynamicImage) {
     let task = pipeline_task_spec(
         name,
@@ -39,7 +30,6 @@ fn gui_candidate(name: &str, roi: ScreenRegion) -> (TaskDef, DynamicImage) {
     (task, solid_image(roi.width, roi.height, 160))
 }
 
-/// ヘッドレス egui コンテキスト内に子 Ui を作る (既存パターン)。
 fn child_ui(ctx: &egui::Context) -> egui::Ui {
     egui::Ui::new(
         ctx.clone(),
@@ -51,7 +41,6 @@ fn child_ui(ctx: &egui::Context) -> egui::Ui {
     )
 }
 
-/// 保存 → 新規登録・有効化 → ホーム一覧反映の通しフロー (UC-3 受入)。
 #[test]
 fn panel_flow_save_register_enable_reflects_in_home_list() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -60,7 +49,6 @@ fn panel_flow_save_register_enable_reflects_in_home_list() {
     let tasks_dir = root.join("templates/tasks");
     fs::create_dir_all(&tasks_dir).expect("mkdir tasks");
 
-    // (a) シナリオ作成・保存 (パネル経由)。
     let mut panel = ScenarioPanel::new(pipelines_root.clone());
     panel.state.name = "uc3_flow".to_string();
     let (tap, tap_png) = gui_candidate("TapMain", ScreenRegion::new(10, 20, 100, 50));
@@ -80,7 +68,6 @@ fn panel_flow_save_register_enable_reflects_in_home_list() {
         Some(pipelines_root.join("uc3_flow").as_path())
     );
 
-    // 登録セクションのヘッドレス描画がパニック無し (stub あり/なし両方)。
     let egui_ctx = egui::Context::default();
     let stubs = vec![StubTaskOption {
         id: "stub_x".to_string(),
@@ -104,7 +91,6 @@ fn panel_flow_save_register_enable_reflects_in_home_list() {
     let _ = panel.ui_task_link(&mut child_ui(&egui_ctx), &empty_ctx, &mut status);
     let _ = egui_ctx.end_pass();
 
-    // (b)+(c) 新規タスクとして登録・有効化 (ボタン実体 = 既存 save() パターン)。
     let ev = panel.register_as_new_task(&ctx, &mut status);
     assert!(
         matches!(ev, Some(ScenarioPanelEvent::TaskEnabled { .. })),
@@ -112,7 +98,6 @@ fn panel_flow_save_register_enable_reflects_in_home_list() {
     );
     assert!(status.contains("タスク登録・有効化"), "status: {status}");
 
-    // (d) ホーム一覧反映: load_task_definitions 再読込で選択可能になる。
     let defs = anaden_studio::tasks::load_task_definitions(&tasks_dir).expect("reload");
     let def = defs
         .iter()
@@ -121,7 +106,6 @@ fn panel_flow_save_register_enable_reflects_in_home_list() {
     assert!(def.is_selectable(), "有効化タスクは選択可能: {def:?}");
     assert_eq!(def.start_task.as_deref(), Some("TapMain"));
 
-    // (ii) 既存 stub への紐付け+有効化経路 (テンポラリ stub TOML)。
     fs::write(
         tasks_dir.join("stub_x.toml"),
         "# stub\nid = \"stub_x\"\ntitle = \"スタブX\"\nkind = \"pipeline_run\"\n\
@@ -147,7 +131,6 @@ fn panel_flow_save_register_enable_reflects_in_home_list() {
     );
 }
 
-/// fail-closed: 未保存での登録・紐付けは status エラーとなりイベントを返さない。
 #[test]
 fn register_before_save_reports_error_without_event() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -164,14 +147,11 @@ fn register_before_save_reports_error_without_event() {
     assert!(panel.register_as_new_task(&ctx, &mut status).is_none());
     assert!(status.contains("保存"), "status: {status}");
 
-    // 紐付けも未保存・未選択で拒否。
     let mut status2 = String::new();
     assert!(panel.bind_stub_task(&ctx, &mut status2).is_none());
     assert!(status2.contains("保存"), "status: {status2}");
 }
 
-/// fail-closed: 同名 task TOML 既存時の再登録は上書き拒否 (バイト不変)・
-/// 不正 task id は UnsafeTaskId として status へ伝播する。
 #[test]
 fn panel_register_failures_propagate_to_status() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -192,7 +172,6 @@ fn panel_register_failures_propagate_to_status() {
     panel.save(&mut status);
     assert!(status.contains("シナリオ保存"));
 
-    // 既存 TOML (上書き対象 — 変更されてはならない)。
     let existing = tasks_dir.join("dup_flow.toml");
     let original = "# 既存\nid = \"dup_flow\"\ntitle = \"既存\"\nkind = \"launch_subcommand\"\n\
                     implemented = true\n";
@@ -214,7 +193,6 @@ fn panel_register_failures_propagate_to_status() {
         "既存ファイルは 1 バイトも変わらない"
     );
 
-    // 不正 task id (パス区切り) も status へ fail-closed。
     panel.task_id_input = "a/b".to_string();
     assert!(panel.register_as_new_task(&ctx, &mut status).is_none());
     assert!(

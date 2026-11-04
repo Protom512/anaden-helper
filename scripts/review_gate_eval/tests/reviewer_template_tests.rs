@@ -1,9 +1,3 @@
-//! reviewer 定義 (issue #80 Task 1) のスキーマ契約テスト。
-//!
-//! 3つの reviewer Markdown テンプレートに以下が必須であること:
-//! - (a) confidence: high/medium/low フィールド
-//! - (b) コマンド成否セクション: clippy / nextest の pass/fail を実行結果貼付で報告
-//! - (c) 決定論的判定 (コマンド成否) と LLM 判定 (所見ベース GO/NO-GO) の分離
 
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::panic)]

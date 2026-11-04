@@ -1,89 +1,26 @@
 #![cfg(windows)]
-//! ANOTHER EDEN PC版のウィンドウ画像取得プローブ(Windows 専用)。
-//!
-//! 目的: AnotherEden.exe(32bit cocos2d-x, OpenGL 描画, アンチチート wfsdrv 稼働中)の
-//! ウィンドウ画像を PrintWindow + GDI で取得し、GPU 描画が黒一色になっていないか
-//! (= 実際のゲーム画面が取れているか) を**輝度分散**で自動判定する。
-//!
-//! 最終目標は `anaden-engine/src/pipeline_driver.rs` の Capture trait
-//!   `async fn capture(&self) -> Result<DynamicImage, DeviceError>`
-//! へ Windows 実装バックエンド(WindowsCapture)を足せるかの実証。
-//!
-//! ## 主軸 API: PrintWindow(PW_RENDERFULLCONTENT=0x2) + GDI 連鎖
-//!
-//! BitBlt 単体は DirectX/OpenGL 等 GPU 描画サーフェスを拾えず黒画像になる
-//! (AnotherEden は cocos2d-x OpenGL 描画なので確実に黒)。PrintWindow に
-//! PW_RENDERFULLCONTENT(0x2, Win8.1+) を渡すと「GPU 描画含むフルコンテンツ」を
-//! レンダリングしてくれる。これが BitBlt vs PrintWindow の差別化点。
-//!
-//! アンチチート wfsdrv は読み取り系 API を握り潰す証拠が無い(launcher-opengl-fix.md
-//! で副次要因止まり)なので、まず PrintWindow を試すのが最短。
-//!
-//! ### windows 0.62 の feature 落とし穴(解決済み)
-//! PrintWindow は `Win32::Graphics::Gdi` ではなく **`Win32::Storage::Xps`** にある。
-//! フラグ型は `PRINT_WINDOW_FLAGS`(newtype around u32)。
-//! ルート `Cargo.toml` の windows features に `Win32_Storage_Xps` を追加済みでないと
-//! コンパイル不可。BitBlt/CreateCompatibleDC/GetDIBits/SelectObject は
-//! `Win32::Graphics::Gdi`(既存 feature)。
-//!
-//! また windows 0.62.2 では多くの BOOL 返却 GDI 関数が `Result<()>` を返し、
-//! HWND/HDC を取る関数の該当引数は `Option<HWND>`/`Option<HDC>` を要求する。
-//! `SelectObject`/`DeleteObject` は `HGDIOBJ` を要求するため HBITMAP は `.into()` で渡す。
-//!
-//! ## フォールバック(本プローブでは設計のみ): Windows.Graphics.Capture (WGC)
-//!
-//! PrintWindow が黒になる場合の escalate 先。WGC は Direct3D/DirectX 描画を含め
-//! GPU サーフェスをフレームごとに取り出せる現世代の正攻法。手順:
-//!   1. `GraphicsCaptureItem::CreateFromWindow(hwnd)` で HWND から item 生成
-//!   2. `Direct3D11CaptureFramePool::Create(d3d11device, format, size)` で pool 作成
-//!   3. `frame_pool.CreateCaptureSession(item)` → `session.StartCapture()`
-//!   4. `FrameArrived` で `Direct3DSurface` を取り出し CPU 側へ copy → RGBA へ
-//!
-//! Cargo.toml の WGC features(Graphics_Capture / Win32_Graphics_Direct3D11 /
-//! Win32_Graphics_Dxgi / Win32_System_WinRT / Win32_System_WinRT_Direct3D11 /
-//! Win32_System_WinRT_Graphics_Capture)は既に定義済み。本プローブでは
-//! 「PrintWindow 黒 → WGC escalate」の分岐判定ロジックとこのコメントのみ残し、
-//! WGC 実装は第2段プローブ probe_windows_capture_wgc.rs とする。
-//!
-//! ## 使い方
-//!
-//! ゲーム起動済み(Launcher.exe 起動 → AnotherEden.exe のウィンドウ表示状態)で:
-//! ```bash
-//! cargo run --release -p anaden-device --example probe_windows_capture -- \
-//!   --process AnotherEden.exe --out capture_probe.png
-//! ```
-//!
-//! ## exit code(自動判定)
-//! - 0: RESULT=OK_CONTENT_CAPTURED (分散 >= 閾値 → 実描画が取れた)
-//! - 1: RESULT=BLACK_FRAME         (PrintWindow 成功だが分散 < 閾値 → GPU描画不可)
-//! - 2: PROCESS_NOT_FOUND          (プロセス/HWND 特定失敗)
-//! - 3: CAPTURE_API_FAILED         (PrintWindow/BitBlt/GetDIBits のいずれか失敗)
 
 use windows::Win32::Foundation::{HWND, LPARAM, RECT};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HDC, HGDIOBJ, SelectObject,
 };
-// PrintWindow / PRINT_WINDOW_FLAGS は Graphics::Gdi ではなく Storage::Xps にある。
 use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
 use windows::Win32::System::Diagnostics::ToolHelp::{
     CreateToolhelp32Snapshot, PROCESSENTRY32W, Process32FirstW, Process32NextW, TH32CS_SNAPPROCESS,
 };
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetParent, GetWindowThreadProcessId, IsWindowVisible,
-};
-// DPI アウェア化(4K/HiDPI 環境で GetDC/GetClientRect が論理ピクセルを返す問題を回避)。
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, PROCESS_PER_MONITOR_DPI_AWARE,
     SetProcessDpiAwareness, SetProcessDpiAwarenessContext,
 };
+use windows::Win32::UI::WindowsAndMessaging::{
+    EnumWindows, GetParent, GetWindowThreadProcessId, IsWindowVisible,
+};
 
 use image::{DynamicImage, ImageBuffer};
 
-/// PW_RENDERFULLCONTENT = 0x2 (Win8.1+)。GPU 描画含むフルコンテンツをレンダリング。
 const PW_RENDERFULLCONTENT: u32 = 0x2;
 
-/// 輝度分散のデフォルト閾値。これ未満なら黒画面と判定する。
 const DEFAULT_LUM_THRESHOLD: f64 = 1.0;
 
 #[derive(Debug)]
@@ -128,14 +65,8 @@ fn parse_args() -> Result<Args, String> {
 }
 
 fn main() {
-    // DPI アウェア化を最初に行う(4K/3840x2160 等のスケーリング環境で、GetDC/GetClientRect
-    // が論理ピクセル(DPIスケール後)を返し画像が歪む問題を回避)。HWND 生成前に呼ぶ必要がある。
-    // PER_MONITOR_AWARE_V2 が失敗する古い環境では SetProcessDPIAware にフォールバック。
-    // (本プローブは HWND を自前生成しないが、GetDC/GetClientRect のピクセル解釈に影響する)
     unsafe {
         if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_err() {
-            // 古い OS 向けフォールバック: システム DPI アウェア(PROCESS_PER_MONITOR_DPI_AWARE が
-            // 取れなければ PROCESS_SYSTEM_DPI_AWARE 相当の system 設定を試す)。
             let _ = SetProcessDpiAwareness(PROCESS_PER_MONITOR_DPI_AWARE);
         }
     }
@@ -154,21 +85,15 @@ fn main() {
         args.process, args.out, args.lum_threshold
     );
 
-    // (1)-(3) プロセス/HWND/クライアント領域を順に解決 (失敗時は各 step 内で
-    // 従来どおりのエラー出力 + exit)。
     let pid = step_find_pid(&args.process);
     let hwnd = step_find_visible_hwnd(pid);
     let (w, h) = step_client_size(hwnd);
 
-    // (4)-(5) PrintWindow 連鎖で RGBA を取り出し DynamicImage へ構築。
     let dyn_img = step_capture_image(hwnd, w, h);
-    // (6)-(8) 輝度分散 → PNG 保存 → 自動判定 (exit code を確定)。
     verdict(dyn_img, &args.out, args.lum_threshold);
 }
 
-/// (1) プロセス名 → PID。見つからなければユーザー指示を出して exit 2。
 fn step_find_pid(process: &str) -> u32 {
-    // 自動判定不可: ユーザーがタスクマネージャでプロセス名を確認する必要あり。
     let Some(p) = find_pid_by_name(process) else {
         println!("PROCESS_NOT_FOUND");
         println!(
@@ -181,7 +106,6 @@ fn step_find_pid(process: &str) -> u32 {
     p
 }
 
-/// (2) PID → 可視トップレベル HWND。無ければ exit 2。
 fn step_find_visible_hwnd(pid: u32) -> HWND {
     let Some(h) = find_visible_hwnd_for_pid(pid) else {
         println!("PROCESS_NOT_FOUND");
@@ -195,7 +119,6 @@ fn step_find_visible_hwnd(pid: u32) -> HWND {
     h
 }
 
-/// (3) クライアント領域サイズ。0x0 / GetClientRect 失敗は exit 3。
 fn step_client_size(hwnd: HWND) -> (u32, u32) {
     let size = client_size(hwnd).unwrap_or_else(|code| {
         println!("CAPTURE_API_FAILED: GetClientRect GetLastError={}", code);
@@ -213,7 +136,6 @@ fn step_client_size(hwnd: HWND) -> (u32, u32) {
     std::process::exit(3);
 }
 
-/// (4)-(5) PrintWindow + GDI 連鎖で RGBA ピクセルを取り出し [`DynamicImage`] を構築。
 fn step_capture_image(hwnd: HWND, w: u32, h: u32) -> DynamicImage {
     let rgba = match capture_via_printwindow(hwnd, w, h) {
         Ok(buf) => {
@@ -243,7 +165,6 @@ fn step_capture_image(hwnd: HWND, w: u32, h: u32) -> DynamicImage {
     }
 }
 
-/// (6)-(8) 輝度分散計算 → PNG 保存 → 自動判定。本プローブの exit code (0/1) を確定する。
 fn verdict(dyn_img: DynamicImage, out: &str, lum_threshold: f64) {
     let variance = luminance_variance(&dyn_img);
     println!("variance={}", variance);
@@ -275,7 +196,6 @@ fn verdict(dyn_img: DynamicImage, out: &str, lum_threshold: f64) {
     std::process::exit(1);
 }
 
-/// `CreateToolhelp32Snapshot` + `Process32First/Next` で exe 名(小文字比較)から PID を得る。
 fn find_pid_by_name(exe: &str) -> Option<u32> {
     let needle = exe.to_ascii_lowercase();
     unsafe {
@@ -304,13 +224,11 @@ fn find_pid_by_name(exe: &str) -> Option<u32> {
     None
 }
 
-/// EnumWindows コールバック間で受け渡す状態。
 struct HwndSearchState {
     target_pid: u32,
     found: Option<HWND>,
 }
 
-/// EnumWindows で全トップレベルウィンドウを走査し、指定 PID に属する可視ウィンドウを返す。
 fn find_visible_hwnd_for_pid(pid: u32) -> Option<HWND> {
     let mut state = HwndSearchState {
         target_pid: pid,
@@ -323,28 +241,17 @@ fn find_visible_hwnd_for_pid(pid: u32) -> Option<HWND> {
     state.found
 }
 
-/// EnumWindows コールバック。指定 PID に属する可視**トップレベル**ウィンドウを記録。
-///
-/// splash/子ウィンドウ(スプラッシュ画面や隠しオーナー等)を弾くため、`GetParent(hwnd)` が
-/// null(=親なし = トップレベル) のみを候補とする。これをしないと最初に見つかった splash 等
-/// の小ウィンドウが HWND に選ばれ、クライアント領域が 0x0 や意図しないサイズになる。
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
-    // safety: lparam は呼び出し元の &mut HwndSearchState 由来。関数内の各 unsafe 呼び出しは
-    // 妥当な HWND/ポインタを前提とする(EnumWindows が有効な HWND を渡す)。
     unsafe {
         let state = &mut *(lparam.0 as *mut HwndSearchState);
         if state.found.is_some() {
-            // 既に候補決定済みなら以降の API 呼び出しを省略。
             return windows::Win32::Foundation::TRUE;
         }
         if !IsWindowVisible(hwnd).as_bool() {
             return windows::Win32::Foundation::TRUE;
         }
-        // トップレベル(親なし)のみ。windows 0.62 では GetParent は Result<HWND> を返し、
-        // 親が無い(トップレベル)場合は Err となる。Err = 親なし = 候補として採用。
         match GetParent(hwnd) {
             Ok(parent) if !parent.is_invalid() => {
-                // 有効な親を持つ = 子/splash 系ウィンドウ。スキップ。
                 return windows::Win32::Foundation::TRUE;
             }
             _ => {}
@@ -358,7 +265,6 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> windows::core
     windows::Win32::Foundation::TRUE
 }
 
-/// HWND のクライアント領域幅 x 高さを返す。失敗時は GetLastError 相当(簡易: -1)。
 fn client_size(hwnd: HWND) -> Result<(u32, u32), i32> {
     use windows::Win32::UI::WindowsAndMessaging::GetClientRect;
     let mut rect = RECT::default();
@@ -370,21 +276,15 @@ fn client_size(hwnd: HWND) -> Result<(u32, u32), i32> {
     Ok((w, h))
 }
 
-/// PrintWindow(PW_RENDERFULLCONTENT=2) → BitBlt(SRCCOPY) → GetDIBits(BI_RGB,32bpp) で
-/// RGBA ピクセル列(Top-Down DIB で取得し BGRA→RGBA 変換)を構築する。
-///
-/// 戻り値の長さは (w * h * 4)。エラー時は直近の GetLastError(HRESULT code) を i32 で返す。
 fn capture_via_printwindow(hwnd: HWND, w: u32, h: u32) -> Result<Vec<u8>, i32> {
     unsafe {
         let last_err = || windows::Win32::Foundation::GetLastError().0 as i32;
 
-        // hwnd_dc 取得。0x00000001 が sentinel の invalid ハンドル。
         let hwnd_dc = GetDC(Some(hwnd));
         if hwnd_dc.is_invalid() {
             return Err(last_err());
         }
 
-        // mem_dc は 0.62.2 で直接 HDC を返す(is_invalid で失敗判定)。
         let mem_dc = CreateCompatibleDC(Some(hwnd_dc));
         if mem_dc.is_invalid() {
             let code = last_err();
@@ -392,7 +292,6 @@ fn capture_via_printwindow(hwnd: HWND, w: u32, h: u32) -> Result<Vec<u8>, i32> {
             return Err(code);
         }
 
-        // 互換ビットマップ。0.62.2 で直接 HBITMAP を返す。HGDIOBJ に .into() 可能。
         let bmp = CreateCompatibleBitmap(hwnd_dc, w as i32, h as i32);
         if bmp.is_invalid() {
             let code = last_err();
@@ -401,11 +300,8 @@ fn capture_via_printwindow(hwnd: HWND, w: u32, h: u32) -> Result<Vec<u8>, i32> {
             return Err(code);
         }
 
-        // SelectObject で互換ビットマップを mem_dc へ選択。元オブジェクトは後で復元。
         let old_obj = SelectObject(mem_dc, bmp.into());
 
-        // (主軸) PrintWindow に PW_RENDERFULLCONTENT(0x2) を渡して GPU 描画含む
-        // フルコンテンツを mem_dc へレンダリング。PrintWindow は BOOL 返却。
         if !PrintWindow(hwnd, mem_dc, PRINT_WINDOW_FLAGS(PW_RENDERFULLCONTENT)).as_bool() {
             let code = last_err();
             let _ = SelectObject(mem_dc, old_obj);
@@ -415,17 +311,11 @@ fn capture_via_printwindow(hwnd: HWND, w: u32, h: u32) -> Result<Vec<u8>, i32> {
             return Err(code);
         }
 
-        // ※ BitBlt(SRCCOPY, hwnd_dc -> mem_dc) は**意図的に行わない**。
-        // PrintWindow が GPU 描画含むフルコンテンツを mem_dc へ描いた直後に BitBlt で
-        // GDI 通常DC(非GPUサーフェス)の内容を上書きすると黒/空画像になり、本プローブの
-        // 黒画面判定を汚染する。PrintWindow の結果(mem_dc)をそのまま使う。
-
-        // BITMAPINFO(BI_RGB, 32bpp, Top-Down) を構築して GetDIBits で生ピクセル取り出し。
         let mut bi = BITMAPINFO {
             bmiHeader: BITMAPINFOHEADER {
                 biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
                 biWidth: w as i32,
-                biHeight: -(h as i32), // 負 = Top-Down DIB
+                biHeight: -(h as i32),
                 biPlanes: 1,
                 biBitCount: 32,
                 biCompression: BI_RGB.0,
@@ -457,16 +347,13 @@ fn capture_via_printwindow(hwnd: HWND, w: u32, h: u32) -> Result<Vec<u8>, i32> {
             return Err(code);
         }
 
-        // クリーンアップ
         let _ = SelectObject(mem_dc, old_obj);
         let _ = DeleteObject(bmp.into());
         let _ = DeleteDC(mem_dc);
         let _ = release_dc(hwnd, hwnd_dc);
 
-        // 32bpp BI_RGB は BGRA 順。RGBA(RgbaImage が期待) へ変換。
         for chunk in pixels.chunks_exact_mut(4) {
-            chunk.swap(0, 2); // B <-> R
-            // alpha は GDI では未定義(0 のことあり)。完全不透明に固定。
+            chunk.swap(0, 2);
             chunk[3] = 0xFF;
         }
 
@@ -474,15 +361,10 @@ fn capture_via_printwindow(hwnd: HWND, w: u32, h: u32) -> Result<Vec<u8>, i32> {
     }
 }
 
-/// GetDC で取得した HDC を ReleaseDC で解放。
-///
-/// # Safety
-/// 呼び出し元が既に `unsafe` ブロック内にあり、`hwnd`/`hdc` が有効であること。
 unsafe fn release_dc(hwnd: HWND, hdc: HDC) -> i32 {
     unsafe { windows::Win32::Graphics::Gdi::ReleaseDC(Some(hwnd), hdc) }
 }
 
-/// 全ピクセルの輝度 Y=0.299R+0.587G+0.114B の分散 σ² を計算。
 fn luminance_variance(img: &DynamicImage) -> f64 {
     let rgba = img.to_rgba8();
     let n = (rgba.width() as usize) * (rgba.height() as usize);
@@ -500,11 +382,9 @@ fn luminance_variance(img: &DynamicImage) -> f64 {
         sum_sq += y * y;
     }
     let mean = sum / n as f64;
-    // 母分散(σ²)。黒一色なら 0 に漸近。
     sum_sq / n as f64 - mean * mean
 }
 
-// HGDIOBJ への変換が SelectObject/DeleteObject で必要になることを明示参照(ドキュメント用)。
 #[allow(dead_code)]
 fn _unused() {
     let _ = std::convert::identity::<HGDIOBJ>;

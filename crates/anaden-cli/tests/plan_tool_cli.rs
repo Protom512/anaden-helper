@@ -1,9 +1,3 @@
-//! `anaden-tool plan-tenmei` / `plan-expand` の CLI 振る舞いテスト
-//! (終了コード・stdout/stderr・生成ファイル)。Issue #248 offline。
-//!
-//! モジュール内部 (plan_data / plan_tool) ではなく、ビルド済みバイナリの
-//! 振る舞いを黒箱検証する (テスト不改変ゲート対象外の新規テスト)。
-
 use std::path::PathBuf;
 use std::process::Command;
 
@@ -27,7 +21,6 @@ fn tool() -> Command {
     Command::new(env!("CARGO_BIN_EXE_anaden-tool"))
 }
 
-/// stdout の TOML を値レベルで検証する (entry 順・難易度・優先度)。
 #[test]
 fn plan_tenmei_stdout_is_machine_parseable_plan() {
     let out = tool()
@@ -58,7 +51,6 @@ fn plan_tenmei_stdout_is_machine_parseable_plan() {
     assert_eq!(first.get("priority").and_then(|v| v.as_integer()), Some(1));
 }
 
-/// 未知キャラは exit 非ゼロ + stderr にキャラ名 (fail-closed)。
 #[test]
 fn plan_tenmei_unknown_char_fails_nonzero() {
     let out = tool()
@@ -72,7 +64,6 @@ fn plan_tenmei_unknown_char_fails_nonzero() {
     assert!(stderr.contains("存在しないキャラ"), "{stderr}");
 }
 
-/// plan-expand --out の生成物は engine の routine ローダでそのまま検証できる。
 #[test]
 fn plan_expand_out_file_loads_and_validates_as_routine() {
     let dir = tempfile::tempdir().expect("tempdir");

@@ -229,8 +229,6 @@ mod tests {
         )
     }
 
-    // ---- 構築/選択状態 ----
-
     #[test]
     fn new_panel_is_empty_and_no_selection() {
         let p = HistoryPanel::new();
@@ -249,9 +247,7 @@ mod tests {
         ];
         p.refresh_from(&recs);
         assert_eq!(p.entries().len(), 2);
-        // 新しい順 (index 0 = started 2)。
         assert_eq!(p.entries()[0].started_at_unix, 2);
-        // 差し替え直後は最新が選択される。
         assert_eq!(p.selected().map(|r| r.started_at_unix), Some(2));
     }
 
@@ -261,7 +257,6 @@ mod tests {
         let recs = vec![record(1, "s", RunOutcome::Success, 1)];
         p.refresh_from(&recs);
         p.select(0);
-        // 履歴が空になったら選択は解除される。
         p.refresh_from(&[]);
         assert!(p.selected().is_none());
     }
@@ -286,8 +281,6 @@ mod tests {
         assert_eq!(p.selected().map(|r| r.strategy.as_str()), Some("a"));
     }
 
-    // ---- ButtonState (UC-2) ----
-
     #[test]
     fn buttons_when_stopped_rerun_only() {
         let b = ButtonState { running: false };
@@ -311,8 +304,6 @@ mod tests {
         assert!(!p.buttons().rerun_enabled());
     }
 
-    // ---- アクション要求 (UI ボタンのヘッドレス等価) ----
-
     #[test]
     fn take_action_returns_none_initially_and_after_consume() {
         let mut p = HistoryPanel::new();
@@ -329,8 +320,6 @@ mod tests {
         p.request(HistoryAction::Rerun);
         assert_eq!(p.take_action(), Some(HistoryAction::Rerun));
     }
-
-    // ---- 設定保存/読込 (UC-2: 失敗しても GUI 継続) ----
 
     #[test]
     fn save_settings_records_ok_path() {
@@ -355,15 +344,12 @@ mod tests {
 
     #[test]
     fn load_settings_missing_file_is_not_an_error_for_gui() {
-        // UC-2: 初回起動 (ファイル不在) はエラー表示にしない。
         let mut p = HistoryPanel::new();
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("nope.toml");
         assert!(p.load_settings(&path).is_none());
         assert!(matches!(p.settings_status(), SettingsStatus::Ok(_)));
     }
-
-    // ---- 表示ラベル純関数 ----
 
     #[test]
     fn record_label_contains_strategy_and_outcome_ja() {

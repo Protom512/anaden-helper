@@ -193,7 +193,6 @@ mod tests {
     #[test]
     fn detect_state_with_single_template_exact_match() {
         let mut store = TemplateStore::new();
-        // 1テンプレート: 厳しい閾値 (0.95) が必要だが、完全一致なら超える
         store.register("title", black_image(50, 50), GameState::TitleScreen);
 
         let detector = SceneDetector::with_defaults(store);
@@ -205,14 +204,12 @@ mod tests {
     #[test]
     fn detect_state_requires_multiple_votes_for_many_templates() {
         let mut store = TemplateStore::new();
-        // 3つのテンプレートを登録（min_votes=2 が必要）
         store.register("title_a", black_image(50, 50), GameState::TitleScreen);
         store.register("title_b", white_image(50, 50), GameState::TitleScreen);
         store.register("title_c", gray_image(50, 50), GameState::TitleScreen);
 
         let detector = SceneDetector::with_defaults(store);
 
-        // 黒い画面 → title_a だけマッチ（1票 < 2票要件）→ Unknown
         let screenshot = black_image(200, 200);
         let state = detector.detect_state(&screenshot);
         assert_eq!(
@@ -225,13 +222,11 @@ mod tests {
     #[test]
     fn detect_state_confirms_with_enough_votes() {
         let mut store = TemplateStore::new();
-        // 同じ見た目のテンプレート2つ（両方マッチする）
         store.register("title_a", black_image(50, 50), GameState::TitleScreen);
         store.register("title_b", black_image(30, 30), GameState::TitleScreen);
 
         let detector = SceneDetector::with_defaults(store);
 
-        // 黒い画面 → 両方マッチ（2票 ≥ 2票要件）→ TitleScreen
         let screenshot = black_image(200, 200);
         let state = detector.detect_state(&screenshot);
         assert_eq!(
@@ -249,7 +244,6 @@ mod tests {
 
         let detector = SceneDetector::with_defaults(store);
 
-        // 白い画面 → 黒いテンプレートにマッチしない → Unknown
         let screenshot = white_image(200, 200);
         let state = detector.detect_state(&screenshot);
         assert_eq!(

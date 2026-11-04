@@ -60,22 +60,18 @@ where
 mod tests {
     use super::*;
 
-    /// UC-1: フラグなし起動 → 統合アプリ。
     #[test]
     fn no_flags_launches_unified() {
         let args = parse_args_from(Vec::<String>::new());
         assert_eq!(launch_kind(&args), LaunchKind::Unified);
     }
 
-    /// Issue #123 (shard 2): `--pipeline` は未知の引数として無視され、
-    /// CliArgs には反映されない（フラグ完全削除）。
     #[test]
     fn pipeline_flag_is_now_unknown_arg() {
         let args = parse_args_from(["--pipeline".to_string()]);
         assert_eq!(launch_kind(&args), LaunchKind::Unified);
     }
 
-    /// Issue #188: `--target` も未知の引数として無視される（Android 削除・Win32 固定）。
     #[test]
     fn target_flag_is_now_unknown_arg() {
         let args = parse_args_from(["--target".to_string(), "windows".to_string()]);
@@ -83,7 +79,6 @@ mod tests {
         assert_eq!(launch_kind(&args), LaunchKind::Unified);
     }
 
-    /// `--exe` は StudioApp 初期値へ伝播される値として保持される。
     #[test]
     fn exe_propagates_to_args() {
         let args = parse_args_from(["--exe".to_string(), "AnotherEden.exe".to_string()]);
@@ -91,7 +86,6 @@ mod tests {
         assert_eq!(args.target, crate::source::Target::Windows);
     }
 
-    /// ヘルプ指定 → Help 種別（アプリ起動しない）。
     #[test]
     fn help_flag_requests_help() {
         let args = parse_args_from(["--help".to_string()]);
@@ -100,8 +94,6 @@ mod tests {
         assert_eq!(launch_kind(&args_h), LaunchKind::Help);
     }
 
-    /// Issue #123: ヘルプ文言に `--pipeline` はもう現れない
-    /// （Issue #188: `--target` 記述も削除済み）。
     #[test]
     fn help_text_no_longer_mentions_pipeline_nor_target() {
         assert!(!HELP_TEXT.contains("--pipeline"));
@@ -109,7 +101,6 @@ mod tests {
         assert!(!HELP_TEXT.contains("deprecated"));
     }
 
-    /// 未知の引数は無視されて起動継続（従来動作）。
     #[test]
     fn unknown_arg_is_ignored_and_app_launches() {
         let args = parse_args_from(["--nonexistent".to_string()]);

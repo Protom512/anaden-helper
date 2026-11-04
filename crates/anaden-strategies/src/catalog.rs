@@ -164,7 +164,6 @@ pub enum SelectionError {
 mod tests {
     use super::*;
 
-    /// 実在が期待される PC 版 2 パイプラインの id 一覧（Issue #139 / #188）。
     const EXPECTED_IDS: [&str; 2] = ["field_loop_pc", "nav_to_field_pc"];
 
     #[test]
@@ -206,12 +205,6 @@ mod tests {
 
     #[test]
     fn catalog_pipeline_dirs_actually_exist_in_repo() {
-        // カタログ定義がリポジトリ実体と乖離していないことの機械検証
-        //（テスト実行は crate ルートから相対でない場合があるため env!("CARGO_MANIFEST_DIR")
-        // からリポジトリルートを辿る）。
-        // is_dir() はフル実行時の大量プロセス起動中に AV/インデクサの
-        // 一時的なディレクトリハンドルロックで偽陰性を返す実績がある
-        // (#187/#191/#201 の各フルランで再発) ため 3 回リトライする。
         let manifest_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"));
         let repo_root = manifest_dir.ancestors().nth(2).unwrap();
         let catalog = StrategyCatalog::builtin();
@@ -235,7 +228,6 @@ mod tests {
 
     #[test]
     fn all_strategies_carry_windows_target() {
-        // Issue #188: PC 専用化により全カタログ戦略が --target windows を持つ。
         let catalog = StrategyCatalog::builtin();
         for s in catalog.strategies() {
             assert_eq!(
@@ -258,7 +250,6 @@ mod tests {
                 "run",
                 "--algorithm",
                 "ccoeff",
-                // F6: builtin は CLI 既定 (100) でなく明示値を渡す。
                 "--max-iters",
                 "10000",
                 "templates/pipelines/nav_to_field_pc",
@@ -280,9 +271,6 @@ mod tests {
         );
     }
 
-    // ---- 04-studio-maxiters-outcome: --max-iters 明示化 (F6) ----
-
-    /// StrategyDef が max_iters を持つとき to_run_args は --max-iters <N> を含む。
     #[test]
     fn to_run_args_includes_explicit_max_iters_when_set() {
         let mut def = StrategyCatalog::builtin()
@@ -304,8 +292,6 @@ mod tests {
         );
     }
 
-    /// max_iters 未指定 (None) のときは --max-iters を出力しない
-    /// (CLI 既定値への黙示依存は builtin 側で排除済みのため実運用では未発生)。
     #[test]
     fn to_run_args_omits_max_iters_flag_when_none() {
         let mut def = StrategyCatalog::builtin()
@@ -320,8 +306,6 @@ mod tests {
         );
     }
 
-    /// builtin 戦略は CLI 既定 100 サイクル (≈100 秒で打ち切り) への黙示依存を
-    /// 排除し、farming に十分大きな max_iters を明示持つこと (F6)。
     #[test]
     fn builtin_strategies_carry_explicit_large_max_iters() {
         for s in StrategyCatalog::builtin().strategies() {
@@ -363,7 +347,6 @@ mod tests {
 
     #[test]
     fn selection_toml_roundtrip_keeps_compatibility() {
-        // 既存 TOML 設定形式との互換: toml 往復で値が保存される。
         let mut sel = StrategySelection::from_defaults(&StrategyCatalog::builtin());
         sel.strategy = Some("field_loop_pc".to_string());
         sel.set_option("field_loop_pc", "demo", false);
@@ -377,8 +360,6 @@ mod tests {
 
     #[test]
     fn selection_parses_unknown_strategy_without_error() {
-        // フォワード互換: 未知の戦略（旧 fishing 設定ファイル等）でも
-        // デシリアライズ自体は成功する。
         let toml_str = r#"strategy = "fishing""#;
         let parsed: StrategySelection = toml::from_str(toml_str).expect("deserialize");
         assert_eq!(parsed.strategy.as_deref(), Some("fishing"));
@@ -396,7 +377,6 @@ mod tests {
             Err(SelectionError::UnknownStrategy { .. })
         ));
 
-        // fishing はカタログ外（タスクバンク経由）のため検証も拒否する。
         sel = StrategySelection {
             strategy: Some("fishing".to_string()),
             ..Default::default()

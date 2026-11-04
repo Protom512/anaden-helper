@@ -114,7 +114,6 @@ mod tests {
     #[test]
     fn test_shell_default_state_uses_tasks_pane() {
         let shell = UnifiedShell::new(None);
-        // 既定はホーム (タスク一覧ペイン) + ツール既定セクション (作成)。
         assert_eq!(shell.mode(), UnifiedMode::Home);
         assert_eq!(shell.pane(), UnifiedPane::Tasks);
         assert_eq!(shell.tools_section(), ToolsSection::Authoring);
@@ -123,63 +122,47 @@ mod tests {
     #[test]
     fn test_mode_transitions_switch_active_pane() {
         let mut shell = UnifiedShell::new(None);
-        // 既定はホーム (Tasks ペイン)。
         assert_eq!(shell.pane(), UnifiedPane::Tasks);
 
-        // ツール (既定セクション=作成) へ切替 → Studio ペイン。
         shell.set_mode(UnifiedMode::Tools);
         assert_eq!(shell.mode(), UnifiedMode::Tools);
         assert_eq!(shell.pane(), UnifiedPane::Studio);
 
-        // 実行セクションへ → Runner ペイン。
         shell.set_tools_section(ToolsSection::Run);
         assert_eq!(shell.pane(), UnifiedPane::Runner);
 
-        // 履歴セクションも Runner ペイン。
         shell.set_tools_section(ToolsSection::History);
         assert_eq!(shell.pane(), UnifiedPane::Runner);
 
-        // ホームへ戻す → Tasks ペインへ復帰。
         shell.set_mode(UnifiedMode::Home);
         assert_eq!(shell.pane(), UnifiedPane::Tasks);
         assert_eq!(shell.mode(), UnifiedMode::Home);
     }
 
-    /// Issue #123 (shard 2): `--pipeline` フラグは完全削除済み。new() 以外の
-    /// コンストラクタは存在せず、deprecated 警告バナーも表示されない。
     #[test]
     fn pipeline_deprecated_warning_fully_removed() {
         let shell = UnifiedShell::new(None);
-        // new_with_flags / shows_deprecated_pipeline_warning は削除済み
-        // (コンパイル時検証: この test が型チェックを通れば API は存在しない)。
         assert_eq!(shell.mode(), UnifiedMode::Home);
     }
 
-    /// ウィンドウタイトルは単一名称「anaden-studio」。
     #[test]
     fn test_window_title_is_unified_single_name() {
         assert_eq!(UNIFIED_WINDOW_TITLE, "anaden-studio");
     }
 
-    // ---- エッジケース ----
-
-    /// ホーム↔ツール往復でツールセクション選択は保持される（状態リセットなし）。
     #[test]
     fn test_mode_roundtrip_preserves_tools_section() {
         let mut shell = UnifiedShell::new(None);
         shell.set_mode(UnifiedMode::Tools);
         shell.set_tools_section(ToolsSection::History);
         shell.set_mode(UnifiedMode::Home);
-        // ホームの間もセクション選択は失われていない。
         assert_eq!(shell.tools_section(), ToolsSection::History);
         assert_eq!(shell.pane(), UnifiedPane::Tasks);
-        // ツールへ戻すと前回のセクション (履歴) が復帰する。
         shell.set_mode(UnifiedMode::Tools);
         assert_eq!(shell.tools_section(), ToolsSection::History);
         assert_eq!(shell.pane(), UnifiedPane::Runner);
     }
 
-    /// セクション切替はトップレベルモードを変更しない（ツールの外には出ない）。
     #[test]
     fn test_section_switch_keeps_tools_mode() {
         let mut shell = UnifiedShell::new(None);
@@ -190,8 +173,6 @@ mod tests {
         }
     }
 
-    /// ヘッドレス egui コンテキストを用意し、その中に子 Ui を作る
-    /// （app.rs のテストと同一パターン・GUI バックエンド不要）。
     fn child_ui(ctx: &egui::Context) -> egui::Ui {
         egui::Ui::new(
             ctx.clone(),
@@ -203,14 +184,10 @@ mod tests {
         )
     }
 
-    /// ホーム + ツール全セクションの描画がパニックせず完了する
-    /// （Issue #157: 統合後も全旧ペインが描画可能なことの回帰保証）。
-    /// 併せてホーム描画が tools_section を書き換えないこと（サブバー非描画）を検証。
     #[test]
     fn render_home_and_all_tool_sections_complete_without_panic() {
         let ctx = egui::Context::default();
         let mut shell = UnifiedShell::new(None);
-        // ホーム (既定): modebar 2 タブ + タスク一覧。
         shell.set_tools_section(ToolsSection::Settings);
         ctx.begin_pass(egui::RawInput::default());
         shell.render_modebar(&mut child_ui(&ctx));
@@ -219,7 +196,6 @@ mod tests {
         assert_eq!(shell.mode(), UnifiedMode::Home);
         assert_eq!(shell.tools_section(), ToolsSection::Settings);
 
-        // ツール: サブバー + 全 6 セクション。
         shell.set_mode(UnifiedMode::Tools);
         for section in ToolsSection::ALL {
             shell.set_tools_section(section);
