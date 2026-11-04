@@ -38,7 +38,6 @@ phase('Non-Functional Review')
 
 const reviews = await parallel([
 
-  // 1. Reliability & Error Handling — 例外処理・エラーハンドリングの完全性
   () => agent(
     `You are a RELIABILITY REVIEWER. You evaluate exception handling, error paths, and fault tolerance.
 
@@ -74,7 +73,6 @@ Read the actual code. Provide specific line references for each finding.`,
     { label: 'review:reliability', phase: 'Non-Functional Review', schema: V_SCHEMA }
   ),
 
-  // 2. Performance — 性能性 (コンパイル時間・ランタイム影響)
   () => agent(
     `You are a PERFORMANCE REVIEWER. You evaluate performance impact of the refactoring.
 
@@ -106,7 +104,6 @@ Provide evidence (measurements where possible).`,
     { label: 'review:performance', phase: 'Non-Functional Review', schema: V_SCHEMA }
   ),
 
-  // 3. Extensibility & Maintainability — 拡張性・保守性
   () => agent(
     `You are an EXTENSIBILITY REVIEWER. You evaluate future-proofing and maintainability.
 
@@ -146,7 +143,6 @@ This is a judgment call — document your reasoning.`,
     { label: 'review:extensibility', phase: 'Non-Functional Review', schema: V_SCHEMA }
   ),
 
-  // 4. Governance & Documentation — 統制・ドキュメント
   () => agent(
     `You are a GOVERNANCE REVIEWER. You evaluate documentation, traceability, and compliance.
 
@@ -184,7 +180,6 @@ Provide specific file references for documentation gaps.`,
     { label: 'review:governance', phase: 'Non-Functional Review', schema: V_SCHEMA }
   ),
 
-  // 5. Security & Safety — セキュリティ・安全性
   () => agent(
     `You are a SECURITY REVIEWER. You evaluate safety, resource management, and attack surface.
 
@@ -223,7 +218,6 @@ Report exact findings.`,
     { label: 'review:security', phase: 'Non-Functional Review', schema: V_SCHEMA }
   ),
 
-  // 6. Integration & Connectivity — 接続性・統合性
   () => agent(
     `You are an INTEGRATION REVIEWER. You evaluate how this change affects the wider system.
 

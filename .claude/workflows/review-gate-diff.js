@@ -1,8 +1,3 @@
-// Diff-injection helpers for review-gate (Issue #78 Task 2).
-// Ports the R8 diff-inject pattern from feature-pipeline.js (L589-635) so that
-// reviewer prompts carry the actual working-tree diff instead of only a file list.
-// Cap values are kept identical to feature-pipeline.js: 28000 (DIFF threshold
-// inside the fetch prompt) / 24000 (truncated DIFF body) / 30000 (total slice).
 
 export const DIFF_TRUNCATE_THRESHOLD = 28000;
 export const DIFF_BODY_CAP = 24000;
@@ -14,10 +9,6 @@ export const DIFF_FETCH_PROMPT = `Working-tree diff fetcher for the Review Gate.
 3. \`git --no-pager status --porcelain\`
 Concatenate with headers "=== STAT ===", "=== DIFF ===", "=== UNTRACKED ===". If the DIFF section exceeds ${DIFF_TRUNCATE_THRESHOLD} chars, emit full STAT + UNTRACKED but only the FIRST ${DIFF_BODY_CAP} chars of DIFF, then a line "[DIFF TRUNCATED]". Return ONLY the concatenated text.`;
 
-/**
- * Normalize the agent's diff-fetch result into a string, capped at TOTAL_DIFF_CAP.
- * Fail-open: null/undefined → '' (gate stays runnable without diff context).
- */
 export function normalizeGateDiff(result) {
   const text = typeof result === 'string'
     ? result
@@ -25,10 +16,6 @@ export function normalizeGateDiff(result) {
   return text.slice(0, TOTAL_DIFF_CAP);
 }
 
-/**
- * Wrap a normalized diff body in === WORKING-TREE DIFF === markers.
- * Returns '' when diff is empty (nothing to inject).
- */
 export function buildDiffSection(diff) {
   if (!diff) return '';
   return `=== WORKING-TREE DIFF ===
@@ -36,39 +23,11 @@ ${diff}
 === END DIFF ===`;
 }
 
-/**
- * Append the R8 instruction + diff section to a reviewer prompt.
- * Reviewers must analyze the provided diff directly and NOT re-Read files.
- * Mirrors feature-pipeline.js FEEDBACK_INSTRUCTION (L629-635).
- */
-// ---------------------------------------------------------------------------
-// Issue #91 Task T1 — commit-range-diff fallback (S2-FP-1 fix proposal).
-// Pure logic: prefer working-tree diff when non-empty, else commit-range
-// (HEAD~1..HEAD by default, merge-base variant configurable), else fail-closed.
-// Evidence payload carries the tree-hash capture (git write-tree) so that
-// "green but actually empty" states are detectable (pipeline-evidence rule §2).
-// ---------------------------------------------------------------------------
-
-/** Commit-range spec per variant. */
 export const RANGE_VARIANTS = {
   'head-prev': 'HEAD~1..HEAD',
   'merge-base': 'origin/master...HEAD',
 };
 
-/**
- * Build the gate diff input with working-tree → commit-range → fail-closed
- * fallback (S2-FP-1). Pure function: no git invocation here; callers pass
- * pre-collected strings (stat/diff from `git diff HEAD`, rangeStat/rangeDiff
- * from the commit-range variant, treeHash from `git write-tree`).
- *
- * @param {{stat?:string, diff?:string, untracked?:string,
- *          rangeStat?:string, rangeDiff?:string, treeHash?:string|null}} input
- * @param {{rangeVariant?:'head-prev'|'merge-base'}} [options]
- * @returns {{mode:'working-tree'|'commit-range'|'fail-closed',
- *            stat:string, diff:string, untracked:string,
- *            treeHash?:string, rangeVariant?:string,
- *            reason?:string, note?:string}}
- */
 export function buildCommitRangeDiffInput(input, options = {}) {
   const str = (v) => (typeof v === 'string' ? v : '');
   const stat = str(input.stat);
@@ -101,13 +60,6 @@ export function buildCommitRangeDiffInput(input, options = {}) {
   return out;
 }
 
-/**
- * Extract the body of a "=== NAME ===" delimited section from the concatenated
- * plain-text result of a diff-fetch agent (T2, Issue #91). Returns '' when the
- * section is missing or whitespace-only. Used to split the single fetch result
- * into working-tree STAT/DIFF/UNTRACKED, COMMIT-RANGE STAT/DIFF and TREE HASH
- * parts before feeding buildCommitRangeDiffInput.
- */
 export function extractDiffSection(raw, name) {
   if (typeof raw !== 'string' || raw === '') return '';
   const startMarker = `=== ${name} ===`;
@@ -119,25 +71,6 @@ export function extractDiffSection(raw, name) {
   return body.trim();
 }
 
-// ---------------------------------------------------------------------------
-// Issue #102 T1 — unified gate-diff single source of truth (S2 codify).
-// Pure function expressing the full deterministic fallback chain of UC-1:
-//   (a) working-tree STAT/DIFF non-empty → 'working-tree'
-//   (b) empty → HEAD~1..HEAD commit-range
-//   (c) still empty → merge-base (origin/master...HEAD)
-//   (d) untracked files only → 'intent-to-add' (file list + individual Read)
-//   (e) all empty / 429-placeholder input → 'fail-closed'
-// Returns basis (mode-decision evidence), treeHash and a pre-assembled
-// snapshot string for injection into every gate lane.
-// buildCommitRangeDiffInput is reused as the lower-level routine for the
-// working-tree vs single-commit-range decision (no breaking change).
-// ---------------------------------------------------------------------------
-
-/**
- * Exact-match 429/placeholder sentinels. Detection is exact (whole trimmed
- * section equals one of these) so legitimate diffs containing these words as
- * substrings are NOT fail-closed (estimate approval condition #1).
- */
 export const PLACEHOLDER_SENTINELS = ['429', 'rate limit', 'placeholder'];
 
 function isPlaceholderSection(text) {
@@ -153,9 +86,6 @@ function assembleSnapshot(stat, diff, header) {
   return (header ? `${header}\n` : '') + parts.join('\n');
 }
 
-/**
- * Parse `git status --porcelain` untracked lines into file paths.
- */
 function parseUntrackedFiles(untracked) {
   return untracked
     .split('\n')
@@ -165,20 +95,6 @@ function parseUntrackedFiles(untracked) {
     .filter((l) => l !== '');
 }
 
-/**
- * Unified deterministic gate-diff resolver (Issue #102 UC-1). Pure function:
- * callers pass pre-collected git outputs; no git invocation here.
- *
- * @param {{stat?:string, diff?:string, untracked?:string,
- *          headPrevStat?:string, headPrevDiff?:string,
- *          mergeBaseStat?:string, mergeBaseDiff?:string,
- *          treeHash?:string|null}} input
- * @returns {{mode:'working-tree'|'commit-range'|'intent-to-add'|'fail-closed',
- *            basis:string, snapshot:string,
- *            stat?:string, diff?:string, untracked?:string,
- *            treeHash?:string, rangeVariant?:string,
- *            untrackedFiles?:string[], reason?:string, note?:string}}
- */
 export function buildUnifiedGateDiff(input) {
   const str = (v) => (typeof v === 'string' ? v : '');
   const fail = (basis, reason) => ({
@@ -192,14 +108,11 @@ export function buildUnifiedGateDiff(input) {
   const stat = str(input.stat);
   const diff = str(input.diff);
 
-  // (e) 429-placeholder detection — EXACT match only (see PLACEHOLDER_SENTINELS).
   if (isPlaceholderSection(stat) || isPlaceholderSection(diff)) {
     return fail('429-placeholder',
       'gate diff input is a 429/rate-limit placeholder string; must fail-closed instead of vacuous GO');
   }
 
-  // (a) working-tree mode — reuses buildCommitRangeDiffInput as the lower
-  // routine for the working-tree vs HEAD~1..HEAD decision.
   const headPrev = buildCommitRangeDiffInput({
     stat, diff, untracked: str(input.untracked),
     rangeStat: str(input.headPrevStat),
@@ -225,7 +138,6 @@ export function buildUnifiedGateDiff(input) {
     };
   }
 
-  // (c) merge-base fallback (origin/master...HEAD).
   const mergeStat = str(input.mergeBaseStat);
   const mergeDiff = str(input.mergeBaseDiff);
   if (isPlaceholderSection(mergeStat) || isPlaceholderSection(mergeDiff)) {
@@ -246,7 +158,6 @@ export function buildUnifiedGateDiff(input) {
     return out;
   }
 
-  // (d) untracked-only → intent-to-add mode (file list + individual Read).
   const untracked = str(input.untracked);
   if (untracked.trim() !== '') {
     const files = parseUntrackedFiles(untracked);
@@ -264,7 +175,6 @@ export function buildUnifiedGateDiff(input) {
     };
   }
 
-  // (e) everything empty → fail-closed.
   return fail('all-empty',
     'working-tree, HEAD~1..HEAD and merge-base diffs are all empty and no untracked files exist');
 }

@@ -1,5 +1,3 @@
-// Tests for review-gate diff injection (Issue #78 Task 2 — TDD, written BEFORE impl).
-// Run: node --test .claude/workflows/review-gate-diff.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -14,8 +12,6 @@ import {
 } from './review-gate-diff.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
-
-// ── normalizeGateDiff: R8 caps consistent with feature-pipeline.js ──
 
 test('normalizeGateDiff: passes through string diff', () => {
   assert.equal(normalizeGateDiff('=== STAT ===\n...'), '=== STAT ===\n...');
@@ -36,8 +32,6 @@ test('normalizeGateDiff: caps at 30000 chars total (R8 slice)', () => {
   assert.equal(out.length, 30000);
 });
 
-// ── buildDiffSection: === WORKING-TREE DIFF === block ──
-
 test('buildDiffSection: wraps diff in begin/end markers', () => {
   const s = buildDiffSection('diff --git a/foo b/foo');
   assert.ok(s.includes('=== WORKING-TREE DIFF ==='));
@@ -49,17 +43,13 @@ test('buildDiffSection: empty diff yields empty section (fail-open, keep gate ru
   assert.equal(buildDiffSection(''), '');
 });
 
-// ── withDiffContext: R8 instruction injection into reviewer prompts ──
-
 test('withDiffContext: appends R8 instruction + diff section to prompt', () => {
   const out = withDiffContext('Architecture Review:', buildDiffSection('+foo'));
   assert.ok(out.startsWith('Architecture Review:'));
   assert.ok(out.includes('提供済み diff で直接分析'));
-  assert.ok(out.includes('ファイルを個別に Read して再取得')); // do-not-reRead instruction
+  assert.ok(out.includes('ファイルを個別に Read して再取得'));
   assert.ok(out.includes('+foo'));
 });
-
-// ── wiring: review-gate.js actually injects diff into all 3 reviewer prompts ──
 
 const src = readFileSync(join(here, 'review-gate.js'), 'utf8');
 
@@ -68,8 +58,8 @@ test('review-gate.js: fetches diff via R8-style agent before reviews', () => {
   assert.ok(src.includes('DIFF_FETCH_PROMPT'));
   const mod = readFileSync(join(here, 'review-gate-diff.js'), 'utf8');
   assert.ok(mod.includes('git --no-pager diff HEAD'));
-  assert.ok(mod.includes('24000')); // DIFF truncation threshold (R8 values)
-  assert.ok(mod.includes('28000')); // total diff threshold (R8 values)
+  assert.ok(mod.includes('24000'));
+  assert.ok(mod.includes('28000'));
 });
 
 test('review-gate.js: all 3 reviewer prompts wrapped with withDiffContext (definition excluded)', () => {
@@ -81,13 +71,6 @@ test('review-gate.js: all 3 reviewer prompts wrapped with withDiffContext (defin
 test('review-gate.js: changed files list retained in reviewer prompts', () => {
   assert.ok(src.includes('Changed files: ${changes.changedFiles.join'));
 });
-
-// ── buildUnifiedGateDiff: deterministic fallback chain (Issue #102 UC-1 / T1) ──
-// Chain: (a) working-tree non-empty → working-tree mode,
-//        (b) else HEAD~1..HEAD commit-range,
-//        (c) else merge-base (origin/master...HEAD),
-//        (d) else untracked-only → intent-to-add mode,
-//        (e) all empty or 429 placeholder → fail-closed.
 
 test('buildUnifiedGateDiff: (a) non-empty working-tree STAT/DIFF → working-tree mode', () => {
   const out = buildUnifiedGateDiff({
@@ -102,7 +85,7 @@ test('buildUnifiedGateDiff: (a) non-empty working-tree STAT/DIFF → working-tre
   assert.equal(out.treeHash, 'abc123');
   assert.ok(out.snapshot.includes('=== STAT ==='));
   assert.ok(out.snapshot.includes('diff --git a/foo.js'));
-  assert.ok(!out.snapshot.includes('bar.js')); // must not fall through
+  assert.ok(!out.snapshot.includes('bar.js'));
 });
 
 test('buildUnifiedGateDiff: (b) empty working-tree → falls back to HEAD~1..HEAD', () => {
@@ -127,7 +110,7 @@ test('buildUnifiedGateDiff: (c) HEAD~1..HEAD empty too → merge-base fallback',
   assert.equal(out.mode, 'commit-range');
   assert.equal(out.basis, 'commit-range:origin/master...HEAD');
   assert.ok(out.snapshot.includes('diff --git a/baz.js'));
-  assert.equal('treeHash' in out, false); // null treeHash omitted
+  assert.equal('treeHash' in out, false);
 });
 
 test('buildUnifiedGateDiff: (d) untracked only → intent-to-add mode with file list', () => {
@@ -168,8 +151,6 @@ test('buildUnifiedGateDiff: 429 placeholder exact match in diff → fail-closed'
 });
 
 test('buildUnifiedGateDiff: legitimate diff containing "placeholder" as substring is NOT fail-closed', () => {
-  // Exact-match-only detection: a real diff touching a placeholder variable
-  // must not trigger fail-closed (estimate approval condition #1).
   const out = buildUnifiedGateDiff({
     stat: ' ph.js | 2 ++',
     diff: 'diff --git a/ph.js b/ph.js\n-const placeholder = 1;\n+const placeholder = 2;',

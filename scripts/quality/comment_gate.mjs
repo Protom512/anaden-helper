@@ -8,7 +8,9 @@ const ROOT = path.resolve(scriptDir, '..', '..');
 const EXT_LANG = new Map([
   ['.rs', 'rust'],
   ['.mjs', 'js'],
+  ['.js', 'js'],
   ['.sh', 'shell'],
+  ['.ps1', 'ps1'],
 ]);
 
 const CONFIG_EXT_LANG = new Map([
@@ -305,6 +307,89 @@ export function lexShell(src) {
   return segs;
 }
 
+export function lexPs1(src) {
+  const segs = [];
+  const n = src.length;
+  let i = 0;
+  let codeStart = 0;
+  const code = (to) => { if (to > codeStart) segs.push({ type: 'code', start: codeStart, end: to }); };
+  const comment = (from, to) => { code(from); segs.push({ type: 'comment', start: from, end: to, newline: true }); codeStart = to; };
+  const atTokenStart = (pos) => pos === 0 || /\s/.test(src[pos - 1]);
+  const hereOpenerAt = (pos) => {
+    if (src[pos] !== '@' || !atTokenStart(pos)) return false;
+    const q = src[pos + 1];
+    if (q !== '"' && q !== "'") return false;
+    let k = pos + 2;
+    while (k < n && (src[k] === ' ' || src[k] === '\t')) k += 1;
+    return k >= n || src[k] === '\r' || src[k] === '\n';
+  };
+  const skipHereString = (pos) => {
+    const close = src[pos + 1] + '@';
+    let j = src.indexOf('\n', pos);
+    while (j !== -1) {
+      const nextNl = src.indexOf('\n', j + 1);
+      const lineEnd = nextNl === -1 ? n : nextNl;
+      if (src.slice(j + 1, lineEnd).replace(/\r$/, '').trim() === close) return lineEnd;
+      j = nextNl;
+    }
+    return n;
+  };
+
+  while (i < n) {
+    const c = src[i];
+    if (c === '<' && src[i + 1] === '#') {
+      const k = src.indexOf('#>', i + 2);
+      const end = k === -1 ? n : k + 2;
+      comment(i, end);
+      i = end;
+      continue;
+    }
+    if (c === '@' && hereOpenerAt(i)) {
+      i = skipHereString(i);
+      continue;
+    }
+    if (c === '"') {
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === '`') { j += 2; continue; }
+        if (src[j] === '"') {
+          if (src[j + 1] === '"') { j += 2; continue; }
+          j += 1;
+          break;
+        }
+        if (src[j] === '\n') break;
+        j += 1;
+      }
+      i = j;
+      continue;
+    }
+    if (c === "'") {
+      let j = i + 1;
+      while (j < n) {
+        if (src[j] === "'") {
+          if (src[j + 1] === "'") { j += 2; continue; }
+          j += 1;
+          break;
+        }
+        if (src[j] === '\n') break;
+        j += 1;
+      }
+      i = j;
+      continue;
+    }
+    if (c === '#' && (i === 0 || /\s/.test(src[i - 1]))) {
+      let j = src.indexOf('\n', i);
+      if (j === -1) j = n;
+      comment(i, j);
+      i = j;
+      continue;
+    }
+    i += 1;
+  }
+  code(n);
+  return segs;
+}
+
 export function lexToml(src) {
   const segs = [];
   const n = src.length;
@@ -372,7 +457,12 @@ export function lexYaml(src) {
   return segs;
 }
 
-const LEXERS = { rust: lexRust, js: lexJs, shell: lexShell, toml: lexToml, yaml: lexYaml };
+const LEXERS = { rust: lexRust, js: lexJs, shell: lexShell, ps1: lexPs1, toml: lexToml, yaml: lexYaml };
+
+const DRIFT_GUARD_MARKER = /^\/\/\s*(?:\[[a-z0-9-]+-(?:begin|end)\]|[a-z][a-z0-9-]*-(?:begin|end))$/;
+const PHASE_HEADER = /^\/\/\s*(?:──\s*)?Phase \d+\b/;
+
+const isStructuralComment = (text) => DRIFT_GUARD_MARKER.test(text) || PHASE_HEADER.test(text);
 
 export function findComments(src, lang) {
   const lex = LEXERS[lang];
@@ -381,6 +471,7 @@ export function findComments(src, lang) {
   const out = [];
   for (const s of segs) {
     if (lang === 'shell' && s.start === 0) continue;
+    if (lang === 'js' && isStructuralComment(src.slice(s.start, s.end).trim())) continue;
     out.push(s);
   }
   return out;
@@ -424,7 +515,7 @@ export function stripComments(src, lang) {
   return parts.join('');
 }
 
-const FIXABLE_LANGS = new Set(['toml', 'yaml']);
+const FIXABLE_LANGS = new Set(['toml', 'yaml', 'js', 'ps1']);
 
 export function applyFixes(root = ROOT) {
   let commentsStripped = 0;
@@ -461,6 +552,8 @@ export function scopeFiles(root = ROOT) {
   const codeSkip = (name) => CODE_SKIP_DIRS.has(name);
   walkTree(path.join(root, 'crates'), EXT_LANG, codeSkip, out);
   walkTree(path.join(root, 'scripts'), EXT_LANG, codeSkip, out);
+  walkTree(path.join(root, '.claude', 'workflows'), EXT_LANG, codeSkip, out);
+  walkTree(path.join(root, 'docs', 'explainers'), EXT_LANG, codeSkip, out);
   walkTree(root, CONFIG_EXT_LANG, configSkipDir, out);
   out.sort((a, b) => a.path.localeCompare(b.path));
   return out;
@@ -483,11 +576,11 @@ export function check(root = ROOT) {
 export function main(argv = process.argv.slice(2)) {
   if (argv.includes('--fix')) {
     const fix = applyFixes();
-    console.log(`comment-gate: --fix stripped ${fix.comments} comment(s) from ${fix.files} file(s) (toml/yaml only)`);
+    console.log(`comment-gate: --fix stripped ${fix.comments} comment(s) from ${fix.files} file(s) (toml/yaml/js/ps1)`);
   }
   const result = check();
   if (!result.ok) {
-    console.error(`comment-gate: ${result.findings.length} comment(s) in ${result.findings.length > 0 ? result.findings[0].file.split(path.sep).slice(0, 2).join(path.sep) : 'scope'} code (crates/ + scripts/ + repo toml/yml):`);
+    console.error(`comment-gate: ${result.findings.length} comment(s) in ${result.findings.length > 0 ? result.findings[0].file.split(path.sep).slice(0, 2).join(path.sep) : 'scope'} code (crates/ + scripts/ + .claude/workflows + docs/explainers + repo toml/yml):`);
     for (const f of result.findings.slice(0, 200)) {
       console.error(`  ${path.relative(ROOT, f.file).replace(/\\/g, '/')}:${f.line}`);
     }

@@ -1,25 +1,3 @@
-// TDD tests for Issue #106 Task 1+2: file ownership map + conflict detection +
-// dispatch serialization + wiring/evidence persistence (cycle-40 retrospective
-// proposal 3/5).
-//
-// feature-pipeline.js exposes a pure block between
-//   // [file-ownership-begin]  ...  // [file-ownership-end]
-// containing:
-//   computeFileOwnership(tasks)   — task.files[] から file→taskId[] の所有権マップ
-//   findFileConflicts(tasks)      — 同一ファイルに触るタスク群を検出
-//   resolveDispatchGroups(tasks)  — 重複タスクは直列チェーン、分離タスクは
-//                                   同一グループで並列維持 (UC-1)。
-//                                   UC-3: files 未宣言 ([]・フィールド欠損) は
-//                                   fail-closed — status 'ownership-undeclared'。
-//   buildOwnershipSerializationRationale(tasks, treeHash, runId, runTimestamp)
-//                                 — .omc/logs/{run-id}/ownership-serialization.json
-//                                   へ永続する判定根拠 payload (§2 evidence)。
-// Wiring (Task 2, [ownership-serialization-wiring-begin/end]):
-//   - implResults は resolveDispatchGroups(estimate.tasks) のグループ結合
-//   - 'ownership-undeclared' は return で fail-closed 報告 (dispatch しない)
-//   - 既存 lane 分岐 / operator-gated skip / precheck は回帰なし
-//
-// Run: node --test .claude/workflows/tests/ownership-serialization.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -50,8 +28,6 @@ test('markers exist and pure block evaluates', () => {
   assert.equal(typeof api.resolveDispatchGroups, 'function');
   assert.equal(typeof api.buildOwnershipSerializationRationale, 'function');
 });
-
-// ── computeFileOwnership ──
 
 test('derives file→task[] map from declared files (UC-2 基礎)', () => {
   const tasks = [
@@ -96,8 +72,6 @@ test('path normalization: backslash separators treated like forward slashes', ()
   assert.deepEqual(r.ownership['src/foo.js'], ['1', '2']);
 });
 
-// ── findFileConflicts ──
-
 test('detects file shared by multiple tasks (UC-1 core)', () => {
   const conflicts = loadApi().findFileConflicts([
     { id: '1', files: ['a.rs', 'b.rs'] },
@@ -137,8 +111,6 @@ test('undeclared task reported as potential conflict with every other in-flight 
   assert.deepEqual(conflicts[0].taskIds, ['1', '2']);
 });
 
-// ── resolveDispatchGroups ──
-
 test('UC-1: conflicting tasks serialized as chain, disjoint tasks kept parallel in one group', () => {
   const r = loadApi().resolveDispatchGroups([
     { id: '1', files: ['a.rs'] },
@@ -146,10 +118,8 @@ test('UC-1: conflicting tasks serialized as chain, disjoint tasks kept parallel 
     { id: '3', files: ['c.md'] },
     { id: '4', files: ['d.md'] },
   ]);
-  // conflicting pair → each its own sequential stage, in task order
   const serialStages = r.groups.filter((g) => !g.parallel);
   assert.deepEqual(serialStages.map((g) => g.tasks), [['1'], ['2']]);
-  // disjoint tasks → single parallel group
   const parallelGroups = r.groups.filter((g) => g.parallel);
   assert.equal(parallelGroups.length, 1);
   assert.deepEqual(parallelGroups[0].tasks, ['3', '4']);
@@ -178,7 +148,6 @@ test('UC-3: undeclared-files task appended as serial stage at the tail, never pa
   const last = r.groups[r.groups.length - 1];
   assert.equal(last.parallel, false);
   assert.deepEqual(last.tasks, ['2']);
-  // 並列グループに紛れ込んでいない
   for (const g of r.groups) {
     if (g.parallel) assert.ok(!g.tasks.includes('2'));
   }
@@ -207,8 +176,6 @@ test('every task appears exactly once across groups', () => {
   const all = r.groups.flatMap((g) => g.tasks).sort();
   assert.deepEqual(all, ['1', '2', '3', '4', '5']);
 });
-
-// ── Task 2: status / duplicateFiles / serializedPairs ──
 
 test('disjoint declared tasks → status ok, empty duplicates', () => {
   const r = loadApi().resolveDispatchGroups([
@@ -245,8 +212,6 @@ test('any undeclared task → status ownership-undeclared (fail-closed)', () => 
   }
 });
 
-// ── Task 2: buildOwnershipSerializationRationale (§2 evidence payload) ──
-
 test('rationale carries groups, duplicates, pairs, taskFiles, treeHash, runId, runTimestamp', () => {
   const r = loadApi().buildOwnershipSerializationRationale(
     [
@@ -277,8 +242,6 @@ test('rationale for undeclared tasks records undeclaredTasks + unknown treeHash'
   assert.equal(r.treeHash, 'unknown');
 });
 
-// ── Task 2: wiring (regression-safe dispatch rewrite) ──
-
 test('wiring: implResults built from resolveDispatchGroups groups (tdd-lane tasks only, Issue #134)', () => {
   assert.ok(
     /const\s+ownershipPlan\s*=\s*resolveDispatchGroups\(ownershipRelevantTasks\(estimate\.tasks\)\)/.test(src),
@@ -291,7 +254,7 @@ test('wiring: implResults built from resolveDispatchGroups groups (tdd-lane task
 });
 
 test('wiring: flat pipeline(estimate.tasks, ...) dispatch is gone (code, not comments)', () => {
-  const code = src.replace(/^\s*\/\/.*$/gm, ''); // strip line comments
+  const code = src.replace(/^\s*\/\/.*$/gm, '');
   assert.ok(
     !/pipeline\(\s*estimate\.tasks\s*,/.test(code),
     'old flat parallel dispatch over estimate.tasks must be removed',
@@ -318,13 +281,12 @@ test('wiring: existing lane branch / operator-gated skip / precheck intact', () 
   assert.ok(src.includes('ticket-precheck'), 'ticket precheck kept');
 });
 
-// ── Issue #134: ownership 対象は tdd lane タスクのみ ──
 test('ownershipRelevantTasks filters to tdd-lane tasks (Issue #134)', () => {
   const eval2 = loadApi().ownershipRelevantTasks;
   const tasks = [
     { id: 'T1', files: ['a.js'], metadata: { lane: 'tdd' } },
-    { id: 'T2', files: [], metadata: { lane: 'merge' } },    // 検証系: files 無しは正当
-    { id: 'T3', files: [], metadata: { lane: 'release' } },  // 検証系
+    { id: 'T2', files: [], metadata: { lane: 'merge' } },
+    { id: 'T3', files: [], metadata: { lane: 'release' } },
   ];
   const relevant = eval2(tasks);
   assert.equal(relevant.length, 1);
@@ -334,15 +296,13 @@ test('ownershipRelevantTasks filters to tdd-lane tasks (Issue #134)', () => {
 test('ownershipRelevantTasks treats lane-less tasks as tdd (fail-closed side)', () => {
   const eval2 = loadApi().ownershipRelevantTasks;
   const tasks = [
-    { id: 'T1', files: ['a.js'] },  // metadata 無し → tdd 扱い (ownership 対象)
+    { id: 'T1', files: ['a.js'] },
   ];
   const relevant = eval2(tasks);
   assert.equal(relevant.length, 1);
 });
 
 test('verification-only tickets with zero tdd tasks pass ownership (Issue #134 regression)', () => {
-  // 全タスクが merge/release lane の検証チケットは ownership チェック対象が空 →
-  // resolveDispatchGroups([]) は status 'ok' で dispatch 可能。
   const api = loadApi();
   const relevant = api.ownershipRelevantTasks([
     { id: 'T1', files: [], metadata: { lane: 'merge' } },

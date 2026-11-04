@@ -1,9 +1,4 @@
-// Intent<->fact contrast check for the S3 review gate (Issue #91 Task 4).
-// Pure module: compares what the ticket/design/tasks *declare* against what the
-// diff *actually touched*. Mismatches are advisory (CONDITIONAL override via
-// CEO approval point) — this module only reports facts, never blocks.
 
-/** Extract changed-file paths from a raw diff text (diff --git lines, +++ lines, stat lines). */
 export function extractChangedPaths(diff) {
   const paths = new Set();
   if (typeof diff !== 'string') return [...paths];
@@ -14,7 +9,6 @@ export function extractChangedPaths(diff) {
   }
   const plusLines = diff.matchAll(/^\+\+\+ b\/(\S+)$/gm);
   for (const m of plusLines) paths.add(m[1]);
-  // Stat-style lines: " path/to/file.js | 12 +++---"
   const statLines = diff.matchAll(/^\s+(\S+?)\s+\|\s+\d+/gm);
   for (const m of statLines) {
     if (!m[1].startsWith('...') && m[1] !== '') paths.add(m[1]);
@@ -22,7 +16,6 @@ export function extractChangedPaths(diff) {
   return [...paths];
 }
 
-/** Tokenize a ticket title into lowercase keywords (non-word chars as separators, len>=3). */
 function titleKeywords(title) {
   if (typeof title !== 'string') return [];
   return title
@@ -36,21 +29,12 @@ function pathMatchesKeyword(path, kw) {
   return p.includes(kw) || path.split('/').pop().toLowerCase().includes(kw);
 }
 
-/**
- * Contrast check: does the diff (facts) overlap the ticket intent (title keywords,
- * design+task declared files)?
- *
- * @param {{ticketTitle: string, designFiles: string[], taskFiles: string[], diff: string}} input
- * @returns {{consistent: boolean, mismatches: Array<{kind: 'title-diff'|'design-tasks', detail: string}>}}
- *   consistent=false means CONDITIONAL verdict (CEO-overrideable), never a hard NO-GO.
- */
 export function testContrast({ ticketTitle, designFiles = [], taskFiles = [], diff }) {
   const mismatches = [];
   const changed = extractChangedPaths(diff);
   const kws = titleKeywords(ticketTitle);
   const declared = [...designFiles, ...taskFiles].filter((f) => typeof f === 'string');
 
-  // title-diff: some changed path must overlap a title keyword (or a declared file).
   const overlapsTitle =
     changed.length > 0 &&
     (changed.some((p) => kws.some((kw) => pathMatchesKeyword(p, kw))) ||
@@ -65,8 +49,6 @@ export function testContrast({ ticketTitle, designFiles = [], taskFiles = [], di
     });
   }
 
-  // design-tasks: when declared files exist and diff is non-empty, at least one
-  // declared file (or a path overlapping its basename/dir) should appear in the diff.
   if (declared.length > 0 && changed.length > 0) {
     const declaredBasenames = declared.map((f) => f.split('/').pop().toLowerCase());
     const overlapsDeclared = changed.some(

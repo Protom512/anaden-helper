@@ -1,14 +1,3 @@
-// TDD tests for Issue #91 (P-007) T2: Commit Gate diff fetcher must also
-// collect commit-range diff (HEAD~1..HEAD / merge-base variant) + tree hash,
-// and fail-closed (short-circuit the gate) when BOTH working-tree diff and
-// commit-range diff are empty — instead of injecting an empty diff into
-// reviewers (vacuous-GO prevention, pipeline-evidence-verification.md §2).
-//
-// Two layers:
-//  - unit tests of the pure helpers in review-gate-diff.js (T1 dependency)
-//  - source-scan of feature-pipeline.js (script is not importable)
-//
-// Run: node --test .claude/workflows/tests/gate-commit-range-diff.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -22,8 +11,6 @@ import {
 
 const wfDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fpSrc = readFileSync(join(wfDir, 'feature-pipeline.js'), 'utf8');
-
-// ── unit: extractDiffSection parses "=== NAME ===" delimited sections ──
 
 test('extractDiffSection returns body between headers', () => {
   const raw = [
@@ -55,8 +42,6 @@ test('extractDiffSection: missing section -> "", last section -> rest, whitespac
   assert.equal(extractDiffSection(null, 'DIFF'), '');
 });
 
-// ── unit: buildCommitRangeDiffInput fallback + fail-closed (T1, exercised for T2 wiring) ──
-
 test('buildCommitRangeDiffInput: working-tree diff wins when non-empty', () => {
   const r = buildCommitRangeDiffInput({ stat: 's', diff: 'd', rangeDiff: 'c', treeHash: 'h' });
   assert.equal(r.mode, 'working-tree');
@@ -77,8 +62,6 @@ test('buildCommitRangeDiffInput: both empty -> fail-closed with reason', () => {
   assert.equal(r.mode, 'fail-closed');
   assert.ok(r.reason, 'fail-closed decision carries a reason');
 });
-
-// ── source scan: feature-pipeline.js wiring (gate:fetch-diff, ~L589) ──
 
 test('feature-pipeline fetch-diff prompt collects commit-range stat + diff', () => {
   const idx = fpSrc.indexOf("label: 'gate:fetch-diff'");
@@ -119,13 +102,7 @@ test('feature-pipeline: fail-closed uses unified T1 helper and short-circuits be
   assert.ok(failAt > 0 && failAt < instrAt, 'short-circuit precedes reviewer prompt build');
 });
 
-// ── drift guard: inlined helpers in feature-pipeline.js must behave identically
-//    to the canonical review-gate-diff.js module (approver condition: compare
-//    input/output pairs, not just source text) ──
-
 test('drift guard: inlined extractDiffSection/buildCommitRangeDiffInput match canonical behavior', async () => {
-  // extract the inlined function bodies from feature-pipeline.js and eval them
-  // in a sandbox alongside the canonical module.
   const inlineSrc = fpSrc.slice(
     fpSrc.indexOf('function extractDiffSection'),
     fpSrc.indexOf('const diffFetch = await agent(')
@@ -170,10 +147,6 @@ test('drift guard: inlined extractDiffSection/buildCommitRangeDiffInput match ca
   );
 });
 
-// ── Issue #102 T5: drift guard for the unified helper (inline copy in
-//    feature-pipeline.js vs canonical review-gate-diff.js) — behavior comparison
-//    over the full deterministic fallback chain (UC-1) ──
-
 function extractInlineFunction(scriptSrc, name) {
   const start = scriptSrc.indexOf(`function ${name}(`);
   assert.ok(start >= 0, `function ${name} must be inlined in feature-pipeline.js`);
@@ -211,7 +184,6 @@ function loadInlineUnifiedFromFp() {
   const parts = ['isPlaceholderSection', 'assembleSnapshot', 'parseUntrackedFiles', 'buildUnifiedGateDiff']
     .map((n) => extractInlineFunction(fpSrc, n));
   const bcr = extractInlineFunction(fpSrc, 'buildCommitRangeDiffInput');
-  // eslint-disable-next-line no-new-func
   const factory = new Function(
     `const PLACEHOLDER_SENTINELS = ["429", "rate limit", "placeholder"];\n${bcr}${parts.join('\n')}\nreturn buildUnifiedGateDiff;`
   );
@@ -252,10 +224,6 @@ test('drift guard (Issue #102): inlined buildUnifiedGateDiff in feature-pipeline
   }
 });
 
-// ── Issue #102 T5 (ticket-precheck-wiring pattern): static verification of
-//    gate-diff.json persistence + fail-closed pre-fanout short-circuit + TDZ
-//    ordering of the persistence builder ──
-
 test('wiring (Issue #102): fetch-diff prompt collects merge-base as a separate section', () => {
   const idx = fpSrc.indexOf("label: 'gate:fetch-diff'");
   const body = fpSrc.slice(fpSrc.lastIndexOf('agent(', idx), idx);
@@ -268,15 +236,12 @@ test('wiring (Issue #102): fetch-diff prompt collects merge-base as a separate s
 test('wiring (Issue #102 T2): fetch-diff prompt enumerates untracked file contents explicitly', () => {
   const idx = fpSrc.indexOf("label: 'gate:fetch-diff'");
   const body = fpSrc.slice(fpSrc.lastIndexOf('agent(', idx), idx);
-  // untracked-only fallback で reviewer が中身を読めるよう、ファイル内容列挙を明示指示
   assert.ok(/UNTRACKED FILE CONTENTS|untracked file contents/i.test(body),
     'explicit untracked file contents enumeration instruction');
   assert.ok(/head -c|cat\b/.test(body), 'content read command (head -c / cat) instructed');
 });
 
 test('wiring (Issue #102 T2): fetched untracked file contents reach the reviewer snapshot (intent-to-add mode)', () => {
-  // UNTRACKED FILE CONTENTS sections must be extracted and joined into the
-  // GATE_DIFF snapshot so reviewers see file bodies, not just names.
   const extractAt = fpSrc.indexOf('extractUntrackedFileContents');
   assert.ok(extractAt > 0, 'dedicated extractor for UNTRACKED FILE CONTENTS sections');
   const declAt = fpSrc.indexOf('const GATE_DIFF = [');
@@ -288,8 +253,6 @@ test('wiring (Issue #102 T2): fetched untracked file contents reach the reviewer
 test('wiring (Issue #102): gate-diff.json persistence agent exists with basis/treeHash/snapshot', () => {
   const labelAt = fpSrc.indexOf("label: 'gate:persist-diff'");
   assert.ok(labelAt > 0, 'persistence agent has a dedicated label (gate:persist-diff)');
-  // builder definition sits ~14k chars upstream of the persist label (TDZ-safe
-  // definition region), so the assertion window must span both.
   const around = fpSrc.slice(labelAt - 15500, labelAt + 200);
   assert.ok(around.includes('gate-diff.json'), 'gate-diff.json persistence file name present');
   assert.ok(around.includes('.omc/logs/'), 'log dir .omc/logs/ referenced');
@@ -297,10 +260,8 @@ test('wiring (Issue #102): gate-diff.json persistence agent exists with basis/tr
   for (const f of ['mode', 'basis', 'treeHash', 'snapshot', 'recordedAt', 'snapshotChars', 'untrackedFiles']) {
     assert.ok(around.includes(f), `field ${f} persisted`);
   }
-  // recordedAt は runTimestamp 流用 (ticket-precheck.json と同一パターン)
   assert.ok(fpSrc.includes('recordedAt: runTimestamp'),
     'recordedAt reuses runTimestamp (single source, ticket-precheck pattern)');
-  // fail-closed path must carry failClosedReason (mode/basis mandatory even on failure)
   const failIdx = fpSrc.indexOf("label: 'gate:persist-diff-failed'");
   const failBlock = fpSrc.slice(failIdx - 2200, failIdx);
   assert.ok(failBlock.includes('failClosedReason'), 'fail-closed persistence carries failClosedReason');
@@ -317,18 +278,13 @@ test('wiring (Issue #102): fail-closed short-circuit precedes all reviewer fan-o
   assert.ok(failAt < instrAt, 'fail-closed precedes FEEDBACK_INSTRUCTION build');
   assert.ok(failAt < persistAt, 'fail-closed precedes any persistence/fan-out agent');
   assert.ok(failAt < teamGateAt, 'fail-closed precedes gate team fan-out');
-  // the fail-closed branch itself must return (resumable status)
   const failBlock = fpSrc.slice(failAt, failAt + 3000);
   assert.ok(failBlock.includes('GATE_DIFF_EMPTY_STATUS'), 'resumable empty status');
   assert.ok(/return\s*\{/.test(failBlock), 'fail-closed returns before fan-out');
-  // 429 placeholder must route into the same fail-closed branch (no separate bypass)
   assert.ok(fpSrc.includes('429-placeholder'), '429-placeholder basis flows through fail-closed');
 });
 
 test('wiring (Issue #102): TDZ ordering — GATE_DIFF_SNAPSHOT builder executed only after ACTIVE_GATE_DIMENSIONS', () => {
-  // estimate approval condition #3: the persistence builder must be invoked
-  // strictly AFTER ACTIVE_GATE_DIMENSIONS is confirmed (past TDZ incident
-  // integrationSliceCheck). Builder DEFINITION may precede; INVOCATION may not.
   const dimsAt = fpSrc.indexOf('const ACTIVE_GATE_DIMENSIONS =');
   const builderDefAt = fpSrc.indexOf('const buildGateDiffEvidence = () =>');
   const builderCallAt = fpSrc.indexOf('const gateDiffEvidence = buildGateDiffEvidence()');
@@ -348,10 +304,8 @@ test('wiring (Issue #102): shared snapshot injected into every reviewer lane (si
   assert.ok(instrAt > gateDiffDecl, 'FEEDBACK_INSTRUCTION (carrier of GATE_DIFF) built after snapshot');
   const instrBlock = fpSrc.slice(instrAt, instrAt + 1200);
   assert.ok(instrBlock.includes('${GATE_DIFF}'), 'GATE_DIFF injected into the shared instruction');
-  // persistence records the same GATE_DIFF (single source of truth)
   const persistIdx = fpSrc.indexOf('snapshot: GATE_DIFF');
   assert.ok(persistIdx > 0, 'persisted snapshot is the same GATE_DIFF string');
-  // fail-closed path also persists its rationale to gate-diff.json
   const failPersistIdx = fpSrc.indexOf("label: 'gate:persist-diff-failed'");
   assert.ok(failPersistIdx > 0, 'fail-closed path persists to gate-diff.json too');
   const failAround = fpSrc.slice(failPersistIdx - 2500, failPersistIdx);

@@ -1,9 +1,3 @@
-// TDD tests for the Commit Gate TeamCreate wiring (Issue #63 Task 4).
-// Written BEFORE the implementation. The workflow script is not an importable
-// module (harness-executed), so — like team-verdict.test.mjs — we extract the
-// marker-delimited pure-logic block from feature-pipeline.js and eval it.
-//
-// Run: node --test .claude/workflows/tests/team-gate-wiring.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -22,8 +16,6 @@ assert.ok(end > begin, 'feature-pipeline.js contains gate-team-end marker after 
 
 const block = src.slice(begin + BEGIN.length, end);
 const api = new Function(`${block}; return { normalizeGateReview, aggregateGateReviews };`)();
-
-// ── normalizeGateReview: structured-first transport (PROTOCOL_SPEC) ──
 
 test('normalizeGateReview: structured object passes through (first path)', () => {
   const v = api.normalizeGateReview(
@@ -48,7 +40,7 @@ test('normalizeGateReview: fenced JSON envelope in a string is parsed (structure
 test('normalizeGateReview: bare JSON object string is parsed', () => {
   const v = api.normalizeGateReview('{"verdict":"CONDITIONAL","summary":"c"}', 'governance');
   assert.equal(v.verdict, 'CONDITIONAL');
-  assert.equal(v.dimension, 'governance'); // dimension backfilled from lane key
+  assert.equal(v.dimension, 'governance');
 });
 
 test('normalizeGateReview: R6 keyword text parse is the LAST resort only', () => {
@@ -71,8 +63,6 @@ test('normalizeGateReview: null on non-verdict input (lane stays MISSING → blo
   assert.equal(api.normalizeGateReview({ verdict: 'MAYBE' }, 'x'), null);
   assert.equal(api.normalizeGateReview(42, 'x'), null);
 });
-
-// ── aggregateGateReviews: deterministic pre-verdict (semantics invariance) ──
 
 test('aggregateGateReviews: 6/6 GO → complete, all GO', () => {
   const a = api.aggregateGateReviews(Array.from({ length: 6 }, (_, i) => ({ verdict: 'GO', dimension: `d${i}` })));
@@ -102,13 +92,9 @@ test('aggregateGateReviews: mixed GO/CONDITIONAL with no NO-GO → CONDITIONAL',
   assert.equal(api.aggregateGateReviews(reviews).preVerdict, 'CONDITIONAL');
 });
 
-// ── wiring structure assertions (feature-pipeline.js source-level invariants) ──
-
 test('wiring: gate team path is capability-gated (falls back to parallel() path)', () => {
   assert.match(src, /runCommitGateViaTeam/, 'runCommitGateViaTeam exists');
   assert.match(src, /team primitives unavailable.*Commit Gate/s, 'unavailability log + fallback present');
-  // The team path must return null when primitives are missing so the existing
-  // parallel() route runs unchanged.
   assert.match(src, /gateTeamPrimitivesAvailable/, 'primitive availability helper exists');
 });
 

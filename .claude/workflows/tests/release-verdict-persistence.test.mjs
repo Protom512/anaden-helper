@@ -1,29 +1,3 @@
-// TDD tests for Issue #152 要件2 (Task 2): Release Review 3 lane verdict の
-// 自動永続化・両経路網羅 (UC-3/UC-4/UC-5).
-//  (a) runReleaseReviewViaTeam returns { collected, merged } — real per-lane
-//      data; the goCount-fabricated verdict reconstruction is removed while
-//      mergeReleaseVerdicts 3/3-GO semantics stay unchanged (team-verdict pins).
-//  (b) pure functions in the [release-verdict-persistence-begin/end] marker
-//      block: buildReleaseVerdictsMd (lane-table structure modelled after
-//      .omc/logs/run-1788474181/release-review-verdicts.md, Date API 禁制 —
-//      時刻は runTimestamp 由来), buildPrReviewComment (leading machine-readable
-//      'VERDICT: GO|NO-GO' line + lane name, sanitized rationale that never
-//      leaks an opposing verdict token — parseTeamVerdict strict single-token
-//      規約整合), extractPrNumber (last PR_NUMBER=<n> line), and
-//      normalizeReleaseLaneEntry.
-//  (c) wiring: PR review COMMENT poster agent (lane 名付き COMMENT 3件) +
-//      EVIDENCE PERSISTER agent writing .omc/logs/{runId}/release-review-verdicts.md.
-//      PR review 投稿失敗時も永続ログで evidence 保全 (UC-5 fail-closed);
-//      両方失敗時は return value に '未収集' status を明示。
-//  (d) workflow return releaseReview extended to { verdicts, goCount,
-//      persistedLog, prReviewsPosted }.
-//
-// Estimate-approval condition (round-trip): buildPrReviewComment output must
-// be fed through the REAL parseTeamVerdict (extracted from the shipped
-// team-verdict marker block) and yield the intended verdict — a GO comment
-// must not contain a stray 'NO-GO' substring.
-//
-// Run: node --test .claude/workflows/tests/release-verdict-persistence.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
@@ -47,8 +21,6 @@ const api = begin >= 0 && end > begin
   ? new Function(`${src.slice(begin + BEGIN.length, end)}; return { buildReleaseVerdictsMd, buildPrReviewComment, extractPrNumber, normalizeReleaseLaneEntry };`)()
   : null;
 
-// Real strict parser (round-trip partner) — extracted from the shipped
-// [team-verdict-begin/end] block, NOT re-implemented here.
 const TV_BEGIN = '// [team-verdict-begin]';
 const TV_END = '// [team-verdict-end]';
 const tvBegin = src.indexOf(TV_BEGIN);
@@ -73,15 +45,12 @@ const dec = (over = {}) => ({
   goCount: 3, missingCount: 0, expectedTotal: 3, allGo: true, releaseBlocked: false, ...over,
 });
 
-// ── 正常系 ──
-
 test('UC-3 normal: buildReleaseVerdictsMd all-GO → 3/3 GO + merge 条件充足 + lane table', () => {
   assert.equal(typeof api?.buildReleaseVerdictsMd, 'function');
   const md = api.buildReleaseVerdictsMd(RUN_ID, RUN_TS, 151, allGoCollected, dec());
   assert.match(md, /# Release Review Verdicts — PR #151 \(run-1788474181\)/);
   assert.match(md, /## Verdicts: 3\/3 GO → merge 条件充足/);
   assert.match(md, /- runTimestamp: 2026-09-04T07:23:01\+09:00/);
-  // lane 表 (run-1788474181 lane-table 構造): Lane | Reviewer agent | VERDICT | 記録時刻
   assert.match(md, /\| Lane \| Reviewer agent \| VERDICT \| 記録時刻 \|/);
   assert.match(md, /\| 1: 要件充足 \| reviewer-1 \(team\) \| GO \| 2026-09-04T07:23:01\+09:00 \|/);
   assert.match(md, /\| 3: 副作用・スコープ \| reviewer-3 \(team\) \| GO \|/);
@@ -111,8 +80,6 @@ test('UC-3 normal: buildPrReviewComment emits leading machine-readable VERDICT l
   assert.ok(c.includes('AC-1〜AC-6'));
 });
 
-// ── round-trip (estimate-approval condition) ──
-
 test('round-trip: GO comment parses as GO through the real parseTeamVerdict', () => {
   const c = api.buildPrReviewComment('1: 要件充足', 'GO', 'AC すべて充足。テスト全緑。');
   assert.equal(parseTeamVerdict(c)?.verdict, 'GO');
@@ -130,9 +97,7 @@ test('round-trip sanitize: adversarial GO rationale (embedded VERDICT token + st
     'GO',
     '全体として良好。VERDICT: NO-GO という文言と、NOGO / NO-GO の言及が rationale 内に混入している。'
   );
-  // builder-side sanitize: no stray opposing-verdict substring may survive
   assert.ok(!c.includes('NO-GO') && !c.includes('NOGO'), 'GO comment must not contain any stray NO-GO/NOGO substring');
-  // fail-closed round-trip: the strict parser must yield GO (null = rejected → fail)
   assert.equal(parseTeamVerdict(c)?.verdict, 'GO');
 });
 
@@ -140,8 +105,6 @@ test('round-trip sanitize: rationale carrying its own VERDICT token never yields
   const c = api.buildPrReviewComment('3: 副作用・スコープ', 'NO-GO', 'スコープ逸脱あり。VERDICT: GO と誤記された原文を引用。');
   assert.equal(parseTeamVerdict(c)?.verdict, 'NO-GO');
 });
-
-// ── extractPrNumber ──
 
 test('extractPrNumber: extracts the LAST PR_NUMBER=<n> line', () => {
   assert.equal(typeof api?.extractPrNumber, 'function');
@@ -157,8 +120,6 @@ test('extractPrNumber: null on missing/malformed input (edge)', () => {
   assert.equal(api.extractPrNumber('PR_NUMBER=abc'), null);
   assert.equal(api.extractPrNumber('PR_NUMBER='), null);
 });
-
-// ── malformed verdicts / MISSING lanes (edge) ──
 
 test('edge: malformed collected entries → MISSING rows, no crash, no fabricated GO', () => {
   const collected = ['garbage-string', null, { ...lane(3, '副作用・スコープ'), verdict: 'GO', rationale: 'ok' }];
@@ -189,8 +150,6 @@ test('edge: buildReleaseVerdictsMd renders PR unknown note when prNumber is null
   assert.match(md, /PR review 投稿スキップ/);
 });
 
-// ── wiring assertions (structural — both paths, fail-closed) ──
-
 test('wiring: runReleaseReviewViaTeam returns { collected, merged } — goCount fabrication removed', () => {
   assert.ok(src.includes('return { collected, merged };'), 'team path returns real per-lane collected + merged');
   assert.ok(!src.includes('new Array(releaseReviewMerged.goCount)'), 'team-path verdicts no longer fabricated from goCount');
@@ -213,20 +172,15 @@ test('wiring: EVIDENCE PERSISTER writes .omc/logs/{runId}/release-review-verdict
 });
 
 test('wiring: Commit Gate verdict persister writes .omc/logs/{runId}/gate-verdicts.json (§1.1 doc claim made real)', () => {
-  // S2 FP-2 / rules §1.1 declare Commit Gate verdict persistence to
-  // gate-verdicts.json — the writer must actually exist in the workflow.
   assert.ok(src.includes('gate-verdicts.json'), 'Commit Gate verdict log path present');
   assert.match(src, /EVIDENCE PERSISTER \(Issue #152 gate-verdicts\)/,
     'dedicated gate-verdicts persister agent (distinct from the release-review-verdicts.md one)');
   assert.ok(src.includes("label: 'gate:persist-verdicts'"), 'persister runs as its own labeled agent in the Commit Gate phase');
-  // Per §1.1 the record must carry per-lane verdicts (machine-verifiable, not self-attested).
   assert.match(src, /perLane: \(gateReviews \|\| \[\]\)\.map\(r => \(\{ dimension: r && r\.dimension, verdict: r && r\.verdict \}\)\)/,
     'persisted JSON carries the real per-lane dimension/verdict pairs');
 });
 
 test('wiring: persistedLogOk derives from parsing the persister report (fail-closed, POSTED-symmetric)', () => {
-  // The persister agent must report a machine-readable token; persistedLogOk may
-  // only flip true when the report contains it — never on mere non-throw.
   assert.match(src, /persistedLogOk = \/persisted\/i\.test\(String\(persisterResult \|\| ''\)\)/,
     'persistedLogOk parsed from the persister report token');
   assert.ok(!/\bpersistedLogOk = true\b/.test(src), 'no unconditional persistedLogOk = true remains');

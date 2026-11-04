@@ -166,6 +166,39 @@ test('stripComments is a no-op on clean sources', () => {
   assert.equal(stripComments(src, 'toml'), src);
 });
 
+test('ps1: line and block comments are found, strings are not', () => {
+  const src = 'Write-Host "a # b"' + NL + '# note' + NL + '<# block' + NL + 'still block #>' + NL + "Write-Host 'don''t # stop'";
+  const comments = findComments(src, 'ps1');
+  assert.equal(comments.length, 2);
+  assert.equal(src.slice(comments[0].start, comments[0].end), '# note');
+  assert.ok(src.slice(comments[1].start, comments[1].end).includes('still block'));
+});
+
+test('ps1: here-string content is not a comment', () => {
+  const src = '$t = @"' + NL + 'not # a comment' + NL + '"@' + NL + '# real note';
+  const comments = findComments(src, 'ps1');
+  assert.equal(comments.length, 1);
+  assert.equal(src.slice(comments[0].start, comments[0].end), '# real note');
+});
+
+test('ps1: fingerprint ignores comments and whitespace', () => {
+  const withComments = 'Get-ChildItem # go' + NL + 'Write-Host 1';
+  const bare = 'Get-ChildItem' + NL + 'Write-Host 1';
+  assert.equal(codeFingerprint(withComments, 'ps1'), codeFingerprint(bare, 'ps1'));
+});
+
+test('js: pure drift-guard marker comments are exempt, marker-with-prose is not', () => {
+  const src = 'const a = 1;' + NL + '// [done-evidence-begin]' + NL + 'const b = 2;' + NL + '// run-metadata-lookup-end' + NL + '// [x-begin] prose here' + NL + 'const c = 3;';
+  const comments = findComments(src, 'js');
+  assert.equal(comments.length, 1);
+  assert.ok(src.slice(comments[0].start, comments[0].end).includes('prose here'));
+});
+
+test('stripComments keeps pure drift-guard marker lines', () => {
+  const src = 'const a = 1;' + NL + '// [done-evidence-begin]' + NL + 'const b = 2;';
+  assert.equal(stripComments(src, 'js'), src);
+});
+
 test('scopeFiles covers crates/scripts code plus repo toml and config yml', () => {
   const files = scopeFiles();
   assert.ok(files.length > 150);
@@ -175,10 +208,15 @@ test('scopeFiles covers crates/scripts code plus repo toml and config yml', () =
   assert.ok(paths.some((p) => p.endsWith('/sgconfig.yml')), 'sgconfig.yml');
   assert.ok(paths.some((p) => p.includes('/templates/pipelines/')), 'templates pipelines');
   assert.ok(paths.some((p) => p.includes('/data/')), 'data');
+  assert.ok(paths.some((p) => p.includes('/.claude/workflows/feature-pipeline.js')), 'workflows js');
+  assert.ok(paths.some((p) => p.endsWith('/rss_bench.ps1')), 'rss_bench.ps1');
+  assert.ok(paths.some((p) => p.includes('/docs/explainers/')), 'docs explainers');
   assert.ok(!paths.some((p) => p.includes('/ast-grep-tests/')), 'ast-grep-tests excluded');
   assert.ok(!paths.some((p) => p.includes('/references/')), 'references vendored tree excluded');
+  assert.ok(!paths.some((p) => p.includes('/.claude/skills/')), 'vendored skills excluded');
+  assert.ok(!paths.some((p) => p.includes('/.claude/hooks/')), 'local hooks excluded');
   assert.ok(paths.some((p) => p.includes('/.cargo/')), '.cargo included');
   for (const f of files) {
-    assert.ok(['.rs', '.mjs', '.sh', '.toml', '.yml', '.yaml'].some((e) => f.path.endsWith(e)), f.path);
+    assert.ok(['.rs', '.mjs', '.js', '.sh', '.ps1', '.toml', '.yml', '.yaml'].some((e) => f.path.endsWith(e)), f.path);
   }
 });

@@ -1,13 +1,3 @@
-// TDD tests for Issue #78 Task 4: review-gate Analyze phase must inject the
-// working-tree diff (R8 pattern ported from feature-pipeline.js) into all
-// reviewer prompts, so findings are guaranteed to originate from the actual diff.
-//
-// Two layers:
-//  - unit tests of the pure helpers in review-gate-diff.js (cap semantics)
-//  - source-scan of review-gate.js (the workflow script itself is not importable:
-//    top-level phase()/agent() calls)
-//
-// Run: node --test .claude/workflows/tests/review-gate-diff-inject.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -25,8 +15,6 @@ import {
 
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'review-gate.js');
 const src = readFileSync(wfPath, 'utf8');
-
-// ── cap constants consistent with feature-pipeline.js (approver condition) ──
 
 test('cap constants match feature-pipeline R8 values (28000/24000/30000)', () => {
   assert.equal(DIFF_TRUNCATE_THRESHOLD, 28000);
@@ -46,8 +34,6 @@ test('fetch prompt uses R8 commands: stat / full diff / status --porcelain + [DI
   assert.ok(DIFF_FETCH_PROMPT.includes('[DIFF TRUNCATED]'));
 });
 
-// ── (b) 30000 char total cap works (unit) ──
-
 test('normalizeGateDiff caps at 30000 chars (b)', () => {
   const big = 'x'.repeat(TOTAL_DIFF_CAP + 5000);
   const capped = normalizeGateDiff(big);
@@ -65,8 +51,6 @@ test('normalizeGateDiff: small strings unchanged; null -> ""; objects JSON-strin
   assert.equal(normalizeGateDiff(hugeObj).length, 30000);
 });
 
-// ── (a) reviewer prompt contains === WORKING-TREE DIFF === section (unit) ──
-
 test('withDiffContext wraps prompt with WORKING-TREE DIFF section (a)', () => {
   const section = buildDiffSection('diff --git a/x b/x');
   const prompt = withDiffContext('Review this.', section);
@@ -81,8 +65,6 @@ test('empty diff: buildDiffSection/withDiffContext are no-ops (fail-open)', () =
   assert.equal(buildDiffSection(''), '');
   assert.equal(withDiffContext('P', ''), 'P');
 });
-
-// ── wiring inside review-gate.js (source scan) ──
 
 test('review-gate.js: diff fetched in Analyze BEFORE any reviewer prompt is built', () => {
   const fetchAt = src.indexOf("label: 'review:fetch-diff'");
@@ -115,24 +97,14 @@ test('review-gate.js: inlined cap constants match review-gate-diff.js (drift gua
   }
 });
 
-// ── Issue #91 T3: commit-range fallback + fail-closed mirrored in review-gate.js ──
-// review-gate.js is not importable (top-level phase()/agent()), so the T1
-// helpers are INLINED. Drift guard (approver condition): compare input/output
-// PAIRS of the inlined helper against the canonical review-gate-diff.js copy —
-// not just source-text equality — so behavior drift on future feature additions
-// is detected even if the text stays superficially similar.
-
 import {
   buildCommitRangeDiffInput as canonicalBuildCommitRangeDiffInput,
   extractDiffSection as canonicalExtractDiffSection,
 } from '../review-gate-diff.js';
 
-/** Extract a top-level `function name(...) {...}` source from a script by brace matching. */
 function extractFunctionSource(scriptSrc, name) {
   const start = scriptSrc.indexOf(`function ${name}(`);
   assert.ok(start >= 0, `function ${name} must be inlined in review-gate.js`);
-  // Start matching AFTER the parameter list's closing paren — the first '{'
-  // may itself be a default-parameter object literal (e.g. `options = {}`).
   const parenOpen = scriptSrc.indexOf('(', start);
   let parenDepth = 0;
   let bodyOpen = -1;
@@ -150,7 +122,7 @@ function extractFunctionSource(scriptSrc, name) {
   for (let i = bodyOpen; i < scriptSrc.length; i++) {
     const c = scriptSrc[i];
     if (inStr) {
-      if (c === '\\') i += 1; // skip escaped char
+      if (c === '\\') i += 1;
       else if (c === inStr) inStr = null;
       continue;
     }
@@ -166,7 +138,6 @@ function extractFunctionSource(scriptSrc, name) {
 
 function loadInlinedHelper(name) {
   const fnSrc = extractFunctionSource(src, name);
-  // eslint-disable-next-line no-new-func
   const factory = new Function(`${fnSrc}\nreturn ${name};`);
   return factory();
 }
@@ -218,7 +189,6 @@ test('drift guard: inlined extractDiffSection matches canonical outputs on heade
 });
 
 test('review-gate.js: fetch-diff prompt collects commit-range diff + tree hash (Issue #91 T3)', () => {
-  // The prompt is a template literal assigned to DIFF_FETCH_PROMPT before the fetch agent.
   const start = src.indexOf('DIFF_FETCH_PROMPT = `');
   const end = src.indexOf('`;', start);
   const body = src.slice(start, end);
@@ -236,8 +206,6 @@ test('review-gate.js: wiring uses extractDiffSection + unified T1 helper after f
   const fetchAt = src.indexOf("label: 'review:fetch-diff'");
   const after = src.slice(fetchAt, fetchAt + 4000);
   assert.ok(after.includes('extractDiffSection'), 'sections extracted from raw fetch result');
-  // Issue #102 T4: the wiring now drives the fallback via buildUnifiedGateDiff
-  // (which reuses buildCommitRangeDiffInput internally as the lower routine).
   assert.ok(after.includes('buildUnifiedGateDiff('), 'T1 unified helper drives the fallback decision');
   for (const s of ['STAT', 'DIFF', 'UNTRACKED', 'COMMIT-RANGE STAT', 'COMMIT-RANGE DIFF', 'TREE HASH']) {
     assert.ok(after.includes(`'${s}'`), `section '${s}' extracted`);
