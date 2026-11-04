@@ -1,23 +1,3 @@
-//! 宣言的パイプラインのデバイス発火＋ライブループ層。
-//!
-//! [`crate::pipeline_runner`] の純粋 tick([`PipelineState::tick`]) を消費し、
-//! 実 capture(`Win32Capture`)/input(`Win32InputExecutor`) に接続して async ループを回す
-//! 最終マイル層。テンプレ画像は caller が `&[TaskDef]` として渡す。
-//! (旧 Android 実機バックエンド・命令型 Orchestrator は Issue #188 で削除済み。)
-//!
-//! 解像度モデル: device 側は生解像度(PC版は黒帯込み生幅)。
-//! capture した画像を [`ScreenScaler::normalize_capture`] (黒帯クロップ + キャンバス
-//! アスペクト保護 + 基準幅 1280 正規化の単一前処理・Issue #212) へ通して tick に食わせる。
-//! 発火座標は逆方向に [`rescale_command`] が [`CropInfo`]（黒帯オフセット情報）を使って
-//! normalize後1280空間 → 実機生画像（黒帯込み）へ戻す。
-//!
-//! **座標空間の統一（C1/M1 修正）**: 全 [`InputCommand`] は「normalize後1280空間」へ統一。
-//! ClickSelf は matched_region(既に1280空間) をそのまま、ClickRect/Swipe は raw-1258 空間の
-//! roi/from/to を1280空間へ変換してから載せる（[`crate::pipeline_runner::action_to_command`]）。
-//! rescale は黒帯込み実機画像への逆写像として `x_real = x_1280 * crop_w / 1280 + offset_x`、
-//! `y_real = y_1280 * crop_w / 1280 + offset_y` で計算する（両軸とも幅比 `crop_w/1280`）。
-//! 黒帯なし（offset=0, width=device_width）のとき従来の [`ScreenScaler::from_base`] と同等になる。
-
 use std::future::Future;
 use std::path::PathBuf;
 use std::pin::Pin;
@@ -37,58 +17,26 @@ use anaden_vision::{BASE_WIDTH, CropInfo, ScreenScaler, TaskDef};
 use crate::jitter::Jitter;
 use crate::pipeline_runner::{InputCommand, PipelineState};
 
-/// リカバリフックへ渡す実行コンテキスト (02-recovery-budget)。
-///
-/// 従来は hook へ `u32` (NoMatch streak) を渡すだけだったため、CLI 側は試行番号を
-/// 独自の単調カウンタ (AtomicU32) で数えるしかなく、健全サイクルを挟んでも
-/// 「2 回目以降 = 即 kill+restart」の強いエスカレーションが続いていた (F4)。
-/// 試行番号の管理を engine 側 [`RecoveryGuard`] へ集約し、hook は本構造体を受け取る。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RecoveryContext {
-    /// 現在のエピソード (直近の健全サイクル以降) でのリカバリ試行番号 (1 起点)。
-    /// テンプレートマッチ成功 (Fired / NoFire) で 1 へ戻る。
     pub attempt: u32,
-    /// リカバリ発火時点の NoMatch / FiredUnverified 連続回数 (閾値と同値)。
     pub streak: u32,
 }
 
-/// boxed async リカバリフック(`run_loop_with_recovery` で使用)。
-///
-/// NoMatch が `threshold` 回連続したときに [`RecoveryContext`] を渡して呼ばれる。
-/// `Ok` ならリカバリ成功とみなし NoMatch 連続カウンタをリセットしてループを継続、
-/// `Err` なら IO エラーとして停止する。試行回数の上限 (circuit breaker) は
-/// [`PipelineDriver::with_max_recovery_attempts`] が担い、上限到達時は hook を
-/// 呼ばず [`LoopStopReason::RecoveryExhausted`] で停止する。
 pub type RecoveryHook = Box<
     dyn FnMut(RecoveryContext) -> Pin<Box<dyn Future<Output = Result<(), DeviceError>> + Send>>
         + Send,
 >;
 
-/// リカバリ後の起動猶予 (boot-wait) 判定に使う経過時間の供給抽象 (Issue #210)。
-///
-/// `run_loop_with_recovery` / `run_loop_with_goal` はリカバリフック成功後に
-/// [`PipelineDriver::with_recovery_grace`] で設定した猶予期間だけ NoMatch streak の
-/// 蓄積を止める (ゲーム再起動 → タイトル到達には分単位かかるため、起動途中の
-/// プロセスを再び殺す「再起動ストーム」を構造的に防ぐ)。猶予判定に必要なのは
-/// 「ループ開始からの経過時間」のみのため、本 trait は [`GoalClock`] と同じ設計方針
-/// (本番は `Instant` 計測・テストは決定論的ステップ、`tokio::time::pause` をドライバへ
-/// 導入しない) で時間を注入可能にする。`&mut self` はテスト impl が「呼出毎に時間を
-/// 進める」副作用を持てるようにするため。
-///
-/// `Send + Sync` はドライバ構造体のフィールドとして保持される (`Box<dyn …>` を
-/// await 点を跨いだ `&self` メソッドで使う) ために必要。
 pub trait RecoveryClock: Send + Sync {
-    /// ループ開始からの経過時間を返す。
     fn elapsed(&mut self) -> Duration;
 }
 
-/// [`RecoveryClock`] の本番実装。`Instant::now()` 差分で実時間を計測する。
 pub struct SystemRecoveryClock {
     started: Instant,
 }
 
 impl SystemRecoveryClock {
-    /// 現在時刻を起点に計測を開始する。
     pub fn new() -> Self {
         Self {
             started: Instant::now(),
@@ -108,50 +56,14 @@ impl RecoveryClock for SystemRecoveryClock {
     }
 }
 
-/// NoMatch streak + リカバリ後起動猶予 (boot-wait) の純粋状態機械 (Issue #210)。
-///
-/// 時間 (`now`: ループ開始からの経過時間) を全メソッドの引数で外部注入する
-/// (内部時計を持たない = 単体テストが決定論的)。状態遷移:
-///
-/// - `record_miss(now)`: NoMatch / FiredUnverified 1 回分。猶予中 (`in_grace`) は
-///   streak を増やさず [`false`] を返す (capture は継続し、マッチすれば即通常動作)。
-///   猶予外なら streak +1 し、閾値到達で [`true`] (リカバリフックを呼ぶべき) を返す。
-/// - `record_match()`: Fired / NoFire (テンプレートマッチ成功)。streak をリセットし、
-///   猶予タイマーも解除する (画面が認識できた = 起動完了なので boot-wait は不要)。
-/// - `recovered(now)`: リカバリフック成功直後。streak をリセットし、猶予タイマーを
-///   `now` から `grace` 間だけ開始する。
-///
-/// `grace == Duration::ZERO` のとき `in_grace` は常に [`false`] = 猶予なしの従来挙動
-/// (猶予導入前のテスト契約を 1 ビットも変えない)。
-///
-/// # リカバリ試行の予算 (circuit breaker・02-recovery-budget)
-///
-/// NoMatch が続く限り hook を発火し続ける従来挙動は、永久 NoMatch (ゲームが起動
-/// できない環境故障) で再起動を無限に繰り返した (F4)。本状態機械は試行予算
-/// `max_attempts` を持ち、[`Self::consume_attempt`] が予算到達時に [`None`] を返す
-/// ことで呼出側を [`LoopStopReason::RecoveryExhausted`] 停止へ導く。
-///
-/// 予算は「健全サイクルを挟まずに連続した試行数」に対して適用される
-/// ([`Self::record_match`] で現在エピソードの試行番号は 1 からやり直し)。
-/// 従って「起動 → 数分プレイ → 落ちる」を繰り返す間は毎エピソード attempt=1 の
-/// 弱いエスカレーション (kill なし起動) からやり直し、連続して復帰できない時だけ
-/// 上限へ到達する。予算には [`u32::MAX`] (= 上限なし = 従来挙動) も指定できる。
 struct RecoveryGuard {
-    /// NoMatch 連続でリカバリを発火する閾値。0 はリカバリ無効。
     threshold: u32,
-    /// リカバリ成功後の起動猶予期間。
     grace: Duration,
-    /// 現在の NoMatch 連続回数。
     streak: u32,
-    /// 直近のリカバリ成功時刻 (ループ開始からの経過時間)。未実施なら [`None`]。
     recovered_at: Option<Duration>,
-    /// リカバリ試行の予算 (1 エピソード内の最大試行数)。[`u32::MAX`] は上限なし。
     max_attempts: u32,
-    /// 現在のエピソードで消費した試行数 (直近の健全サイクルからの連続試行数)。
     attempts: u32,
-    /// run 通算のリカバリ試行回数 (`ProgressReport::recovery_attempts` の元)。
     total_attempts: u32,
-    /// エピソード内連続試行の最大値 (`ProgressReport::max_consecutive_recovery` の元)。
     max_consecutive: u32,
 }
 
@@ -169,12 +81,10 @@ impl RecoveryGuard {
         }
     }
 
-    /// 現在の NoMatch 連続回数。
     fn streak(&self) -> u32 {
         self.streak
     }
 
-    /// 起動猶予 (boot-wait) 中か。リカバリ未実施、または `grace` 経過済みなら [`false`]。
     fn in_grace(&self, now: Duration) -> bool {
         match self.recovered_at {
             Some(t) => now.saturating_sub(t) < self.grace,
@@ -182,9 +92,6 @@ impl RecoveryGuard {
         }
     }
 
-    /// NoMatch / FiredUnverified を 1 回記録する。猶予中はカウントせず [`false`]。
-    /// 猶予外で streak が `threshold` に達したら [`true`] (リカバリ発火)。
-    /// `threshold == 0` (リカバリ無効) では常に [`false`]。
     fn record_miss(&mut self, now: Duration) -> bool {
         if self.in_grace(now) {
             return false;
@@ -193,28 +100,17 @@ impl RecoveryGuard {
         self.threshold > 0 && self.streak >= self.threshold
     }
 
-    /// テンプレートマッチ成功 (Fired / NoFire) を記録する。
-    /// streak をリセットし、起動猶予も解除する (画面認識 = 起動完了)。
-    /// あわせて現在エピソードの試行番号も 1 からやり直し (健全サイクルを挟んだ
-    /// 再発 NoMatch は新規エピソードとして弱いエスカレーションから開始する)。
     fn record_match(&mut self) {
         self.streak = 0;
         self.recovered_at = None;
         self.attempts = 0;
     }
 
-    /// リカバリフック成功を記録する。streak をリセットし、`now` から猶予タイマーを開始。
-    /// 試行番号 (`attempts`) はリセットしない — hook 成功は「起動コマンドを打てた」
-    /// ことでありゲームが復帰した保証は無いため、連続故障時はエスカレーションを
-    /// 継続する (単調カウンタだった従来と同じ強度。解除は健全サイクルのみ)。
     fn recovered(&mut self, now: Duration) {
         self.streak = 0;
         self.recovered_at = Some(now);
     }
 
-    /// リカバリ試行を 1 回消費して試行番号 (1 起点) を払い出す。
-    /// 予算到達後は [`None`] (呼出側は [`LoopStopReason::RecoveryExhausted`] で停止)。
-    /// テレメトリ (通算回数・連続最大値) もここで更新する。
     fn consume_attempt(&mut self) -> Option<u32> {
         if self.attempts >= self.max_attempts {
             return None;
@@ -225,8 +121,6 @@ impl RecoveryGuard {
         Some(self.attempts)
     }
 
-    /// 復帰テレメトリ ([`ProgressReport`] の `recovery_attempts` /
-    /// `max_consecutive_recovery` の元) のスナップショット。
     fn telemetry(&self) -> RecoveryTelemetry {
         RecoveryTelemetry {
             recovery_attempts: self.total_attempts,
@@ -235,36 +129,19 @@ impl RecoveryGuard {
     }
 }
 
-/// リカバリ試行の集計テレメトリ ([`ProgressReport`] の復帰系 2 フィールドの元)。
-///
-/// [`RecoveryGuard::telemetry`] がループ内で随時スナップショットを払出し、
-/// [`PipelineDriver::build_outcome`] が [`ProgressReport`] へ埋め込む。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct RecoveryTelemetry {
-    /// run 通算のリカバリフック起動回数。
     recovery_attempts: u32,
-    /// 健全サイクルを挟まずに連続したリカバリ試行の最大回数。
     max_consecutive_recovery: u32,
 }
 
-/// [`PipelineDriver::build_outcome`] へ渡す停止時集計の束。
-///
-/// `per_task_matches` / `started` / `recovery` を 1 つにまとめることで
-/// build_outcome の引数を 7 個以内に保つ (clippy `too_many_arguments` —
-/// [`GoalEvalInputs`] と同じ bundling 方針)。ProgressReport 構築に必要な
-/// 「ループで蓄積した報告コンテキスト」を表す。
 struct OutcomeCtx {
-    /// タスク毎のマッチ回数 (ループで蓄積したものをそのまま移譲)。
     per_task_matches: Vec<TaskMatchCount>,
-    /// ループ開始時刻 (elapsed_ms 計算の起点)。
     started: Instant,
-    /// 復帰テレメトリ ([`RecoveryGuard`] のスナップショット)。
     recovery: RecoveryTelemetry,
 }
 
 impl OutcomeCtx {
-    /// ループの集計値 + guard から報告コンテキストを組み立てる
-    /// (テレメトリは呼出時点の [`RecoveryGuard::telemetry`] スナップショット)。
     fn new(per_task_matches: Vec<TaskMatchCount>, started: Instant, guard: &RecoveryGuard) -> Self {
         Self {
             per_task_matches,
@@ -274,36 +151,18 @@ impl OutcomeCtx {
     }
 }
 
-/// 1 回のリカバリ試行 ([`PipelineDriver::run_recovery_step`]) の結果。
 enum RecoveryStep {
-    /// hook 成功。streak リセット + 起動猶予タイマー開始済み。ループ継続。
     Recovered,
-    /// 試行予算到達 ([`RecoveryGuard::consume_attempt`] が [`None`])。
-    /// [`LoopStopReason::RecoveryExhausted`] で停止すべき (環境故障で進行不能)。
     Exhausted,
-    /// hook が IO エラーを返した。[`LoopStopReason::ExecuteError`] で停止すべき。
     HookFailed(DeviceError),
 }
 
-/// 統合ループコアの累積状態 (§A C3)。
-///
-/// iterations / fired / per_task_matches / started / guard / recovery_enabled を
-/// 1 つにまとめ、各 step_* helper と [`PipelineDriver::run_recovery_or_stop`] へ
-/// `&mut` で渡す。**driver の self フィールドにしないこと** — ヘルパ群が
-/// `&mut self` (recovery_clock / current 等) を取りつつ state を分離 borrow する
-/// ため (self に置くと二重借用で書けなくなる)。
 struct LoopState {
-    /// 現在の tick 数 (MaxIterations 判定・outcome 記録の元)。
     iterations: u64,
-    /// 累積発火コマンド。
     fired: Vec<InputCommand>,
-    /// タスク毎のマッチ回数。
     per_task_matches: Vec<TaskMatchCount>,
-    /// ループ開始時刻 (elapsed_ms 計算の起点)。
     started: Instant,
-    /// NoMatch 連続リカバリの状態機械。
     guard: RecoveryGuard,
-    /// リカバリ有効 (threshold > 0 かつ hook 有り)。record_miss の短絡判定に使う。
     recovery_enabled: bool,
 }
 
@@ -324,7 +183,6 @@ impl LoopState {
         }
     }
 
-    /// 停止 outcome 構築用の報告コンテキスト (per_task_matches を消費して移譲)。
     fn ctx(&mut self) -> OutcomeCtx {
         OutcomeCtx::new(
             std::mem::take(&mut self.per_task_matches),
@@ -333,13 +191,11 @@ impl LoopState {
         )
     }
 
-    /// マッチ系 tick (Fired / NoFire) の共通 prologue: streak リセット + 集計 bump。
     fn record_match_tick(&mut self, current_before: &str) {
         self.guard.record_match();
         bump_task_match(current_before, &mut self.per_task_matches);
     }
 
-    /// ゴール評価用の入力束 (現在の累積状態の借用スナップショット)。
     fn goal_eval_inputs(&self) -> GoalEvalInputs<'_> {
         GoalEvalInputs {
             iterations: self.iterations,
@@ -351,12 +207,8 @@ impl LoopState {
     }
 }
 
-/// 1 arm 処理の結果: ループ継続か、完成 [`LoopOutcome`] での停止か。
 enum StepFlow {
-    /// 継続 (interval sleep へ)。
     Continue,
-    /// 停止 (呼出側がそのまま return する完成 outcome)。
-    /// 224 bytes 超の payload で enum 全体が肥大化するため Box 化 (Issue #272)。
     Stop(Box<LoopOutcome>),
 }
 
@@ -366,56 +218,28 @@ impl StepFlow {
     }
 }
 
-/// マッチ系 arm の種別 (Fired / NoFire)。§A D9 の非対称契約をデータ化:
-/// ログ位置 (Fired は debug → eval、NoFire は eval → debug) と停止種別
-/// (TerminalTask+タスク名 / Stop+"stop") の両方がこの 1 enum で決まる。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum MatchArm {
-    /// コマンド発火済み。debug は評価**前**、停止は TerminalTask + 現在タスク名。
     Fired,
-    /// 発火コマンド無し (ClickSelf w/o region 等)。debug は継続確定**後**、
-    /// 停止は Stop + "stop" 固定。
     NoFire,
 }
 
-/// [`PipelineDriver::step_matched`] への arm 固有入力 (clippy
-/// `too_many_arguments` 回避の bundling — [`GoalEvalInputs`] と同じ方針)。
-/// `just_fired` は NoFire では [`None`]。
 struct MatchStepInput<'a> {
-    /// step 実行前のカレントタスク名 (集計 bump 用)。
     current_before: &'a str,
-    /// 遷移先タスク名 ([`None`] はパイプライン終端/停止指示)。
     next_current: Option<String>,
-    /// 実際に発火したコマンド (Fired のみ)。
     just_fired: Option<InputCommand>,
-    /// ゴール評価へ伝播する直近マッチ情報 (§A D2)。
     match_info: Option<(String, f32, ScreenRegion)>,
 }
 
-/// ゴール評価用の経過時間計測の抽象(Issue #37 T4)。
-///
-/// [`anaden_core::goal::evaluate`] は `elapsed_secs` を純粋パラメータとして受け取るため、
-/// ドライバ側は「現在の経過秒数」を供給するだけでよい。本 trait はその供給口であり、
-/// 本番では [`SystemClock`](`Instant::now` 計測)、テストでは `FakeClock`(決定論的ステップ)
-/// へ差し替え可能にする。`tokio::time::pause` をドライバへ導入せず済む(test-only runtime
-/// feature への結合を避ける = org-feedback estimate approval condition)。
-///
-/// `&mut self` なのは、テスト用 impl が「呼出毎に時間を進める」副作用を持てるようにするため。
 pub trait GoalClock: Send {
-    /// ループ開始からの経過秒数を返す。
     fn elapsed_secs(&mut self) -> u64;
 }
 
-/// [`GoalClock`] の本番実装。`Instant::now()` で実時間を計測する。
-///
-/// `run_loop_with_goal` が `goal=Some` で渡されたときのみ消費される(`goal=None` なら
-/// 計測は行われない = 既存 `run_loop_with_recovery` と完全等価)。
 pub struct SystemClock {
     started: Instant,
 }
 
 impl SystemClock {
-    /// 開始時刻を `now` として計測を開始する。
     pub fn new() -> Self {
         Self {
             started: Instant::now(),
@@ -435,72 +259,30 @@ impl GoalClock for SystemClock {
     }
 }
 
-/// `evaluate_goal` へ渡すループ状態のバンドル。
-///
-/// `evaluate_goal` の引数が 8 個(clippy `too_many_arguments` 閾値超過)になるのを防ぐため、
-/// 呼出側がループ内で蓄積した `iterations` / `fired_commands` / `per_task_matches` /
-/// `started` を 1 つの借用束にまとめて渡す。`build_outcome` への転送もこの束から行う。
 struct GoalEvalInputs<'a> {
-    /// 現在の tick 数。
     iterations: u64,
-    /// 累積発火コマンド。
     fired_commands: &'a [InputCommand],
-    /// タスク毎のマッチ回数。
     per_task_matches: &'a [TaskMatchCount],
-    /// ループ開始時刻。
     started: Instant,
-    /// 復帰テレメトリ (停止時の ProgressReport へ伝播)。
     recovery: RecoveryTelemetry,
 }
 
-/// goal 活性ループの評価コンテキスト束 (§A C2)。[`GoalMode::Active`] の中身。
-///
-/// `clock` はトレイトオブジェクト (`&mut dyn GoalClock`) で受ける — 公開シグネチャの
-/// `impl GoalClock` はそのまま維持し、ループ内部だけ動的ディスパッチに寄せる
-/// (統合ループコア run_loop_core が Inactive / Active を同一型で扱うための準備)。
 struct GoalLoopCtx<'a> {
-    /// 評価対象ゴール。
     goal: &'a anaden_core::Goal,
-    /// 経過秒数の供給源 (テストでは FakeClock)。
     clock: &'a mut dyn GoalClock,
-    /// tick 数と直近マッチの蓄積。
     goal_ctx: anaden_core::GoalStatusContext,
 }
 
-/// ループのゴール評価モード (§A C2)。
-///
-/// [`GoalMode::Inactive`] は非ゴールループ ([`PipelineDriver::run_loop_with_recovery`])
-/// と完全一致であることを型で強制する — [`PipelineDriver::eval_goal_stop`] は
-/// Inactive を即 [`None`] (tick も clock も進めない) とする契約。
 enum GoalMode<'a> {
-    /// 非ゴールモード。ゴール評価は一切行わない。
     Inactive,
-    /// ゴール活性モード (評価コンテキスト込み)。
     Active(GoalLoopCtx<'a>),
 }
 
-/// normalize後1280空間の [`InputCommand`] を、実機生画像（黒帯込み）の座標へ変換する純関数。
-///
-/// 入力座標は「黒帯除去後描画領域を幅1280基準へ正規化した空間」。normalize は
-/// [`ScreenScaler::normalize`] が **幅基準（幅→1280、高さはアスペクト比保存）** でリサイズ
-/// するため、コンテンツ領域内では X も Y も同じ比 `crop_info.width / 1280` で実ピクセルへ
-/// 戻る。よって [`CropInfo`]（コンテンツ領域の元画像空間における位置・寸法）を使って:
-/// - `x_real = x_1280 * crop_info.width / 1280 + crop_info.offset_x`
-/// - `y_real = y_1280 * crop_info.width / 1280 + crop_info.offset_y`
-///
-/// とする（両軸とも `width/1280`。高さ比 `height/720` を使うと、アスペクト比が 16:9 でない
-/// 端末で normalize 後高さ ≠ 720 となるため Y がズレる）。`crop_info` が「黒帯なし」
-/// （`offset=(0,0)`, `width=device_width`）のとき、この変換は従来の
-/// [`ScreenScaler::from_base`] と完全に同等になる。
-///
-/// IO を持たないため単体テスト可能。
 pub fn rescale_command(cmd: InputCommand, device_width: u32, crop_info: &CropInfo) -> InputCommand {
     let to_real = |x_1280: u32, y_1280: u32| -> (u32, u32) {
-        // 両軸とも幅比 crop_w/1280 でスケール（normalize が幅基準・アスペクト比保存のため）。
         let s = (crop_info.width as f64) / (BASE_WIDTH as f64);
         let x_real = (x_1280 as f64 * s).round() as u64 + crop_info.offset_x as u64;
         let y_real = (y_1280 as f64 * s).round() as u64 + crop_info.offset_y as u64;
-        // 安全側: device_width でクランプ（実機画像幅を超えないように）。
         (
             x_real.min(device_width as u64) as u32,
             y_real.min(device_width as u64) as u32,
@@ -522,25 +304,16 @@ pub fn rescale_command(cmd: InputCommand, device_width: u32, crop_info: &CropInf
     }
 }
 
-/// 画面キャプチャ能力の抽象。本番 impl([`anaden_device::Win32Capture`]) とテスト用 fake を差し替える。
 #[async_trait]
 pub trait Capture: Send + Sync {
-    /// デバイスの画面をキャプチャして生解像度画像を返す。
     async fn capture(&self) -> Result<DynamicImage, DeviceError>;
 }
 
-/// 入力発火能力の抽象。本番 impl([`anaden_device::Win32InputExecutor`]) とテスト用 fake を差し替える。
 #[async_trait]
 pub trait Input: Send + Sync {
-    /// 入力アクションを実行する。
     async fn execute(&self, action: &InputAction) -> Result<(), DeviceError>;
 }
 
-// ---- 本番 impl: PC版(Windows) Win32 バックエンド ----
-//
-// `Win32Capture` / `Win32InputExecutor` は anaden-device 側の cfg(windows) 型。
-// engine 側は型名を参照するだけで windows-rs API には触れないため、engine/Cargo.toml
-// への windows 依存追加は不要(Linux ビルド維持)。実体は device 側へ委譲する薄い impl。
 #[cfg(windows)]
 #[async_trait]
 impl Capture for anaden_device::Win32Capture {
@@ -557,153 +330,65 @@ impl Input for anaden_device::Win32InputExecutor {
     }
 }
 
-/// ステップ IO エラーの発生源分類。
-///
-/// [`StepOutcome::Error`] の構造化キー。従来は message 文字列の prefix 一致
-/// (`starts_with("capture")`) でリカバリ可否を判定しており、`verify_capture:` が
-/// 「capture 系」として拾えない・文言変更に脆い問題があった (F3)。分類はこの enum で
-/// 機械的に行い、message 文字列は e2e 出力契約 (人間可読ログ) 専用と分離する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum StepErrorKind {
-    /// サイクル冒頭の画面取得 ([`PipelineDriver::run_once`] の capture) の IO エラー。
     Capture,
-    /// 入力発火 (execute) の IO エラー。
     Execute,
-    /// 発火後検証の再 capture ([`PipelineDriver::run_once_verified`]) の IO エラー。
     VerifyCapture,
-    /// 画面取得・入力以外のステップ内エラー (05-template-cache / F34)。
-    ///
-    /// 現在はテンプレート読込失敗 ([`anaden_vision::TaskDefError::TemplateLoadFailed`]) が
-    /// ここに分類される。テンプレ欠落は設定破損 (恒常故障) のため非リカバリ = 停止系。
-    /// NoMatch (リトライ候補) とは区別される。
     Other,
 }
 
-/// 画面取得系 IO エラー (capture / verify_capture) = リカバリ対象か。
-///
-/// 画面が取れないのは「ゲームが死んでいる/起動途中」可能性が高い一過状態なので、
-/// `run_loop_with_recovery` / `run_loop_with_goal` の両ループがこの判定を共有して
-/// recovery hook 起動 + 起動猶予 (boot-wait) 継続へ分類する (Issue #210 と同一契約)。
-/// 入力発火系 ([`StepErrorKind::Execute`]) はハードウェア/権限系の恒常故障を含むため
-/// 従来どおり即停止 (fail-closed)。
 pub fn is_recoverable_io_error(kind: StepErrorKind) -> bool {
     matches!(kind, StepErrorKind::Capture | StepErrorKind::VerifyCapture)
 }
 
-/// 1 サイクルの実行結果。caller([`PipelineDriver::run_loop`]) が継続判定に使う。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum StepOutcome {
-    /// tick がマッチしコマンド発火済み。`next_current` があれば継続。
-    /// `fired` は実際に発火した(実機座標へ rescale 済み)コマンド。
     Fired {
         next_current: Option<String>,
         fired: Option<InputCommand>,
     },
-    /// tick したが発火コマンド無し(Stop/DoNothing/ClickSelf w/o region)。
-    /// `next_current` が [`None`] は停止指示。[`Some`] は遷移のみ。
-    NoFire { next_current: Option<String> },
-    /// マッチせず(tick が [`None`])。current 不変。リトライ候補。
+    NoFire {
+        next_current: Option<String>,
+    },
     NoMatch,
-    /// capture/execute/verify_capture の IO エラー。
-    /// `kind` でリカバリ可否を機械分類し ([`is_recoverable_io_error`])、`message` は
-    /// `"capture: ..."` / `"execute: ..."` / `"verify_capture: ..."` の従来文言を維持
-    /// (e2e 出力契約保持)。
     Error {
         kind: StepErrorKind,
         message: String,
     },
-    /// 発火はしたが事後検証で**対象が残存**した(テンプレがまだ高 conf でマッチ)。
-    /// アクションが効果を発揮していない疑いが強い「誤成功」状態。
-    /// `next_current` は tick 結果の next(検証失敗時は current を巻き戻すので基本 [`None`])。
-    /// `fired` は実際に発火したコマンド(記録/デバッグ用)。caller はこれを
-    /// 実質 NoMatch 相当(リトライ候補)として扱うべき([`PipelineDriver::run_loop_with_recovery`]
-    /// は NoMatch streak へ加算する)。
-    /// ([`PipelineDriver::run_once_verified`] でのみ発生。既定の [`PipelineDriver::run_once`] は返さない)
     FiredUnverified {
         next_current: Option<String>,
         fired: Option<InputCommand>,
     },
-    /// 常時監視 (watch) タスクがマッチしその action を発火した (Issue #252)。
-    ///
-    /// [`PipelineDriver::run_once`] が current タスクの評価より先に watch タスク群を
-    /// チェックし、マッチしたら本 variant を返して tick を終了する。**current は
-    /// 進まない**(本流を壊さずポップアップ等を閉じるだけ)。`task` はマッチした
-    /// watch タスク名、`fired` は発火した (rescale 済み) コマンド (action が
-    /// コマンドを生まない場合は [`None`])。
     WatchFired {
         task: String,
         fired: Option<InputCommand>,
     },
 }
 
-/// パイプライン実行ドライバ。純粋 tick + 実 capture/input を接続する。
 pub struct PipelineDriver<C: Capture, I: Input> {
     capture: C,
     input: I,
     scaler: ScreenScaler,
     state: PipelineState,
     tasks: Vec<TaskDef>,
-    /// rescale 用デバイス実解像度の幅。
     device_width: u32,
-    /// `InputCommand::Swipe` に duration が無いためのデフォルト(millisec)。
     swipe_duration_ms: u64,
-    /// 発火後検証を有効化するか。既定 [`false`](検証しない=現状維持)。
-    /// [`Self::with_verify`] で [`true`] にしたとき、[`Self::run_loop`] /
-    /// [`Self::run_loop_with_recovery`] は内部で [`Self::run_once`] の代わりに
-    /// [`Self::run_once_verified`] を呼ぶ。
     verify_after_fire: bool,
-    /// 直近の tick でマッチしたテンプレート情報(UC-2 用)。
-    /// `run_once` がマッチ時に `(task_name, confidence, region)` を格納し、
-    /// `run_loop_with_goal` が `GoalStatusContext::tick` へ渡すために消費(`take`)する。
-    /// 非ゴールパス(`run_loop_with_recovery`)では参照されず、上書きされるだけ。
     last_match: Option<(String, f32, ScreenRegion)>,
-    /// 直近の capture で黒帯クロップした描画領域の、元画像（黒帯込み生幅）空間における
-    /// 位置・寸法。`run_once` / `run_once_verified` が capture→crop 毎に更新し、
-    /// `rescale_command` が発火座標の逆変換（1280空間 → 実機生画像）に使う。
-    /// 初期値は `CropInfo::default()` (0,0,0,0) で、最初の capture で即座に上書きされる。
     last_crop_info: CropInfo,
-    /// 外部キャンセル口(Ctrl+C 等)。[`Self::with_cancel`] で設定したときのみ有効。
-    /// 各ループ(`run_loop` / `run_loop_with_recovery` / `run_loop_with_goal`)は
-    /// サイクル冒頭で `is_cancelled()` を判定し、sleep 区間を [`tokio::select!`] で
-    /// cancel 待ち受け化する。[`None`] のときは従来の `tokio::time::sleep` のみ(後方互換)。
     cancel: Option<CancellationToken>,
-    /// スナップショット保存の連番(ガード4)。ANADEN_SNAPSHOT_DIR 設定時に
-    /// NoMatch / FiredUnverified でインクリメントしてファイル名へ埋める。
     snapshot_counter: u64,
-    /// 診断レポート保存の連番(Issue #71)。ANADEN_DIAG_REPORT 設定時に
-    /// NoMatch 発生でインクリメントしてファイル名へ埋める。
     diag_counter: u64,
-    /// リカバリ (ゲーム再起動) 後の起動猶予 (boot-wait) 期間 (Issue #210)。
-    /// 既定 [`Duration::ZERO`] (猶予なし = 従来挙動・後方互換)。
-    /// [`Self::with_recovery_grace`] で設定する。
     recovery_grace: Duration,
-    /// 猶予判定用の経過時間供給 (Issue #210)。本番は [`SystemRecoveryClock`]、
-    /// テストは [`Self::with_recovery_clock`] で決定論的クロックへ差し替える。
     recovery_clock: Box<dyn RecoveryClock>,
-    /// リカバリ試行の予算上限 (02-recovery-budget)。健全サイクルを挟まずに連続した
-    /// 試行がこの回数に達すると [`LoopStopReason::RecoveryExhausted`] で停止する。
-    /// 既定 [`u32::MAX`] (= 上限なし = 従来挙動)。[`Self::with_max_recovery_attempts`] で設定。
     max_recovery_attempts: u32,
-    /// ヒューマンライクな入力ゆらぎ (Issue #253)。[`None`] で無効 (従来挙動・後方互換)。
-    /// [`Self::with_jitter`] で設定。タップ座標ジッタ (normalize 後空間) と
-    /// interval ジッタの両方に適用される。シードは [`ProgressReport::jitter_seed`] 経由で
-    /// report.json へ記録される (再現性)。
     jitter: Option<Jitter>,
-    /// 発火後検証 (run_once_verified) の実績計数 (Issue #260: report.json verify スキーマ)。
-    /// `run_loop_core` 開始時にリセットされ、`verify_action_effect` で加算、
-    /// `build_outcome` が [`ProgressReport::verify`] へ埋め込む。
     verify_stats: VerifyStats,
-    /// 常時監視 (interrupt) タスク名リスト (Issue #252)。[`Self::with_watch`] で設定。
-    /// 空 (既定) なら watch チェックは一切行われない (従来挙動・後方互換)。
-    /// 名前は `tasks` 内の TaskDef を指す (CLI が起動時検証する)。
     watch: Vec<String>,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
-    /// 各依存を指定して生成する。
-    ///
-    /// `device_width` は実機の横解像度(Pixel 7a なら 2400)。発火座標の基準→実機変換に用いる。
-    /// `swipe_duration_ms` は `Action::Swipe` が duration を持たないため発火時に注入する固定値。
     pub fn new(
         capture: C,
         input: I,
@@ -735,115 +420,51 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// 発火後検証(アクションが効果を発揮したかの事後検証)を有効化する。
-    ///
-    /// このビルダーを呼ぶと、[`Self::run_loop`] / [`Self::run_loop_with_recovery`] が
-    /// 内部で [`Self::run_once_verified`] を使うようになる。発火後フレームでテンプレが
-    /// まだマッチ(対象残存)すれば [`StepOutcome::FiredUnverified`] を返し、
-    /// [`Self::run_loop_with_recovery`] はこれを NoMatch streak 相当として扱う。
-    ///
-    /// 既定は検証 OFF(現状維持)。本メソッドを呼ばなければ [`Self::run_once`] 相当の挙動のまま。
     pub fn with_verify(mut self, enabled: bool) -> Self {
         self.verify_after_fire = enabled;
         self
     }
 
-    /// 外部キャンセルトークン(Ctrl+C / SIGINT 等)を設定するビルダー。
-    ///
-    /// 呼ばない場合は `cancel = None`(デフォルト = 従来動作、後方互換)。main.rs の
-    /// 呼出元は `.with_verify` と同じビルダーチェーンで重ねるだけでシグネチャを変えない。
-    /// 設定すると各ループ(`run_loop` / `run_loop_with_recovery` / `run_loop_with_goal`)が
-    /// サイクル冒頭で [`CancellationToken::is_cancelled`] を判定して
-    /// [`LoopStopReason::Interrupted`] で停止し、末尾の interval 待ちを
-    /// [`tokio::select!`] で cancel 通知を即時受け取るようになる。
     pub fn with_cancel(mut self, token: CancellationToken) -> Self {
         self.cancel = Some(token);
         self
     }
 
-    /// リカバリ (ゲーム再起動) 後の起動猶予 (boot-wait) 期間を設定する (Issue #210)。
-    ///
-    /// 呼ばない場合の既定は [`Duration::ZERO`] (猶予なし = 従来挙動・後方互換)。
-    /// 正の値を設定すると、リカバリフック成功から `grace` 経過までは NoMatch /
-    /// FiredUnverified が streak を増やさない (再起動ストーム防止)。capture は
-    /// 継続され、猶予中にテンプレートがマッチすれば即座に通常動作へ復帰する
-    /// (マッチ自体が「起動完了 = ready」のシグナルになるため、猶予を待つより早い)。
     pub fn with_recovery_grace(mut self, grace: Duration) -> Self {
         self.recovery_grace = grace;
         self
     }
 
-    /// 猶予判定用のクロックを差し替える (主にテスト用・Issue #210)。
-    ///
-    /// 呼ばない場合の既定は [`SystemRecoveryClock`] (実時間計測)。テストは
-    /// 決定論的に時間を進める [`RecoveryClock`] impl を注入できる
-    /// ([`GoalClock`] の FakeClock と同じ方針 — `tokio::time::pause` 非導入)。
     pub fn with_recovery_clock(mut self, clock: Box<dyn RecoveryClock>) -> Self {
         self.recovery_clock = clock;
         self
     }
 
-    /// リカバリ試行 (recovery hook 起動) の予算上限を設定する (02-recovery-budget)。
-    ///
-    /// 健全サイクル (テンプレートマッチ成功) を挟まずに連続したリカバリ試行が
-    /// `max_attempts` 回に達すると、次の発火タイミングで hook を呼ばず
-    /// [`LoopStopReason::RecoveryExhausted`] で停止する (永久 NoMatch でのゲーム
-    /// 再起動無限ループ = circuit breaker)。健全サイクルを挟むと試行番号は
-    /// 1 からやり直し、予算も新規エピソードとして数え直す。
-    ///
-    /// 呼ばない場合の既定は [`u32::MAX`] (上限なし = 従来挙動・後方互換)。
     pub fn with_max_recovery_attempts(mut self, max_attempts: u32) -> Self {
         self.max_recovery_attempts = max_attempts;
         self
     }
 
-    /// ヒューマンライクな入力ゆらぎを設定する (Issue #253)。
-    ///
-    /// 呼ばない場合の既定は [`None`] (ジッタ無効 = 従来挙動・後方互換)。
-    /// [`Some`] を渡すと:
-    /// - 発火タップ座標 (normalize 後 1280 空間) に ±`JitterConfig::tap_radius_px` px
-    ///   の一様ジッタ ([`Self::run_once`] の rescale 前に挿入)。
-    /// - ループ間隔に ±`JitterConfig::interval_ratio` のジッタ
-    ///   ([`Self::run_loop_core`] の interval sleep 前)。
-    ///
-    /// シードは [`Jitter::seed`] 経由で [`ProgressReport::jitter_seed`] に記録され、
-    /// 同一シードで実行を完全再現できる (evidence 規約)。
     pub fn with_jitter(mut self, jitter: Option<Jitter>) -> Self {
         self.jitter = jitter;
         self
     }
 
-    /// 常時監視 (interrupt) タスク名を設定する (Issue #252)。
-    ///
-    /// 呼ぶと各 tick で current タスクの評価より先に `watch` 内のタスクを
-    /// (先頭順に) テンプレート照合し、マッチしたものがあればその action を発火して
-    /// tick を終了する (current は進まない)。レベルアップ・実績等の不定期ポップアップ
-    /// を pipeline 本流から分離してハンドルする (MAA の interrupt 相当)。
-    ///
-    /// タスク名は [`Self::new`] に渡した `tasks` 内の TaskDef と同名であること。
-    /// 名前解決は呼出側 (CLI) が起動時に行う (存在しない名前は fail-closed で
-    /// run 前に弾く)。空 Vec を渡すと watch なし (従来挙動)。
-    ///
-    /// watch タスクの `next` は無視される (遷移しない・閉じるだけ)。
     pub fn with_watch(mut self, watch: Vec<String>) -> Self {
         self.watch = watch;
         self
     }
 
-    /// スケーラへの参照(主にテスト・デバッグ用)。
     pub fn scaler(&self) -> &ScreenScaler {
         &self.scaler
     }
 
-    /// 現在タスク名への参照。
     pub fn current(&self) -> &str {
         self.state.current()
     }
 
-    /// 1 サイクル(capture → normalize → tick → rescale → execute)を実行する。
     pub async fn run_once(&mut self) -> StepOutcome {
         let t_cycle = std::time::Instant::now();
-        // 1. capture（生解像度画像）
         let t_cap = std::time::Instant::now();
         let screen = match self.capture.capture().await {
             Ok(img) => img,
@@ -858,13 +479,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let capture_ms = t_cap.elapsed().as_secs_f64() * 1000.0;
         let raw_w = screen.width();
         let raw_h = screen.height();
-        // 2+3. 本番前処理 (単一情報源・Issue #212): 黒帯クロップ (キャンバス アスペクト保護
-        //     付き) → 基準幅 1280 正規化。`anaden-tool run-pipeline` も同じ
-        //     ScreenScaler::normalize_capture を呼ぶため両経路の前処理は常に一致する。
-        //     CropInfo（元画像空間でのコンテンツ位置・寸法）は後段の rescale で発火座標を
-        //     黒帯込み実機画像へ逆変換するために保持する。
-        //     アスペクト保護: キャンバス内部の黒 (起動途中フレームの未描画領域等) を黒帯と
-        //     誤判定して幾何を破壊するのを防ぐ (letterbox::crop_to_canvas_with_info)。
         let (normalized, crop_info) = self.scaler.normalize_capture(&screen);
         self.last_crop_info = crop_info;
         let crop_w = crop_info.width;
@@ -878,23 +492,16 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
         let norm_w = normalized.width();
         let norm_h = normalized.height();
-        // [DEBUG] 生フレーム寸法 + normalize 後寸法。向き/スケール乖離の診断用。
         debug!(
             "frame raw={raw_w}x{raw_h} normalized={norm_w}x{norm_h} (device_width={})",
             self.device_width
         );
-        // Issue #252: watch (常時監視) チェック — current タスクより優先。
-        // マッチした watch タスクがあればその action を発火して本 tick は終了
-        // (current は進めない = 本流を壊さずポップアップを閉じる)。
         if !self.watch.is_empty()
             && let Some(outcome) = self.check_watch(&normalized, norm_w, norm_h).await
         {
             return outcome;
         }
-        // 3. tick（純粋計算 + current 遷移）
         let t_rec = std::time::Instant::now();
-        // tick は内部で current を next[0] へ進めるため、マッチした(発火前)タスク名を
-        // 事前に採取する(UC-2 last_match の task 名要素)。
         let matched_task_name = self.state.current().to_string();
         let tick = match self.state.tick(&normalized, &self.tasks) {
             Ok(Some(r)) => r,
@@ -904,18 +511,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     t_rec.elapsed().as_secs_f64() * 1000.0,
                     t_cycle.elapsed().as_secs_f64() * 1000.0
                 );
-                // ガード4: NoMatch 発生時、ANADEN_SNAPSHOT_DIR 設定時に normalized
-                // フレームを PNG 保存(認識ズレ原因特定用)。未設定時は no-op。
                 self.save_snapshot(&matched_task_name, &normalized);
-                // Issue #71: NoMatch 診断モード。ANADEN_SNAPSHOT_DIR 設定時または
-                // ANADEN_DIAG_REPORT=1 時にフレームダンプ + テンプレート別 conf 内訳
-                // レポートを保存する。未設定時は no-op(ファイル IO ゼロ・後方互換)。
                 self.save_diagnose_report(&matched_task_name, &normalized);
                 return StepOutcome::NoMatch;
             }
-            // F34 (05-template-cache): テンプレート読込エラーは NoMatch (リトライ候補) と
-            // 区別して停止系エラーにする。従来は run_step が None へ潰すため永久 NoMatch
-            // ループとして観測され、テンプレ欠落が fail-invisible だった。
             Err(e) => {
                 warn!("template detect error (task '{matched_task_name}'): {e}");
                 return StepOutcome::Error {
@@ -925,14 +524,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
         };
         let recognize_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
-        // マッチしたテンプレート情報を記録(UC-2 ゴール評価用)。run_loop_with_goal が
-        // GoalStatusContext::tick へ渡すために消費(take)する。非ゴールパスでは未参照。
         if let (Some(region), Some(confidence)) = (tick.matched_region, tick.matched_confidence) {
             self.last_match = Some((matched_task_name, confidence, region));
         }
-        // 4. rescale + execute（command があれば発火）
         if let Some(cmd) = tick.command {
-            // Issue #253: ジッタは normalize 後空間で適用 (解像度非依存の指ぶれ)。
             let cmd = match self.jitter.as_mut() {
                 Some(j) => j.jitter_command(cmd),
                 None => cmd,
@@ -965,19 +560,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// watch タスク群をこのフレームで評価する (Issue #252)。
-    ///
-    /// [`Self::run_once`] から current タスク評価の前に呼ばれる。先頭の watch タスクから
-    /// 順に [`anaden_vision::run_step`] で照合し:
-    /// - マッチ → action を [`crate::pipeline_runner::action_to_command`] で入力コマンド化
-    ///   (ジッタ適用 → rescale → 発火) し [`StepOutcome::WatchFired`] を返す。
-    ///   `next` は無視 (遷移しない・閉じるだけ)。
-    /// - 非マッチ → 次の watch タスクへ。全て非マッチなら [`None`] (通常の current 評価へ)。
-    /// - テンプレート読込エラー → [`StepErrorKind::Other`] (F34 と同一契約: 設定破損は停止系)。
-    /// - 発火 IO エラー → [`StepErrorKind::Execute`]。
-    ///
-    /// 事後検証 (run_once_verified) は watch 発火には適用しない — ポップアップ消失は
-    /// 次 tick の watch 再評価 (非マッチになる) で自然に確認されるため。
     async fn check_watch(
         &mut self,
         normalized: &DynamicImage,
@@ -1004,7 +586,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             );
             let fired = match command {
                 Some(cmd) => {
-                    // ジッタは本流タップと同一規則 (normalize 後空間 → rescale)。
                     let cmd = match self.jitter.as_mut() {
                         Some(j) => j.jitter_command(cmd),
                         None => cmd,
@@ -1031,33 +612,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         None
     }
 
-    /// 発火後検証付きの 1 サイクル([`Self::run_once`] + 事後検証)。
-    ///
-    /// [`Self::run_once`] と同じ capture→normalize→tick→rescale→execute を行った後、
-    /// **発火に成功した場合のみ** もう1回 capture→normalize→同タスクで再 tick し、
-    /// アクションが効果を発揮したか検証する。
-    ///
-    /// # 検証ロジック
-    /// 発火後フレームで **現在タスクのテンプレがまだ閾値以上でマッチ** すれば、対象が
-    /// 画面に残存している=アクション無効と判定し [`StepOutcome::FiredUnverified`] を返す。
-    /// これは「テンプレがマッチして発火した→成功」という偽の成功(close_btn 誤キャプチャ等)を防ぐ。
-    ///
-    /// 検証でテンプレが消失(非マッチ)すれば、アクションは効果を発揮したとみなし通常の
-    /// [`StepOutcome::Fired`] を返す。
-    ///
-    /// # current の巻き戻し
-    /// [`PipelineState::tick`] は内部で `current` を `next[0]` へ進める。検証失敗時は対象残存なので
-    /// next へ進むべきでない。本メソッドは [`FiredUnverified`][StepOutcome::FiredUnverified] 返却前に
-    /// `current` を発火前のタスク名へ巻き戻す(=caller は次サイクルで同じタスクを再試行できる)。
-    ///
-    /// 検証成功時は next へ進んだ状態を維持([`Self::run_once`] と同じ)。
-    ///
-    /// # 戻り値
-    /// - 発火しなかった(NoMatch/NoFire/Error) → [`Self::run_once`] と同じ結果をそのまま返す。
-    /// - 発火した → 事後検証を実施:
-    ///   - テンプレ消失/変化 → [`StepOutcome::Fired`]
-    ///   - テンプレ残存(高 conf で再マッチ) → [`StepOutcome::FiredUnverified`](current 巻き戻し済み)
-    ///   - 事後 capture IO エラー → [`StepOutcome::Error`] { kind: [`StepErrorKind::VerifyCapture`], message: `"verify_capture: ..."` }
     pub async fn run_once_verified(&mut self) -> StepOutcome {
         let pre_task = self.state.current().to_string();
         let fired = self.run_once().await;
@@ -1066,34 +620,19 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 next_current,
                 fired: just_fired,
             } => {
-                // 発火成功のみ事後検証。検証は pre_task(発火前タスク)で再マッチさせる。
                 self.verify_action_effect(&pre_task, just_fired, next_current)
                     .await
             }
-            // NoFire/NoMatch/Error は検証対象外(コマンド発火していない)。
             other => other,
         }
     }
 
-    /// 発火後フレームで `task_name` がまだマッチするか検証する純粋寄りの async ヘルパ。
-    ///
-    /// capture→normalize→`run_step`(anaden_vision) で `task_name` を再認識し、
-    /// マッチ残存なら [`StepOutcome::FiredUnverified`](current を `task_name` へ巻き戻し)、
-    /// 消失なら [`StepOutcome::Fired`] を返す。capture IO エラーは [`StepOutcome::Error`]。
-    ///
-    /// ここでは [`PipelineState::tick`] を使わず `run_step` を直接呼ぶ(current をこれ以上
-    /// 動かさないため)。`run_step` は `task_name` が見つからない場合は `Ok(None)` を返し、
-    /// これは検証上は「対象消失」と同義(発火前はマッチしていたタスクなので、欠落/不明に
-    /// なるケースは実運用上稀。安全側 = 検証成功扱いで Fired)。テンプレ読込エラーの
-    /// `Err` も同じ扱いだが warn で可視化する (F34)。なおテンプレ自体は run_once の
-    /// detect と同じ前処理済みキャッシュを使うため再読込は発生しない (F19)。
     async fn verify_action_effect(
         &mut self,
         task_name: &str,
         just_fired: Option<InputCommand>,
         next_current: Option<String>,
     ) -> StepOutcome {
-        // Issue #260: 検証実行を計数 (report.json の verify.checks)。
         self.verify_stats.checks += 1;
         let screen = match self.capture.capture().await {
             Ok(img) => img,
@@ -1105,13 +644,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 };
             }
         };
-        // run_once と同じ本番前処理 (normalize_capture・検証も描画領域空間で行う)。
-        // CropInfo は検証では発火しないため保存不要。
         let (normalized, _crop_info) = self.scaler.normalize_capture(&screen);
-        // run_step を直接呼び、task_name で再認識。マッチ残存 → 対象残存 = 未検証。
-        // F34: run_step はテンプレ読込エラーを Err で返すが、検証時の Err は従来の
-        // 「対象消失」扱い (=Fired) を維持する (発火前はマッチしていたタスクなので
-        // 欠落は実運用上稀。安全側 = 検証成功扱い)。warn で fail-invisible を防ぐ。
         let still_present = match anaden_vision::run_step(&self.tasks, &normalized, task_name) {
             Ok(Some(_)) => true,
             Ok(None) => false,
@@ -1121,20 +654,14 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
         };
         if still_present {
-            // Issue #260: 検証失敗 (対象残存 = 誤成功) を計数。
             self.verify_stats.failed += 1;
-            // ガード4: アクション無効(対象残存)時、ANADEN_SNAPSHOT_DIR 設定時に
-            // 発火後フレームを PNG 保存(偽成功の原因特定用)。未設定時は no-op。
             self.save_snapshot(task_name, &normalized);
-            // current を発火前タスクへ巻き戻す(次サイクルで同じタスクを再試行)。
             self.state.set_current(task_name.to_string());
             StepOutcome::FiredUnverified {
-                // current は巻き戻したので next は伝搬させない(呼出側ログ用に残す)。
                 next_current,
                 fired: just_fired,
             }
         } else {
-            // Issue #260: 検証成功 (対象消失 = 効果発揮) を計数。
             self.verify_stats.passed += 1;
             StepOutcome::Fired {
                 next_current,
@@ -1143,7 +670,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// [`InputCommand`] → [`InputAction`] 変換＋発火。Swipe に duration を注入する。
     async fn execute_command(&self, cmd: &InputCommand) -> Result<(), DeviceError> {
         let action = match *cmd {
             InputCommand::Tap { x, y } => InputAction::tap(x, y),
@@ -1154,7 +680,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         self.input.execute(&action).await
     }
 
-    /// キャンセルトークンが設定済みかつ発火済みか。未設定時は常に [`false`](後方互換)。
     fn is_cancelled(&self) -> bool {
         match &self.cancel {
             Some(token) => token.is_cancelled(),
@@ -1162,13 +687,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// interval 待ち。キャンセルトークンが設定されていれば [`tokio::select!`] で
-    /// cancel 通知を即時受け取る(そうでなければ従来の [`tokio::time::sleep`])。
-    ///
-    /// 末尾の `select!` は cancel 優先: 両方同時(競合)でも cancel 側を拾い、次サイクル冒頭の
-    /// [`Self::is_cancelled`] で [`LoopStopReason::Interrupted`] 停止へ遷移させる。
-    /// トークン未設定時は sleep のみを await し、cancel 分岐はコンパイル時に存在しない
-    /// (実行時分岐ではないので zero-cost 寄り)。
     async fn sleep_or_cancelled(&self, interval: Duration) {
         match &self.cancel {
             Some(token) => {
@@ -1183,28 +701,15 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// スナップショット保存ディレクトリ(ガード4)。
-    ///
-    /// 環境変数 `ANADEN_SNAPSHOT_DIR` が設定されていればそのパスを、未設定なら [`None`]
-    /// (保存 OFF)を返す。NoMatch / FiredUnverified 発生時の認識ズレ原因特定用。
-    /// Live 実行のデバッグ用途で、未設定時は一切のファイル IO を行わない(後方互換)。
     fn snapshot_dir() -> Option<PathBuf> {
         std::env::var_os("ANADEN_SNAPSHOT_DIR").map(PathBuf::from)
     }
 
-    /// 画像を PNG として best-effort 保存する(ガード4)。
-    ///
-    /// `ANADEN_SNAPSHOT_DIR` 未設定時は no-op([`None`] 早期 return)。設定時は
-    /// `<dir>/<task>_<連番>_<SystemTimeナノ秒>.png` へ `image` の PNG エンコーダで保存する。
-    /// 全てのエラー(ディレクトリ作成失敗・書込失敗・エンコード失敗)は `let _ =` で
-    /// 無視し、ライブラリコードから panic しない(認識失敗時のデバッグ補助が目的で、
-    /// 保存失敗でループを止めない)。連番は `snapshot_counter` をインクリメントして使う。
     fn save_snapshot(&mut self, task: &str, frame: &DynamicImage) {
         let Some(dir) = Self::snapshot_dir() else {
             return;
         };
         self.snapshot_counter = self.snapshot_counter.saturating_add(1);
-        // SystemTime のナノ秒で一意性を補強(連番だけでは再実行で衝突するため)。
         let stamp = SystemTime::now()
             .duration_since(SystemTime::UNIX_EPOCH)
             .map(|d| d.as_nanos())
@@ -1213,7 +718,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             "{task}_{counter}_{stamp}.png",
             counter = self.snapshot_counter
         ));
-        // フレームを PNG 保存。best-effort: エラーは全て無視(panic しない)。
         let _ = std::fs::create_dir_all(&dir);
         let file = match std::fs::File::create(&path) {
             Ok(f) => f,
@@ -1229,14 +733,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// NoMatch 診断レポート保存(Issue #71)。
-    ///
-    /// 環境変数 `ANADEN_SNAPSHOT_DIR` 設定時、または `ANADEN_DIAG_REPORT=1` 設定時に
-    /// フレームダンプ(PNG)と全テンプレート別 conf 内訳レポート(markdown)を保存する。
-    /// 未設定時は no-op(ファイル IO ゼロ・後方互換)。実処理は
-    /// [`crate::diagnostics::save_diagnose_report`] へ委譲(薄い env ラッパ)。
-    /// `ANADEN_SNAPSHOT_DIR` 設定時は `save_snapshot` が PNG を保存済みのため
-    /// フレームダンプをスキップし二重保存を避ける(レポート MD のみ出力)。
     fn save_diagnose_report(&mut self, task: &str, frame: &DynamicImage) {
         let Some(dir) = crate::diagnostics::diag_report_dir() else {
             return;
@@ -1254,139 +750,58 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     }
 }
 
-/// run_loop の停止理由。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum LoopStopReason {
-    /// `Action::Stop` 到達(NoFire + next_current=None)。
     Stop,
-    /// next_current が無い終端タスクへ到達(Fired 後 next_current=None)。
     TerminalTask,
-    /// 最大イテレーション到達。
     MaxIterations,
-    /// capture 失敗。
     CaptureError,
-    /// execute 失敗。
     ExecuteError,
-    /// 宣言的ゴール到達(`anaden_core::goal::evaluate` が reached を返した)。
-    /// Issue #37 T3: ゴール駆動自動化の正常終端。
     GoalReached,
-    /// ゴール未到達タイムアウト(最大イテレーション到達だがゴール活性)。
-    /// Issue #37 T3: 成果物は出たが宣言的ゴール未到達の soft failure。
     GoalTimeout,
-    /// 外部キャンセル(Ctrl+C / SIGINT)。[`PipelineDriver::with_cancel`] で設定した
-    /// [`CancellationToken`] が発火したときにループが即時停止したことを示す。
-    /// PC版 Live 実行中の緊急停止経路。`#[derive]` Serialize/Deserialize 付きなので
-    /// `interrupted` の snake_case 表現として機械可読(JSON/TOML)に現れる。
     Interrupted,
-    /// リカバリ試行の予算上限到達 (02-recovery-budget)。NoMatch / FiredUnverified /
-    /// 画面取得系エラーで recovery hook を連続起動しても健全サイクル (テンプレート
-    /// マッチ) に戻らず試行上限に達した = 環境故障で進行不能と判断した終端
-    /// (永久 NoMatch での再起動無限ループ = circuit breaker)。
-    /// `recovery_exhausted` の snake_case 表現として JSON/TOML に現れる。
     RecoveryExhausted,
 }
 
-/// タスク毎のマッチ回数(UC-3 進捗レポート用)。
-///
-/// `LoopOutcome::progress_report` の `per_task_matches` の要素。CI/studio が
-/// 「どのタスクが何回マッチしたか」を機械処理するための構造化エントリ。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct TaskMatchCount {
-    /// マッチ対象のタスク名。
     pub task: String,
-    /// このタスクがマッチ(発火または状態遷移のみの遷移)した回数。
     pub matches: u64,
 }
 
-/// UC-3「タイムアウト時の進捗レポート」を機械可読にするための構造化サマリ。
-///
-/// `LoopOutcome` に埋め込まれ、CI/studio が成果(JSON/TOML)を消費できるよう
-/// `Serialize` を備える。`#[serde(default)]` で `LoopOutcome` に保持されるため、
-/// 古いシリアライズ成果物(本フィールド無し)からのデシリアライズも壊さない。
-///
-/// # フィールドの意味
-/// - `iterations`: 実行したサイクル数(`LoopOutcome::iterations` と同値)。
-/// - `fired_count`: 実際にコマンド発火した回数(`fired_commands.len()` と同値)。
-/// - `per_task_matches`: タスク毎のマッチ回数。ループ内で現在タスクがマッチする度に +1。
-/// - `elapsed_ms`: ループ開始から停止までの推定経過ミリ秒(`Instant` 計測)。
-/// - `terminal_task`: 停止時に到達していたタスク名(終端タスクまたは最終タスク)。
-/// - `reached_goal`: ゴール駆動モードで到達したゴールの記述子。非ゴールモードでは [`None`]。
-/// - `recovery_attempts`: run 通算のリカバリ (ゲーム再起動) 試行回数
-///   (02-recovery-budget。「どれだけ復帰を試みたか」の実態テレメトリ)。
-/// - `max_consecutive_recovery`: 健全サイクルを挟まずに連続したリカバリ試行の最大回数
-///   (大 = 復帰できずにエスカレーションし続けた期間がある。上限到達で
-///   [`LoopStopReason::RecoveryExhausted`] 停止)。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProgressReport {
-    /// 実行したサイクル数。
     pub iterations: u64,
-    /// 発火した回数。
     pub fired_count: u64,
-    /// タスク毎のマッチ回数(挿入順保持)。
     pub per_task_matches: Vec<TaskMatchCount>,
-    /// 推定経過ミリ秒。
     pub elapsed_ms: u64,
-    /// 停止時の到達タスク名(分からなければ [`None`])。
     pub terminal_task: Option<String>,
-    /// 到達ゴール記述子(非ゴールモードでは [`None`])。
     pub reached_goal: Option<String>,
-    /// 停止理由 (`LoopOutcome::reason` と同値・03-report-channel)。
-    ///
-    /// report 単体 (JSON) を消費する CLI/studio が「なぜ止まったか」を
-    /// 読むためのフィールド。`#[serde(default)]` により旧成果物
-    /// (本フィールド無し) は [`None`] 補完で読める。
     #[serde(default)]
     pub stop_reason: Option<LoopStopReason>,
-    /// run 通算のリカバリ試行回数 (02-recovery-budget)。
-    /// `#[serde(default)]` により旧成果物 (本フィールド無し) は 0 補完で読める。
     #[serde(default)]
     pub recovery_attempts: u32,
-    /// 健全サイクルを挟まずに連続したリカバリ試行の最大回数 (02-recovery-budget)。
-    /// `#[serde(default)]` により旧成果物 (本フィールド無し) は 0 補完で読める。
     #[serde(default)]
     pub max_consecutive_recovery: u32,
-    /// ヒューマンライクな入力ゆらぎのシード (Issue #253)。
-    ///
-    /// ジッタ無効 run では [`None`] (`skip_serializing_if` でフィールド自体を出力しない)。
-    /// 有効 run では必ず記録され、同一シードでゆらぎ列を完全再現できる (evidence 規約)。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub jitter_seed: Option<u64>,
-    /// 発火後検証 (run_once_verified) の実績 (Issue #260: report.json verify スキーマ)。
-    ///
-    /// E2E の「タップ効果」判定 (fired → 事後 capture → 変化検出) を run レポートが
-    /// 機械可読に持つ。旧成果物 (本フィールド無し) は default 補完で読める。
     #[serde(default)]
     pub verify: VerifyReport,
 }
 
-/// 発火後検証の実績サマリ (report.json の `verify` セクション・Issue #260)。
-///
-/// - `enabled`: run の検証設定 (`with_verify`)。
-/// - `checks`: 事後検証を実施した回数 (発火成功後に検証 capture を行った回数)。
-/// - `passed`: 検証成功 (発火後フレームで対象消失 = 効果発揮)。
-/// - `failed`: 検証失敗 (対象残存 = 誤成功。FiredUnverified 相当)。
-///
-/// `checks == passed + failed` が不変量 (検証実施は必ずどちらかに分類される)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct VerifyReport {
-    /// 検証が有効だったか。
     #[serde(default)]
     pub enabled: bool,
-    /// 事後検証を実施した回数。
     #[serde(default)]
     pub checks: u64,
-    /// 検証成功回数 (対象消失)。
     #[serde(default)]
     pub passed: u64,
-    /// 検証失敗回数 (対象残存 = 誤成功)。
     #[serde(default)]
     pub failed: u64,
 }
 
-/// driver 内部の verify 実績計数 (build_outcome で [`VerifyReport`] へ変換)。
-///
-/// `enabled` は driver の `verify_after_fire` フラグから取るため持たない。
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 struct VerifyStats {
     checks: u64,
@@ -1394,28 +809,16 @@ struct VerifyStats {
     failed: u64,
 }
 
-/// run_loop の結果。
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct LoopOutcome {
-    /// 実行したサイクル数。
     pub iterations: u64,
-    /// 発火履歴(検証・デバッグ用)。実機座標へ rescale 済み。
     pub fired_commands: Vec<InputCommand>,
-    /// 終端タスク名 or 停止理由文字列。
     pub terminal: String,
-    /// 停止理由。
     pub reason: LoopStopReason,
-    /// UC-3 進捗レポート(機械可読サマリ)。CI/studio 消費用。
-    /// `#[serde(default)]` により、古い成果物からのデシリアライズを壊さない。
     #[serde(default)]
     pub progress_report: ProgressReport,
 }
 
-/// `per_task_matches` へタスク別マッチ回数を +1 する純ヘルパ(UC-3 進捗レポート用)。
-///
-/// 同名タスクが既出ならそのエントリの `matches` をインクリメントし、
-/// 初出なら末尾へ `matches=1` として挿入する(挿入順保持)。`run_loop_with_recovery` が
-/// 各サイクルで現在タスクがマッチしたときに呼ぶ。IO・状態を持たないため単体テスト可能。
 pub fn bump_task_match(current: &str, list: &mut Vec<TaskMatchCount>) {
     if let Some(entry) = list.iter_mut().find(|e| e.task == current) {
         entry.matches = entry.matches.saturating_add(1);
@@ -1427,15 +830,6 @@ pub fn bump_task_match(current: &str, list: &mut Vec<TaskMatchCount>) {
     }
 }
 
-/// `LoopOutcome` を人間可読な進捗レポート文字列へ整形する純関数(UC-3)。
-///
-/// CLI 側の提示ロジック(println フォーマット)をエンジン外へ持ち出さず、
-/// エンジン層で一元化する。出力はログ・標準エラー・studio UI のいずれにも
-/// そのまま流せる単一文字列。
-///
-/// # 引数
-/// 整形対象の `&`[`LoopOutcome`]。`progress_report` フィールドを優先し、
-/// 旧フィールド(`iterations`/`fired_commands`/`terminal`)はフォールバック参照する。
 pub fn format_progress_report(outcome: &LoopOutcome) -> String {
     let pr = &outcome.progress_report;
     let iterations = pr.iterations.max(outcome.iterations);
@@ -1467,12 +861,6 @@ pub fn format_progress_report(outcome: &LoopOutcome) -> String {
     lines.join("\n")
 }
 
-/// [`LoopStopReason`] の人間可読ラベル (03-report-channel)。
-///
-/// CLI (`anaden run` の「停止理由:」行) と studio (report.json 由来の表示) を
-/// 繋ぐ単一情報源。studio の stdout 行解析 (`RunStatus::observe` の
-/// `停止理由:` 行マッチ) もこの文言に依存するため、変更時は anaden-studio
-/// (log_status.rs) の出力契約テストを併せて更新すること。
 #[must_use]
 pub fn stop_reason_label(reason: LoopStopReason) -> &'static str {
     match reason {
@@ -1490,29 +878,10 @@ pub fn stop_reason_label(reason: LoopStopReason) -> &'static str {
     }
 }
 
-/// [`Goal`](`anaden_core::Goal`) の到達記述子(descriptor)を [`StopCondition`] から導出する純関数。
-///
-/// `evaluate_goal` が `progress_report.reached_goal` へ埋める文字列で、各バリアントを
-/// 人間可読かつ機械処理可能な形式へ射影する:
-/// - `LoopCount { target }` → `loop_count=<target>`
-/// - `TemplateMatch { task, confidence }` → `template_match conf>=<confidence> (task=<task>)`
-/// - `Timeout { secs }` → `timeout=<secs>`
-/// - `All { conditions }` → `all[N](<c0>, <c1>, ...)`（子記述子をカンマ区切りで集約）
-/// - `Any { conditions }` → `any[N](<c0>, <c1>, ...)`（同上）
-///
-/// `All`/`Any` は再帰的に展開し、ネストした合成も括弧対応の取れた単一文字列になる。
-/// この文字列は `reached_goal` として JSON round-trip する既存契約を維持する
-/// （`progress_report` が JSON serialize される際の単一文字列フィールド）。
-///
-/// I/O・時間・乱数に依存しない。`pub(crate)` でテストからも参照可能。
 fn goal_descriptor(goal: &anaden_core::Goal) -> String {
     stop_condition_descriptor(&goal.stop)
 }
 
-/// [`StopCondition`] 単体から記述子を導出する再帰的ヘルパー。
-///
-/// `goal_descriptor` から分離したのは、`All`/`Any` の子要素が `StopCondition`
-/// （`Goal` ではない）だから。子を再帰的に展開するために本関数が必要。
 fn stop_condition_descriptor(stop: &anaden_core::StopCondition) -> String {
     match stop {
         anaden_core::StopCondition::LoopCount { target } => {
@@ -1542,30 +911,11 @@ fn stop_condition_descriptor(stop: &anaden_core::StopCondition) -> String {
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
-    /// run_once を指定 interval で反復する。3つの停止条件:
-    /// (a) Stop(command 無 + next_current=None)、(b) 終端(next_current=None だが Fired)、
-    /// (c) max_iterations。
-    ///
-    /// IO エラーは即停止(簡易方針)。NoMatch は current 不変で次サイクルへ流す(リトライしない)。
-    /// リカバリ不要のエントリポイント。リカバリ付きは [`Self::run_loop_with_recovery`]。
     pub async fn run_loop(&mut self, interval: Duration, max_iterations: u64) -> LoopOutcome {
         self.run_loop_with_recovery(interval, max_iterations, 0, None)
             .await
     }
 
-    /// リカバリフックを 1 回起動する両ループ共通の実行部 (02-recovery-budget)。
-    ///
-    /// (1) [`RecoveryGuard::consume_attempt`] で試行番号を払い出す。試行番号は健全
-    ///     サイクルで 1 起点へ戻るため、hook 側のエスカレーション (初回 = kill なし
-    ///     起動) が毎エピソード正しく適用される。予算到達時は [`RecoveryStep::Exhausted`]。
-    /// (2) hook へ [`RecoveryContext`] (`attempt` / `streak`) を渡して起動する。
-    ///     成功なら streak リセット + 起動猶予 (grace) タイマー開始、IO エラーなら
-    ///     [`RecoveryStep::HookFailed`]。
-    ///
-    /// 従来は `hook(guard.streak())` の直接呼出と結果分岐が 2 ループ × 3 発火経路
-    /// (NoMatch / FiredUnverified / 画面取得系エラー) の 6 箇所に重複しており、
-    /// ループ間で契約が乖離する温床だった。本メソッドへ集約することで両ループの
-    /// リカバリ契約 (猶予・予算・失敗時停止) を 1 箇所で共有する。
     async fn run_recovery_step(
         &mut self,
         cause: &str,
@@ -1584,9 +934,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let streak = guard.streak();
         info!("{cause}; invoking recovery hook (attempt {attempt}, streak {streak})");
         let Some(hook) = recover.as_mut() else {
-            // 呼出側は recovery_enabled (threshold > 0 かつ hook 有り) で gating して
-            // いるため通常到達しない。到達したら hook 無し = リカバリ不能として
-            // fail-closed (試行番号は消費済みなので黙って継続はしない)。
             return RecoveryStep::Exhausted;
         };
         match hook(RecoveryContext { attempt, streak }).await {
@@ -1603,16 +950,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// [`Self::run_recovery_step`] を呼び、停止すべき結果なら完成 [`LoopOutcome`] を
-    /// 組み立てる (継続なら [`None`])。NoMatch / FiredUnverified / capture-error の
-    /// 3 arm で共通する RecoveryStep match を 1 箇所に集約する。
-    ///
-    /// 停止 outcome は「この tick は失敗扱い」の慣例どおり `iterations - 1` を
-    /// 記録する (`run_recovery_step` 失敗 tick は進行と数えない)。
-    /// `fired` / `per_task_matches` は停止時のみ `std::mem::take` で消費する。
-    ///
-    /// warn! の位置 (HookFailed arm の 1 回のみ・Exhausted は run_recovery_step
-    /// 内部の warn で済ませる) は集約前の各 arm と同一順序を維持する。
     async fn run_recovery_or_stop(
         &mut self,
         cause: &str,
@@ -1644,9 +981,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// マッチ系 arm (Fired / NoFire) の共通尾部: ゴール評価 → 継続/停止判定。
-    /// eval より前の副作用 (集計 bump / debug! 等) は呼出側 [`Self::step_matched`]
-    /// の契約順序 (§A D9) に属する — Fired は debug → eval、NoFire は eval → debug。
     fn eval_then_terminal(
         &mut self,
         state: &mut LoopState,
@@ -1674,14 +1008,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         StepFlow::Continue
     }
 
-    /// マッチ系 arm (Fired / NoFire) 共通の 1 tick 処理。
-    ///
-    /// 副作用順 (§A D3/D9): guard 更新 → 集計 bump/push (Fired のみ push) →
-    /// debug-if-Some (**Fired は eval 前**・eval 停止時も出力済み、NoFire は
-    /// 継続確定後) → ゴール評価 → 停止種別判定。
-    /// [`GoalMode::Inactive`] では eval が即 [`None`] になるため、非ゴール
-    /// ループの旧挙動 (None → 停止 / Some → debug 継続) と完全一致する。
-    /// 差分は [`MatchArm`] 1 値に集約 — 双生児関数を作らない (duplication gate)。
     fn step_matched(
         &mut self,
         state: &mut LoopState,
@@ -1709,13 +1035,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         flow
     }
 
-    /// NoMatch arm。副作用順 = streak 記録 (`recovery_enabled &&` の短絡維持) →
-    /// ゴール評価 → due なら recovery hook (§A D5: 同 tick での goal 到達は
-    /// hook 発火より優先して停止する)。
-    ///
-    /// `miss_cause` は recovery ログ文言。NoMatch と FiredUnverified (実質
-    /// NoMatch 相当の誤成功 — bump/push のみ追加して本メソッドへ委譲) で
-    /// 文言を変えるため呼出側から渡す。
     async fn step_no_match(
         &mut self,
         state: &mut LoopState,
@@ -1735,9 +1054,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         StepFlow::Continue
     }
 
-    /// FiredUnverified arm (実質 NoMatch 相当の誤成功)。集計 bump/push のみを
-    /// 行い、以降 (streak 記録 → ゴール評価 → due なら recovery hook) は
-    /// [`Self::step_no_match`] に委譲 (§A D6 — cause 文言のみ差し替え)。
     async fn step_fired_unverified(
         &mut self,
         state: &mut LoopState,
@@ -1761,20 +1077,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         .await
     }
 
-    /// Error arm (§A D7: ゴール評価は一切しない — 引数に goal_mode を取らない
-    /// ことで構造保証。tick も clock も進めない)。
-    ///
-    /// Issue #210: 起動猶予 (boot-wait) 中の capture エラーはゲーム再起動直後の
-    /// 一過状態 (プロセス/ウィンドウ未存在 → GetClientRect 失敗等) として許容し、
-    /// ループを継続する (grace 中は streak 加算も抑制済み)。猶予外の capture
-    /// エラーも、recovery hook が有効なら「ゲームが死んでいる」(初回起動前・
-    /// クラッシュ直後) 可能性が高いため recovery を呼んで grace へ入る
-    /// (issue210-verify で初回起動前 io_error 即死した事例)。recovery 無効・
-    /// 失敗時と execute エラーは従来どおり即停止 (fail-closed)。
-    /// 分類は message 文字列でなく [`is_recoverable_io_error`] (enum 機械判定)
-    /// で行う — verify_capture (発火後検証の再 capture) も画面取得系として
-    /// 同一契約に含める (F1: リカバリ漏れ解消)。hook 起動は
-    /// [`Self::run_recovery_step`] (予算・猶予込みの共通実行部) に集約。
     async fn step_error(
         &mut self,
         state: &mut LoopState,
@@ -1815,11 +1117,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// Issue #252: watch ハンドル成功 — current を進めず継続。
-    /// テンプレートマッチ成功 (健全サイクル) として streak をリセットし、
-    /// per_task_matches は watch タスク側へ計上する (ポップアップ処理回数の
-    /// テレメトリ)。ゴール評価は行わない (本流の tick ではないため —
-    /// LoopCount は進まず TemplateMatch の last_match も伝播しない)。
     fn step_watch_fired(
         &mut self,
         state: &mut LoopState,
@@ -1833,30 +1130,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         StepFlow::Continue
     }
 
-    /// `run_loop` + NoMatch 連続時リカバリフック付き。
-    ///
-    /// `recover_nomatch_threshold > 0` かつ `recover` が [`Some`] のとき、
-    /// NoMatch が `threshold` 回連続するごとに `recover(RecoveryContext { attempt, streak })`
-    /// を呼ぶ (`attempt` は健全サイクルで 1 に戻る試行番号)。`Ok` なら連続カウンタを
-    /// リセットしてループ継続。`Err` なら [`LoopStopReason::ExecuteError`]
-    /// で停止(re-launch のプロセス起動失敗等)。健全サイクルを挟まずに連続した試行が
-    /// [`Self::with_max_recovery_attempts`] の予算に達したら [`LoopStopReason::RecoveryExhausted`]
-    /// で停止する (circuit breaker・02-recovery-budget)。
-    /// `threshold == 0` または `recover == None` なら
-    /// リカバリ無効(通常の [`Self::run_loop`] と等価)。
-    ///
-    /// # 起動猶予 (boot-wait・Issue #210)
-    ///
-    /// [`Self::with_recovery_grace`] で正の猶予を設定した場合、リカバリフック成功から
-    /// 猶予期間が経過するまで NoMatch / FiredUnverified を streak に加算しない
-    /// (ゲーム再起動 → タイトル到達に分単位かかるため、起動途中の再発火
-    /// = 再起動ストームを構造的に防ぐ)。capture は継続し、猶予中にテンプレートが
-    /// マッチすれば即座に通常動作へ復帰する(マッチ = 起動完了のシグナル)。
-    /// 猶予明け後は streak が 0 から再開し、閾値再到達で次のリカバリが発火する。
-    /// 既定 (`Duration::ZERO`) は猶予なし = 従来挙動(後方互換)。
-    ///
-    /// 本メソッドは非ゴールモード([`Self::run_loop_with_goal`] へ `goal=None` を渡すのと等価)。
-    /// 宣言的ゴールで停止するには [`Self::run_loop_with_goal`] を使うこと。
     pub async fn run_loop_with_recovery(
         &mut self,
         interval: Duration,
@@ -1864,9 +1137,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         recover_nomatch_threshold: u32,
         mut recover: Option<RecoveryHook>,
     ) -> LoopOutcome {
-        // 非ゴールモード(後方互換)。run_loop_with_goal(goal=None) からも本メソッドへ委譲される
-        // ため、両者を相互再帰させず本メソッド内で完結させる(async fn の再帰は boxing が必要で
-        // コストが高い+実装上の理由がない)。ゴール評価付きは run_loop_with_goal を直接呼ぶこと。
         self.run_loop_core(
             interval,
             max_iterations,
@@ -1877,13 +1147,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         .await
     }
 
-    /// 統合ループコア (§A C4)。[`Self::run_loop_with_recovery`] (Inactive) と
-    /// [`Self::run_loop_with_goal`] (Active) の共通実装。
-    ///
-    /// 両モードの差分は [`GoalMode`] に集約され、本体はモード非依意 —
-    /// [`Self::eval_goal_stop`] と match_info の take が Inactive で no-op に
-    /// なるため、cancel/MaxIterations 判定 → step 実行 → 5 arm dispatch →
-    /// interval sleep の構造は両公開メソッドで完全に同一。
     async fn run_loop_core(
         &mut self,
         interval: Duration,
@@ -1898,10 +1161,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             self.max_recovery_attempts,
             recover.is_some(),
         );
-        // Issue #260: verify 実績計数は run毎にリセット (前回 run の累積を引き継がない)。
         self.verify_stats = VerifyStats::default();
         loop {
-            // 外部キャンセル(Ctrl+C 等)。トークン未設定時は None で無効(後方互換)。
             if self.is_cancelled() {
                 return self.build_outcome(
                     state.iterations,
@@ -1927,13 +1188,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             } else {
                 self.run_once().await
             };
-            // UC-2 (TemplateMatch): Fired/NoFire ブランチでは run_once が格納した
-            // self.last_match (task_name, confidence, region) を take() で取り出し
-            // GoalStatusContext::last_match へ伝播させる。NoMatch/FiredUnverified/Error は
-            // テンプレートマッチしていない(または誤成功)なので None を渡す。
-            // (NoFire は ClickSelf w/o region 等の「マッチしたが発火コマンド無」で、tick は
-            //  マッチしているので last_match を伝播する。)
-            // §A D2: take はゴール活性時のみ (Inactive は触らない = 非ゴールループとの完全一致)。
             let match_info = match (&*goal_mode, &step) {
                 (GoalMode::Active(_), StepOutcome::Fired { .. } | StepOutcome::NoFire { .. }) => {
                     self.last_match.take()
@@ -1991,7 +1245,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     .await
                 }
                 StepOutcome::Error { kind, message } => {
-                    // §A D7: Error arm はゴール評価なし (tick も clock も進めない)。
                     self.step_error(&mut state, recover, kind, message).await
                 }
                 StepOutcome::WatchFired { task, fired } => {
@@ -2002,9 +1255,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 StepFlow::Continue => {}
                 StepFlow::Stop(outcome) => return *outcome,
             }
-            // interval 待ちを cancel 通知で即時抜けられるように select! 化。
-            // トークン未設定時は cancel 分岐が発火しないので従来の sleep のみ(後方互換)。
-            // Issue #253: ジッタ有効時は毎サイクル interval に ±ratio のゆらぎを加える。
             let wait = match self.jitter.as_mut() {
                 Some(j) => j.jitter_interval(interval),
                 None => interval,
@@ -2013,26 +1263,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// `run_loop_with_recovery` + 宣言的ゴール評価(Issue #37 T4)。
-    ///
-    /// `goal=Some` のとき各 tick後に [`anaden_core::goal::evaluate`] を呼び、
-    /// [`anaden_core::goal::GoalStatus::Reached`] → [`LoopStopReason::GoalReached`]
-    /// [`anaden_core::goal::GoalStatus::Failed`] → [`LoopStopReason::GoalTimeout`] で停止する。
-    /// `goal=None` のときは [`Self::run_loop_with_recovery`] と完全等価(後方互換)。
-    ///
-    /// 経過秒数は [`GoalClock`] から供給する。本番は [`SystemClock`]、テストは
-    /// `FakeClock`(決定論的ステップ)を渡す。`tokio::time::pause` を導入しないことで
-    /// ドライバのテスト専用 runtime feature への結合を避ける(org-feedback approval)。
-    ///
-    /// `evaluate` 呼出毎に `GoalStatusContext::tick` を +1 する(tick 数 = evaluate 回数)。
-    /// `last_match` には `StepOutcome` から取り出した `(task_name, confidence, region)` を
-    /// 渡す: Fired/NoFire ブランチでは `self.last_match.take()` で伝播し、
-    /// NoMatch/FiredUnverified/Error は `None` を渡す(UC-2: テンプレートマッチしていない、
-    /// または誤成功のため)。NoFire は ClickSelf w/o region 等「マッチしたが発火コマンド無」の
-    /// ケースで tick 上はマッチ扱いなので伝播する。
-    ///
-    /// `GoalClock` は具象型(非ジェネリクス)にすると `run_loop` 互換の既存シグネチャへ
-    /// 影響しないが、テストで差し替えられるようトレイトオブジェクトで受ける。
     pub async fn run_loop_with_goal(
         &mut self,
         interval: Duration,
@@ -2043,7 +1273,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         mut clock: impl GoalClock,
     ) -> LoopOutcome {
         let Some(goal_ref) = goal else {
-            // ゴール無し: 既存 run_loop_with_recovery へ完全委譲。clock は消費されない。
             return self
                 .run_loop_with_recovery(
                     interval,
@@ -2053,8 +1282,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 )
                 .await;
         };
-        // ゴール活性パス。非ゴールループと同一の run_loop_core を使い、
-        // GoalMode::Active の差分 (tick+eval / match_info take) だけ挿動が変わる。
         let mut goal_mode = GoalMode::Active(GoalLoopCtx {
             goal: goal_ref,
             clock: &mut clock,
@@ -2070,10 +1297,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         .await
     }
 
-    /// ゴールを評価し、終端状態なら停止理由と terminal 文字列を返す。
-    /// まだ継続なら [`None`]。呼出側が [`Self::build_outcome`] で累積状態
-    /// (`fired_commands`/`per_task_matches`)を保持したまま停止 outcome を構築できるよう、
-    /// 本メソッドは理由と terminal のみを返す(LoopOutcome 構築は呼出側に委ねる)。
     fn evaluate_goal_reason(
         &self,
         goal: &anaden_core::Goal,
@@ -2091,13 +1314,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    /// 統合ループコアの 1 tick ゴール評価 (§A D2/D7/D8 担当)。
-    ///
-    /// [`GoalMode::Inactive`] は即 [`None`] — tick も [`GoalClock`] も進めない。
-    /// これにより非ゴールループとの完全一致 (副作用順も含む) を型で保証する
-    /// (Error arm から呼ばれない = D7 は呼出側の構造で担保)。
-    /// [`GoalMode::Active`] は tick (+1) → clock 経過取得 → [`Self::evaluate_goal`]
-    /// の順 (D8: clock は tick 直後に 1 回だけ)。
     fn eval_goal_stop(
         &self,
         mode: &mut GoalMode<'_>,
@@ -2112,17 +1328,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         self.evaluate_goal(ctx.goal, &ctx.goal_ctx, elapsed, inputs)
     }
 
-    /// ゴールを評価し、終端状態なら呼出側がそのまま `return` できる完成 [`LoopOutcome`] を返す。
-    /// まだ継続なら [`None`]。
-    ///
-    /// [`Self::evaluate_goal_reason`] で理由と terminal を判定した上で、[`Self::build_outcome`]
-    /// で基本 outcome を構築し、ゴール到達時は `progress_report.reached_goal` へ
-    /// **ゴール記述子文字列** を上書きで埋める(Issue #37 T3: 成果レポート用)。
-    ///
-    /// 記述子はモジュール直下の free function [`goal_descriptor`](@goal_descriptor) が
-    /// [`anaden_core::StopCondition`] のバリアントから導出する
-    /// (`loop_count=<n>` / `template_match conf>=<f> (task=<t>)` / `timeout=<secs>`)。
-    /// `GoalTimeout` のとき到達ゴールは無いので `reached_goal` は [`None`] のままとする。
     fn evaluate_goal(
         &self,
         goal: &anaden_core::Goal,
@@ -2142,8 +1347,6 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 recovery: inputs.recovery,
             },
         );
-        // ゴール到達/タイムアウト時、評価対象ゴールの記述子を埋める
-        // (CI/studio が「どのゴールで停止したか」を人間可読に追跡するため)。
         outcome.progress_report.reached_goal = Some(goal_descriptor(goal));
         Some(outcome)
     }
@@ -2167,16 +1370,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             per_task_matches: ctx.per_task_matches,
             elapsed_ms: ctx.started.elapsed().as_millis() as u64,
             terminal_task: terminal_task.clone(),
-            // 非ゴールモード。ゴール到達は T4/T5 で run_loop_with_recovery 側が上書きする。
             reached_goal: None,
-            // 停止理由 (03-report-channel)。report 単体の消費者向け。
             stop_reason: Some(reason.clone()),
-            // 復帰テレメトリ (02-recovery-budget)。両ループが RecoveryGuard から伝播。
             recovery_attempts: ctx.recovery.recovery_attempts,
             max_consecutive_recovery: ctx.recovery.max_consecutive_recovery,
-            // ジッタのシード (Issue #253)。無効 run では None (フィールド自体を出力しない)。
             jitter_seed: self.jitter.as_ref().map(Jitter::seed),
-            // 発火後検証の実績 (Issue #260: report.json verify スキーマ)。
             verify: VerifyReport {
                 enabled: self.verify_after_fire,
                 checks: self.verify_stats.checks,

@@ -1,12 +1,3 @@
-//! 宣言的TOMLパイプライン。1つのTOMLファイル = 1つの認識タスク。
-//!
-//! TASK-008 の最初の縦スライス。テンプレート画像・ROI・閾値・アルゴリズム・状態キーを
-//! TOMLで宣言し、コード変更なしで認識タスクを定義・実行できる。
-//! Wiki [[Declarative-Tasks-Design]] の具装化。action/next/base は前方互換の Option で保持する。
-//!
-//! 本スライスの範囲: TOML1ファイル = 平坦な [`TaskDef`]。1ファイル複数タスク（サブテーブル）や
-//! action 実行・next 状態機械・base 継承解決は将来スライス。
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};
@@ -24,71 +15,26 @@ use crate::engine::{SseVisionEngine, VisionEngine};
 use crate::matcher::{MatchResult, TemplateMatcher};
 use crate::template_quality::{needle_exceeds_roi_warning_for_path, unstructured_warning_for_path};
 
-/// 認識アルゴリズム。TOML の `algorithm` 文字列（`sse`/`ccoeff`）から解決する。
-///
-/// Wiki 設計の `AlgorithmType`（match_template/ocr/feature/just_return）のうち、
-/// 本スライスは既存2エンジンで実現可能な `sse`/`ccoeff` のみ。未知値はロード時エラー。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum Algorithm {
-    /// imageproc 正規化SSE（[`crate::engine::SseVisionEngine`]）。
     Sse,
-    /// OpenCV 互換 TM_CCOEFF_NORMED（[`crate::ccoeff::CcoeffVisionEngine`]）。
     Ccoeff,
 }
 
-/// MAA `ProcessTaskAction`（AsstTypes.h:492-518）準拠の認識成功時アクション。
-///
-/// 本スライスでは「指示を値として表現」するまで。実際の tap/swipe 発火は範囲外
-/// （[`crate`] 外のデバイス実行層で [`anaden_core`] の入力型へ変換して発火させる）。
-///
-/// TOML ではテーブル `[action]`（`type` キー必須）で記述する。MAA の `get_action_type` と同様、
-/// 未知の `type` 文字列はロード時（[`load_pipeline`] の `toml::from_str`）エラーになる。
-///
-/// ```toml
-/// [action]
-/// type = "click_self"
-/// ```
-///
-/// 引数なしバリアント（`click_self`/`do_nothing`/`stop`）は `type` だけのテーブル。
-/// 引数付きバリアントは `roi`/`from`/`to`（[`ScreenRegion`] = `[x,y,width,height]` 整数配列）を持つ。
-///
-/// # `deny_unknown_fields` の実装上の注意
-/// serde の内部タグ付き enum（`#[serde(tag = "type")]`）では `deny_unknown_fields` が
-/// **未知フィールドを黙許する** 既知の制限がある（serde は `Content` バッファに取り込むため
-/// フィールド名を検証できない）。そのため `Action` の [`Deserialize`] は手動実装とし、
-/// `type` を取り出した残りテーブルを各バリアント構造体（`deny_unknown_fields` 付き）で
-/// 厳密に検証する。これにより未知 `type`・必須フィールド欠落・未知フィールド過剰の
-/// いずれもロード時 [`TaskDefError::ParseFailed`] となる。
-///
-/// 注: anaden-core の `InputAction` はデバイス実行用の別型（Tap/Swipe/LongPress 等）で、
-/// MAA 宣言的 Action とは責務が違うため本 enum は pipeline 内に新設する。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Action {
-    /// マッチしたテンプレート位置（[`MatchResult::region`]）をクリック。
     ClickSelf,
-    /// 静的に指定した矩形をクリック（MAA `specificRect` 相当）。
     ClickRect {
-        /// クリック対象矩形。720p（幅1280）基準 `[x, y, width, height]`。
         roi: ScreenRegion,
     },
-    /// 指定2点間をスワイプ（`special_params[0]`=duration は将来スライス）。
     Swipe {
-        /// スワイプ開始点。720p 基準 `[x, y, width, height]`。
         from: ScreenRegion,
-        /// スワイプ終点。720p 基準 `[x, y, width, height]`。
         to: ScreenRegion,
     },
-    /// 何もしない（MAA では action 省略/空文字列と同等）。
     DoNothing,
-    /// 現在のタスクフローを停止（将来: `NodeStatus::Interrupted` に伝播）。
     Stop,
 }
-
-// ---- Action の Deserialize 手動実装（deny_unknown_fields を確実に効かせる）----
-//
-// `type` キーでバリアントを分岐し、残りのキーを各バリアント構造体で検証する。
-// 各構造体に `deny_unknown_fields` を付け、未知フィールドを拒否する。
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -103,7 +49,6 @@ struct SwipeDef {
     to: ScreenRegion,
 }
 
-/// 引数なしバリアント用。`deny_unknown_fields` で `type` 以外の過剰キーを拒否する。
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct BareActionDef {}
@@ -115,7 +60,6 @@ impl<'de> Deserialize<'de> for Action {
     {
         use serde::de::Error;
 
-        // 一旦 toml::Value 相当の汎用 map として受ける（`type` を先読みするため）。
         let raw = toml::Value::deserialize(deserializer)?;
         let table = raw
             .as_table()
@@ -126,8 +70,6 @@ impl<'de> Deserialize<'de> for Action {
             .and_then(|v| v.as_str())
             .ok_or_else(|| D::Error::custom("action requires a string `type` field"))?;
 
-        // `type` 以外のキーだけを持つ部分テーブルを構築し、各バリアント構造体で検証。
-        // （`type` を取り除かないと deny_unknown_fields が `type` を未知フィールドとして弾く）
         let mut rest = toml::value::Table::new();
         for (k, v) in table {
             if k != "type" {
@@ -175,14 +117,6 @@ impl<'de> Deserialize<'de> for Action {
     }
 }
 
-/// 保存形式を手書き TOML と機械一致させるための [`Serialize`] 手動実装。
-///
-/// derive は `roi`/`from`/`to` を ScreenRegion 構造体テーブル（`[action.roi]` の
-/// `x`/`y`/`width`/`height`）として書き出すが、手書き TaskDef は serde の
-/// seq 形式受容（`visit_seq`）を利用した `[x, y, width, height]` 配列
-/// （`action = { type = "click_rect", roi = [900, 466, 30, 30] }`）で書かれている。
-/// 本実装は配列形式で書き出し、[`save_task_def`] の出力が既存手書き TaskDef と
-/// `toml::Value` として完全一致することを保証する（AC-1/AC-4 の土台）。
 impl Serialize for Action {
     fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
     where
@@ -190,7 +124,6 @@ impl Serialize for Action {
     {
         use serde::ser::SerializeMap;
 
-        /// ScreenRegion を `[x, y, width, height]` 配列として直列化するヘルパ。
         struct RoiArray(ScreenRegion);
 
         impl Serialize for RoiArray {
@@ -226,40 +159,22 @@ impl Serialize for Action {
     }
 }
 
-/// 1つの宣言的認識タスク。
-///
-/// 1ファイル1タスク構成（[`load_pipeline`] はディレクトリ内 `*.toml` を各1タスクとして集約）。
-/// 将来の action/next/base 継承拡張に備え、これらは `Option` で前方互換を持たせる。
-/// 本スライスの [`TaskDef::detect`] は action/next/base を **使わない**（パースして保持するだけ）。
-// PartialEq は UC-4 (Issue #160 Shard 5) のロスレス往復検証 (load -> save -> load
-// の意味比較) 用の trait 追加のみ。serde schema・直列化形式は不変。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskDef {
-    /// タスク名（= 識別子）。
     pub name: String,
-    /// 紐付ける状態キー（文字列）。GameState enum 直結は本スライス外。後段マッパが解決する。
     pub state: String,
-    /// 認識アルゴリズム。
     pub algorithm: Algorithm,
-    /// テンプレート画像パス。相対パスは TOML ファイルの親ディレクトリ基準
-    /// （[`load_pipeline`] で絶対パスに解決される）。
     pub template: PathBuf,
-    /// 720p（幅1280）基準ROI `[x, y, w, h]`。`None` なら全面。
     #[serde(default)]
     pub roi: Option<[u32; 4]>,
-    /// マッチ判定閾値 0.0..=1.0。省略時は [`MatchConfidence::DEFAULT_THRESHOLD`]（0.95）。
     #[serde(default = "default_threshold")]
     pub threshold: f32,
 
-    /// MAA baseTask 相当の継承。将来の resolve で使用。本スライスでは無視。
     #[serde(default)]
     pub base: Option<String>,
-    /// 認識成功時アクション（[`Action`]）。省略時は [`Action::DoNothing`] 扱い
-    /// （[`run_step`] で補充）。未知 `type` や必須フィールド欠落はロード時エラー。
     #[serde(default)]
     pub action: Option<Action>,
-    /// next 遷移リスト。将来の状態機械で使用。本スライスでは無視。
     #[serde(default)]
     pub next: Option<Vec<String>>,
 }
@@ -269,43 +184,14 @@ fn default_threshold() -> f32 {
 }
 
 impl TaskDef {
-    /// テンプレート画像を読み込み、algorithm + roi + threshold で認識を実行する。
-    ///
-    /// 戻り値の [`MatchResult::region`] は **入力 screenshot と同じ座標空間**の座標
-    /// （[`VisionEngine`] 仕様）。roi 指定時は cropping 後の局所座標 → 画面座標へオフセット戻しする。
-    ///
-    /// # テンプレートキャッシュ（05-template-cache / F13/F17/F19）
-    /// disk 読込+デコード、needle の Lanczos3 リサイズ、ccoeff 前処理 (`T'` 計算) は
-    /// [`prepared_template`] の (パス, norm_w, norm_h) キー + mtime 検証キャッシュで
-    /// **初回のみ**実行される。verify_after_fire の再 detect や diagnose も同一キャッシュ
-    /// を通るため、テンプレ読込・リサイズ・前処理が毎サイクル 2 倍化することはない。
-    ///
-    /// # 動的スケール（raw-1258 空間 → 正規化後画面）
-    /// PC版テンプレート/ROI は raw-1258x708 空間で定義されるが、呼出側が screenshot を
-    /// どの寸法に正規化して渡してもよい（黒帯クロップ + normalize 後は 1280x720 等）。
-    /// 本メソッドは入力 screenshot の `width()/height()` から X/Y 別比を再計算し、
-    /// [`crate::scale::roi_to_normalized`] / `crate::scale::needle_to_normalized` で
-    /// ROI・needle をその空間へ揃える。よって **detect シグネチャは不変**で、呼出側は
-    /// 正規化済み screenshot を渡すだけでよい（クロップ/resize は内部で吸収）。
-    ///
-    /// `template_root` は、`template` が相対パスの場合の解決基準（通常は TOML の親ディレクトリ）。
-    /// [`load_pipeline`] で既に絶対化済みならこの引数は使われない。
     pub fn detect(
         &self,
         screenshot: &DynamicImage,
         template_root: &Path,
     ) -> Result<Option<MatchResult>, TaskDefError> {
-        // 1+2. ROI/needle を正規化後キャプチャ寸法へ動的スケール。
-        //
-        // PC版テンプレート/ROI は raw-1258x708 空間で定義されるが、実行時キャプチャは
-        // 黒帯クロップ + normalize で 1280x720 等へ変動する。detect シグネチャは不変のまま、
-        // 入力 screenshot の width()/height()（=normalize 後寸法）から X/Y 別比を再計算して
-        // ROI・needle をその空間へ揃える（scale.rs のファクタ API）。
         let norm_w = screenshot.width();
         let norm_h = screenshot.height();
 
-        // テンプレート解決 (キャッシュ): disk 読込 + Lanczos3 リサイズ + ccoeff 前処理は
-        // (パス, norm_w, norm_h) + mtime 検証で初回のみ。読込失敗は TemplateLoadFailed。
         let tpl_path = if self.template.is_absolute() {
             self.template.clone()
         } else {
@@ -313,8 +199,6 @@ impl TaskDef {
         };
         let prepared = prepared_template(&tpl_path, norm_w, norm_h)?;
 
-        // ROI cropping（raw-1258 空間 ROI → 正規化後画面の画素座標へスケールして crop）
-        // scaled_roi はオフセット戻しにも再利用（局所座標 → 正規化後画面座標）。
         let scaled_roi = self.roi_to_region().map(|r| {
             let s = crate::scale::roi_to_normalized([r.x, r.y, r.width, r.height], norm_w, norm_h);
             ScreenRegion::new(s[0], s[1], s[2], s[3])
@@ -324,29 +208,16 @@ impl TaskDef {
             None => screenshot.clone(),
         };
 
-        // 3. algorithm 切替（既存エンジン再利用）
         let thr = MatchConfidence::new(self.threshold);
         let result = match self.algorithm {
-            // SseVisionEngine::with_defaults() は閾値0.85固定のため、TaskDef.threshold を
-            // 反映するには threshold_only で構築する。needle はキャッシュの正規化済みもの。
             Algorithm::Sse => {
                 let m = TemplateMatcher::threshold_only(thr);
                 SseVisionEngine::new(m).match_template(&work, &prepared.needle)
             }
-            // CCOEFF も downscale_factor=1（threshold_only 相当）で構築する。
-            // 設計案では downscale=2 を想定していたが、Triangle 1/2縮小は周期パターンで
-            // サブピクセル位相依存の相関低下を生じ、needle 埋込位置が奇数座標だと閾値未満に
-            // なる（位置非依存の「埋め込めば必ず一致」性質が壊れる）。宣言的タスクでは
-            // ユーザが「テンプレを埋めれば確実にマッチする」ことを期待するため、正確性を
-            // 優先して downscale=1 とする。全面走査の性能は将来スライスで ROI/解像度前提を
-            // 併用して最適化する。キャッシュの前処理済みテンプレート
-            // (match_template_prepared) を使い `T'` 計算を省略する (F13)。
             Algorithm::Ccoeff => CcoeffVisionEngine::threshold_only(thr)
                 .match_template_prepared(&work, &prepared.ccoeff),
         };
 
-        // 4. ROI オフセット戻し（cropping した場合、局所→正規化後画面座標へ）。
-        //    scaled_roi（正規化後空間の ROI）の (x,y) で戻す。
         Ok(result.map(|mut mr| {
             if let Some(r) = scaled_roi {
                 mr.region = ScreenRegion::new(
@@ -360,7 +231,6 @@ impl TaskDef {
         }))
     }
 
-    /// roi 配列 → [`ScreenRegion`]。`w`/`h` が 0 なら `None`（=全面扱い）。
     fn roi_to_region(&self) -> Option<ScreenRegion> {
         let [x, y, w, h] = self.roi?;
         if w == 0 || h == 0 {
@@ -370,53 +240,28 @@ impl TaskDef {
     }
 }
 
-/// パイプライン読込・テンプレート読込のエラー。
 #[derive(Debug, Error)]
 pub enum TaskDefError {
-    /// テンプレート画像の読込失敗。
     #[error("template load failed {path}: {reason}")]
     TemplateLoadFailed { path: PathBuf, reason: String },
 
-    /// TOML 解析失敗（構文エラー・未知キー・未知 algorithm・型不一致を含む）。
     #[error("TOML parse failed {path}: {reason}")]
     ParseFailed { path: PathBuf, reason: String },
 
-    /// 保存（シリアライズ・書き出し）失敗。UC-1 シナリオ作成 GUI の save 経路
-    /// （[`save_task_def`] / [`save_pipeline_manifest`]）。
     #[error("save failed: {reason}")]
     SaveFailed { reason: String },
 }
 
-// ---- 05-template-cache: PreparedTemplate キャッシュ (F13/F17/F19) ----
-//
-// F13/F17/F19: TaskDef::detect は毎サイクル「テンプレート PNG の disk 読込+デコード →
-// needle の Lanczos3 リサイズ → ccoeff 前処理 (T' 計算)」を繰り返していた。さらに
-// verify_after_fire は同タスクの detect をもう 1 度呼ぶため、これらが毎サイクル 2 倍化する。
-//
-// TemplateCache は (絶対パス, norm_w, norm_h) をキーに前処理済みテンプレートを保持し、
-// ファイル mtime の検証でテンプレ差し替えを反映する。プロセス全体で共有する静的インスタンス
-// (TEMPLATE_CACHE) を使い、detect / run_step (verify 再検出) / diagnose の全経路が同一
-// キャッシュを使う (TaskDef は不変のまま detect シグネチャも不変)。
-
-/// 前処理済みテンプレート 1 エントリ分のデータ。
-///
-/// キャッシュミス時のみ「disk 読込+デコード → [`crate::scale::needle_to_normalized`]
-/// (Lanczos3 リサイズ) → ccoeff 前処理」を実行した結果。SSE 経路は `needle` を、
-/// ccoeff 経路は `ccoeff` を使う (前処理の 1 回化 — F13/F17)。
 pub(crate) struct PreparedTemplate {
-    /// 正規化後 (norm_w x norm_h 空間へリサイズ済み) needle。SSE 経路で使用。
     pub(crate) needle: DynamicImage,
-    /// ccoeff 前処理済み表現 (luma + T' + denomT)。
     pub(crate) ccoeff: PreparedCcoeff,
 }
 
-/// キャッシュエントリ。`mtime` はテンプレートファイルの読込時点の更新時刻。
 struct CachedTemplate {
     mtime: Option<SystemTime>,
     prepared: Arc<PreparedTemplate>,
 }
 
-/// (絶対パス, norm_w, norm_h) キーの前処理済みテンプレートキャッシュ。
 struct TemplateCache {
     entries: Mutex<HashMap<(PathBuf, u32, u32), CachedTemplate>>,
 }
@@ -430,12 +275,6 @@ impl Default for TemplateCache {
 }
 
 impl TemplateCache {
-    /// `path` のテンプレートを `norm_w x norm_h` 空間へ前処理した結果を返す。
-    ///
-    /// キャッシュヒット時は mtime 検証のみ (disk 読込・リサイズ・前処理なし)。
-    /// ミス時のみ disk 読込 + リサイズ + ccoeff 前処理を実行してエントリを載せる。
-    /// 読込失敗は [`TaskDefError::TemplateLoadFailed`] を返し、**エラーはキャッシュしない**
-    /// (次回の呼び出しで再試行する — ファイルが後から配置されるケースを妨げない)。
     fn get_or_prepare(
         &self,
         path: &Path,
@@ -443,8 +282,6 @@ impl TemplateCache {
         norm_h: u32,
     ) -> Result<Arc<PreparedTemplate>, TaskDefError> {
         let key = (path.to_path_buf(), norm_w, norm_h);
-        // ロック取得。poisoned は他スレッドの panic 中にロックが放たれたもので、
-        // マップ内容自体は壊れていないため回復して使う (panic 連鎖を防ぐ)。
         let mut entries = match self.entries.lock() {
             Ok(guard) => guard,
             Err(poisoned) => poisoned.into_inner(),
@@ -453,11 +290,9 @@ impl TemplateCache {
             if mtime_unchanged(path, hit.mtime) {
                 return Ok(hit.prepared.clone());
             }
-            // テンプレートが差し替えられた → 当該エントリを無効化して再読込。
             debug!("template cache invalidated (mtime changed): {path:?}");
             entries.remove(&key);
         }
-        // キャッシュミス: disk 読込 + Lanczos3 リサイズ + ccoeff 前処理 (1 回だけ実行)。
         let needle = image::open(path).map_err(|e| TaskDefError::TemplateLoadFailed {
             path: path.to_path_buf(),
             reason: e.to_string(),
@@ -480,18 +315,10 @@ impl TemplateCache {
     }
 }
 
-/// テンプレートファイルの mtime (取得不能な FS では [`None`])。
 fn file_mtime(path: &Path) -> Option<SystemTime> {
     std::fs::metadata(path).and_then(|m| m.modified()).ok()
 }
 
-/// `path` の現在の mtime がキャッシュ時点のものと一致するか。
-///
-/// メタデータ取得に失敗する (ファイル削除済み等) 場合は**キャッシュを信頼する** —
-/// 読込時点ではファイルが実在したことをキャッシュが保証しており、削除後に disk を見に
-/// 行くと必ず読込失敗になるため (削除後もキャッシュヒットし続ける挙動は
-/// `detect_template_loaded_once_for_repeated_detects` が固定する)。キャッシュ側に mtime
-/// がない (取得不能な FS で読み込んだ) 場合も比較不能のためキャッシュを信頼する。
 fn mtime_unchanged(path: &Path, cached: Option<SystemTime>) -> bool {
     match (file_mtime(path), cached) {
         (Some(current), Some(cached)) => current == cached,
@@ -500,15 +327,8 @@ fn mtime_unchanged(path: &Path, cached: Option<SystemTime>) -> bool {
     }
 }
 
-/// プロセス全体で共有するテンプレートキャッシュ。
-/// detect / verify 再検出 (run_step) / diagnose の全経路が同一キャッシュを使う。
 static TEMPLATE_CACHE: LazyLock<TemplateCache> = LazyLock::new(TemplateCache::default);
 
-/// テンプレートを `(path, norm_w, norm_h)` キーで前処理済みの形に解決する (単一入り口)。
-///
-/// [`TaskDef::detect`] と [`crate::diagnose::diagnose_task`] が使う。エントリの key に
-/// norm 寸法を含むため、異なるキャプチャ寸法 (1280x720 / 1258x708 等) が混在しても
-/// 相互に汚染しない。
 pub(crate) fn prepared_template(
     path: &Path,
     norm_w: u32,
@@ -517,14 +337,6 @@ pub(crate) fn prepared_template(
     TEMPLATE_CACHE.get_or_prepare(path, norm_w, norm_h)
 }
 
-/// ディレクトリ内の `*.toml` を走査し、各1ファイルを1 [`TaskDef`] として読み込む。
-///
-/// [`crate::template_store::TemplateStore::load_from_directory`] と同構造
-/// （`read_dir` → 拡張子フィルタ → パース → 集約）。順序は保持する（`Vec<TaskDef>`）。
-///
-/// 相対 `template` パスは各 TOML ファイルの親ディレクトリ基準で絶対化する。
-/// 画像は遅延読込（パスだけ保持し、[`TaskDef::detect`] 呼出時に `image::open`）。
-/// 存在しないディレクトリ・空ディレクトリは空 `Vec` を返す。
 pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
     let mut defs = Vec::new();
     if !dir.exists() {
@@ -542,7 +354,6 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
         })?;
         let path = entry.path();
 
-        // *.toml のみ（template_store::is_image_file の TOML版）
         let is_toml = path
             .extension()
             .and_then(|e| e.to_str())
@@ -552,9 +363,6 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
             continue;
         }
 
-        // pipeline.toml はパイプライン manifest（Goal/start_task 宣言）であり TaskDef
-        // ではない。誤パース回避のため manifest 慣例パスを明示的にスキップする
-        // （regression: `load_pipeline_skips_pipeline_manifest_file`）。
         if is_pipeline_manifest_path(&path) {
             debug!("Skipping pipeline manifest (not a TaskDef): {:?}", path);
             continue;
@@ -569,24 +377,15 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
             reason: e.to_string(),
         })?;
 
-        // template 相対パスを TOMLファイルの親ディレクトリ基準で絶対化
         if !def.template.is_absolute() && path.parent().is_some() {
             let parent = path.parent().expect("parent exists");
             def.template = parent.join(&def.template);
         }
 
-        // Issue #184: 無構造テンプレート (stddev < TEMPLATE_MIN_LUMA_STDDEV) の
-        // fail-visible 通知。load 自体は成功させる — 既存 pipeline 資産の後方互換
-        // (問題のある資産を弾くのではなく、恒久 NoMatch 想定を operator へ可視化する。
-        // 保存時点での同じ検証は GUI 側 (anaden-studio) が同じ anaden-vision 実装で行う)。
         if let Some(warning) = unstructured_warning_for_path(&def.template) {
             warn!("task '{}': {warning}", def.name);
         }
 
-        // Issue #187: needle (テンプレート PNG) が ROI に収まらない (幅 or 高さ超過) の
-        // fail-visible 通知。stddev warn と同じ位置づけ — load は成功させ恒久 NoMatch
-        // 想定を可視化するのみ (Issue #182: 再生成 needle 138px vs roi 幅 121px で
-        // 発火しなかった実例。検出条件自体は template_quality の単一実装)。
         if let Some(warning) = needle_exceeds_roi_warning_for_path(&def.template, def.roi) {
             warn!("task '{}': {warning}", def.name);
         }
@@ -598,15 +397,8 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
     Ok(defs)
 }
 
-/// パイプライン manifest の慣例ファイル名。各パイプラインディレクトリのルートに
-/// 置かれたこのファイルは TaskDef ではなく [`PipelineManifest`]（Goal/start_task）
-/// を宣言する。`load_pipeline` はこのファイルをスキップし、
-/// [`load_pipeline_manifest`] が読み込む。
 pub const PIPELINE_MANIFEST_FILENAME: &str = "pipeline.toml";
 
-/// `path` がパイプライン manifest の慣例パス（ファイル名 == `pipeline.toml`、
-/// case-sensitive）かを判定する。TaskDef 誤パース回避のために [`load_pipeline`]
-/// が呼ぶ。
 fn is_pipeline_manifest_path(path: &Path) -> bool {
     path.file_name()
         .and_then(|n| n.to_str())
@@ -614,90 +406,16 @@ fn is_pipeline_manifest_path(path: &Path) -> bool {
         .unwrap_or(false)
 }
 
-/// パイプライン manifest。各パイプラインディレクトリのルートに置かれた
-/// `pipeline.toml`（[`PIPELINE_MANIFEST_FILENAME`]）が宣言する、開始タスクと
-/// ゴール（終端条件）の集合。
-///
-/// TaskDef（認識タスク）とは分離された宣言層で、[`load_pipeline`] はこのファイルを
-/// TaskDef として誤パースしない（[`load_pipeline`] がスキップし、
-/// [`load_pipeline_manifest`] が読み込む）。
-///
-/// # TOML schema
-///
-/// ```toml
-/// start_task = "<task-name>"          # 必須: 最初に実行する TaskDef 名
-///
-/// [[goal]]                            # 省略可（無宣言 = 無限ループ・後方互換）
-/// name = "<goal-name>"
-/// [goal.stop]
-/// LoopCount = { target = 50 }        # UC-1: N 回反復で停止
-/// # または
-/// # [goal.stop.TemplateMatch]        # UC-2: テンプレートマッチで停止
-/// # task = "clear_button"
-/// # confidence = 0.85
-/// # または
-/// # Timeout = { secs = 3600 }        # UC-3: 指定秒数経過で停止
-///
-/// watch = ["levelup_popup", "close_btn"]  # 省略可: 常時監視 (interrupt) タスク名 (Issue #252)
-/// ```
-///
-/// `start_task` は必須。`goals` は `[[goal]]` 配列（0個以上）。`watch` はタスク名の
-/// 文字列配列（0個以上・driver が毎 tick current タスクより先に評価する）。
-/// 未知フィールドは `deny_unknown_fields` で拒否される（typo 回帰防止）。
-///
-/// # Goal バリアントの意味
-///
-/// 各 `stop` は [`anaden_core::StopCondition`] のいずれか1つ。詳細な評価セマンティクス
-/// （`LoopCount` は tick 数 = evaluate 呼出回数、`TemplateMatch` は信頼度閾値、
-/// `Timeout` は `elapsed_secs >= secs`）は `anaden_core::goal` モジュール doc 参照。
-/// 本 manifest 層は宣言をパースするだけで評価はしない（評価は driver 層の責務）。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct PipelineManifest {
-    /// 最初に実行する TaskDef 名（パイプラインディレクトリ内の `*.toml` の `name`）。
     pub start_task: String,
-    /// ゴール（終端条件）のリスト。`[[goal]]` 配列。空の場合、driver は従来通り
-    /// 無限ループとして振る舞う（後方互換）。
-    ///
-    /// フィールド名は Rust 慣習で `goals` だが、TOML では `[[goal]]` 配列表記で
-    /// 宣言するため `#[serde(rename = "goal")]` で同期する。保存時、空なら
-    /// `goal` 行自体を出力しない（無宣言 = 無限ループの手書き後方互換形式）。
     #[serde(default, rename = "goal", skip_serializing_if = "Vec::is_empty")]
     pub goals: Vec<anaden_core::Goal>,
-    /// 常時監視 (interrupt) タスク名のリスト (Issue #252)。TOML では
-    /// `watch = ["task-a", "task-b"]` 文字列配列で宣言する。
-    ///
-    /// driver ([`anaden_engine::PipelineDriver`]) は毎 tick、current タスクの
-    /// 評価より**先に**これらをチェックし、マッチしたらその action を発火して
-    /// tick を終了する (current は進まない = 本流を壊さずポップアップを閉じる)。
-    /// レベルアップ・実績・クロノス石・アップデート告知等の不定期ポップアップ
-    /// ハンドリングを各 pipeline の FSM から分離するための宣言 (MAA の
-    /// interrupt 相当)。空の場合は従来挙動 (watch なし・後方互換)。
-    /// 保存時、空なら `watch` 行自体を出力しない。
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub watch: Vec<String>,
 }
 
-/// パイプラインディレクトリ内の慣例パス `pipeline.toml` を manifest として読み込む。
-///
-/// [`load_pipeline`] とは対照的に、TaskDef (`*.toml`) は読まず、manifest ファイル
-/// （[`PIPELINE_MANIFEST_FILENAME`]）のみを読み込む。ファイルが存在しない場合は
-/// [`TaskDefError::ParseFailed`] を返す（manifest 経路を選んだ呼出側は manifest の
-/// 存在を期待するため、不在は即時 fail する — [`load_pipeline`] の「空 Vec を返す」
-/// 緩い契約とは意図的に異なる）。
-///
-/// # 引数
-/// - `dir`: パイプラインディレクトリ。`dir/pipeline.toml` を読む。
-///
-/// # 戻り値
-/// - `Ok(PipelineManifest)`: パース成功。`start_task` + `goals` に分離済み。
-/// - `Err(TaskDefError::ParseFailed)`: ファイル不在・読込失敗・TOML 構文エラー・
-///   未知フィールド・`start_task` 欠落等。
-///
-/// # Goals と TaskDef の分離契約
-/// `goals` に含まれる `StopCondition::TemplateMatch { task, .. }` の `task` 名は
-/// 別ディレクトリのテンプレート識別子を指す場合があり、本関数は TaskDef 名前空間との
-/// 衝突を検証しない（driver 層の責務）。本関数は純粋に manifest の構文解析のみを行う。
 pub fn load_pipeline_manifest(dir: &Path) -> Result<PipelineManifest, TaskDefError> {
     let manifest_path = dir.join(PIPELINE_MANIFEST_FILENAME);
     let content =
@@ -713,25 +431,6 @@ pub fn load_pipeline_manifest(dir: &Path) -> Result<PipelineManifest, TaskDefErr
     Ok(manifest)
 }
 
-/// [`TaskDef`] を1ファイル1タスク慣例（[`load_pipeline`] が読む形式）で
-/// `path` へ書き出す（UC-1 シナリオ作成 GUI の保存経路）。
-///
-/// 保存 TOML は既存 schema と同一形式（保存形式の単一情報源は本関数）:
-/// - `template` が絶対パスの場合は `path` の親ディレクトリ（パイプライン
-///   ディレクトリ）基準の相対パス・フォワードスラッシュ形式へ変換する
-///   （fishing/fishing_start.toml の `"../field_loop_pc/hud_tr.png"` 形式）。
-///   [`load_pipeline`] が相対 template を TOML 親ディレクトリ基準で絶対化するのと対称。
-/// - 相対化不能な絶対パス（共通祖先なし = 別ドライブ等）は絶対形式のまま
-///   保存する（[`TaskDef::detect`] は絶対パスを優先するため動作可能）。
-/// - manifest 慣例ファイル名（[`PIPELINE_MANIFEST_FILENAME`]）への保存は拒否する
-///   （`load_pipeline` が TaskDef として読まないため、書き出すと実行不能になる）。
-///
-/// # Errors
-/// - [`TaskDefError::SaveFailed`]: manifest 慣例パス指定・シリアライズ失敗・
-///   書き出し失敗（親ディレクトリ不在等）。1 バイトも書き出さず fail する。
-///
-/// 保存 → [`load_pipeline`] 往復はテストで機械保証されている
-/// （`save_task_def_roundtrips_through_load_pipeline` 等）。
 pub fn save_task_def(def: &TaskDef, path: &Path) -> Result<(), TaskDefError> {
     if is_pipeline_manifest_path(path) {
         return Err(TaskDefError::SaveFailed {
@@ -752,18 +451,6 @@ pub fn save_task_def(def: &TaskDef, path: &Path) -> Result<(), TaskDefError> {
     })
 }
 
-/// [`PipelineManifest`] を `dir/pipeline.toml`（[`PIPELINE_MANIFEST_FILENAME`]）へ
-/// 書き出す（UC-1 シナリオ作成 GUI の保存経路）。
-///
-/// `goals` は `[[goal]]` 配列テーブルとして書き出される（`rename` の対称）。
-/// 空なら `goal` 行自体を出力しない（無宣言 = 無限ループの手書き後方互換形式）。
-///
-/// # Errors
-/// シリアライズ失敗・書き出し失敗（`dir` 不在等）は
-/// [`TaskDefError::SaveFailed`] を返す。1 バイトも書き出さず fail する。
-///
-/// 保存 → [`load_pipeline_manifest`] 往復はテストで機械保証されている
-/// （`save_pipeline_manifest_roundtrips_through_load`）。
 pub fn save_pipeline_manifest(manifest: &PipelineManifest, dir: &Path) -> Result<(), TaskDefError> {
     let content = to_pretty_toml(manifest).map_err(|e| TaskDefError::SaveFailed {
         reason: e.to_string(),
@@ -774,22 +461,12 @@ pub fn save_pipeline_manifest(manifest: &PipelineManifest, dir: &Path) -> Result
     })
 }
 
-/// 保存用 TOML 文字列を生成する（f32 浮動小数点の最短表現正規化付き）。
-///
-/// toml 0.8 は `serialize_f32` を `v as f64` で書き出すため `0.7f32` が
-/// `0.699999988079071` に展開され、手書き形式（`threshold = 0.70` 等）との
-/// 機械一致が壊れる。本関数は一度 `toml::Value` へ落としてから float を
-/// 「f32 へ丸め → 最短10進表現 → f64」へ正規化する。schema の浮動小数点は
-/// 全て f32（threshold/confidence）のため値は往復不変（f32 表示は f32 を
-/// 一意に復元する Rust の roundtrip 表示保証）。
 fn to_pretty_toml<T: Serialize + ?Sized>(value: &T) -> Result<String, toml::ser::Error> {
     let mut v = toml::Value::try_from(value)?;
     normalize_f32_floats(&mut v);
     toml::to_string(&v)
 }
 
-/// [`to_pretty_toml`] 用: `toml::Value` ツリー内の float を f32 最短表現へ
-/// 正規化する（再帰）。f32 起源の float のみ値が変化しない（schema 契約）。
 fn normalize_f32_floats(value: &mut toml::Value) {
     match value {
         toml::Value::Float(f) => {
@@ -811,17 +488,6 @@ fn normalize_f32_floats(value: &mut toml::Value) {
     }
 }
 
-/// `template` を `base` 基準の相対パス（フォワードスラッシュ区切り）へ変換する。
-///
-/// - `template` が相対パスならセパレータ正規化のみ行う。
-/// - 絶対パスなら `base` との共通コンポーネント接頭辞を求め、`..` 遷移 + 残差で
-///   相対化する（`templates/pipelines/fishing` 基準の `../field_loop_pc/hud_tr.png` 形式）。
-/// - 共通祖先を持たない（Windows のドライブ違い等）場合は絶対・フォワードスラッシュ
-///   形式を返す（[`TaskDef::detect`] は絶対パスをそのまま使うため動作可能）。
-///
-/// レキシカル変換のみ（`.`/`..` 成分の正規化・シンボリックリンク解決はしない）。
-/// `load_pipeline` が絶対化に使う `parent.join(rel)` と対称のため、`..` 成分を
-/// 含むパスも正しく往復する。
 fn relativize_template(template: &Path, base: &Path) -> String {
     let forward = |p: &Path| p.to_string_lossy().replace('\\', "/");
     if !template.is_absolute() || base.as_os_str().is_empty() {
@@ -834,7 +500,6 @@ fn relativize_template(template: &Path, base: &Path) -> String {
         .zip(base_components.iter())
         .take_while(|(t, b)| t == b)
         .count();
-    // 先頭（Prefix/RootDir）が一致しない = 共通祖先なし → 絶対パス保持。
     if common == 0 {
         return forward(template);
     }
@@ -851,45 +516,15 @@ fn relativize_template(template: &Path, base: &Path) -> String {
     forward(&rel)
 }
 
-/// 1ステップの実行結果。action は省略時 [`Action::DoNothing`] を補充済み。
-///
-/// `next` は空の場合あり（終端タスク）。base 継承解決は範囲外のため `next` は
-/// [`TaskDef::next`] の生の値をそのまま返す。
-///
-/// `matched_region` はマッチしたテンプレート位置（[`MatchResult::region`]）。caller はこれを
-/// [`Action::ClickSelf`] のクリック座標計算などに使う（純粋層 [`crate`] 外の pipeline_runner）。
-///
-/// `matched_confidence` はマッチの信頼度（[`MatchResult::confidence`]）。Issue #37 T4:
-/// 宣言的ゴール TemplateMatch(UC-2) 評価が `last_match` を構築するために必要。
 #[derive(Debug, Clone, PartialEq)]
 pub struct StepOutcome {
-    /// マッチしたタスク名（= `run_step` の `current_name` と一致するはず）。
     pub matched_task: String,
-    /// 実行すべきアクション（action 省略時は [`Action::DoNothing`]）。
     pub action: Action,
-    /// next 遷移先リスト（空可）。
     pub next: Vec<String>,
-    /// マッチしたテンプレート領域（スクリーンショット元解像度の座標）。
     pub matched_region: ScreenRegion,
-    /// マッチの信頼度（0.0..=1.0）。
     pub matched_confidence: f32,
 }
 
-/// `current_name` の [`TaskDef`] を探して1ステップ実行（detect）する。
-///
-/// 戻り値 [`Result<Option<StepOutcome>, TaskDefError>`]:
-/// - `current_name` が `tasks` に無い → `Ok(None)`（未知タスク名 = NoMatch 扱い）。
-/// - `detect` が `Ok(None)`（閾値下・ROI 外）→ `Ok(None)`（NoMatch = リトライ候補）。
-/// - `detect` が `Ok(Some(_))` → action（省略時 [`Action::DoNothing`] 補充）+ next で
-///   [`StepOutcome`] 構築して `Ok(Some(_))`。
-/// - `detect` がテンプレ読込失敗等の [`Err`] → そのまま `Err`（F34: NoMatch に潰さず
-///   可視化。caller は NoMatch (リトライ候補) と区別して停止扱い等にできる）。
-///
-/// 本スライスは「1ステップ」のみ。next への自動遷移ループは caller 側で戻り値の `next` を
-/// 見て次の `current_name` を決める形で実装する（本関数内では行わない）。
-///
-/// `template` は [`load_pipeline`] 経由で絶対化済みを想定する。`detect` 内部で
-/// `self.template.is_absolute()` なら `template_root` を無視するため、空 [`Path`] を渡す。
 pub fn run_step(
     tasks: &[TaskDef],
     screenshot: &DynamicImage,
@@ -910,16 +545,14 @@ pub fn run_step(
                 matched_confidence: matched.confidence.0,
             }))
         }
-        Ok(None) => Ok(None), // 閾値下 / ROI 外
+        Ok(None) => Ok(None),
         Err(e) => {
-            // F34: テンプレ欠落等の読込エラーは NoMatch と区別して伝える (warn で可視化)。
             warn!("task '{current_name}' detect failed: {e}");
             Err(e)
         }
     }
 }
 
-/// ROI cropping ヘルパ。はみ出し時は画面サイズに clamp する。
 fn crop_imm(img: &DynamicImage, r: ScreenRegion) -> DynamicImage {
     let x = r.x.min(img.width().saturating_sub(1));
     let y = r.y.min(img.height().saturating_sub(1));

@@ -1,9 +1,3 @@
-//! StudioApp の Tasks ペイン描画 (Issue #174: app_ui.rs 分割)。
-//!
-//! タスク一覧 (MAA 型チェックボックス)・タスク詳細 (UC-3)・実行ログ
-//! ビューアの描画 impl。状態定義は app_state.rs、状態操作 (キュー実行・
-//! ファイル入出力) は app.rs。
-
 use std::path::Path;
 
 use eframe::egui;
@@ -13,13 +7,8 @@ use crate::log_view::LogBuffer;
 use crate::tasks::{self, QueueState};
 
 impl StudioApp {
-    /// タスク一覧 UI (MAA 型チェックボックス) を描画する。
-    /// implemented=false はグレー表示・チェック不可 (嘘の動作可能表示禁止)。
-    /// UC-4: 毎フレーム drain によるリアルタイム進行表示 (i/N + チェック順
-    /// キュー)・ログ表示・失敗時の明示的な「継続」「停止」ボタンを含む。
     pub fn render_task_list(&mut self, ui: &mut egui::Ui) {
         ui.heading("タスク一覧");
-        // 毎フレーム drain (UC-4: Exit 観測がキュー進行の唯一の契機)。
         self.drain_task_logs();
         if self.task_defs.is_none() {
             if ui.button("タスク定義を読み込む").clicked() {
@@ -37,12 +26,7 @@ impl StudioApp {
         ui.label(&self.status);
     }
 
-    /// タスク定義のチェックボックス一覧 (MAA 型・UC-3 詳細プレビューつき)。
-    /// implemented=false はグレー表示・チェック不可 (嘘の動作可能表示禁止)。
-    /// チェックトグルはループ後に 1 回だけ適用 (借用分離)。
     fn task_checkboxes(&mut self, ui: &mut egui::Ui, list: &tasks::TaskListState) {
-        // UC-3: 詳細プレビューは実行と同じ引数解決条件 (target/root)。
-        // serial は Issue #188 の Android 削除で廃止 — 常に None。
         let target = self.cli_target();
         let serial: Option<&str> = None;
         let root = Self::workspace_root();
@@ -56,7 +40,6 @@ impl StudioApp {
                     def.is_selectable(),
                     egui::Checkbox::new(&mut checked, label),
                 );
-                // UC-3: 選択済みなら実行順位置を横に表示 (未選択は非表示)。
                 if let Some(pos) = tasks::queue_position_label(&selected, &def.id) {
                     ui.weak(pos);
                 }
@@ -64,8 +47,6 @@ impl StudioApp {
             if checked != list.is_selected(&def.id) {
                 clicked = Some(def.id.clone());
             }
-            // UC-3: 展開可能な詳細表示 (kind・pipeline_dir・start_task・
-            // 引数プレビュー — 読み取り専用・schema 変更なし)。
             egui::CollapsingHeader::new(egui::RichText::new("詳細").weak())
                 .id_salt(&def.id)
                 .show(ui, |ui| {
@@ -77,7 +58,6 @@ impl StudioApp {
         }
     }
 
-    /// 「開始」ボタン (キュー非アクティブ時のみ有効 = 実行中の再開始拒否)。
     fn task_queue_start_controls(&mut self, ui: &mut egui::Ui, list: &tasks::TaskListState) {
         let can_start = list.selected_count() > 0 && !self.task_queue_active();
         ui.add_enabled_ui(can_start, |ui| {
@@ -87,8 +67,6 @@ impl StudioApp {
         });
     }
 
-    /// UC-3: 選択済みキューの実行順リスト (チェック順 1. 2. 3. ...・
-    /// 未実装 (不整合検出時) はグレー表示)。
     fn task_queue_order_preview(ui: &mut egui::Ui, list: &tasks::TaskListState) {
         let selected = list.selected_ids().to_vec();
         let rows = tasks::queue_order_rows(&selected, list.definitions());
@@ -106,7 +84,6 @@ impl StudioApp {
         }
     }
 
-    /// UC-4: 進行サマリ + 実行制御 (中止/継続/停止) + チェック順キュー一覧。
     fn task_queue_progress(&mut self, ui: &mut egui::Ui) {
         let Some(queue) = self.task_queue.clone() else {
             return;
@@ -124,7 +101,6 @@ impl StudioApp {
         }
     }
 
-    /// キュー状態別の実行制御ボタン。Running=中止、一時停止系=継続/停止。
     fn task_queue_controls(&mut self, ui: &mut egui::Ui, state: &QueueState) {
         match state {
             QueueState::Running { .. } => {
@@ -136,8 +112,6 @@ impl StudioApp {
                 ui.colored_label(egui::Color32::RED, "タスクが失敗しました。継続しますか?");
                 self.task_queue_resume_or_abort(ui);
             }
-            // F6 (04-studio-maxiters-outcome): exit 0 でも成果ゼロ打ち切り。
-            // 失敗とは区別して警告色で継続判断を促す (自動継続しない)。
             QueueState::PausedAfterBudgetExhausted { .. } => {
                 ui.colored_label(
                     egui::Color32::YELLOW,
@@ -149,7 +123,6 @@ impl StudioApp {
         }
     }
 
-    /// 一時停止中キューの「継続」「停止」ボタン (失敗・予算切れで共通)。
     fn task_queue_resume_or_abort(&mut self, ui: &mut egui::Ui) {
         if ui.button("継続").clicked() {
             self.resume_task_queue();
@@ -158,11 +131,6 @@ impl StudioApp {
             self.abort_task_queue();
         }
     }
-    /// UC-3: タスク 1 件の詳細表示ボディ (collapsing header 配下・読み取り専用)。
-    ///
-    /// kind・pipeline_dir・start_task (未宣言時は解決結果)・実引数プレビューを
-    /// 表示する。引数解決は [`tasks::task_detail_view`] (実行の [`tasks::spawn_args`]
-    /// と単一情報源)。未実装タスクは赤字で理由を表示 (fail-closed)。
     fn task_detail_ui(
         ui: &mut egui::Ui,
         def: &tasks::TaskDefinition,
@@ -186,10 +154,9 @@ impl StudioApp {
                 ui.label(format!("start_task: {task}"));
             }
             None if def.kind == tasks::TaskKind::PipelineRun => {
-                // pipeline_run なのに解決不能 = 実行不可 (fail-closed 表示)。
                 ui.colored_label(egui::Color32::RED, "start_task: 未解決");
             }
-            None => {} // launch_subcommand は start_task を使用しない
+            None => {}
         }
         ui.label(format!("引数プレビュー: {}", view.args_preview()));
         if let Some(reason) = &view.unimplemented_reason {
@@ -197,7 +164,6 @@ impl StudioApp {
         }
     }
 
-    /// Tasks ペインの実行ログビューア (log_view.rs の LogBuffer/AutoScroll 再利用)。
     fn task_log_ui(&mut self, ui: &mut egui::Ui) {
         ui.horizontal(|ui| {
             ui.heading("実行ログ");
@@ -231,7 +197,6 @@ impl StudioApp {
                 }
             });
         if stick {
-            // stick_to_bottom が有効な間は egui が末尾へ張り付くため追従清算する。
             self.task_scroll.on_scrolled_to_bottom();
         }
     }

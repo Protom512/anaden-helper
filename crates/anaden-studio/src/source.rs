@@ -1,12 +1,3 @@
-//! スクリーンショットの取得元 (PC 版 Win32 キャプチャ専用)。
-//!
-//! `LiveCapture` は別スレッドで Win32Capture(PrintWindow) キャプチャを繰り返し、
-//! 最新フレームを mpsc チャネルで UI スレッドに渡す。egui の描画スレッドを
-//! ブロックしないための措置。
-//!
-//! Android (adb screencap) バックエンドは Issue #188 で削除した
-//! (_WAKEUP / screen_off_timeout 操作も廃止)。
-
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::mpsc::{self, Receiver};
@@ -15,55 +6,34 @@ use std::time::Duration;
 
 use image::{DynamicImage, GrayImage};
 
-// PC版(Windows) Win32 キャプチャバックエンド。#[cfg(windows)] で gating し、
-// Linux では参照しないことで cargo check --workspace が通るようにする。
-// DEFAULT_PROCESS_NAME は GUI の既定 exe 名として app.rs で参照するため再エクスポート。
 #[cfg(windows)]
 pub use anaden_device::DEFAULT_PROCESS_NAME;
 #[cfg(windows)]
 use anaden_device::Win32Capture;
 
-/// ライブキャプチャの取得元バックエンド。
-///
-/// Issue #188 で Android(adb) を削除し PC 版 Win32Capture(PrintWindow) 専用とした。
-/// exe 名でウィンドウを解決するため serial は不要。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Target {
-    /// PC版(Windows): Win32Capture。
     #[default]
     Windows,
 }
 
-/// 別スレッドで動くライブキャプチャ。停止フラグで終了させる。
-///
-/// **OOM 対策**: チャネルは容量 1 の有界チャネルで送信側は try_send のため、
-/// チャネル内に保持されるフレームは高々1枚。UI 側の `latest()` と整合し、
-/// UI がドレインに追いつかなくてもフレームが蓄積しない。
 pub struct LiveCapture {
     rx: Receiver<Arc<DynamicImage>>,
     stop: Arc<AtomicBool>,
 }
 
 impl LiveCapture {
-    /// Win32 キャプチャを `interval_ms` 間隔で繰り返すスレッドを開始する。
-    ///
-    /// `exe` でプロセス(exe 名→PID→HWND)を解決し Win32Capture(PrintWindow) で
-    /// キャプチャする。
     pub fn start(interval_ms: u64, exe: &str) -> Self {
-        // OOM 対策: 容量1の有界チャネル。UI がドレインに追いつかなくても、チャネル内に
-        // 保持されるフレームは高々1枚で頭打ちになる。
         let (tx, rx) = mpsc::sync_channel(1);
         let stop = Arc::new(AtomicBool::new(false));
         let stop_thread = stop.clone();
         Self::start_windows_inner(rx, tx, stop, stop_thread, exe, interval_ms)
     }
 
-    /// キャプチャスレッドに停止を要求する。
     pub fn stop(&self) {
         self.stop.store(true, Ordering::Relaxed);
     }
 
-    /// チャネルをドレインし、最新フレームだけを返す（無ければ None）。
     pub fn latest(&self) -> Option<Arc<DynamicImage>> {
         let mut latest = None;
         while let Ok(img) = self.rx.try_recv() {
@@ -72,7 +42,6 @@ impl LiveCapture {
         latest
     }
 
-    // ---- windows(Win32Capture) バックエンドのスレッド起動 ----
     #[cfg(windows)]
     fn start_windows_inner(
         rx: Receiver<Arc<DynamicImage>>,
@@ -88,11 +57,8 @@ impl LiveCapture {
         thread::spawn(move || {
             while !stop_thread.load(Ordering::Relaxed) {
                 if let Some(img) = capture_windows(&capture_thread) {
-                    // try_send: チャネル満タン(1枚未読)なら Full で破棄(OOM 回避)。
                     let _ = tx.try_send(Arc::new(img));
                 }
-                // ウィンドウ未検出(最小化/未起動)時は Err になり capture_windows が None を返す。
-                // 無限ループで CPU を食わないよう、interval の分割スリープは必ず機能させる。
                 sleep_until_next(&stop_thread, interval_ms);
             }
         });
@@ -100,8 +66,6 @@ impl LiveCapture {
         Self { rx, stop }
     }
 
-    /// 非 Windows ビルドのスタブ (チャネルを作るのみ・フレームは流れない。
-    /// cargo check --workspace の Linux 通過のための経路)。
     #[cfg(not(windows))]
     fn start_windows_inner(
         rx: Receiver<Arc<DynamicImage>>,
@@ -115,7 +79,6 @@ impl LiveCapture {
     }
 }
 
-/// 停止フラグをポーリングしながら `interval_ms` まで分割スリープする。
 fn sleep_until_next(stop: &AtomicBool, interval_ms: u64) {
     let mut waited = 0u64;
     while waited < interval_ms && !stop.load(Ordering::Relaxed) {
@@ -126,7 +89,6 @@ fn sleep_until_next(stop: &AtomicBool, interval_ms: u64) {
 }
 
 #[cfg(windows)]
-/// Win32Capture で1枚キャプチャする(同期)。失敗・黒フレーム時は None。
 fn capture_windows(capture: &Win32Capture) -> Option<DynamicImage> {
     let img = capture.capture_blocking().ok()?;
     if is_black_frame(&img) {
@@ -141,11 +103,8 @@ impl Drop for LiveCapture {
     }
 }
 
-/// 黒フレーム判定の閾値。実測値: 黒フレーム mean=0.0 / 正常フレーム mean=64.8〜85.7。
-/// ここでは安全側(浅すぎず深すぎず)に倒した値を使う。
 const BLACK_FRAME_MEAN_THRESHOLD: f32 = 10.0;
 
-/// グレースケール平均輝度が閾値未満なら黒フレームとみなす。
 fn is_black_frame(img: &DynamicImage) -> bool {
     let gray: GrayImage = img.to_luma8();
     let pixels: &[u8] = gray.as_raw();

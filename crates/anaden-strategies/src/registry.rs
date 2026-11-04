@@ -1,12 +1,9 @@
-//! 戦略の名前解決と管理。
-
 use std::collections::HashMap;
 
 use tracing::debug;
 
 use anaden_core::{GameState, MiniGameType};
 
-/// ミニゲーム戦略を名前で管理するレジストリ。
 pub struct StrategyRegistry {
     strategies: HashMap<String, Box<dyn anaden_core::MiniGameStrategy>>,
 }
@@ -24,13 +21,11 @@ impl StrategyRegistry {
         }
     }
 
-    /// 戦略を登録する。
     pub fn register(&mut self, strategy: Box<dyn anaden_core::MiniGameStrategy>) {
         let name = strategy.name().to_string();
         self.strategies.insert(name, strategy);
     }
 
-    /// 指定したゲーム状態を処理できる戦略を検索する。
     pub fn find_for_state(&self, state: &GameState) -> Option<&dyn anaden_core::MiniGameStrategy> {
         for strategy in self.strategies.values() {
             if let Some(_actions) = strategy.decide_actions(state) {
@@ -41,7 +36,6 @@ impl StrategyRegistry {
         None
     }
 
-    /// 指定したミニゲーム種別の戦略を検索する。
     pub fn find_for_minigame(
         &self,
         game_type: &MiniGameType,
@@ -55,12 +49,10 @@ impl StrategyRegistry {
             .map(|s| s.as_ref())
     }
 
-    /// 登録されている戦略の数。
     pub fn len(&self) -> usize {
         self.strategies.len()
     }
 
-    /// 戦略が空かどうか。
     pub fn is_empty(&self) -> bool {
         self.strategies.is_empty()
     }

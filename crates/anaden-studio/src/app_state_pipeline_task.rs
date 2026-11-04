@@ -1,12 +1,3 @@
-//! pipeline task の構築・保存 (Issue #175: app_state.rs 分割)。
-//!
-//! 作成タブ (Authoring) の入力 (ROI/スコア/アクション) から pipeline task
-//! (anaden_vision::TaskDef) を構築する ([`PipelineActionKind`] /
-//! [`pipeline_task_spec`]) と、TOML + テンプレート PNG としてディレクトリへ
-//! 保存する ([`save_pipeline_task`]) を定義する。StudioApp 本体は
-//! [`crate::app_state_core`]、呼び出し元互換の re-export は
-//! [`crate::app_state`] (facade)。
-
 use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
@@ -14,20 +5,14 @@ use image::DynamicImage;
 use anaden_core::ScreenRegion;
 use anaden_vision::{Action, Algorithm};
 
-/// pipeline task の認識成功時アクション種別 (UI コンボ選択用)。
-/// anaden_vision::Action の作成タブで扱う部分集合。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum PipelineActionKind {
-    /// マッチ位置をクリック (`click_self`)。
     ClickSelf,
-    /// 何もしない (`do_nothing`)。
     DoNothing,
-    /// 停止 (`stop`)。
     Stop,
 }
 
 impl PipelineActionKind {
-    /// UI コンボ表示ラベル (グリフ確認済み・豆腐なし)。
     #[must_use]
     pub fn label(self) -> &'static str {
         match self {
@@ -37,7 +22,6 @@ impl PipelineActionKind {
         }
     }
 
-    /// ラベル → 種別。UI の選択状態復元用。未知ラベルは None (fail-closed)。
     #[must_use]
     pub fn from_label(label: &str) -> Option<Self> {
         match label {
@@ -48,7 +32,6 @@ impl PipelineActionKind {
         }
     }
 
-    /// anaden_vision::Action へ変換。
     fn to_action(self) -> Action {
         match self {
             Self::ClickSelf => Action::ClickSelf,
@@ -58,10 +41,6 @@ impl PipelineActionKind {
     }
 }
 
-/// 作成タブの入力 (ROI/スコア) から pipeline task (anaden_vision::TaskDef) を構築する。
-///
-/// `method` は engine_kind.method_str ("sse"/"ccoeff") を想定。未知文字列は
-/// None (fail-closed。黙って既定方式へフォールバックしない)。
 #[must_use]
 pub fn pipeline_task_spec(
     name: &str,
@@ -89,10 +68,6 @@ pub fn pipeline_task_spec(
     })
 }
 
-/// pipeline task を TOML + テンプレート PNG としてディレクトリへ保存する。
-///
-/// 出力: `<dir>/<name>.toml` + `<dir>/<name>.png`。既存 `load_pipeline`
-/// (anaden-vision) でそのまま読み込める形式 (`templates/pipelines/<pipeline>/` 互換)。
 pub fn save_pipeline_task(
     dir: &Path,
     spec: &anaden_vision::TaskDef,

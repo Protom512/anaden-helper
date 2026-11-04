@@ -1,42 +1,3 @@
-//! グレースケール `TM_CCOEFF_NORMED` によるテンプレートマッチエンジン。
-//!
-//! SSE（[`crate::matcher`]）が絶対輝度差を測るため輝度シフト（明るさの一律変動）に弱い
-//! 弱点を、テンプレート・窓双方の平均を引くことで補う。OpenCV の
-//! `TM_CCOEFF_NORMED` と等価な相関係数を純Rustで計算する。
-//!
-//! # 数式
-//!
-//! 各走査位置 `(x, y)` に対する相関係数 `r(x,y) ∈ [-1, 1]`:
-//!
-//! ```text
-//! r(x,y) = Σ(T' · I'_patch) / sqrt( Σ T'² · Σ I'_patch² )
-//! ```
-//!
-//! ここで:
-//! - `T'[x',y'] = T(x',y') - μT`（平均除去テンプレート、`μT` は位置非依存で1回計算）
-//! - `I'_patch = I(x+x', y+y') - μI(x,y)`（窓画像の平均除去）
-//! - `μI(x,y) = (1/N) Σ I(x+x', y+y')`（位置依存の窓平均）
-//! - `N = w · h`
-//!
-//! # 計算手順
-//!
-//! 1. 前処理（テンプレート側、1回）: `μT`, `T'`, `denomT = sqrt(Σ T'²)`。
-//!    `denomT == 0`（一様テンプレート）なら全位置 `0` を返す。
-//! 2. haystack 側の積分図を2本構築（`Σ I`, `Σ I²`）。
-//! 3. 各位置 `(x,y)`: 窓和 `sumI`, `sumI2` を O(1) で取り、
-//!    `μI = sumI / N`、`denomI = sqrt(sumI2 - N·μI²)` を計算。
-//!    分子は明示的に `Σ T' · (I - μI) = Σ T'·I - μI·ΣT'` で計算（`ΣT'=0`
-//!    の恒等式に依存せず、MAA 等価性を確実に保つ）。
-//!    `denomI ≈ 0`（一様窓）のとき `0` を返す（ゼロ割り回避）。
-//!
-//! # confidence 写像
-//!
-//! `r ∈ [-1, 1]` を `[0, 1]` に `clamp(r, 0.0, 1.0)` で写像する。
-//! 負の相関（反転パターン）は不一致扱いで `0`。MAA の `minMaxLoc` が
-//! 最大値を取る挙動と整合する。
-//!
-//! 詳細は Wiki [[Vision-Engine-Design]] / [[MAA-Matching-Algorithms]] 参照。
-
 use image::{DynamicImage, GrayImage, Luma};
 use imageproc::integral_image::{integral_image, integral_squared_image, sum_image_pixels};
 use tracing::debug;
@@ -46,20 +7,14 @@ use anaden_core::{MatchConfidence, ScreenRegion};
 use crate::engine::VisionEngine;
 use crate::matcher::MatchResult;
 
-/// 積分図の画素型。`u64` で `255² · W · H` を十分に保持できる。
 type IntegralImage = image::ImageBuffer<Luma<u64>, Vec<u64>>;
 
-/// `TM_CCOEFF_NORMED` によるテンプレートマッチエンジン。
-///
-/// [`crate::engine::SseVisionEngine`] と同じ [`VisionEngine`] trait を実装し、
-/// 輝度シフトに強い相関ベースのマッチングを提供する。
 pub struct CcoeffVisionEngine {
     threshold: MatchConfidence,
     downscale_factor: u32,
 }
 
 impl CcoeffVisionEngine {
-    /// 閾値とダウンスケール倍率を指定して作成する。
     pub fn new(threshold: MatchConfidence, downscale_factor: u32) -> Self {
         let factor = if downscale_factor == 0 {
             1
@@ -72,20 +27,14 @@ impl CcoeffVisionEngine {
         }
     }
 
-    /// デフォルト設定（閾値95%、1/2ダウンスケール）で作成する。
-    /// [`crate::engine::SseVisionEngine::with_defaults`] と同値の方針。
     pub fn with_defaults() -> Self {
         Self::new(MatchConfidence::DEFAULT_THRESHOLD, 2)
     }
 
-    /// ダウンスケールなし（テスト用）。[`crate::matcher::TemplateMatcher::threshold_only`] 相当。
     pub fn threshold_only(threshold: MatchConfidence) -> Self {
         Self::new(threshold, 1)
     }
 
-    /// 両画像をダウンスケールする。テンプレートが画面より大きい場合は `None`。
-    ///
-    /// [`crate::matcher::TemplateMatcher`] と同じロジック（独立に保持して SSE 側は触らない）。
     fn downscale_images(
         &self,
         haystack: &DynamicImage,
@@ -124,13 +73,6 @@ impl CcoeffVisionEngine {
         }
     }
 
-    /// 前処理済みテンプレート ([`PreparedCcoeff`]) でマッチングする (F13: 前処理のキャッシュ)。
-    ///
-    /// `downscale_factor == 1` ([`Self::threshold_only`] 構成) のとき [`PreparedCcoeff`]
-    /// の前処理結果 (luma 変換 + `T'` 計算) をそのまま使い、毎サイクルの
-    /// [`preprocess_template`] 再実行を省く。factor > 1 のときは luma から
-    /// [`DynamicImage`] を復元して [`VisionEngine::match_template`] へフォールバックする
-    /// (ccoeff は両画像を to_luma8 してから計算するため luma 復元は等価)。
     pub(crate) fn match_template_prepared(
         &self,
         haystack: &DynamicImage,
@@ -152,12 +94,6 @@ impl CcoeffVisionEngine {
         )
     }
 
-    /// 前処理済みデータで haystack 全位置を走査し、最良一致を閾値判定して返す共通核。
-    ///
-    /// [`VisionEngine::match_template`] (毎回前処理) と [`Self::match_template_prepared`]
-    /// (前処理済みデータを受け取る) の双方が使う。`scan_dims` は走査に使う needle 寸法
-    /// (downscale 済み)、`report_dims` は [`MatchResult::region`] に報告する寸法
-    /// (downscale 前の元 needle 寸法)。
     fn scan_best_thresholded(
         &self,
         hg: &GrayImage,
@@ -185,7 +121,6 @@ impl CcoeffVisionEngine {
         let ii = integral_image::<_, u64>(hg);
         let ii2 = integral_squared_image::<_, u64>(hg);
 
-        // 1パスで最大を発見（Vec 確保なし）。
         let mut best_x = 0u32;
         let mut best_y = 0u32;
         let mut best_r = f32::MIN;
@@ -230,34 +165,20 @@ impl CcoeffVisionEngine {
     }
 }
 
-/// score_map / match_all 共通のスキャン準備結果 (ダウンスケール → luma8 →
-/// テンプレート前処理 → 積分画像)。
-///
-/// ピクセル走査本体は両メソッドで別々に維持する (heatmap 全点出力と
-/// しきい値超過列挙は出力契約が異なるため — ピクセルループの統合禁止、
-/// 承認プラン §B の ccoeff 項参照)。
 struct CcoeffScan {
-    /// ダウンスケール後の探索対象 luma 画像。
     hg: GrayImage,
-    /// 前処理済みテンプレート (平均除去済み `T'`)。
     t_prime: Vec<f32>,
     sum_t_prime: f64,
     denom_t: f64,
-    /// 積分画像 (輝度和)。
     ii: image::ImageBuffer<Luma<u64>, Vec<u64>>,
-    /// 積分画像 (輝度二乗和)。
     ii2: image::ImageBuffer<Luma<u64>, Vec<u64>>,
-    /// テンプレート寸法 (ダウンスケール空間)。
     nw: u32,
     nh: u32,
-    /// スキャン結果マップ寸法。
     rw: u32,
     rh: u32,
 }
 
 impl CcoeffVisionEngine {
-    /// score_map / match_all 共通の準備。ダウンスケール不能 (探索対象より
-    /// テンプレートが大きい等) は [`None`]。
     fn prepare_scan(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<CcoeffScan> {
         let (h, n) = self.downscale_images(haystack, needle)?;
         let hg = h.to_luma8();
@@ -369,28 +290,15 @@ impl VisionEngine for CcoeffVisionEngine {
     }
 }
 
-/// テンプレートの ccoeff 前処理済み表現 (05-template-cache / F13)。
-///
-/// [`CcoeffVisionEngine`] は毎マッチ呼び出しで needle を to_luma8 → 平均除去 (`T'`)
-/// していた。本型はその結果を保持し、[`CcoeffVisionEngine::match_template_prepared`]
-/// 経路で再計算を省く (decode+resize と併せ pipeline のテンプレートキャッシュが保持)。
 #[derive(Debug, Clone)]
 pub(crate) struct PreparedCcoeff {
-    /// グレースケール化済み needle (正規化後寸法。downscale は適用前)。
     pub(crate) luma: GrayImage,
-    /// 平均除去テンプレート `T'` ([`preprocess_template`] の第 1 返却値)。
     pub(crate) t_prime: Vec<f32>,
-    /// `ΣT'` (f64)。
     pub(crate) sum_t_prime: f64,
-    /// `sqrt(Σ T'^2)` (denomT)。
     pub(crate) denom_t: f64,
 }
 
 impl PreparedCcoeff {
-    /// needle (正規化済み [`DynamicImage`]) から前処理済みテンプレートを作る。
-    ///
-    /// `to_luma8` + [`preprocess_template`] を 1 回だけ実行する。以降のマッチ呼び出しは
-    /// [`CcoeffVisionEngine::match_template_prepared`] で本結果を再利用する。
     pub(crate) fn prepare(needle: &DynamicImage) -> Self {
         let luma = needle.to_luma8();
         let (t_prime, sum_t_prime, denom_t) = preprocess_template(&luma);
@@ -403,23 +311,17 @@ impl PreparedCcoeff {
     }
 }
 
-/// テンプレートの前処理: 平均除去テンプレート `T'` と `ΣT'`、`denomT` を返す。
-///
-/// `denomT == 0`（一様テンプレート）のとき `T'` は全 `0`（`denom_t` も `0`）となり、
-/// [`ccoeff_at`] は全位置で `0` を返す。累算は f64 で行い桁落ちを防ぐ。
 fn preprocess_template(ng: &GrayImage) -> (Vec<f32>, f64, f64) {
     let w = ng.width() as usize;
     let h = ng.height() as usize;
     let n = (w * h) as f64;
 
-    // μT
     let mut sum_t: f64 = 0.0;
     for p in ng.pixels() {
         sum_t += p[0] as f64;
     }
     let mu_t = sum_t / n;
 
-    // T' と ΣT'、Σ T'²
     let mut t_prime = Vec::with_capacity(w * h);
     let mut sum_t_prime: f64 = 0.0;
     let mut sum_t_prime_sq: f64 = 0.0;
@@ -434,11 +336,6 @@ fn preprocess_template(ng: &GrayImage) -> (Vec<f32>, f64, f64) {
     (t_prime, sum_t_prime, denom_t)
 }
 
-/// 1走査位置 `(x, y)` の相関係数 `r ∈ [-1, 1]` を計算する。
-///
-/// 分子は明示的に `Σ T'·(I - μI) = Σ T'·I - μI·ΣT'` で計算（`ΣT'` を f64 で渡し、
-/// 数値誤差による位置バイアスを排除する）。窓平均 `μI` は積分図から O(1)。
-/// `denom_t == 0` または `denomI ≈ 0` のとき `0` を返す。NaN/Inf も `0` に弾く。
 #[allow(clippy::too_many_arguments)]
 fn ccoeff_at(
     hg: &GrayImage,
@@ -452,7 +349,6 @@ fn ccoeff_at(
     w: u32,
     h: u32,
 ) -> f32 {
-    // 一様テンプレート: CCOEFF 未定義 → 0
     if denom_t == 0.0 {
         return 0.0;
     }
@@ -460,19 +356,16 @@ fn ccoeff_at(
     let n = (w as u64) * (h as u64);
     let nf = n as f64;
 
-    // O(1) 窓和。sum_image_pixels は [left,right]*[top,bottom] 閉区間。
     let sum_i = sum_image_pixels(ii, x, y, x + w - 1, y + h - 1)[0] as f64;
     let sum_i2 = sum_image_pixels(ii2, x, y, x + w - 1, y + h - 1)[0] as f64;
     let mu_i = sum_i / nf;
 
-    // denomI = sqrt(Σ I² - N·μI²)
     let var_i = sum_i2 - nf * mu_i * mu_i;
     if var_i <= 0.0 {
-        return 0.0; // 一様窓: ゼロ割り回避
+        return 0.0;
     }
     let denom_i = var_i.sqrt();
 
-    // 分子: Σ T'·I - μI·ΣT'（f64 累算）
     let mut dot: f64 = 0.0;
     let tw = w as usize;
     for j in 0..h as usize {
@@ -490,7 +383,6 @@ fn ccoeff_at(
         return 0.0;
     }
     let r = numerator / denom;
-    // NaN/Inf 防御（f32 計算では稀だが MAA inRange 相当の二重防御）
     if !r.is_finite() {
         return 0.0;
     }

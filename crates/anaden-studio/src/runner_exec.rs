@@ -1,20 +1,3 @@
-//! Pipeline 実行ランナーの実行状態機械（Issue #168 分割・egui 非依存）。
-//!
-//! 旧 runner.rs (Issue #83/#85 シャード2・3前半) から実行系ロジックを移動:
-//! - `anaden` バイナリの明示パス解決 (`pick_anaden_bin`: ANADEN_BIN →
-//!   target/{debug,release} → PATH)
-//! - `anaden run` CLI 引数列の組み立て (`build_run_args` / `build_spawn_spec`) と
-//!   pipeline ディレクトリ位置引数の決定的解決 (`resolve_pipeline_arg`)
-//! - `PipelineRunnerApp` の状態遷移・子プロセス管理 (childproc::ChildProcess)・
-//!   ログ drain/スナップショット (log_view::SharedLogBuffer + egui スクロール
-//!   ビューアは runner_ui.rs)・履歴追記・設定 I/O
-//!
-//! egui 描画 (render_body 系・`eframe::App` 実装・`level_color`) は
-//! runner_ui.rs。状態遷移・パス解決・ログ drain は egui に依存しない
-//! メソッドに切り出し、ヘッドレスでユニットテスト可能にしている。
-//! runner_ui.rs からの参照のため private→pub(crate) 昇格したフィールド・
-//! メソッドのみ可視性が変わる (ロジック変更なし)。
-
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, SyncSender};
 
@@ -24,17 +7,6 @@ use crate::history_ui::{HistoryAction, HistoryPanel};
 use crate::log_view::{
     DEFAULT_MAX_LINES, LogBuffer, LogEntry, LogEvent, LogLevel, SharedLogBuffer,
 };
-/// `anaden` バイナリを解決する純関数（Issue #85 タスク2）。
-///
-/// 候補順:
-/// 1. 環境変数 `ANADEN_BIN`（ファイルが存在すれば使用、無ければエラー）
-/// 2. マニフェストディレクトリ基準 `target/<profile>/anaden[.exe]`
-///    （debug → release の順）
-/// 3. PATH 環境変数の各ディレクトリ
-///
-/// # Errors
-/// いずれの候補でも実行可能ファイルが見つからない場合、または
-/// `ANADEN_BIN` が存在しないパスを指している場合にエラーメッセージを返す。
 pub fn pick_anaden_bin(
     env_val: Option<&str>,
     manifest_dir: Option<&Path>,
@@ -73,8 +45,6 @@ pub fn pick_anaden_bin(
     ))
 }
 
-/// 実行時の `anaden` 解決（main.rs 用）。失敗時は PATH 起動を試みる
-/// プログラム名 "anaden" へフォールバックし、解決エラーを UI 表示用に返す。
 fn resolve_anaden_program() -> (String, Option<String>) {
     let env_val = std::env::var("ANADEN_BIN").ok();
     let manifest = Some(Path::new(env!("CARGO_MANIFEST_DIR")));
@@ -85,26 +55,10 @@ fn resolve_anaden_program() -> (String, Option<String>) {
     }
 }
 
-/// pipeline 子プロセスの起動指定を組み立てる。
 pub fn build_spawn_spec(program: &str, args: &[String]) -> SpawnSpec {
     SpawnSpec::new(program, args.to_vec())
 }
 
-/// [`anaden_strategies::StrategySelection`] から `anaden run` の CLI 引数列を組み立てる純関数
-/// （Issue #88 受け入れ基準: egui 非依存・ヘッドレスユニットテスト対象）。
-///
-/// Issue #139 T1 単一情報源化: 引数列はハードコード match ではなく
-/// `StrategyCatalog::builtin()` の [`anaden_strategies::StrategyDef::to_run_args`]
-/// （カタログ定義）から組み立てる。実在 PC 版 2 パイプライン
-/// (field_loop_pc / nav_to_field_pc) がカタログ経由で実行可能
-/// (Issue #188 で Android 版 4 パイプラインを削除)。
-///
-/// - `--goal` / `--goal-file` は排他（CLI の `parse_goal_flag` 制約）のため、
-///   本関数はいずれも出力しない（ゴール無し = 従来の max_iters 挙動）。
-///
-/// # Errors
-/// 戦略未選択（`strategy == None`）、または未知の戦略 id の場合にエラーを返す
-/// （UC-4: 子プロセスを起動せず拒否するための事前検証）。
 pub fn build_run_args(
     selection: &anaden_strategies::StrategySelection,
 ) -> Result<Vec<String>, String> {
@@ -118,43 +72,18 @@ pub fn build_run_args(
         .ok_or_else(|| format!("未知の戦略です(カタログ外): {id}"))
 }
 
-/// コンパイル時に確定する workspace ルート（anaden-studio manifest から
-/// 2 階層上昇 = リポジトリルート）。実行時 workdir に依存しない
-/// pipeline ディレクトリ解決の基準点（Issue #139 T2）。
 fn workspace_root() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..")
 }
 
-/// `build_run_args` が生成した引数列中の pipeline ディレクトリ位置引数を
-/// workspace ルート基準の絶対パスへ決定的解決する純関数（Issue #139 T2）。
-///
-/// カタログの `pipeline_dir` は `templates/pipelines/<name>` 形式の相対パス。
-/// 従来は子プロセス (anaden CLI) 側の cwd 依存解決だったため、studio の
-/// 起動 workdir 次第で「パイプライン読込失敗」になっていた。本関数は
-/// spawn 前に UI 側で絶対パスへ確定させる:
-///
-/// - `templates/pipelines/<name>` (相対) → `<root>/templates/pipelines/<name>`
-///   （解決先が実在する場合のみ置換。非実在なら元の値を維持し CLI の
-///   fail-closed エラーに委譲する）
-/// - `<name>` (バリアンド: バ bare name) → `<root>/templates/pipelines/<name>`
-/// - 絶対パス・その他のトークンは変更しない
-///
-/// `run` サブコマンド・`--algorithm`/`--target` とその値は位置引数ではない
-/// ためスキップする。
-/// `tok` が pipeline 位置引数候補か (run トークン自身、または run を含む
-/// 引数列の非フラグ トークン)。
 fn is_pipeline_positional(tok: &str, args: &[String]) -> bool {
     tok == "run" || !tok.starts_with('-') && args.iter().any(|a| a == "run")
 }
 
-/// `tok` が bare name 形式か (パス区切りなし・フラグでない・run ではない)。
 fn is_bare_pipeline_name(tok: &str) -> bool {
     !tok.starts_with('-') && !tok.contains('/') && !tok.contains('\\') && tok != "run"
 }
 
-/// 位置引数候補トークンを解決済み絶対パスへ置き換える。
-/// テンプレ相対形式 (`templates/pipelines/..`) と bare name のみ対象で、
-/// 解決先がディレクトリ実在のときのみ置換する。
 fn resolve_positional_token(tok: &mut String, root: &Path) {
     let joined =
         if tok.starts_with("templates/pipelines/") || tok.starts_with("templates\\pipelines\\") {
@@ -187,11 +116,6 @@ pub fn resolve_pipeline_arg(args: &[String], root: &Path) -> Vec<String> {
     out
 }
 
-/// strategy 実行の spawn 引数列へ `--report-file <path>` を付与する純関数
-/// (03-report-channel)。
-///
-/// report は studio 管理パスへ書かせ、終了 (Exit イベント) 時に読み取る
-/// (CLI stdout の人間可読日本語行を機械 IF として文字列解析する F11 の解消)。
 #[must_use]
 fn with_report_file_arg(args: &[String], report_path: &Path) -> Vec<String> {
     let mut out = args.to_vec();
@@ -200,62 +124,35 @@ fn with_report_file_arg(args: &[String], report_path: &Path) -> Vec<String> {
     out
 }
 
-/// 実行系ペインの種別（統合GUIシェルからの描画委譲用・Issue #120 欠陥2修正）。
-///
-/// 「▶️ 実行」タブと「🕘 履歴」タブが同一画面になる欠陥を解消するため、
-/// [`PipelineRunnerApp::render_body`] はこのペイン種別で描画内容を区別する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerPane {
-    /// 実行ビュー（開始/停止/再実行・戦略選択・ログ・履歴の全量）。
     Run,
-    /// 履歴ビュー（履歴テーブル + 設定保存/読込のみ）。
     History,
-    /// 戦略選択ビュー（Issue #125 shard 3: 戦略パネルの独立タブ。
-    /// 実行ビューの埋め込みから切り出し、runner 保持の単一
-    /// `StrategyPanel` インスタンスを共有する）。
     Strategy,
-    /// 設定ビュー（Issue #125 shard 3: 設定保存/読込の独立タブ）。
     Settings,
 }
 
-/// pipeline 実行GUI の状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunnerStatus {
-    /// 停止中。
     Stopped,
-    /// 実行中。
     Running,
 }
 
-/// 読み取りスレッド → UI 間の bounded channel 容量。
 const LOG_CHANNEL_CAPACITY: usize = 1024;
 
-/// pending レポート (report.json) の種別 (03-report-channel follow-up)。
-///
-/// strategy 実行 (`anaden run`) は `ProgressReport` を、routine 実行
-/// (`anaden routine`) は `RoutineSummary` を書く。spawn 時点で種別が確定
-/// するためフィールドで追跡し、Exit ドレイン時のパース型を切り替える
-/// (JSON 形状からの推測に依らない明示契約)。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum PendingReportKind {
-    /// `anaden run` の report.json (`ProgressReport`)。
     #[default]
     Run,
-    /// `anaden routine` の report.json (`RoutineSummary`)。
     Routine,
 }
 
-/// Exit ドレインで読み取ったレポート (種別付き)。
 enum LoadedReport {
-    /// strategy 実行の成果物 (`ProgressReport`)。
     Run(anaden_engine::ProgressReport),
-    /// routine 実行の成果物 (`RoutineSummary`)。
     Routine(anaden_engine::RoutineSummary),
 }
 
 impl LoadedReport {
-    /// 履歴レコードへ付与する停止理由ラベル (run は stop_reason ラベル・
-    /// routine は全体成否ラベル)。
     fn stop_reason_label(&self) -> Option<String> {
         match self {
             Self::Run(r) => r
@@ -267,7 +164,6 @@ impl LoadedReport {
         }
     }
 
-    /// 履歴レコードへ付与する発火回数 (run は fired_count・routine は全ステップ合計)。
     fn fired_count(&self) -> u64 {
         match self {
             Self::Run(r) => r.fired_count,
@@ -276,43 +172,19 @@ impl LoadedReport {
     }
 }
 
-/// 起動要求 (Issue #204)。再実行 (`rerun_pipeline`) で引数列を組み立て直す
-/// ため、run-id 込みの SpawnSpec ではなく再生成に必要な入力を保持する。
-///
-/// routine 実行は spawn のたびに新しい evidence run-id を発行する
-/// (初回起動・再実行の両方)。旧実装は run-id 込みの SpawnSpec をそのまま
-/// 再 spawn し、2 回目の evidence が同一 `.omc/logs/<run-id>/` へ上書き
-/// されていた (Issue #204 本体)。
 #[derive(Clone)]
 enum RunRequest {
-    /// strategy 実行 (`start_pipeline_with_selection` 経由)。
-    /// 引数列は固定 (evidence run-id を含まない)。
     Strategy {
-        /// `anaden run` の引数列 (pipeline ディレクトリ解決済み)。
         args: Vec<String>,
     },
-    /// routine 実行 (`start_routine` 経由)。
     Routine {
-        /// routine ファイルの絶対パス。
         path: PathBuf,
-        /// 履歴ラベル用の routine 名。
         name: String,
-        /// evidence 採取チェックの起動時スナップショット
-        /// (再実行も同一設定で再現する)。
         evidence_enabled: bool,
     },
 }
 
 impl RunRequest {
-    /// 要求から (spawn spec, 履歴ラベル, 発行した evidence run-id, 発行した
-    /// report パスとその種別) を組む。
-    ///
-    /// evidence run-id はこの関数が spawn のたびに新規発行する
-    /// (呼出側で使い回さない — Issue #204)。strategy 実行はラベル・run-id
-    /// とも None (履歴ラベルは strategy 選択から採る)。
-    /// report パス (strategy・routine 両方) も spawn のたびに新規発行する
-    /// (03-report-channel。再実行で前回 report を上書きしない)。種別は
-    /// `anaden run` = ProgressReport / `anaden routine` = RoutineSummary。
     fn build_spawn(
         &self,
         program: &str,
@@ -354,7 +226,6 @@ impl RunRequest {
     }
 }
 
-/// 現在時刻 (UNIX epoch 秒・取得失敗時は 0)。
 fn unix_now_secs() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
@@ -362,101 +233,46 @@ fn unix_now_secs() -> u64 {
         .unwrap_or(0)
 }
 
-/// pipeline ランナーアプリ。
 pub struct PipelineRunnerApp {
-    /// 子プロセス管理。
     child: ChildProcess,
-    /// 起動するコマンド。
     program: String,
-    /// バイナリ解決失敗等、起動前に確定しているエラー。
     resolution_error: Option<String>,
-    /// 直近のエラー表示(UI 表示用)。
     last_error: Option<String>,
-    /// ログイベント送信口(stdout/stderr reader 接続・再起動時に再利用)。
     log_tx: SyncSender<LogEvent>,
-    /// ログイベント受信口(UI drain 用)。drain 後も再利用するため保持。
     log_rx: Receiver<LogEvent>,
-    /// ログバッファ（reader → channel → drain で反映）。
     log: SharedLogBuffer,
-    /// UI 描画用ログスナップショット（毎フレーム drain で更新）。
-    /// runner_ui.rs のログビューア描画からの参照のため pub(crate)。
     pub(crate) log_snapshot: Vec<LogEntry>,
-    /// スナップショット差分更新用の改訂番号キャッシュ (Issue #160 UC-5:
-    /// 新着行のないフレームの全行 clone を回避。LogBuffer::revision と比較)。
     log_revision: u64,
-    /// ログの自動スクロール。runner_ui.rs のログビューア描画からの
-    /// 参照のため pub(crate)。
     pub(crate) auto_scroll: bool,
-    /// 戦略選択パネル(シャード3スコープ、runner に統合)。
-    /// runner_ui.rs の戦略ビュー描画からの参照のため pub(crate)。
     pub(crate) strategy_panel: crate::strategy_ui::StrategyPanel,
-    /// routine 選択パネル (Issue #199: 複数 pipeline の連続実行)。
-    /// runner_ui.rs のルーチンセクション描画からの参照のため pub(crate)。
     pub(crate) routine_panel: crate::routine_ui::RoutinePanel,
-    /// 現在実行の evidence run-id (routine 実行で --evidence-run-id 付与時のみ。
-    /// Issue #202 UC-1: 履歴詳細から `.omc/logs/{run-id}/` を追跡可能にする)。
-    /// `start_request` が spawn 成功時に発行した値のみを保持する
-    /// (Issue #204: spawn 失敗時の残存 = stale 保持を構造的に排除)。
-    /// reset_run_tracking の対象外 (append_history_record が take するまで保持)。
     pending_evidence_run_id: Option<String>,
-    /// 現在実行の run レポート (report.json) パス (03-report-channel)。
-    /// strategy 実行で `--report-file` に渡した studio 管理パス。
-    /// Exit イベント処理 (drain_logs) が読み取って履歴と LogStatus へ
-    /// 反映したのち take で清算する (report を第一ソース化・F11 解消)。
     pending_report_path: Option<PathBuf>,
-    /// pending レポートの種別 (run = ProgressReport / routine = RoutineSummary)。
-    /// `pending_report_path` と同じライフサイクル (spawn 時設定・清算点でリセット)。
     pending_report_kind: PendingReportKind,
-    /// evidence run-id 生成関数。テストで決定的なタイムスタンプを注入して
-    /// 差し替えられる (Issue #204)。既定は実運用用の
-    /// [`crate::routine_ui::new_evidence_run_id`]。
     run_id_gen: fn() -> String,
-    /// 選択サマリのキャッシュ（ui() の changed フラグで再計算・UC-4 前提の表示）。
-    /// runner_ui.rs の描画からの参照のため pub(crate)。
     pub(crate) strategy_summary: String,
-    /// 直近成功起動の要求 (再実行ボタンで再 spawn するため保持)。run-id 込みの
-    /// SpawnSpec ではなく [`RunRequest`] を保持し、再実行時に routine なら
-    /// evidence run-id を新規発行する (Issue #204: 同一 `.omc/logs/<run-id>/`
-    /// への証跡上書きと履歴への run-id 未記録を解消)。
     last_run: Option<RunRequest>,
-    /// 実行履歴ストア（委譲: 追加ロジックは history.rs）。
-    /// runner_ui.rs の履歴セクション描画からの参照のため pub(crate)。
     pub(crate) history: RunHistory,
-    /// 現在実行の開始時刻 (UNIX epoch 秒)。履歴 Record 追記に使用。
     run_started_at: Option<u64>,
-    /// 現在実行の戦略名（履歴 Record 追記に使用）。
     run_strategy: Option<String>,
-    /// 子プロセス終了を検知済みか（Exit イベント処理で立てるフラグ）。
     exit_observed: bool,
-    /// 検知した exit code（Exit イベント処理で保持）。
     exit_code: Option<i32>,
-    /// 異常終了検知時に保持する失敗状態サマリ（run_status_summary + エラーログ末尾）。
     failure_summary: Option<String>,
-    /// 履歴ビューペイン（タスク5・UC-1/UC-2: 一覧・選択・再実行/中止）。
-    /// runner_ui.rs の履歴セクション描画からの参照のため pub(crate)。
     pub(crate) history_panel: HistoryPanel,
-    /// 設定タブロジック（Issue #125 shard 3: 保存/読込の単一実装）。
-    /// runner_ui.rs の設定ビュー描画からの参照のため pub(crate)。
     pub(crate) settings_tab: crate::settings::SettingsTab,
-    /// 設定ファイルパス（settings.rs の解決。テストでは差し替え）。
-    /// runner_ui.rs の設定ビュー描画からの参照のため pub(crate)。
     pub(crate) settings_path: PathBuf,
 }
 
 impl PipelineRunnerApp {
-    /// プログラム名を指定して生成する（テスト・明示指定用）。
     pub fn new(program: impl Into<String>) -> Self {
         Self::with_channel(program, None)
     }
 
-    /// `anaden` バイナリを明示パス解決して生成する（main.rs 用）。
-    /// 解決失敗時は PATH の "anaden" にフォールバックし、エラーを保持する。
     pub fn with_resolved_anaden() -> Self {
         let (program, err) = resolve_anaden_program();
         Self::with_channel(program, err)
     }
 
-    /// テスト用: 解決失敗状態をシミュレートする（起動を試みると即エラー）。
     #[cfg(test)]
     fn unresolved(message: &str) -> Self {
         Self::with_channel(
@@ -466,8 +282,6 @@ impl PipelineRunnerApp {
     }
 
     fn with_channel(program: impl Into<String>, resolution_error: Option<String>) -> Self {
-        // ログチャネル: reader スレッドが try_send で送り、UI が drain する。
-        // UI が受信しなくても reader は行を破棄して継続する（best-effort）。
         let (log_tx, log_rx) = std::sync::mpsc::sync_channel::<LogEvent>(LOG_CHANNEL_CAPACITY);
         Self {
             child: ChildProcess::new(),
@@ -500,7 +314,6 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// 現在の状態。
     pub fn status(&mut self) -> RunnerStatus {
         if self.child.is_running() {
             RunnerStatus::Running
@@ -509,26 +322,16 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// 選択サマリのキャッシュ（UI 表示用・テストから参照）。
     pub fn strategy_summary(&self) -> &str {
         &self.strategy_summary
     }
 
-    /// 選択変更をパネルから受け取る（`StrategyPanel::ui()` の changed フラグを
-    /// 受けてサマリ/引数プレビューを再計算する）。
     pub fn on_strategy_changed(&mut self, changed: bool) {
         if changed {
             self.strategy_summary = self.strategy_panel.summary();
         }
     }
 
-    /// 開始ボタンのハンドラ（選択から引数を組み立てる・UC-4 拒否込み）。
-    ///
-    /// 1. `strategy_panel.validate()` でカタログ整合性を検証
-    /// 2. `build_run_args` で `anaden run` 引数列を組み立て
-    /// 3. `start_pipeline` で子プロセス起動
-    ///
-    /// 検証失敗（未選択/カタログ外）は起動せずエラーを記録する。
     pub fn start_pipeline_with_selection(&mut self) {
         self.last_error = None;
         if let Err(e) = self.strategy_panel.validate() {
@@ -537,8 +340,6 @@ impl PipelineRunnerApp {
         }
         match build_run_args(self.strategy_panel.selection()) {
             Ok(args) => {
-                // Issue #139 T2: pipeline ディレクトリを workspace ルート基準の
-                // 絶対パスへ決定論的に解決（cwd 依存を除去）。
                 let resolved = resolve_pipeline_arg(&args, &workspace_root());
                 self.start_pipeline(&resolved);
             }
@@ -546,26 +347,12 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// 開始ボタンのハンドラ。二重起動は childproc 層で防止され、エラーは
-    /// UI 表示用に保持されるとともにログへ ERROR 行として記録される
-    /// （UC-3: 起動失敗時にエラー行がログに表示される）。
     pub fn start_pipeline(&mut self, args: &[String]) {
-        // 通常 (strategy) 実行: evidence run-id は発行しない
-        // (Issue #204: ラベル・run-id の発行は start_request に集約)。
         self.start_request(RunRequest::Strategy {
             args: args.to_vec(),
         });
     }
 
-    /// ルーチン実行ボタンのハンドラ (Issue #199)。
-    ///
-    /// 選択中の routine を `anaden routine <path>` 子プロセスとして起動する
-    /// (引数列は [`crate::routine_ui::build_routine_args`] の単一実装)。
-    /// 履歴ラベルは `routine:\<name\>` (strategy 実行と区別)。
-    /// evidence 採取チェック ON (既定・Issue #202 UC-1) のとき
-    /// `--evidence-run-id routine-<timestamp>` を付与し、run-id を履歴詳細に
-    /// 残す (`.omc/logs/{run-id}/` の証跡を追跡可能にする)。
-    /// 未選択時は起動せずエラーを記録する (UC-4 と同じ事前拒否パターン)。
     pub fn start_routine(&mut self) {
         self.last_error = None;
         let Some(path) = self.routine_panel.selected_path().map(Path::to_path_buf) else {
@@ -586,15 +373,6 @@ impl PipelineRunnerApp {
         });
     }
 
-    /// 起動要求を spawn し、成功時に再実行用・履歴用の状態を記録する
-    /// (start_pipeline / start_routine / rerun_pipeline の単一経路 — Issue #204)。
-    ///
-    /// - evidence run-id は `RunRequest::build_spawn` が spawn のたびに新規発行し、
-    ///   成功時にのみ `pending_evidence_run_id` へ保持する (spawn 失敗時の残存
-    ///   = stale 付与を構造的に排除。再実行も本経路を通るため旧 run-id の
-    ///   使い回しがない)。
-    /// - 履歴ラベルは routine 実行のみ `routine:\<name\>`、それ以外は
-    ///   strategy 選択から採る。
     fn start_request(&mut self, request: RunRequest) {
         self.last_error = None;
         if let Some(e) = self.resolution_error.clone() {
@@ -602,8 +380,6 @@ impl PipelineRunnerApp {
             return;
         }
         self.reset_run_tracking();
-        // 前回実行の清算 (履歴へ take されなかった pending の掃き出し —
-        // Issue #204: rerun が清算点をバイパスしない単一経路化の要)。
         self.pending_evidence_run_id = None;
         self.pending_report_path = None;
         self.pending_report_kind = PendingReportKind::Run;
@@ -621,9 +397,6 @@ impl PipelineRunnerApp {
         self.run_strategy = label.or_else(|| self.strategy_panel.selection().strategy.clone());
     }
 
-    /// 実行追跡状態をリセット（次実行に備える）。
-    /// `pending_evidence_run_id` は対象外 (start_request が清算し
-    /// append_history_record が take する)。
     fn reset_run_tracking(&mut self) {
         self.run_started_at = None;
         self.run_strategy = None;
@@ -632,12 +405,6 @@ impl PipelineRunnerApp {
         self.failure_summary = None;
     }
 
-    /// 再実行ボタンのハンドラ（UC-1: 停止待ち → 同一起動要求で再 spawn）。
-    ///
-    /// 実行中は何もせずエラーを記録。直前の起動要求が無い場合もエラー。
-    /// routine 実行の再実行は `RunRequest::build_spawn` 経由で新しい evidence
-    /// run-id を発行する (Issue #204: 旧 run-id の `.omc/logs/<run-id>/` 上書き
-    /// と再実行分履歴への run-id 未記録を解消)。
     pub fn rerun_pipeline(&mut self) {
         self.last_error = None;
         if self.child.is_running() {
@@ -648,21 +415,16 @@ impl PipelineRunnerApp {
             self.record_error_line("再実行可能な実行履歴がありません（先に開始してください）");
             return;
         };
-        // 終了済み子の後始末（Exit drain 前でも stop は Ok を返す契約）。
         let _ = self.child.stop();
         self.start_request(request);
     }
 
-    /// 停止ボタンのハンドラ。エラーは UI 表示用に保持するとともにログへ記録。
     pub fn stop_pipeline(&mut self) {
         self.last_error = None;
         if let Err(e) = self.child.stop() {
             self.record_error_line(&e.to_string());
             return;
         }
-        // ユーザー操作による中止として履歴へ記録（exit code は採取不能扱い）。
-        // 自然終了を Exit イベントで既に観測済みなら二重記録しない。
-        // kill された子は report を書かないため pending report も清算する。
         if !self.exit_observed {
             self.pending_report_path = None;
             self.pending_report_kind = PendingReportKind::Run;
@@ -670,30 +432,17 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// エラーを last_error とログ（ERROR レベル行）の両方へ記録する。
     fn record_error_line(&mut self, message: &str) {
         self.last_error = Some(message.to_string());
         self.push_log_line(&format!("ERROR {message}"));
     }
 
-    /// ログバッファへ直接 1 行 push しスナップショットを更新する
-    /// （レベルは LogLevel::from_line で推定される）。
     fn push_log_line(&mut self, line: &str) {
         let line = line.to_string();
         self.log.with_buf(|b| b.push_line(&line));
         self.refresh_snapshot();
     }
 
-    /// チャネルを drain してログスナップショットを更新する（UI 毎フレーム呼出）。
-    ///
-    /// 行の記録は log_view::drain_channel_into (Issue #154 Shard 1 で app.rs
-    /// タスクキューと共有化したヘルパ) に委譲する。
-    ///
-    /// `LogEvent::Exit` を観測した場合:
-    /// - exit code を保持し、異常終了（非零 / 不明）なら失敗状態サマリ
-    ///   （run_status_summary + エラーログ末尾）を保持する（UC-3）
-    /// - 履歴へ RunRecord を追記する（[`history::classify_outcome`]: exit 0 は
-    ///   report 停止理由ベースで Success / BudgetExhausted、非零・不明は Failed）
     pub fn drain_logs(&mut self) {
         let (_new_lines, observed) = crate::log_view::drain_channel_into(&self.log, &self.log_rx);
         let exit_seen = observed.is_some();
@@ -706,8 +455,6 @@ impl PipelineRunnerApp {
             if failed {
                 self.failure_summary = Some(self.build_failure_summary());
             }
-            // 03-report-channel: run レポート (report.json) を第一ソースとして
-            // 読み込む (読込失敗・未生成 = None なら stdout 解析結果を維持)。
             let report = self.load_pending_report();
             match &report {
                 Some(LoadedReport::Run(r)) => {
@@ -718,12 +465,6 @@ impl PipelineRunnerApp {
                 }
                 None => {}
             }
-            // 履歴 Record 追記。成否分類は report 停止理由ベース
-            // (04-studio-maxiters-outcome / F6): exit 0 でも成果ゼロの
-            // MaxIterations 打ち切りは BudgetExhausted として記録する。
-            // routine 実行は no_fire 等の失敗が exit 非零に集約されるため
-            // exit code のみで分類する (report 無しと同一の classify)。
-            // 中止は stop_pipeline 側。
             let run_report = report.as_ref().and_then(|r| match r {
                 LoadedReport::Run(r) => Some(r),
                 LoadedReport::Routine(_) => None,
@@ -733,14 +474,6 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// pending の run/routine レポート (report.json) を読み込む (03-report-channel)。
-    ///
-    /// 種別 (`pending_report_kind`) に応じて `ProgressReport` (strategy 実行) か
-    /// `RoutineSummary` (routine 実行) のどちらかへパースする。
-    /// 未設定 (旧 anaden バイナリ)・不在・破損は [`None`]
-    /// (stdout 行解析 = フォールバック経路を維持)。破損時のみ WARN 行を
-    /// ログへ残し、静黙を避ける。読み取ったパスは take で清算する
-    /// (二重消費・stale 保持の排除 — Issue #204 と同一方針)。
     fn load_pending_report(&mut self) -> Option<LoadedReport> {
         let path = self.pending_report_path.take()?;
         let kind = self.pending_report_kind;
@@ -766,7 +499,6 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// 失敗状態サマリ（状態 + エラーログ末尾）を組み立てる純ロジック。
     fn build_failure_summary(&self) -> String {
         let status = self.run_status_summary();
         let error_tail: Vec<String> = self
@@ -790,11 +522,6 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// 履歴へ RunRecord を追記する（委譲: history.rs）。
-    /// routine 実行の evidence run-id を保持していたら record へ付与する。
-    /// レポート (`report`) が読めていれば停止理由ラベルと発火回数を
-    /// record へ付与する (03-report-channel。run は stop_reason ラベル・
-    /// routine は全体成否ラベル)。
     fn append_history_record(
         &mut self,
         outcome: RunOutcome,
@@ -818,16 +545,10 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// 異常終了検知時に保持した失敗状態サマリ（未検知/正常時は None）。
     pub fn failure_summary(&self) -> Option<&str> {
         self.failure_summary.as_deref()
     }
 
-    /// UI 描画用スナップショットを最新化する (Issue #160 UC-5: 差分更新)。
-    ///
-    /// 従来は毎フレームバッファ全行 (上限 5000 行) を clone していた。
-    /// 現在は [`SharedLogBuffer::changed_entries`] で改訂番号を比較し、
-    /// バッファが変化したフレームのみ複製する。内容の契約は不変。
     fn refresh_snapshot(&mut self) {
         if let Some((rev, entries)) = self.log.changed_entries(self.log_revision) {
             self.log_revision = rev;
@@ -835,38 +556,25 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// ログをクリアする（クリアボタンのハンドラ）。
-    ///
-    /// clear も改訂番号を進めるため、続く `Self::refresh_snapshot` は
-    /// 空スナップショットへ更新される (Issue #160 UC-5 で差分化しても
-    /// 「クリア後に古い行が残る」ことがない構造)。
     pub fn clear_logs(&mut self) {
         self.log.with_buf(LogBuffer::clear);
         self.refresh_snapshot();
     }
 
-    /// 現在のログスナップショット（昇順・UI 描画とテストで使用）。
     pub fn log_snapshot(&self) -> &[LogEntry] {
         &self.log_snapshot
     }
 
-    /// 実行状態サマリの一行文字列（UI ステータスバー表示用・ヘッドレス）。
-    ///
-    /// LogBuffer.status (RunStatus) を refresh_snapshot と同じタイミングで
-    /// 読み取り、summary() を返す。未観測時は "未実行"。
     pub fn run_status_summary(&self) -> String {
         self.log
             .with_buf(|b| b.status.summary())
             .unwrap_or_else(|| "未実行".to_string())
     }
 
-    /// 直近のエラーメッセージ(無ければ None)。
     pub fn last_error(&self) -> Option<&str> {
         self.last_error.as_deref()
     }
 
-    /// 履歴ペインのアクション要求を消費して実行に反映する
-    /// （タスク5・UC-1/UC-2: 再実行/中止/設定保存/設定読込。毎フレーム ui() から呼ぶ）。
     pub fn handle_history_actions(&mut self) {
         while let Some(action) = self.history_panel.take_action() {
             match action {
@@ -878,32 +586,19 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// 履歴パネルの参照（テスト用）。
     pub fn history_panel(&self) -> &HistoryPanel {
         &self.history_panel
     }
 
-    /// 履歴パネルの可変参照（テスト用: アクション注入）。
     pub fn history_panel_mut(&mut self) -> &mut HistoryPanel {
         &mut self.history_panel
     }
 
-    /// 設定を settings_path へ保存する（設定ビュー・履歴ペイン共用の単一実装）。
-    ///
-    /// 選択中戦略を `StudioSettings` として保存し、結果は `SettingsTab` の
-    /// ステータスに記録される（UC-2: 失敗しても GUI 継続）。
-    /// runner_ui.rs の設定ビュー描画からの参照のため pub(crate)。
     pub(crate) fn save_settings_to_path(&mut self) {
         self.settings_tab
             .save(self.strategy_panel.selection(), &self.settings_path);
     }
 
-    /// settings_path から設定を読み込み戦略パネルへ反映する
-    /// （設定ビュー・履歴ペイン共用の単一実装）。
-    ///
-    /// 読込成功時はサマリも再計算する。ファイル不在・破損 (初回起動) は
-    /// UC-2 フォールバックとして既定値を維持しエラー表示しない。
-    /// runner_ui.rs の設定ビュー描画からの参照のため pub(crate)。
     pub(crate) fn load_settings_from_path(&mut self) {
         if let Some(selection) = self.settings_tab.load(&self.settings_path)
             && self
@@ -915,21 +610,17 @@ impl PipelineRunnerApp {
         }
     }
 
-    /// 設定 I/O の直近結果（テスト用）。
     pub fn settings_status(&self) -> &crate::settings::SettingsTabStatus {
         self.settings_tab.status()
     }
 }
 
-/// 読み込んだ選択を StrategyPanel へ渡すための TOML 文字列化
-/// （serde 失敗時は空文字列 → load_toml が Err となるため無視される）。
 fn selection_to_toml(selection: &anaden_strategies::StrategySelection) -> String {
     toml::to_string(selection).unwrap_or_default()
 }
 
 impl Drop for PipelineRunnerApp {
     fn drop(&mut self) {
-        // ChildProcess の kill_on_drop に加え、明示的に停止を試みる。
         self.stop_pipeline();
     }
 }

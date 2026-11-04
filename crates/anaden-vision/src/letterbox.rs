@@ -1,66 +1,20 @@
-//! レターボックス（黒帯）検出・クロップ。
-//!
-//! PC版 Live キャプチャはウィンドウサイズ・DPI に依存して描画領域(16:9)の周囲に
-//! 黒帯（ピラーボックス=左右 / レターボックス=上下）が入ることがある。
-//! テンプレートは描画領域(16:9)の生ピクセル空間で定義されているため、
-//! 黒帯込みでマッチさせるとスケールがズレて NoMatch になる。
-//!
-//! `crop_to_content` は上下左右の端から「行/列の平均輝度 < 閾値」の**連続する**端領域を
-//! 検出し、中央の描画領域をクロップする。黒帯がなければ元画像をそのまま返す。
-//!
-//! 設計上の安全弁:
-//! - 端から連続する黒行/列のみを削る（ゲーム画面内部の暗部は誤判定しない）。
-//! - **2段階検出**: まず行平均で上下黒帯を検出し、その後「上下黒帯を除いた行範囲」で
-//!   列平均を再計算して左右黒帯を検出する。これによりレターボックス時に左右端の列平均が
-//!   上下黒帯で汚染される相互汚染を防ぐ（逆方向も同様）。
-//! - 黒帯境界のアンチエイリアスを吸収するため、検出された黒帯幅から
-//!   [`MARGIN_PX`] だけ内側へ縮める余白を設ける。
-//! - クロップ結果が描画領域を破壊しないよう、最小寸法 [`MIN_CONTENT_PX`] を下回る場合は
-//!   クロップを行わず元画像を返す（フォールバック）。
-//! - **キャンバス アスペクト保護 (Issue #212)**: [`crop_to_canvas_with_info`] は
-//!   クロップ結果のアスペクト比が 16:9 ([`CANVAS_ASPECT`]) から
-//!   [`CANVAS_ASPECT_TOLERANCE`] 以内に収まるときのみクロップを受理する。
-//!   「キャンバス内部の黒」(起動途中フレームの未描画領域・実測 1952x1098 の下 521 行)
-//!   を黒帯と誤判定して幾何 (アスペクト → roi の Y マッピング) を破壊するのを防ぐ。
-
 use image::{DynamicImage, GenericImageView, ImageBuffer, Rgb};
 
-/// 黒帯判定の行/列平均輝度閾値。Y=0.299R+0.587G+0.114B。
-/// 真っ黒(0)〜ほぼ黒(8)までを黒帯とみなす。ゲーム描画領域の暗部は
-/// 「端から連続」でなければ検出されないので、この閾値で実用上十分。
 pub const BLACK_BAR_LUMINANCE_THRESHOLD: f64 = 8.0;
 
-/// 黒帯境界のアンチエイリアス吸収用余白（ピクセル）。
-/// 検出された黒帯幅からこの分だけ内側へ縮めることで、半透明境界画素を描画領域に残さない。
 pub const MARGIN_PX: u32 = 2;
 
-/// クロップ後の最小寸法（ピクセル）。これを下回る黒帯検出は異常とみなしフォールバック。
 pub const MIN_CONTENT_PX: u32 = 64;
 
-/// 黒帯除去後の描画領域（コンテンツ）の、**元画像（黒帯込み生幅）空間における位置と寸法**。
-///
-/// `crop_to_content_with_info` が返す。`offset_x`/`offset_y` は元画像左上を原点とした
-/// コンテンツ領域左上のピクセル座標、`width`/`height` はコンテンツ領域の寸法。
-/// 黒帯が無ければ `offset=(0,0)`・`size=元画像寸法` になる（=クロップ対象なし）。
-///
-/// 発火座標の逆変換（normalize後1280空間 → 実機生画像）に用いる:
-/// 入力画像は normalize でコンテンツ領域を 1280 幅へ拡大されるため、1280 空間の座標を
-/// 元画像（黒帯込み）へ戻すには `x_real = x_1280 * width / 1280 + offset_x` のように
-/// コンテンツ領域内でスケールした上で黒帯オフセット分を平行移動させる必要がある。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub struct CropInfo {
-    /// 元画像（黒帯込み）左上を原点とした、コンテンツ領域左上の X 座標。
     pub offset_x: u32,
-    /// 元画像（黒帯込み）左上を原点とした、コンテンツ領域左上の Y 座標。
     pub offset_y: u32,
-    /// コンテンツ領域（黒帯除去後描画領域）の幅。
     pub width: u32,
-    /// コンテンツ領域（黒帯除去後描画領域）の高さ。
     pub height: u32,
 }
 
 impl CropInfo {
-    /// コンテンツ領域が元画像全体と一致する（黒帯なし）CropInfo を作る。
     pub fn full(w: u32, h: u32) -> Self {
         Self {
             offset_x: 0,
@@ -71,35 +25,10 @@ impl CropInfo {
     }
 }
 
-/// `img` の上下左右の黒帯を検出し、中央の描画領域をクロップして返す。
-///
-/// 黒帯（平均輝度 < `BLACK_BAR_LUMINANCE_THRESHOLD` の端から連続する行/列）が
-/// 上下・左右いずれにも存在しない場合は、元画像を複製して返す。
-///
-/// # 引数
-/// - `img`: 入力画像（任意のピクセル形式。内部で RGB8 に変換して処理）。
-///
-/// # 戻り値
-/// 黒帯が除去された描画領域画像。入力が空(0x0)の場合は入力の複製を返す。
-///
-/// 黒帯除去後の元画像空間における位置・寸法（[`CropInfo`]）も必要な場合は
-/// [`crop_to_content_with_info`] を使うこと（発火座標の逆変換等）。
 pub fn crop_to_content(img: &DynamicImage) -> DynamicImage {
     crop_to_content_with_info(img).0
 }
 
-/// [`crop_to_content`] に加え、クロップ後描画領域の元画像空間における位置・寸法（[`CropInfo`]）も返す。
-///
-/// 戻り値は `(クロップ後画像, CropInfo)`。`CropInfo` は:
-/// - 黒帯あり → コンテンツ領域の左上オフセット（`offset_x`/`offset_y`）と寸法。
-/// - 黒帯なし → `offset=(0,0)`, `size=元画像寸法`（[`CropInfo::full`]）。
-/// - フォールバック（全面黒等で残りが `MIN_CONTENT_PX` 未満）→ 元画像寸法で `offset=(0,0)`。
-/// - 入力が空(0x0) → `(0,0,0,0)`。
-///
-/// この `CropInfo` は発火座標の逆変換（normalize後1280空間 → 元画像＝黒帯込み生画像）に
-/// 必要。入力画像は [`crate::scale::ScreenScaler::normalize`] でコンテンツ領域が1280幅へ
-/// 拡大されるため、1280空間の座標を元画像へ戻すにはコンテンツ領域内でスケールした上で
-/// `offset` 分の平行移動が必要となる。
 pub fn crop_to_content_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo) {
     let (w, h) = img.dimensions();
     if w == 0 || h == 0 {
@@ -108,34 +37,27 @@ pub fn crop_to_content_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo)
 
     let rgb = img.to_rgb8();
 
-    // 第1段階: 行平均（全幅）で上下黒帯を検出。
     let row_means = axis_mean_luminance(&rgb, Axis::Row, 0, w);
     let top = leading_black_count(&row_means, BLACK_BAR_LUMINANCE_THRESHOLD);
     let bottom = trailing_black_count(&row_means, BLACK_BAR_LUMINANCE_THRESHOLD);
 
-    // 第2段階: 上下黒帯を除いた行範囲 [top..h-bottom) で列平均を再計算し、左右黒帯を検出。
-    // これによりレターボックス時に左右端の列平均が上下黒帯で汚染されるのを防ぐ。
     let row_lo = top;
     let row_hi = h.saturating_sub(bottom);
     let col_means = axis_mean_luminance(&rgb, Axis::Col, row_lo, row_hi);
     let left = leading_black_count(&col_means, BLACK_BAR_LUMINANCE_THRESHOLD);
     let right = trailing_black_count(&col_means, BLACK_BAR_LUMINANCE_THRESHOLD);
 
-    // 余白を内側へ寄せる（アンチエイリアス吸収）。黒帯が検出された場合のみ、その幅に
-    // MARGIN_PX を足して境界の半透明画素を描画領域に残さない。黒帯未検出(0)なら 0。
     let crop_top = margin_offset(top, h);
     let crop_bottom = margin_offset(bottom, h);
     let crop_left = margin_offset(left, w);
     let crop_right = margin_offset(right, w);
 
-    // 残り幅/高さが最小寸法を下回るなら異常（黒画面等）→ フォールバック。
     let remaining_w = w.saturating_sub(crop_left + crop_right);
     let remaining_h = h.saturating_sub(crop_top + crop_bottom);
     if remaining_w < MIN_CONTENT_PX || remaining_h < MIN_CONTENT_PX {
         return (img.clone(), CropInfo::full(w, h));
     }
 
-    // 黒帯が一切検出されなければクロップ不要 → 複製を返す（アロケーション節約は呼び出し側で可）。
     if crop_top == 0 && crop_bottom == 0 && crop_left == 0 && crop_right == 0 {
         return (img.clone(), CropInfo::full(w, h));
     }
@@ -156,21 +78,12 @@ pub fn crop_to_content_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo)
     (DynamicImage::ImageRgb8(cropped), info)
 }
 
-/// 平均輝度の集計軸。
 #[derive(Clone, Copy)]
 enum Axis {
-    /// 行方向: 各行 (y) の平均を取る。列範囲 `[lo, hi)` に限定
-    /// (旧 `row_mean_luminance` — `lo=0, hi=w` で全幅の行平均)。
     Row,
-    /// 列方向: 各列 (x) の平均を取る。行範囲 `[lo, hi)` に限定
-    /// (旧 `col_mean_luminance` — 上下黒帯除外範囲で列平均を取り
-    /// 相互汚染を防ぐ)。
     Col,
 }
 
-/// 指定軸の平均輝度を計算する。`Row` は行ごと (列範囲限定)、`Col` は
-/// 列ごと (行範囲限定)。f64 の加算順序は統合前の行/列それぞれの実装と
-/// 同一 (左から右への逐次加算 = bit-identical)。
 fn axis_mean_luminance(
     rgb: &ImageBuffer<Rgb<u8>, Vec<u8>>,
     axis: Axis,
@@ -203,7 +116,6 @@ fn axis_mean_luminance(
         .collect()
 }
 
-/// 先頭（インデックス 0..）から連続する黒要素の個数を返す。
 fn leading_black_count(means: &[f64], threshold: f64) -> u32 {
     let mut count = 0u32;
     for &m in means {
@@ -216,7 +128,6 @@ fn leading_black_count(means: &[f64], threshold: f64) -> u32 {
     count
 }
 
-/// 末尾（インデックス len-1..）から連続する黒要素の個数を返す。
 fn trailing_black_count(means: &[f64], threshold: f64) -> u32 {
     let mut count = 0u32;
     for &m in means.iter().rev() {
@@ -229,9 +140,6 @@ fn trailing_black_count(means: &[f64], threshold: f64) -> u32 {
     count
 }
 
-/// 検出された黒帯幅 `bar` に [`MARGIN_PX`] の余白を加えたクロップ量を返す。
-/// 黒帯が検出されていない（`bar == 0`）場合は余白も加えず 0 を返す（黒帯なし画像を誤って削らない）。
-/// 結果は `max`（画像の高さ/幅）でクランプする。
 fn margin_offset(bar: u32, max: u32) -> u32 {
     if bar == 0 {
         0
@@ -240,48 +148,16 @@ fn margin_offset(bar: u32, max: u32) -> u32 {
     }
 }
 
-/// ゲーム描画領域 (キャンバス) の期待アスペクト比 (16:9)。
-///
-/// PC 版実測クライアント領域 1258x708 (=1.7768) も 16:9 (=1.7778) との差 0.06% で
-/// 本定数の許容誤差内に収まる。
 pub const CANVAS_ASPECT: f64 = 16.0 / 9.0;
 
-/// [`CANVAS_ASPECT`] に対するクロップ受理許容誤差 (相対・5%)。
-///
-/// 実測の健全なクロップ結果は 0.6% 以内 (1952x1098 の左 8px 黒帯除去後 1942x1098 =
-/// 1.7685・16:9 比 +0.52%) に収まる。一方 **キャンバス内部の黒** (起動途中の未描画
-/// 領域・暗画面) を誤って黒帯扱いしたクロップは大きく崩れる (1952x1098 の下 521 行が
-/// 黒 → 1952x577 = 3.373・+89.6%)。5% はこの 2 群を弁別する十分広い閾値。
 pub const CANVAS_ASPECT_TOLERANCE: f64 = 0.05;
 
-/// [`crop_to_content_with_info`] に **キャンバス アスペクト保護** を加えたクロップ。
-///
-/// Issue #212 の根因対策: `crop_to_content_with_info` は「端から連続する黒行/列」を
-/// 黒帯として除去するが、黒帯と **キャンバス内部の黒** (起動途中フレームの未描画下半分、
-/// 暗いロード画面の黒帯状余白等) を区別できない。内部の黒を除去すると:
-///
-/// - クロップ後寸法のアスペクト比が 16:9 から大きく崩れ (実測: 1952x1098 → 1952x577 = 3.373)、
-/// - normalize 後の縦スケールが崩壊し (1280x720 になるべきが 1280x378)、
-/// - `roi_to_normalized` の Y マッピングが約 0.53 倍に圧縮されて roi 窓が外れ、
-/// - needle も縦に圧縮されるため全文探索でもマッチしない (NoMatch)。
-///
-/// 本関数はクロップ結果のアスペクト比が [`CANVAS_ASPECT`] から [`CANVAS_ASPECT_TOLERANCE`]
-/// 以内に収まるときのみクロップを受理し、大きく外れる場合は **クロップを棄却して元画像
-/// 全体** (=`CropInfo::full`) を返す。棄却時も座標系 (全面 = キャンバス) は保たれるため、
-/// roi/needle のスケールは正しいまま「マッチしない」判定だけが残る (= 未描画フレームに
-/// 対する正しい挙動。リトライ/リカバリに委ねる)。
-///
-/// 黒帯が検出されなかった・フォールバックしたケースは [`crop_to_content_with_info`]
-/// と同一の結果 (元画像 + full) を返す。
 pub fn crop_to_canvas_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo) {
     let (w, h) = img.dimensions();
     let (cropped, info) = crop_to_content_with_info(img);
-    // クロップが実質働いていない (黒帯なし / フォールバック / 空画像) はそのまま。
     if info.offset_x == 0 && info.offset_y == 0 && info.width == w && info.height == h {
         return (cropped, info);
     }
-    // クロップ結果がキャンバスアスペクトを保っているか。保っていなければ内部黒の
-    // 誤検出 (幾何破壊) として棄却し、元画像全体 (= キャンバス) を使う。
     if info.height == 0 {
         return (img.clone(), CropInfo::full(w, h));
     }

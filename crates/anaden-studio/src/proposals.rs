@@ -1,57 +1,23 @@
-//! ROI自動提案（純関数）。
-//!
-//! 単一スクリーンショットをタイル分割し、各タイルを VisionEngine::score_map で
-//! 「画面中のどこにマッチするか」の信頼度マップに変換。その peakiness（尖り度）で
-//! 「画面中で鋭く1箇所にだけマッチする＝良いテンプレート候補」を判定する。
-//!
-//! collector.rs の「安定=識別」アンチパターンと違い、peakiness は
-//! 一様にマッチする背景やどこにもマッチしないノイズを弾く。
-//!
-//! 設計の核心（rationale 要約）:
-//! - 鋭い特徴が1箇所: max≈255, median≈低 → value 大 → 採用。
-//! - 一様背景（背景色タイル）: max≈median → value≈0 → MIN_PEAKINESS で弾く。
-//! - ノイズ/弱特徴: max 自体が低い → MIN_ABS_CONF で弾く。
-
 use anaden_core::ScreenRegion;
 use anaden_vision::VisionEngine;
 use image::DynamicImage;
 
-/// peakiness の最低値。これ未満は候補に出さない（一様マッチ/ノイズ除外）。
 const MIN_PEAKINESS: f32 = 0.30;
-/// 最良マッチの最低信頼度(0-255スケール)。自己位置で弱くしかマッチしないなら除外。
-/// ≒0.80（204/255）。
 const MIN_ABS_CONF: u8 = 204;
 
-/// 提案されたROI候補1件。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct Proposal {
-    /// 候補領域（元画像ピクセル座標）。
     pub roi: ScreenRegion,
-    /// peakiness スコア（0.0〜1.0 相当。高いほど鋭く1箇所にマッチ）。
-    /// = score_map の max 信頼度を門前で足切りした上での (max - median) / 255。
     pub score: f32,
 }
 
-/// score_map から計算した尖り度。
-///
-/// `peak` は本番の propose では読まないが、テストでピーク位置を検証するため保持する。
 struct Peakiness {
-    /// 尖り度 = (max - median) / 255。0.0〜1.0。
-    /// max が高く median が低いほど大きい（=画面中で1箇所だけ鋭くマッチ）。
     value: f32,
-    /// 最も信頼度の高い位置（score_map 空間・ダウンスケール済座標）。
     #[allow(dead_code)]
     peak: (u32, u32),
-    /// 最良マッチの信頼度（0-255）。絶対値ガード用。
     max_confidence: u8,
 }
 
-/// score_map から peakiness とピーク位置を計算する。
-///
-/// 計算手順（1パスで max 探索 + 全値収集、その後中央値）:
-/// 1. 全ピクセル値を収集しつつ max 値と座標を追跡（app.rs の max 走査と同じパターン）。
-/// 2. ソートし、中央値を下側中央で近似。
-/// 3. value = (max - median) / 255。
 fn peakiness_and_peak(map: &image::GrayImage) -> Peakiness {
     let mut values: Vec<u8> = Vec::with_capacity((map.width() as usize) * (map.height() as usize));
     let mut peak = (0u32, 0u32);
@@ -66,7 +32,6 @@ fn peakiness_and_peak(map: &image::GrayImage) -> Peakiness {
             }
         }
     }
-    // 空マップは起こり得ない（score_map は常に 1x1 以上）が、安全ガード。
     if values.is_empty() {
         return Peakiness {
             value: 0.0,
@@ -85,21 +50,6 @@ fn peakiness_and_peak(map: &image::GrayImage) -> Peakiness {
     }
 }
 
-/// 単一スクリーンショットから候補ROIを提案する。
-///
-/// 引数:
-/// - `engine`: 閾値0・適度なダウンスケール（1/4 推奨）の VisionEngine。
-///   score_map が返す GrayImage の画素値は信頼度(0-255)。
-/// - `screenshot`: 編集中のスクリーンショット。
-/// - `tile_w`, `tile_h`: タイルサイズ（ピクセル）。
-/// - `step`: タイル並べの刻み（ピクセル）。tile と同値でノーオーバーラップ。
-/// - `max_n`: 返す候補の最大数。score 降順で上位を返す。
-///
-/// 返り値: `Proposal` の Vec（score 降順）。score が MIN_PEAKINESS 未満・
-/// max_confidence が MIN_ABS_CONF 未満のタイルは除外される。
-///
-/// 計算量: タイルごとに score_map を1回呼ぶ。
-/// タイル数 = ((W-tile_w)/step+1) × ((H-tile_h)/step+1)。
 pub fn propose(
     engine: &dyn VisionEngine,
     screenshot: &DynamicImage,
@@ -110,7 +60,6 @@ pub fn propose(
 ) -> Vec<Proposal> {
     let step = step.max(1);
     let (w, h) = (screenshot.width(), screenshot.height());
-    // タイルが画像より大きければ候補なし。
     if tile_w == 0 || tile_h == 0 || tile_w > w || tile_h > h {
         return vec![];
     }
@@ -123,24 +72,18 @@ pub fn propose(
         while x + tile_w <= w {
             let needle = screenshot.crop_imm(x, y, tile_w, tile_h);
             let Some(map) = engine.score_map(screenshot, &needle) else {
-                // タイルが大きすぎる等でマップ不可 → スキップ。
                 x += step;
                 continue;
             };
             let pk = peakiness_and_peak(&map);
-            // 絶対値ガード: 自己位置で弱くしかマッチしない候補は除外。
             if pk.max_confidence < MIN_ABS_CONF {
                 x += step;
                 continue;
             }
-            // 尖り度ガード: 一様マッチ（背景）は除外。
             if pk.value < MIN_PEAKINESS {
                 x += step;
                 continue;
             }
-            // 候補 ROI は元のタイル位置 (x,y,tile_w,tile_h) のまま。
-            // ※理由: score_map のピークは自己相関でタイル自身の位置にほぼ一致するため、
-            //   候補ROI=タイル矩形でよく、ユーザーが編集する両端として直感的。
             out.push(Proposal {
                 roi: ScreenRegion::new(x, y, tile_w, tile_h),
                 score: pk.value,
@@ -150,7 +93,6 @@ pub fn propose(
         y += step;
     }
 
-    // score 降順でソートし max_n で打ち切り。
     out.sort_by(|a, b| {
         b.score
             .partial_cmp(&a.score)

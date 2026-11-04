@@ -1,41 +1,14 @@
-//! 実演オーサリング (Issue #190 Shard 2/3) の座標変換純関数群。
-//!
-//! egui 非依存 (egui::Pos2/Rect を持ち込まずプレーンな数値で表現) で、
-//! 以下の 4 座標空間の変換を単体テスト可能にする ([`crate::canvas::show`] の
-//! インライン変換を抽出・一般化したもの):
-//!
-//! | 空間 | 表現 | 由来 |
-//! |------|------|------|
-//! | ウィジェット | `(f32, f32)` | ライブビュー描画矩形内の位置 (egui 画面座標) |
-//! | フレームピクセル | `(u32, u32)` | 表示フレーム (= 正規化後スクリーンショット) のピクセル |
-//! | 正規化 | `(f32, f32)` | 幅 [`BASE_WIDTH`] (1280) 基準 — TaskDef ROI の定義空間 |
-//! | クライアント | `(i32, i32)` | SendInput 注入用・対象ウィンドウ左上原点の物理 px |
-//!
-//! 正規化は [`anaden_vision::ScreenScaler`] と同じ「幅基準の単一ファクタ」(縦横同一倍率) で
-//! あるため、逆変換も単一ファクタで厳密に戻る。PC版キャプチャはクライアント
-//! 領域をそのまま撮る (GetClientRect 寸法 = 生フレーム寸法) ため、正規化空間 ↔
-//! クライアント空間の往復で元の実ピクセル座標が復元される。
-
 use anaden_vision::BASE_WIDTH;
 
-/// ウィジェット上の描画矩形 (egui Rect と同じ情報を持つプレーン表現)。
-///
-/// `left`/`top` は egui 画面座標・`width`/`height` はポイント寸法。
-/// キャンバス側で `egui::Rect` から本型へ変換して純関数へ渡す。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct ViewRect {
-    /// 矩形左端 (egui 画面座標)。
     pub left: f32,
-    /// 矩形上端。
     pub top: f32,
-    /// 幅 (ポイント)。
     pub width: f32,
-    /// 高さ (ポイント)。
     pub height: f32,
 }
 
 impl ViewRect {
-    /// 点が矩形内にあるか (egui `Rect::contains` と同じく境界を含む)。
     #[must_use]
     pub fn contains(&self, p: (f32, f32)) -> bool {
         p.0 >= self.left
@@ -45,11 +18,6 @@ impl ViewRect {
     }
 }
 
-/// ウィジェット座標 → フレームピクセル座標。
-///
-/// 矩形外・退化寸法 (フレームまたは矩形の幅/高さ 0) は `None`。矩形内の点は
-/// フレームの最終有効ピクセル (`w-1` / `h-1`) へクランプされる
-/// ([`crate::canvas::show`] の `to_img` と同一契約)。
 #[must_use]
 pub fn widget_to_frame(p: (f32, f32), rect: ViewRect, frame: (u32, u32)) -> Option<(u32, u32)> {
     if frame.0 == 0 || frame.1 == 0 || rect.width <= 0.0 || rect.height <= 0.0 {
@@ -66,10 +34,6 @@ pub fn widget_to_frame(p: (f32, f32), rect: ViewRect, frame: (u32, u32)) -> Opti
     ))
 }
 
-/// フレームピクセル座標 → ウィジェット座標 (オーバーレイ描画用の逆変換)。
-///
-/// 退化寸法時は矩形左上を返す (描画側で無害)。[`crate::canvas::show`] の
-/// `img_to_screen` と同一式。
 #[must_use]
 pub fn frame_to_widget(p: (u32, u32), rect: ViewRect, frame: (u32, u32)) -> (f32, f32) {
     if frame.0 == 0 || frame.1 == 0 {
@@ -81,10 +45,6 @@ pub fn frame_to_widget(p: (u32, u32), rect: ViewRect, frame: (u32, u32)) -> (f32
     )
 }
 
-/// フレームピクセル座標 → 正規化空間 (幅 [`BASE_WIDTH`] 基準・f32)。
-///
-/// フレーム幅が既に [`BASE_WIDTH`] (正規化済みスクリーンショット) なら恒等。
-/// フレーム寸法 0 は `None` (ゼロ除算回避)。
 #[must_use]
 pub fn frame_to_normalized(p: (u32, u32), frame: (u32, u32)) -> Option<(f32, f32)> {
     if frame.0 == 0 || frame.1 == 0 {
@@ -94,26 +54,16 @@ pub fn frame_to_normalized(p: (u32, u32), frame: (u32, u32)) -> Option<(f32, f32
     Some((p.0 as f32 * s, p.1 as f32 * s))
 }
 
-/// 正規化空間 (幅 [`BASE_WIDTH`] 基準) → フレームピクセル座標 (round + 端クランプ)。
-///
-/// フレーム寸法 0 は `None`。
 #[must_use]
 pub fn normalized_to_frame(p: (f32, f32), frame: (u32, u32)) -> Option<(u32, u32)> {
     from_base(p, frame)
 }
 
-/// 正規化空間 (幅 [`BASE_WIDTH`] 基準) → クライアント座標 (SendInput 用・i32)。
-///
-/// `client` は対象ウィンドウのクライアント領域寸法 (物理 px)。PC版キャプチャは
-/// クライアント領域をそのまま撮るため生フレーム寸法と一致し、正規化前の実
-/// ピクセル座標が復元される。round + 端クランプ (発火座標がクライアント外に
-/// 出ないようにする)。クライアント寸法 0 は `None`。
 #[must_use]
 pub fn normalized_to_client(p: (f32, f32), client: (u32, u32)) -> Option<(i32, i32)> {
     from_base(p, client).map(|(x, y)| (x as i32, y as i32))
 }
 
-/// 正規化空間 → 幅 `dst.0` の対象空間 (round + 端クランプ・共通コア)。
 fn from_base(p: (f32, f32), dst: (u32, u32)) -> Option<(u32, u32)> {
     if dst.0 == 0 || dst.1 == 0 {
         return None;

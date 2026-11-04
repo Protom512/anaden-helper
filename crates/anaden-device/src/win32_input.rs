@@ -1,23 +1,3 @@
-//! Win32 SendInput / PostMessage 入力注入バックエンド(Windows 専用)。
-//!
-//! `anaden-core::InputAction::{Tap, Swipe, LongPress, Wait}` を Win32 のマウスイベントへ
-//! 翻訳して注入する。プローブ `examples/probe_windows_input.rs` で動作検証済みのロジック
-//! (SendInput でアンチチート wfsdrv を突破確認)をベースに、`Win32InputExecutor` を
-//! 提供する。
-//!
-//! # 座標系
-//! InputAction の (x, y) は「画面左上原点の実ピクセル」
-//! (pipeline_driver の rescale 後 device_width 座標)。プローブ phase2 と同じく
-//! クライアント原点の画面座標 + (x,y) で SendInput 用画面絶対座標を作る。
-//!
-//! # メソッド
-//! - 主軸: SendInput(INPUT_MOUSE) — 物理マウス同等。ゲストプロセスからはユーザ操作と区別不可。
-//! - fallback: PostMessageW(WM_LBUTTONDOWN/UP) — 合成メッセージ。一部ゲームは synthetic を弾く。
-//!
-//! # Linux ビルド
-//! モジュール全体を `#![cfg(windows)]` で囲み、Linux ではコンパイル対象外とする。
-//! lib.rs 側の `#[cfg(windows)] mod win32_input;` と二重安全。
-
 #![cfg(windows)]
 
 use std::mem;
@@ -45,51 +25,27 @@ use anaden_core::InputAction;
 
 use crate::error::DeviceError;
 
-// wParam 区分(PostMessage 用)。
 const MK_LBUTTON: usize = 0x0001;
 
-/// スワイプの MOVE イベント送出間隔(ミリ秒)。down/move/up の連続イベント列を
-/// SendInput の MOVE 連打で近似するための刻み。小さすぎると SendInput 負荷上昇。
 const SWIPE_STEP_MS: u64 = 10;
 
-/// LongPress のデフォルト押下時間(action 側で明示指定がないときの安全弁)。
 const DEFAULT_LONGPRESS_MS: u64 = 600;
 
-/// 前景化後の安定 wait(プローブ phase2 の 150ms と同等)。
 const FOREGROUND_SETTLE_MS: u64 = 150;
 
-/// 入力注入メソッド。
-///
-/// `SendInput` は物理マウス同等(主軸)。`PostMessage` は合成ウィンドウメッセージで
-/// 背面送信可能だが、一部ゲームは synthetic フラグで弾く(fallback 扱い)。
 #[derive(Clone, Copy, Debug, Eq, PartialEq, Default)]
 pub enum InputMethod {
-    /// SendInput(INPUT_MOUSE)。アンチチート wfsdrv を突破実証済みの主軸。
     #[default]
     SendInput,
-    /// PostMessageW(WM_LBUTTONDOWN/UP)。背面送信可能な fallback。
     PostMessage,
 }
 
-/// Win32 で InputAction を実行する入力 executor。
-///
-/// `process`(既定 "AnotherEden.exe")から都度 PID → HWND を解決し、SendInput/PostMessage で
-/// マウスイベントを注入する。HWND はキャッシュせず毎回解決する(ウィンドウ再生成対策。
-/// プローブと同じ挙動で、認識バグの温床を避ける)。
-///
-/// `execute` は SendInput の `std::thread::sleep`(hold 中)で async runtime を止めないよう
-/// `spawn_blocking` でワーカスレッドへ逃す。`Wait` のみ `tokio::time::sleep` で非同期待機。
 pub struct Win32InputExecutor {
     process: String,
     method: InputMethod,
 }
 
 impl Win32InputExecutor {
-    /// 指定プロセス名(例: "AnotherEden.exe")に対する executor を作る。既定メソッド=SendInput。
-    ///
-    /// DPI アウェア化をここで1回呼ぶ(プロセス全体へ影響するが冪等。capture 側でも呼ばれて
-    /// いても二重安全)。これをしないと高 DPI 環境で ClientToScreen/仮想画面メトリクスが
-    /// 論理ピクセルを返し、座標がずれる。
     pub fn new(process: &str) -> Self {
         enable_dpi_awareness();
         Self {
@@ -98,7 +54,6 @@ impl Win32InputExecutor {
         }
     }
 
-    /// 注入メソッドを明示指定するコンストラクタ。
     pub fn with_method(process: &str, method: InputMethod) -> Self {
         enable_dpi_awareness();
         Self {
@@ -107,12 +62,6 @@ impl Win32InputExecutor {
         }
     }
 
-    /// DPI アウェア化を行わずに生成するコンストラクタ。
-    ///
-    /// eframe/egui 等のホストプロセスが既に DPI アウェアな場合向け
-    /// ([`crate::Win32Capture::new_without_dpi`] と同一の提供理由: ホスト起動後に
-    /// アウェア化すると egui の pixels_per_point と乖離してテクスチャ描画が壊れる)。
-    /// 既定メソッド (SendInput) を使う。
     #[must_use]
     pub fn new_without_dpi(process: &str) -> Self {
         Self {
@@ -121,18 +70,11 @@ impl Win32InputExecutor {
         }
     }
 
-    /// 現在の注入メソッドを返す。
     pub fn method(&self) -> InputMethod {
         self.method
     }
 
-    /// `InputAction` を実行する。
-    ///
-    /// 座標は InputAction が持つ「画面左上原点の実ピクセル」(device_width 座標)。
-    /// 内部でクライアント原点(client_origin = client_to_screen_abs(hwnd, 0, 0))を足して
-    /// 画面絶対座標へ変換し、SendInput/PostMessage へ渡す(プローブ phase2 と同一方式)。
     pub async fn execute(&self, action: &InputAction) -> Result<(), DeviceError> {
-        // Wait は IO を伴わない非同期待機なので runtime スレッドで直接 sleep。
         if let InputAction::Wait(d) = action {
             tokio::time::sleep(*d).await;
             return Ok(());
@@ -141,8 +83,6 @@ impl Win32InputExecutor {
         let process = self.process.clone();
         let method = self.method;
         let action = action.clone();
-        // SendInput/PostMessage は std::thread::sleep で hold する同期処理なので
-        // spawn_blocking でワーカスレッドへ逃す(runtime 阻止回避)。
         tokio::task::spawn_blocking(move || run_action_sync(&process, method, &action))
             .await
             .map_err(|e| DeviceError::CommandFailed {
@@ -150,19 +90,11 @@ impl Win32InputExecutor {
             })?
     }
 
-    /// [`Win32InputExecutor::execute`](Self::execute) の同期版。
-    ///
-    /// tokio ランタイムを持たない std::thread ベースの呼出元
-    /// (anaden-studio の実演オーサリング GUI 等) 向け。内部手順は
-    /// [`Self::execute`] と同一の共通同期コア (`run_action_sync`) を直接呼ぶ
-    /// (spawn_blocking もランタイムも不要 = 二重実装なし)。
-    /// [`crate::Win32Capture::capture_blocking`] と同じ提供パターン。
     pub fn execute_blocking(&self, action: &InputAction) -> Result<(), DeviceError> {
         run_action_sync(&self.process, self.method, action)
     }
 }
 
-/// SendInput/PostMessage の同期注入本体(spawn_blocking 内で実行)。
 fn run_action_sync(
     process: &str,
     method: InputMethod,
@@ -191,12 +123,10 @@ fn run_action_sync(
             to.y as i32,
             *duration_ms,
         ),
-        // Wait は execute 側で非同期 sleep 済み。ここには来ない。
         InputAction::Wait(_) => Ok(()),
     }
 }
 
-/// Tap / LongPress 共通: 指定クライアント座標で DOWN → hold_ms → UP を注入。
 fn click(
     process: &str,
     method: InputMethod,
@@ -207,7 +137,6 @@ fn click(
     let (pid, hwnd) = resolve_pid_and_hwnd(process)?;
     match method {
         InputMethod::SendInput => {
-            // SendInput は前景化が前提(物理マウス相当)。AttachThreadInput 併用で確実化。
             if !bring_to_foreground(hwnd) {
                 return Err(DeviceError::CommandFailed {
                     message: format!(
@@ -216,8 +145,6 @@ fn click(
                 });
             }
             std::thread::sleep(Duration::from_millis(FOREGROUND_SETTLE_MS));
-            // ガード2: SendInput 直前に前景ウィンドウが対象プロセスのままか再検証。
-            // settle 待ち中に別アプリへフォアを奪われていたら中止(誤クリック防止)。
             if !foreground_belongs_to(pid) {
                 return Err(DeviceError::CommandFailed {
                     message: format!(
@@ -226,8 +153,6 @@ fn click(
                 });
             }
             let (origin_x, origin_y) = client_to_screen_abs(hwnd, 0, 0);
-            // ガード3: 発火座標(画面絶対)が対象ウィンドウの画面矩形内かを境界チェック。
-            // 枠外なら別ウィンドウ/デスクトップへの誤クリックになるため注入中止。
             let (fire_x, fire_y) = (origin_x + x, origin_y + y);
             if !point_in_window_rect(hwnd, fire_x, fire_y) {
                 return Err(DeviceError::CommandFailed {
@@ -247,7 +172,6 @@ fn click(
             Ok(())
         }
         InputMethod::PostMessage => {
-            // 背面送信。前景化不要。lParam はクライアント座標(x,y)。
             let (down_ok, up_ok) = postmessage_click(hwnd, x, y, hold_ms);
             if down_ok != 1 || up_ok != 1 {
                 return Err(DeviceError::CommandFailed {
@@ -261,8 +185,6 @@ fn click(
     }
 }
 
-/// Swipe: from→to を SendInput の DOWN + MOVE連打 + UP で近似。
-/// PostMessage の場合は WM_MOUSEMOVE を挟みつつ DOWN/UP。
 fn swipe(
     process: &str,
     method: InputMethod,
@@ -284,7 +206,6 @@ fn swipe(
                 });
             }
             std::thread::sleep(Duration::from_millis(FOREGROUND_SETTLE_MS));
-            // ガード2: Swipe も SendInput でシステム全体へ注入するため前景再検証。
             if !foreground_belongs_to(pid) {
                 return Err(DeviceError::CommandFailed {
                     message: format!(
@@ -294,8 +215,6 @@ fn swipe(
             }
             let (origin_x, origin_y) = client_to_screen_abs(hwnd, 0, 0);
 
-            // ガード3: Swipe 両端点(画面絶対)が対象ウィンドウ画面矩形内か境界チェック。
-            // いずれかが枠外なら別ウィンドウ/デスクトップへの誤操作になるため注入中止。
             let (start_x, start_y) = (origin_x + x1, origin_y + y1);
             let (end_x, end_y) = (origin_x + x2, origin_y + y2);
             if !point_in_window_rect(hwnd, start_x, start_y)
@@ -311,7 +230,6 @@ fn swipe(
             let (vw, vh, ox, oy) = virtual_screen();
             let base = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
 
-            // DOWN @ from
             let (ax0, ay0) = to_absolute(origin_x + x1 - ox, origin_y + y1 - oy, vw, vh);
             let down = unsafe { send_mouse(ax0, ay0, base | MOUSEEVENTF_LEFTDOWN) };
             if down == 0 {
@@ -320,7 +238,6 @@ fn swipe(
                 });
             }
 
-            // MOVE 連打で from→to を線形補間
             for i in 1..=steps {
                 let t = i as f64 / steps as f64;
                 let cx = (origin_x as f64 + x1 as f64 + (x2 - x1) as f64 * t).round() as i32;
@@ -330,7 +247,6 @@ fn swipe(
                 std::thread::sleep(Duration::from_millis(SWIPE_STEP_MS));
             }
 
-            // UP @ to
             let (ax1, ay1) = to_absolute(origin_x + x2 - ox, origin_y + y2 - oy, vw, vh);
             let up = unsafe { send_mouse(ax1, ay1, base | MOUSEEVENTF_LEFTUP) };
             if up == 0 {
@@ -341,7 +257,6 @@ fn swipe(
             Ok(())
         }
         InputMethod::PostMessage => {
-            // 背面送信。WM_MOUSEMOVE で経路を再現しつつ DOWN/UP。
             let lp1 = make_lparam(x1, y1);
             let lp2 = make_lparam(x2, y2);
             let (sx1, sy1) = client_to_screen_abs(hwnd, x1, y1);
@@ -378,25 +293,15 @@ fn swipe(
     }
 }
 
-// ============================================================================
-// 共通ヘルパ(pub(crate) — win32_capture/win32_launch と共有想定)
-// ============================================================================
-
-/// プロセス名(大文字小文字区別なし、.exe 含む)から PID を解決する。
-/// 共通ヘルパ `win32_proc::find_pid_by_name` へ委譲(issue#2 で重複解消)。
 pub(crate) fn find_pid_by_name(name: &str) -> Option<u32> {
     super::win32_proc::find_pid_by_name(name)
 }
 
-/// EnumWindows コールバック間で受け渡す状態(static mut を避け lparam 経由でスレッドセーフ化)。
 struct HwndSearchState {
     target_pid: u32,
     found: Option<HWND>,
 }
 
-/// PID に属する可視トップレベルウィンドウの HWND を返す。
-/// プローブ `find_main_window` と同等だが、static mut を排し lparam 経由で状態を受け渡す
-/// (spawn_blocking で複数スレッドから呼ばれても競合しない)。
 pub(crate) fn find_main_window(pid: u32) -> Option<HWND> {
     let mut state = HwndSearchState {
         target_pid: pid,
@@ -409,7 +314,6 @@ pub(crate) fn find_main_window(pid: u32) -> Option<HWND> {
     state.found
 }
 
-/// EnumWindows コールバック。指定 PID に属する最初の可視ウィンドウを記録して列挙を止める。
 unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     unsafe {
         let state = &mut *(lparam.0 as *mut HwndSearchState);
@@ -429,10 +333,6 @@ unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
     }
 }
 
-/// プロセス名 → (PID, HWND) を一括解決。失敗時は CommandFailed へ包む。
-///
-/// ガード2(フォアグラウンド再検証)で PID が必要なため、HWND だけではなく PID も返す。
-/// 旧 `resolve_hwnd` を分割・発展させたもの。
 fn resolve_pid_and_hwnd(process: &str) -> Result<(u32, HWND), DeviceError> {
     let pid = find_pid_by_name(process).ok_or_else(|| DeviceError::CommandFailed {
         message: format!(
@@ -445,32 +345,16 @@ fn resolve_pid_and_hwnd(process: &str) -> Result<(u32, HWND), DeviceError> {
     Ok((pid, hwnd))
 }
 
-/// 発火座標がウィンドウ画面矩形内かを判定する純粋関数(ガード3 の判定本体)。
-///
-/// `rect` は Win32 `RECT`(left/top = 左上、right/bottom = 右下、いずれも画面座標 i32)。
-/// 座標 (x, y) が矩形の「内部」(上下左右いずれの辺上も含む閉区間)にあれば true を返す。
-/// 左上原点の画面座標系で用いる。SendInput は画面絶対座標へ注入するため、対象 HWND の
-/// 画面矩形(GetWindowRect)外の座標が発火点なら誤クリックを防ぐため false(注入中止)とする。
-///
-/// 閉区間判定の理由: GetWindowRect が返す right/bottom は「クライアント領域を含むウィンドウ枠の
-/// 右下角」であり、ゲームのクリック可能領域は通常この枠内に収まる。枠上の点まで弾くと正常な
-/// 端クリックまで落とすため、辺上は許容(閉区間)とする。
 fn rect_contains(rect: &RECT, x: i32, y: i32) -> bool {
     x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
 }
 
-/// 指定 HWND の画面矩形(GetWindowRect)内に画面座標 (sx, sy) が含まれるか(ガード3)。
-///
-/// SendInput 用画面絶対座標が対象ウィンドウの枠内かを検証する。枠外(別ウィンドウ/
-/// デスクトップ上)の座標で注入しようとした場合 false を返し、呼び出し側は注入中止して
-/// 誤クリックを防ぐ。GetWindowRect 失敗時は安全側に倒して false(矩形不明=注入不可)とする。
 fn point_in_window_rect(hwnd: HWND, sx: i32, sy: i32) -> bool {
     unsafe {
         if hwnd.0.is_null() {
             return false;
         }
         let mut rect: RECT = mem::zeroed();
-        // 既存 client_to_screen_abs と同じ GetWindowRect 呼び出しパターン。
         if GetWindowRect(hwnd, &mut rect as *mut RECT).is_err() {
             return false;
         }
@@ -478,15 +362,6 @@ fn point_in_window_rect(hwnd: HWND, sx: i32, sy: i32) -> bool {
     }
 }
 
-/// SendInput 直前のフォアグラウンド再検証(ガード2)。
-///
-/// SendInput はシステム全体へ入力を注入する。`bring_to_foreground` で対象を前景化して
-/// settle 待ちした直後に、実際の前景ウィンドウがまだ `target_pid` に属しているかを検証する。
-/// 別アプリ/デスクトップにフォアグラウンドを奪われていた場合 `false` を返し、呼び出し側は
-/// SendInput を中止して誤クリック(別ウィンドウやデスクトップの誤操作)を防ぐ。
-///
-/// FFI 失敗時は安全側に倒して `false`(前景不明=注入不可)とする。`GetForegroundWindow` が
-/// null HWND を返した場合も前景ウィンドウ無しとみなし `false`。
 fn foreground_belongs_to(target_pid: u32) -> bool {
     unsafe {
         let hwnd = GetForegroundWindow();
@@ -494,15 +369,11 @@ fn foreground_belongs_to(target_pid: u32) -> bool {
             return false;
         }
         let mut pid: u32 = 0;
-        // 既存 enum_proc/bring_to_foreground と同じ GetWindowThreadProcessId 呼び出しパターン。
-        // 戻り値(スレッドID)は不要だが、PID は out パラメータから取得する。
         let _thread_id = GetWindowThreadProcessId(hwnd, Some(&mut pid as *mut u32));
         pid == target_pid
     }
 }
 
-/// DPI アウェア化(冪等)。Per-Monitor V2 → 失敗時 SetProcessDPIAware へフォールバック。
-/// capture 側でも呼ばれる想定で、二重に呼んでも安全。
 pub(crate) fn enable_dpi_awareness() {
     unsafe {
         if SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2).is_err() {
@@ -511,12 +382,6 @@ pub(crate) fn enable_dpi_awareness() {
     }
 }
 
-// ============================================================================
-// 画面メトリクス / 座標変換(プローブ検証済み)
-// ============================================================================
-
-/// 仮想デスクトップ全体(全モニタ結合)の (幅, 高さ, 左上x, 左上y) を返す。
-/// MOUSEEVENTF_VIRTUALDESK と一貫させるためプライマリのみではなく仮想デスクトップ基準。
 pub(crate) fn virtual_screen() -> (i32, i32, i32, i32) {
     unsafe {
         let vw = GetSystemMetrics(SM_CXVIRTUALSCREEN);
@@ -527,8 +392,6 @@ pub(crate) fn virtual_screen() -> (i32, i32, i32, i32) {
     }
 }
 
-/// 画面絶対座標(px, 仮想デスクトップ原点基準) → 仮想デスクトップ絶対座標(0..65535)。
-/// MSDN 公式: (px * 65535) / (extent - 1)。
 pub(crate) fn to_absolute(px: i32, py: i32, vw: i32, vh: i32) -> (i32, i32) {
     let vw1 = (vw as i64 - 1).max(1);
     let vh1 = (vh as i64 - 1).max(1);
@@ -537,7 +400,6 @@ pub(crate) fn to_absolute(px: i32, py: i32, vw: i32, vh: i32) -> (i32, i32) {
     (dx, dy)
 }
 
-/// クライアント座標 → 画面全体座標(物理px)。ClientToScreen 失敗時は GetWindowRect 左上で補完。
 pub(crate) fn client_to_screen_abs(hwnd: HWND, client_x: i32, client_y: i32) -> (i32, i32) {
     unsafe {
         let mut pt = POINT {
@@ -554,7 +416,6 @@ pub(crate) fn client_to_screen_abs(hwnd: HWND, client_x: i32, client_y: i32) -> 
     }
 }
 
-/// HWND を前景化(AttachThreadInput 併用で確実化)。成功/失敗を bool で返す。
 pub(crate) fn bring_to_foreground(hwnd: HWND) -> bool {
     unsafe {
         if hwnd.0.is_null() {
@@ -582,11 +443,6 @@ pub(crate) fn bring_to_foreground(hwnd: HWND) -> bool {
     }
 }
 
-// ============================================================================
-// SendInput / PostMessage 注入(プローブ検証済み)
-// ============================================================================
-
-/// 指定 dwFlags でマウスイベント1つを SendInput。戻り値=挿入されたイベント数。
 unsafe fn send_mouse(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS) -> u32 {
     unsafe {
         let mut inp: INPUT = mem::zeroed();
@@ -603,8 +459,6 @@ unsafe fn send_mouse(dx: i32, dy: i32, flags: MOUSE_EVENT_FLAGS) -> u32 {
     }
 }
 
-/// 画面絶対座標(px, 画面左上原点=仮想デスクトップ原点) で DOWN→hold→UP を送信。
-/// DOWN/UP 各1の挿入成功で計2。片方失敗なら 0 or 1。
 pub(crate) fn sendinput_click(screen_x: i32, screen_y: i32, hold_ms: u64) -> u32 {
     let (vw, vh, ox, oy) = virtual_screen();
     let (ax, ay) = to_absolute(screen_x - ox, screen_y - oy, vw, vh);
@@ -615,14 +469,11 @@ pub(crate) fn sendinput_click(screen_x: i32, screen_y: i32, hold_ms: u64) -> u32
     down + up
 }
 
-/// PostMessage 用 lParam 組立。MAKELPARAM(y, x) = (y << 16) | (x & 0xFFFF)。
 fn make_lparam(client_x: i32, client_y: i32) -> LPARAM {
     let v = (((client_y as u32) << 16) | ((client_x as u32) & 0xFFFF)) as isize;
     LPARAM(v)
 }
 
-/// PostMessage で背面クリック(DOWN→hold→UP)。WM_MOUSEMOVE と SetCursorPos でホバー状態を確立。
-/// 戻り値 (down_ok, up_ok)。各 Ok で 1、Err で 0。
 pub(crate) fn postmessage_click(
     hwnd: HWND,
     client_x: i32,

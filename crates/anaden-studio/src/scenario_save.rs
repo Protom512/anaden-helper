@@ -1,13 +1,3 @@
-//! シナリオ保存フロー (Issue #160 Shard 3 / T3: UC-1・Issue #173 で
-//! scenario_editor.rs から分割)。
-//!
-//! 検証済み [`ScenarioEditorState`] を `anaden-vision` の保存ヘルパー
-//! (`save_pipeline_manifest` / `save_task_def`) で `<pipelines_root>/<name>/`
-//! へ書き出す純 IO 層。既存 pipeline ディレクトリへの無警告上書き防止
-//! (所有権ガード) と、削除・リネーム済み旧 TaskDef ファイルの掃除を含む。
-//! バリデーションは [`crate::scenario_validate`]、状態操作は
-//! [`crate::scenario_state`] (egui パネルは scenario_panel.rs)。
-
 use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
@@ -15,83 +5,36 @@ use image::DynamicImage;
 use crate::scenario_state::ScenarioEditorState;
 use crate::scenario_validate::ScenarioValidationError;
 
-/// シナリオ保存 (manifest + TaskDef 群 + ROI 由来テンプレート PNG) のエラー。
 #[derive(Debug, thiserror::Error)]
 pub enum ScenarioSaveError {
-    /// エディタ状態のバリデーション不合格
-    /// ([`crate::scenario_state::ScenarioEditorState::validate`])。
     #[error("scenario invalid: {0}")]
     Invalid(#[from] ScenarioValidationError),
-    /// pipeline ディレクトリ作成失敗。
     #[error("pipeline dir create failed")]
     DirCreate(#[source] std::io::Error),
-    /// ROI 追加タスクのテンプレート PNG 書き出し失敗。
     #[error("template PNG write failed")]
     PngWrite(#[source] image::ImageError),
-    /// manifest / TaskDef TOML の保存失敗 (anaden-vision save ヘルパー)。
     #[error("pipeline save failed: {0}")]
     Vision(#[from] anaden_vision::TaskDefError),
-    /// 保存先ディレクトリが既存だが、この編集状態の所有対象ではない
-    /// (ロード元でも直近の保存先でもない)。1 バイトも書かない。
-    ///
-    /// Issue #160 レビュー M-1: 既存 pipeline への無警告上書き (新 TaskDef 群で
-    /// 置換 + `sweep_removed_taskdefs` による旧 TaskDef 削除) を防ぐ fail-closed。
-    /// task 登録経路の `TaskAlreadyExists` 拒否と対称。
     #[error(
         "pipeline dir already exists: {dir} (既存 pipeline の無警告上書きは禁止。ロードして編集するか別名を指定してください)"
     )]
-    PipelineDirAlreadyExists {
-        /// 拒否された保存先ディレクトリ。
-        dir: PathBuf,
-    },
-    /// 書き出し TaskDef ファイル (stem または name の .toml) が複数タスクで
-    /// 衝突する。1 バイトも書かない。
-    ///
-    /// Issue #180 (minor-3): stem ≠ name のロード済みタスク (stem `<X>.toml`) と
-    /// 新規タスク (name `<X>`) が同じファイルを指すと後書きが前者を上書きし、
-    /// 再 load でタスクがサイレント消失する。保存前の事前検査で拒否する
-    /// (検査はケースインセンシティブ — Windows FS では大文字小文字違いも
-    /// 同一ファイル)。
+    PipelineDirAlreadyExists { dir: PathBuf },
     #[error(
         "task file path collision: {path} is the write target of tasks `{first}` and `{second}` (stem 衝突。stem ≠ name の既存タスクと衝突する名前は使えません)"
     )]
     TaskFileCollision {
-        /// 衝突した書き出しファイルパス。
         path: PathBuf,
-        /// 先に書き出すタスク (TaskDef name)。
         first: String,
-        /// 同じパスを指すもう一方のタスク (TaskDef name)。
         second: String,
     },
 }
 
-/// [`save_scenario_with_warnings`] の保存結果 (Issue #184 / #187)。
-///
-/// `warnings` はテンプレート品質への fail-visible 警告 (無構造 + needle が ROI に
-/// 収まらない)。保存自体はブロックしていない (警告は保存成功後の付加情報)。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ScenarioSaveOutcome {
-    /// 保存先 pipeline ディレクトリ。
     pub dir: PathBuf,
-    /// テンプレート品質警告のリスト (各要素は対象タスク名を接頭に持つ):
-    /// - 無構造テンプレート (輝度 stddev < [`anaden_vision::TEMPLATE_MIN_LUMA_STDDEV`])
-    ///   — Issue #184。
-    /// - needle (テンプレ PNG) が ROI に収まらない (恒久 NoMatch) — Issue #187。
-    ///
-    /// 全テンプレートが健全なら空 (偽陽性ゼロ)。
     pub warnings: Vec<String>,
 }
 
-/// 検証済みシナリオを `<pipelines_root>/<シナリオ名>/` へ保存する (UC-1 保存経路)。
-///
-/// [`save_scenario`] の警告付き版 (Issue #184 / #187): 書き出し構成・fail-closed 挙動は
-/// 同一で、加えて保存しようとしているテンプレート PNG への品質警告を
-/// [`ScenarioSaveOutcome::warnings`] として返す (pending crop と UC-2 参照の両方):
-/// 無構造 (stddev < 閾値) と needle が ROI に収まらない (恒久 NoMatch)。
-///
-/// # Errors
-/// [`save_scenario`] と同一 (バリデーション不合格・所有権ガード・書き出し失敗。
-/// いずれも 1 バイトも書かない / 部分状態で警告を返さない)。
 pub fn save_scenario_with_warnings(
     state: &ScenarioEditorState,
     pngs: &[(String, DynamicImage)],
@@ -99,25 +42,15 @@ pub fn save_scenario_with_warnings(
 ) -> Result<ScenarioSaveOutcome, ScenarioSaveError> {
     state.validate()?;
     let dir = pipelines_root.join(state.name.trim());
-    // UC-4: ロード済みタスクは元ファイル (stem) へ、新規タスクは <name>.toml へ。
     let out_paths = task_out_paths(state, &dir);
-    // stem 衝突検査 (Issue #180 minor-3・fail-closed): 書き出しパスの一意性。
-    // stem ≠ name のロード済みタスクと新規タスク名が同じファイルを指すと
-    // 後書きが前者を上書きしてタスクがサイレント消失するため、1 バイトも
-    // 書く前に拒否する (既存バリデーションはタスク *名* の一意性しか見ない
-    // ため、この衝突は検出できない)。
     check_unique_out_paths(state, &out_paths)?;
-    // 既存 dir 上書きガード (レビュー M-1): 保存先 dir が既に存在する場合、
-    // この編集状態の所有対象 (ロード元 / 直近の保存先 = loaded_from) と同一の
-    // ときのみ書き込みを許可する。それ以外 (新規シナリオ名が既存 pipeline と
-    // 衝突、ロード編集のリネーム先が別 pipeline と衝突) は 1 バイトも書かない。
     if dir.is_dir() && !is_owned_dir(state, &dir) {
         return Err(ScenarioSaveError::PipelineDirAlreadyExists { dir: dir.clone() });
     }
     std::fs::create_dir_all(&dir).map_err(ScenarioSaveError::DirCreate)?;
     for (name, img) in pngs {
         if !state.tasks.iter().any(|t| &t.name == name) {
-            continue; // 削除済みタスクの crop は書かない
+            continue;
         }
         img.save(dir.join(format!("{name}.png")))
             .map_err(ScenarioSaveError::PngWrite)?;
@@ -127,48 +60,10 @@ pub fn save_scenario_with_warnings(
         anaden_vision::save_task_def(task, path)?;
     }
     sweep_removed_taskdefs(&dir, &out_paths);
-    // Issue #184/#187: テンプレート品質警告 (無構造 + needle/roi 収容)。保存済みの
-    // ためブロックはしない — 呼出側 (ScenarioPanel) が status へ表示する。
     let warnings = template_quality_warnings(state, pngs, &dir);
     Ok(ScenarioSaveOutcome { dir, warnings })
 }
 
-/// 検証済みシナリオを `<pipelines_root>/<シナリオ名>/` へ保存する (UC-1 保存経路)。
-///
-/// 書き出し構成 (既存 pipeline ディレクトリと完全互換):
-/// - `pipeline.toml` — manifest (start_task + goals)。[`anaden_vision::save_pipeline_manifest`]
-/// - `<task>.toml` — 各 TaskDef。[`anaden_vision::save_task_def`]
-/// - `<task>.png` — ROI から追加したタスクのテンプレート PNG 本体
-///
-/// `pngs` は「タスク追加時に確保した crop」のリストで、TaskDef 名前空間に残る
-/// タスクのみ書き出す (削除済みタスクの crop は無視)。ROI 追加タスクの
-/// `template` は追加時に `<name>.png` (pipeline dir 基準の裸相対) が設定済みの
-/// ため、保存 TOML の template 参照と PNG 実体が一致する。
-///
-/// UC-4 (Shard 5): [`crate::scenario_state::ScenarioEditorState::loaded_task_files`]
-/// に対応する (ロード済み) タスクは **元のファイル名 (stem)** へ書き戻す。既存
-/// pipeline は stem ≠ name (`tap_bottom.toml` ↔ `TapBottomStable`) のため、
-/// name で保存すると同一 TaskDef の重複ファイルができ再 load でタスクが倍化する。
-/// 対応エントリの無い新規タスクは `<name>.toml` へ保存される。また、削除・
-/// リネーム済みタスクの旧 TaskDef ファイルを保存成功後に掃除する
-/// (`sweep_removed_taskdefs`) — 残ると `load_pipeline` が再読込時に旧タスクを
-/// 復活させるため。
-///
-/// 警告付き版 ([`save_scenario_with_warnings`]) の薄いラッパ (警告を破棄して
-/// 保存先 dir のみ返す。既存呼出側の互換維持)。GUI 保存経路は警告表示のため
-/// [`save_scenario_with_warnings`] を使う (Issue #184)。
-///
-/// # Errors
-/// - [`ScenarioSaveError::Invalid`]: バリデーション不合格 (1 バイトも書かない)。
-/// - それ以外: 各書き出し段階の失敗 ([`ScenarioSaveError::DirCreate`] /
-///   [`ScenarioSaveError::PngWrite`] / [`ScenarioSaveError::Vision`])。
-///
-/// 保存 → [`anaden_vision::load_pipeline`] / [`load_pipeline_manifest` 往復は
-/// `tests/scenario_editor_tests.rs` (AC-1) と
-/// `tests/scenario_uc4_roundtrip_tests.rs` (UC-4・既存 8 pipeline ロスレス往復)
-/// で機械保証されている。
-///
-/// [`load_pipeline_manifest`]: anaden_vision::load_pipeline_manifest
 pub fn save_scenario(
     state: &ScenarioEditorState,
     pngs: &[(String, DynamicImage)],
@@ -177,24 +72,6 @@ pub fn save_scenario(
     save_scenario_with_warnings(state, pngs, pipelines_root).map(|outcome| outcome.dir)
 }
 
-/// 保存対象タスクのテンプレート品質警告リスト (Issue #184 + #187・fail-visible:
-/// 保存はブロックしない)。
-///
-/// 検証対象 (save 時点で検証可能な範囲):
-/// - `pngs`: ROI 追加タスクの crop (インメモリ画像)。名前空間に残るタスクのみ
-///   (削除済みタスクの crop は保存されないため検証しない)。
-/// - 各タスクの `template` 参照 (UC-2 ライブラリ割当): `dir` 基準で解決し、
-///   実在ファイルのみ検証する。参照先不在・デコード不能は本警告のスコープ外
-///   (存在検証は実行時の detect が担う — 警告はあくまで認識品質の予見)。
-///
-/// 警告の種類:
-/// 1. 無構造テンプレート (stddev < 閾値 — Issue #184)。
-/// 2. needle (テンプレ PNG) が ROI に収まらない (Issue #187 — Issue #182 の
-///    「テンプレ差し替えと ROI 更新が片側だけ」回帰の予見)。
-///
-/// いずれの判定も anaden-vision の単一実装経由
-/// ([`crate::library::template_structure_warning`] /
-/// [`crate::library::needle_roi_warning`]) に委譲する。
 fn template_quality_warnings(
     state: &ScenarioEditorState,
     pngs: &[(String, DynamicImage)],
@@ -202,7 +79,6 @@ fn template_quality_warnings(
 ) -> Vec<String> {
     let mut warnings = Vec::new();
     for task in &state.tasks {
-        // ROI 追加タスク: 保存しようとしている crop 本体を検証する。
         if let Some((_, img)) = pngs.iter().find(|(name, _)| name == &task.name) {
             if let Some(warning) = crate::library::template_structure_warning(img) {
                 warnings.push(format!("{}: {warning}", task.name));
@@ -214,7 +90,6 @@ fn template_quality_warnings(
             }
             continue;
         }
-        // UC-2 参照割当タスク: 参照先ファイルを実読みして検証する。
         let path = if task.template.is_absolute() {
             task.template.clone()
         } else {
@@ -223,7 +98,6 @@ fn template_quality_warnings(
         if !path.is_file() {
             continue;
         }
-        // needle/roi 収容は寸法のみで判定 (ヘッダ読み — デコード不要)。
         if let Ok((nw, nh)) = image::image_dimensions(&path)
             && let Some(warning) = crate::library::needle_roi_warning((nw, nh), task.roi)
         {
@@ -239,9 +113,6 @@ fn template_quality_warnings(
     warnings
 }
 
-/// 各 TaskDef の書き出し先 `<dir>/<stem-or-name>.toml` を導出する (UC-4:
-/// ロード済みタスクは元ファイル stem、対応エントリの無い新規タスクは
-/// TaskDef name)。順序は `state.tasks` と一致する。
 fn task_out_paths(state: &ScenarioEditorState, dir: &Path) -> Vec<PathBuf> {
     state
         .tasks
@@ -258,11 +129,6 @@ fn task_out_paths(state: &ScenarioEditorState, dir: &Path) -> Vec<PathBuf> {
         .collect()
 }
 
-/// 書き出しパスの一意性検査 (Issue #180 minor-3)。
-///
-/// 比較は [`path_eq_ignore_case`] (Windows FS では大文字小文字違いも同一
-/// ファイル)。最初の衝突 (タスク順) を [`ScenarioSaveError::TaskFileCollision`]
-/// で返す。
 fn check_unique_out_paths(
     state: &ScenarioEditorState,
     out_paths: &[PathBuf],
@@ -287,16 +153,10 @@ fn check_unique_out_paths(
     Ok(())
 }
 
-/// パスのケースインセンシティブ比較 (ASCII — Windows FS の同一ファイル判定)。
 fn path_eq_ignore_case(a: &Path, b: &Path) -> bool {
     a.to_string_lossy().to_ascii_lowercase() == b.to_string_lossy().to_ascii_lowercase()
 }
 
-/// `dir` が編集状態の所有対象 (loaded_from) と同一か。
-///
-/// 比較は canonicalize 後のパスで行う (大文字小文字違い・区切り文字違いの
-/// 同一ディレクトリ表現を同値扱い)。canonicalize 失敗時は素のパス比較へ
-/// フォールバックする (不一致 = 拒否方向の fail-closed)。
 fn is_owned_dir(state: &ScenarioEditorState, dir: &Path) -> bool {
     state.loaded_from.as_deref().is_some_and(|src| {
         match (std::fs::canonicalize(src), std::fs::canonicalize(dir)) {
@@ -306,18 +166,6 @@ fn is_owned_dir(state: &ScenarioEditorState, dir: &Path) -> bool {
     })
 }
 
-/// 今回の保存で書き出さなかった旧 TaskDef ファイル (削除・リネーム前) を
-/// 掃除する (UC-4)。manifest 慣例ファイル (`pipeline.toml`) は対象外。
-///
-/// 書き出しパスとの比較はケースインセンシティブ ([`path_eq_ignore_case`] —
-/// Issue #180 minor-4): Windows FS では大文字小文字違いも同一ファイルのため、
-/// バイト比較だとケース違い stem 衝突のファイルを「未書き出し」と誤認して
-/// 書いた直後のファイルを sweep しうる (本来は保存前の stem 衝突検査
-/// [`ScenarioSaveError::TaskFileCollision`] で拒否される組み合わせの二重防御)。
-///
-/// 保存した全 TaskDef の書き出しに成功した後にのみ呼ぶ (失敗時の部分状態で
-/// 旧ファイルを消さない)。削除自体は best-effort — 失敗しても再 load 時に
-/// 旧タスクが復活するだけでデータ破損にはならないためエラーにはしない。
 fn sweep_removed_taskdefs(dir: &Path, written: &[PathBuf]) {
     let Ok(entries) = std::fs::read_dir(dir) else {
         return;

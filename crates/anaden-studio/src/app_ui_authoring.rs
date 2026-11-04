@@ -1,10 +1,3 @@
-//! StudioApp の作成 (Authoring) モード本体描画 (Issue #174: app_ui.rs 分割)。
-//!
-//! テンプレート作成ワークフロー (データ読込・認識エンジン切替・ライブ
-//! キャプチャ・ROI候補・識別力サマリ・テンプレート/pipeline task 保存・
-//! シナリオ作成配線) と中央キャンバス (ヒートマップ・最良マッチ) の描画。
-//! モードディスパッチは app_ui_body の [`StudioApp::render_body`]。
-
 use std::sync::Arc;
 
 use eframe::egui;
@@ -19,15 +12,7 @@ use crate::scoring;
 use crate::source::LiveCapture;
 
 impl StudioApp {
-    /// 作成 (Authoring) モードの本体を描画する。
-    ///
-    /// [`Self::render_body`] の Authoring 分岐から呼ばれる (Issue #174 で
-    /// app_ui.rs から抽出・コード移動のみ)。別スレッドでの propose 計算結果の
-    /// 受信とライブADBキャプチャの最新フレーム取り込みを行ってから、左サイド
-    /// パネル (操作 + 識別力サマリ + 保存) と中央キャンバスを描画する。
     pub(crate) fn render_authoring(&mut self, ui: &mut egui::Ui) {
-        // 別スレッドでの propose 計算結果を非ブロッキング受信。
-        // 完了時: proposing を下ろし、結果を self.proposals へ反映・status 更新。
         if self.proposing
             && let Some(rx) = &self.proposal_rx
             && let Ok(ps) = rx.try_recv()
@@ -38,7 +23,6 @@ impl StudioApp {
             self.status = format!("ROI候補: {} 件（スコア順）", self.proposals.len());
         }
 
-        // ライブADBキャプチャの最新フレームを取り込む（表示更新のみ。ROIは保持）
         if let Some(live) = &self.live
             && let Some(frame) = live.latest()
         {
@@ -47,7 +31,6 @@ impl StudioApp {
             self.screenshot_tex = None;
         }
 
-        // 左サイドパネル: 操作 + 識別力サマリ
         egui::Panel::left("controls")
             .resizable(true)
             .default_size(320.0)
@@ -68,11 +51,9 @@ impl StudioApp {
                 ui.label(&self.status);
             });
 
-        // 中央: キャンバス
         egui::CentralPanel::default().show_inside(ui, |ui| self.authoring_canvas(ui));
     }
 
-    /// データ入力セクション (スクショ/正例/負例読込)。
     fn authoring_data_section(&mut self, ui: &mut egui::Ui) {
         ui.label("データ");
         if ui.button("スクリーンショットを開く").clicked() {
@@ -93,14 +74,10 @@ impl StudioApp {
         ui.separator();
     }
 
-    /// 認識エンジン切替セクション (SSE / CCOEFF)。
     fn authoring_engine_section(&mut self, ui: &mut egui::Ui) {
-        // 認識エンジン切替（ライブ比較）
         ui.heading("認識エンジン");
         ui.horizontal(|ui| {
             ui.label("方式:");
-            // 借用回避: new_kind は self から Copy した値。
-            // 変更があればループ外（closure 脱出後）で switch する。
             let mut new_kind = self.engine_kind;
             egui::ComboBox::from_id_salt("engine_kind_combo")
                 .selected_text(match self.engine_kind {
@@ -118,11 +95,8 @@ impl StudioApp {
         ui.separator();
     }
 
-    /// ライブキャプチャセクション (接続チェック・開始/停止)。
     fn authoring_capture_section(&mut self, ui: &mut egui::Ui) {
-        // ライブキャプチャ (PC版 Windows — Issue #188 で Android 経路は削除)
         ui.heading("ライブキャプチャ");
-        // 接続状態サマリバッジ + チェックボタン + エラー理由パネル (Issue #139 T3)。
         ui.colored_label(
             self.connection.state.badge_color(),
             self.connection.state.badge(),
@@ -145,7 +119,6 @@ impl StudioApp {
                 self.status = "ライブ停止: 現在の画面で固定しました".to_string();
             }
         } else {
-            // 開始可否: exe 名必須 (Win32 キャプチャは exe 名でプロセス解決)。
             let can_start = !self.win_exe.trim().is_empty();
             ui.add_enabled_ui(can_start, |ui| {
                 if ui.button("ライブ開始").clicked() {
@@ -157,11 +130,8 @@ impl StudioApp {
         ui.separator();
     }
 
-    /// ROI自動提案セクション (計算ボタン・候補 → ROI 読込)。
     fn authoring_proposals_section(&mut self, ui: &mut egui::Ui) {
-        // ROI自動提案
         ui.heading("ROI候補");
-        // 計算中(self.proposing)はボタンを無効化（二重起動・多重ブロック防止）。
         let can_propose = self.screenshot.is_some() && !self.proposing;
         ui.add_enabled_ui(can_propose, |ui| {
             let label = if self.proposing {
@@ -175,9 +145,6 @@ impl StudioApp {
         });
         if !self.proposals.is_empty() {
             ui.label("クリックでROIに読込（その後スコアで検証）:");
-            // 借用チェック: ループ内で self.proposals を借用しつつ
-            // self.apply_proposal は呼べないため、クリック対象を退避し
-            // ループ外で適用する（canvas のドラッグROI更新と同パターン）。
             let mut clicked: Option<ScreenRegion> = None;
             for (i, p) in self.proposals.iter().enumerate() {
                 if ui
@@ -197,9 +164,7 @@ impl StudioApp {
         ui.separator();
     }
 
-    /// 識別力サマリセクション (判定・正例/負例スコア一覧)。
     fn authoring_discrimination_section(&mut self, ui: &mut egui::Ui) {
-        // 識別力サマリ
         ui.heading("識別力");
         if let Some(d) = &self.discrimination {
             let (verdict, color) = if d.margin() > 0.1 {
@@ -237,9 +202,7 @@ impl StudioApp {
         ui.separator();
     }
 
-    /// テンプレート保存セクション (名前/状態/保存先)。
     fn authoring_save_section(&mut self, ui: &mut egui::Ui) {
-        // テンプレート保存
         ui.heading("保存");
         ui.horizontal(|ui| {
             ui.label("名前:");
@@ -274,12 +237,7 @@ impl StudioApp {
         ui.separator();
     }
 
-    /// pipeline task 保存セクション (UC-3・action 選択)。
     fn authoring_pipeline_section(&mut self, ui: &mut egui::Ui) {
-        // pipeline task 保存 (UC-3: スクショ取り込み → ROI選択 →
-        // スコア計算 (scoring.rs) → pipeline task TOML 保存)。
-        // 同一の ROI/スコア/名前/状態入力を再利用し、保存形式のみ
-        // pipeline TOML (anaden-vision load_pipeline 互換) に切替。
         ui.heading("pipeline task 保存");
         ui.label(format!("保存先: {}", self.task_dir.display()));
         if ui.button("task保存先変更").clicked()
@@ -314,14 +272,7 @@ impl StudioApp {
         ui.separator();
     }
 
-    /// シナリオ作成セクション (Issue #160 / UC-3 タスク登録の配線)。
     fn authoring_scenario_section(&mut self, ui: &mut egui::Ui) {
-        // シナリオ作成 (Issue #160 T3 / UC-1+UC-2): 単一 TaskDef 保存 (上)
-        // を多 TaskDef + manifest 保存へ拡張する collapsing セクション。
-        // パネル本体は scenario_ui (ドメイン)、ここは配線のみ。
-        // UC-3 (Shard 4): 保存済み pipeline をタスクへ登録・有効化する
-        // サブフロー (ui_task_link) も配線する。stub 一覧は読込済み
-        // タスク定義から導出 (未読込なら既定パスから遅延読込)。
         self.ensure_task_list_loaded();
         let link_root = Self::workspace_root();
         let link_tasks_dir = link_root.join("templates/tasks");
@@ -348,13 +299,10 @@ impl StudioApp {
         }
     }
 
-    /// 中央キャンバス: canvas::show (ROI ドラッグ・ヒートマップ・最良位置)
-    /// + ROI 変化時の識別力/ヒートマップ再評価。
     fn authoring_canvas(&mut self, ui: &mut egui::Ui) {
         if let (Some(tex), Some(img)) = (&self.screenshot_tex, &self.screenshot) {
             let (w, h) = (img.width(), img.height());
 
-            // 既存のヒートマップを描画に渡す（ROI解放時に更新される）
             let heatmap_view = self.heatmap_tex.as_ref().map(|t| canvas::HeatmapView {
                 tex: t.id(),
                 search: self.heatmap_search,
@@ -370,7 +318,6 @@ impl StudioApp {
                 best_match,
             );
 
-            // ROIが安定して変化したら識別力とヒートマップを再評価
             if let Some(roi_rect) = self.roi.rect()
                 && !self.roi.dragging
                 && Some(roi_rect) != self.scored_roi
@@ -383,7 +330,6 @@ impl StudioApp {
                     &self.negatives,
                 ));
 
-                // ヒートマップ（スコアマップ全体）と最良マッチ位置
                 if let Some(sm) = self.heatmap_engine.score_map(img, &crop) {
                     let (bx, by) = score_map_best_position(&sm);
                     let d = HEATMAP_DOWNSCALE;
@@ -415,7 +361,6 @@ impl StudioApp {
     }
 }
 
-/// スコアマップ全体から最大スコア位置 (ダウンスケール空間) を探す。
 fn score_map_best_position(sm: &image::GrayImage) -> (u32, u32) {
     let mut bx = 0u32;
     let mut by = 0u32;

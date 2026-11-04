@@ -1,17 +1,3 @@
-//! シナリオ作成 egui パネル (Issue #160 Shard 3 T3 / Issue #166 分割)。
-//!
-//! [`ScenarioPanel`] は Authoring ペイン埋め込みのシナリオ作成・保存・タスク登録
-//! UI。`strategy_ui::StrategyPanel` と同じ「純状態モデル + egui パネル」パターン
-//! で、保持する編集データは [`crate::scenario_editor::ScenarioEditorState`]、
-//! 保存は [`crate::scenario_editor::save_scenario_with_warnings`] へ委譲
-//! (Issue #184: 無構造テンプレート警告の受け取り)。描画は
-//! [`ScenarioPanel::ui`] を Authoring ペインの collapsing セクションから呼ぶ
-//! (app_ui.rs は配線のみ)。
-//!
-//! UC-3 (Shard 4): 保存済み pipeline をタスクへ登録・有効化するサブフローは
-//! [`ScenarioPanel::ui_task_link`] (ドメインは `scenario_task_link`)。
-//! 呼び出し元互換のため scenario_ui が本モジュールの公開アイテムを re-export する。
-
 use std::path::{Path, PathBuf};
 
 use anaden_core::{Goal, StopCondition};
@@ -20,20 +6,15 @@ use image::DynamicImage;
 
 use crate::scenario_editor::{ScenarioEditorState, goal_summary, save_scenario_with_warnings};
 
-/// ゴール追加フォームの停止条件種別。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 enum GoalKind {
-    /// 指定回数ループで停止。
     #[default]
     LoopCount,
-    /// 指定秒数でタイムアウト停止。
     Timeout,
-    /// 開始タスクのテンプレ一致で停止 (task 名は start_task を採用)。
     TemplateMatch,
 }
 
 impl GoalKind {
-    /// UI コンボ表示ラベル。
     fn label(self) -> &'static str {
         match self {
             Self::LoopCount => "ループ回数",
@@ -42,7 +23,6 @@ impl GoalKind {
         }
     }
 
-    /// 種別切替時の値入力既定値。
     fn default_value(self) -> &'static str {
         match self {
             Self::LoopCount => "10",
@@ -52,72 +32,35 @@ impl GoalKind {
     }
 }
 
-/// UC-3 のリンク経路 (差分はこの 1 値に集約 — 双生児メソッドを作らない)。
 #[derive(Clone, Copy)]
 enum LinkMode {
-    /// (i) 新規タスクとして登録 (task id/title フォーム入力を使用)。
     Register,
-    /// (ii) 選択中の stub タスク (`ScenarioPanel::bind_selection`) へ紐付け。
     Bind,
 }
 
-/// 保存済みシナリオの記録 (UC-3 登録フローの対象)。
-///
-/// `save()` 成功時の実体 (保存先 dir + manifest の start_task) を保持する。
-/// 以後の名前変更・編集が未保存でも、登録はこの保存済み実体に対して行う。
 #[derive(Debug, Clone)]
 struct SavedScenario {
-    /// 保存済み pipeline ディレクトリ (絶対パス)。
     dir: PathBuf,
-    /// 保存済み manifest の start_task。
     start_task: String,
 }
 
-/// Authoring ペイン埋め込みのシナリオ作成パネル (UC-1/UC-2)。
-///
-/// `strategy_ui::StrategyPanel` と同じ「純状態モデル + egui パネル」パターン。
-/// 保持する編集データは [`ScenarioEditorState`]、保存は
-/// [`crate::scenario_editor::save_scenario_with_warnings`] へ委譲
-/// (Issue #184: 無構造テンプレート警告を status へ表示)。描画は [`Self::ui`] を
-/// Authoring ペインの collapsing セクションから呼ぶ (app.rs は配線のみ)。
-///
-/// UC-3 (Shard 4): 保存済み pipeline をタスクへ登録・有効化するサブフローは
-/// [`Self::ui_task_link`] (ドメインは `scenario_task_link`)。
 pub struct ScenarioPanel {
-    /// 編集中のシナリオ (純状態モデル)。フォームがフィールドを直接編集する。
     pub state: ScenarioEditorState,
-    /// 保存先ルート (既定は workspace の `templates/pipelines`。
-    /// UC-4 ロード編集モードではロード元 dir の親に固定される)。
     pipelines_root: PathBuf,
-    /// UC-4 (Shard 5): 新規作成モードの保存先ルート。「既存 pipeline を開く」と
-    /// `pipelines_root` がロード元へ移動するため、新規モードへ戻る際の復元元。
     default_root: PathBuf,
-    /// UC-4: 「既存 pipeline を開く」コンボの選択中 pipeline 名 (未選択 = None)。
     open_selection: Option<String>,
-    /// ROI 追加タスクのテンプレ PNG 本体 (task 名 → crop)。保存時に書き出す。
     pending_pngs: Vec<(String, DynamicImage)>,
-    /// UC-2 でファイル参照を割り当てた PNG の元絶対パス (task 名 → 絶対パス)。
-    /// 保存直前に最終 pipeline dir 基準で再相対化する (シナリオ名変更耐性)。
     assigned_pngs: Vec<(String, PathBuf)>,
-    /// ゴール追加フォーム: 停止条件種別。
     goal_kind: GoalKind,
-    /// ゴール追加フォーム: 値 (回数 / 秒 / 信頼度)。
     goal_value: String,
-    /// ゴール追加フォーム: ゴール名。
     goal_name: String,
-    /// UC-3: 直近の保存成功実体 (未保存 = None。登録フローの対象)。
     saved: Option<SavedScenario>,
-    /// UC-3 登録フォーム: task id (保存時にシナリオ名へ同期・編集可)。
     pub task_id_input: String,
-    /// UC-3 登録フォーム: title (保存時にシナリオ名へ同期・編集可)。
     pub task_title_input: String,
-    /// UC-3: 既存 stub タスク (implemented=false の pipeline_run) からの
-    /// 紐付け先選択 (未選択 = None)。
     pub bind_selection: Option<String>,
 }
 
 impl ScenarioPanel {
-    /// 保存先ルートを指定して構築する。
     #[must_use]
     pub fn new(pipelines_root: PathBuf) -> Self {
         Self {
@@ -137,27 +80,11 @@ impl ScenarioPanel {
         }
     }
 
-    /// 保存先 pipeline ディレクトリ (`<pipelines_root>/<シナリオ名>`)。
     #[must_use]
     pub fn pipeline_dir(&self) -> PathBuf {
         self.pipelines_root.join(self.state.name.trim())
     }
 
-    /// UC-4 (Shard 5): 既存 pipeline ディレクトリをエディタへロードする
-    /// (「開く」ボタンの実体。ドメインは [`crate::scenario_load::load_scenario_from_dir`])。
-    ///
-    /// ロード後は (a) 既定の保存先を **ロード元 dir に固定** する
-    /// (`pipelines_root` = dir の親。シナリオ名 = dir 名のため
-    /// [`Self::pipeline_dir`] がロード元と一致する)、(b) 編集用の未確定データ
-    /// (pending/参照 PNG・保存実体・登録フォーム) をリセットする。ロード済み
-    /// TaskDef の template は load_pipeline が絶対化済みで、保存時
-    /// `save_task_def` が同じ dir 基準で再相対化するため元の相対参照へ戻る。
-    ///
-    /// シナリオ名を書き換えて保存すると別ディレクトリへの新規保存
-    /// (save-as) になる — その場合 template 参照は新しい dir 基準で再相対化
-    /// されるが PNG 実体はコピーされない点は既知の制約。
-    ///
-    /// 戻り値はロード成否。失敗理由は `status` へ。
     pub fn open_existing(&mut self, dir: &Path, status: &mut String) -> bool {
         match crate::scenario_load::load_scenario_from_dir(dir) {
             Ok(state) => {
@@ -186,8 +113,6 @@ impl ScenarioPanel {
         }
     }
 
-    /// UC-4: 新規作成モードへ戻る (ロード編集状態を破棄し、保存先を既定ルートへ
-    /// 復元する。「新規シナリオ」ボタンの実体)。
     pub fn new_scenario(&mut self, status: &mut String) {
         self.pipelines_root = self.default_root.clone();
         self.state = ScenarioEditorState::new("my_scenario");
@@ -201,8 +126,6 @@ impl ScenarioPanel {
         *status = "新規シナリオ作成モードへ戻りました".to_string();
     }
 
-    /// 現在のROI候補タスク (TaskDef + crop PNG) を追加する
-    /// (「+ 現在のROIをタスク追加」ボタンの実体)。同名タスク既存時は Err。
     pub fn add_candidate(&mut self, task: TaskDef, png: DynamicImage) -> Result<(), String> {
         if self.state.task(&task.name).is_some() {
             return Err(format!("同名タスクが既に存在します: {}", task.name));
@@ -213,16 +136,12 @@ impl ScenarioPanel {
         Ok(())
     }
 
-    /// タスクを削除する (pending PNG・UC-2 参照も同期除去)。
     fn remove_task(&mut self, name: &str) {
         self.state.remove_task(name);
         self.pending_pngs.retain(|(n, _)| n != name);
         self.assigned_pngs.retain(|(n, _)| n != name);
     }
 
-    /// 追加フォーム入力から Goal を構築する。種別ごとに値をパースし、不正入力は
-    /// Err (fail-closed・黙って既定値へフォールバックしない)。値域検証
-    /// (`target > 0` 等) は保存時の [`ScenarioEditorState::validate`] に委ねる。
     fn build_goal(&self) -> Result<Goal, String> {
         let name = if self.goal_name.trim().is_empty() {
             format!("goal_{}", self.state.goals.len() + 1)
@@ -270,12 +189,6 @@ impl ScenarioPanel {
         }
     }
 
-    /// 現在の状態を保存する (「シナリオ保存」ボタンの実体)。
-    /// UC-2 参照は最終 pipeline dir 基準で再相対化してから保存する。
-    /// UC-3: 保存成功時は保存実体 (dir + start_task) を記録し、登録フォームの
-    /// 既定値 (task id / title = シナリオ名) を同期する。
-    /// Issue #184: 無構造テンプレート (stddev < 閾値) への警告を status へ併記する
-    /// (fail-visible・保存はブロックしない)。
     pub fn save(&mut self, status: &mut String) {
         let dir = self.pipeline_dir();
         for (name, png) in self.assigned_pngs.clone() {
@@ -288,8 +201,6 @@ impl ScenarioPanel {
                     msg.push_str(&format!(" / {warning}"));
                 }
                 *status = msg;
-                // 保存成功 = この編集状態は保存先 pipeline の所有者 (連続保存が
-                // PipelineDirAlreadyExists ガードを通るための所有権証明)。
                 self.state.loaded_from = Some(outcome.dir.clone());
                 self.saved = Some(SavedScenario {
                     start_task: self.state.start_task.clone(),
@@ -303,15 +214,11 @@ impl ScenarioPanel {
         }
     }
 
-    /// 直近の保存済み pipeline ディレクトリ (未保存 = None)。
     #[must_use]
     pub fn saved_pipeline(&self) -> Option<&Path> {
         self.saved.as_ref().map(|s| s.dir.as_path())
     }
 
-    /// ドメイン呼出結果を status 文字列 + [`crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled`]
-    /// へ変換する共通尾部。成功/失敗の文言だけが「新規登録」と「stub 紐付け」の
-    /// 経路差 (§B 共通フロー化)。
     fn task_link_outcome(
         result: Result<crate::tasks::TaskDefinition, crate::scenario_task_link::ScenarioTaskError>,
         status: &mut String,
@@ -332,10 +239,6 @@ impl ScenarioPanel {
         }
     }
 
-    /// UC-3 (i): 保存済み pipeline を新規タスクとして登録・有効化する
-    /// (「新規タスクとして登録・有効化」ボタンの実体。ドメインは
-    /// `scenario_task_link::register_and_enable_task`)。
-    /// 成功時は [`crate::scenario_task_link::ScenarioPanelEvent::TaskEnabled`] を返す。
     pub fn register_as_new_task(
         &mut self,
         ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
@@ -344,9 +247,6 @@ impl ScenarioPanel {
         self.link_saved_pipeline(LinkMode::Register, ctx, status)
     }
 
-    /// UC-3 (ii): 選択中の既存 stub タスク (implemented=false の pipeline_run) へ
-    /// 保存済み pipeline を紐付けて有効化する (「選択タスクへ紐付け・有効化」
-    /// ボタンの実体。ドメインは `scenario_task_link::bind_and_enable_task`)。
     pub fn bind_stub_task(
         &mut self,
         ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
@@ -355,9 +255,6 @@ impl ScenarioPanel {
         self.link_saved_pipeline(LinkMode::Bind, ctx, status)
     }
 
-    /// UC-3 共通フロー: 保存済み pipeline をタスクへ登録/紐付けして有効化する。
-    /// 経路差 ([`LinkMode`]) 以外は同一: 保存ガード → (Bind のみ選択ガード) →
-    /// ドメイン呼出 → [`Self::task_link_outcome`]。
     fn link_saved_pipeline(
         &mut self,
         mode: LinkMode,
@@ -406,20 +303,12 @@ impl ScenarioPanel {
         )
     }
 
-    /// UC-3: 保存済み pipeline をタスクへ登録・有効化するセクションを描画する。
-    ///
-    /// 保存済みでない場合は何も描画しない (4 段階フローの (b)(c) は保存 (a) が前提)。
-    /// 2 経路: (i) 新規タスクとして登録 (task id / title 編集可)・
-    /// (ii) 既存の未実装タスク (`ctx.stubs`) へ紐付け+有効化。
-    /// 成功時は [`crate::scenario_task_link::ScenarioPanelEvent`] を返す
-    /// (app.rs がホーム一覧を再読込して反映)。
     pub fn ui_task_link(
         &mut self,
         ui: &mut egui::Ui,
         ctx: &crate::scenario_task_link::TaskLinkContext<'_>,
         status: &mut String,
     ) -> Option<crate::scenario_task_link::ScenarioPanelEvent> {
-        // 未保存時はセクション自体を表示しない (イベントも無し)。
         let saved = self.saved.clone()?;
         let mut event = None;
         egui::CollapsingHeader::new("タスク登録・有効化")
@@ -428,7 +317,6 @@ impl ScenarioPanel {
                 ui.label(format!("pipeline: {}", saved.dir.display()));
                 ui.label(format!("start_task: {}", saved.start_task));
                 ui.separator();
-                // (i) 新規タスクとして登録 (task id 既定 = シナリオ名・title 編集可)。
                 ui.horizontal(|ui| {
                     ui.label("task id:");
                     ui.add(
@@ -445,7 +333,6 @@ impl ScenarioPanel {
                     event = self.register_as_new_task(ctx, status);
                 }
                 ui.separator();
-                // (ii) 既存の未実装タスク (implemented=false の pipeline_run) へ紐付け。
                 if ctx.stubs.is_empty() {
                     ui.weak("紐付け可能な未実装タスクがありません");
                 } else {
@@ -478,18 +365,12 @@ impl ScenarioPanel {
         event
     }
 
-    /// パネル本体を描画する。`candidate` は呼出側 (app.rs) が現在のROI・入力から
-    /// 構築した追加候補タスク (None = スクショ/ROI 未確定で追加不可表示)。
-    /// 失敗・結果は `status` へ書き出す (Authoring ペインのステータス行と共有)。
     pub fn ui(
         &mut self,
         ui: &mut egui::Ui,
         candidate: Option<(TaskDef, DynamicImage)>,
         status: &mut String,
     ) {
-        // --- UC-4 (Shard 5): 既存 pipeline を開く / 新規作成モード切替 ---
-        // コンボは既定ルート (workspace `templates/pipelines`) 直下の pipeline
-        // ディレクトリ列挙。rfd のフォルダ参照は列挙外の場所を開く経路。
         ui.horizontal(|ui| {
             let names = crate::scenario_load::list_pipeline_dirs(&self.default_root);
             let selected = self
@@ -530,7 +411,6 @@ impl ScenarioPanel {
         ui.label(format!("保存先: {}", self.pipeline_dir().display()));
         ui.separator();
 
-        // --- タスク一覧 (名前一覧を先に clone して borrow を分離) ---
         let names: Vec<String> = self.state.tasks.iter().map(|t| t.name.clone()).collect();
         let mut removed: Option<String> = None;
         let mut pick_png: Option<String> = None;
@@ -543,7 +423,6 @@ impl ScenarioPanel {
                 .show(ui, |ui| {
                     ui.monospace(format!("template: {}", task.template.display()));
                     ui.add(egui::Slider::new(&mut task.threshold, 0.5..=0.99).text("閾値"));
-                    // next 参照 (他タスク名のチェックボックスでON/OFF)。
                     let mut nexts = task.next.clone().unwrap_or_default();
                     let mut changed = false;
                     for other in &names {
@@ -563,8 +442,6 @@ impl ScenarioPanel {
                     if changed {
                         task.next = Some(nexts);
                     }
-                    // UC-2: 既存 PNG (テンプレート作成ペイン成果物等) をファイル
-                    // 参照として割り当てる (pipeline dir 基準の相対パスへ解決)。
                     if ui.small_button("テンプレPNG参照...").clicked() {
                         pick_png = Some(name.clone());
                     }
@@ -576,8 +453,6 @@ impl ScenarioPanel {
         if let Some(name) = removed {
             self.remove_task(&name);
         }
-        // UC-2: ファイルダイアログで選んだ PNG を相対参照として割り当てる。
-        // 元絶対パスも保持し、保存直前に最終 pipeline dir 基準で再相対化する。
         if let Some(name) = pick_png
             && let Some(png) = rfd::FileDialog::new()
                 .add_filter("PNG image", &["png"])
@@ -591,7 +466,6 @@ impl ScenarioPanel {
             }
         }
 
-        // --- タスク追加 (現在のROI候補) ---
         match candidate {
             Some((task, crop)) => {
                 if ui
@@ -608,7 +482,6 @@ impl ScenarioPanel {
         }
         ui.separator();
 
-        // --- 開始タスク選択 (TaskDef 名前空間から) ---
         ui.horizontal(|ui| {
             ui.label("開始タスク:");
             egui::ComboBox::from_id_salt("scenario_start_task")
@@ -634,7 +507,6 @@ impl ScenarioPanel {
         });
         ui.separator();
 
-        // --- ゴール一覧 + 追加フォーム ---
         ui.strong(format!("ゴール ({})", self.state.goals.len()));
         let mut remove_goal: Option<usize> = None;
         for (i, goal) in self.state.goals.iter().enumerate() {
@@ -674,7 +546,6 @@ impl ScenarioPanel {
         });
         ui.separator();
 
-        // --- 保存 (検証不合格時は全問題を一覧表示してボタン無効化) ---
         let issues = self.state.validation_issues();
         if issues.is_empty() {
             if ui.button("シナリオ保存").clicked() {
@@ -682,7 +553,6 @@ impl ScenarioPanel {
             }
         } else {
             ui.add_enabled_ui(false, |ui| {
-                // 無効化表示のみ (クリックは起きない)。Response は未使用でよい。
                 let _ = ui.button("シナリオ保存");
             });
             for issue in &issues {

@@ -1,34 +1,14 @@
-//! 統合シェルのナビゲーション型群 (Issue #162 Shard 3)。
-//!
-//! [`UnifiedMode`] (ホーム/ツールの 2 タブ)・[`ToolsSection`] (ツール内
-//! サブセクション)・[`UnifiedPane`] (描画ペイン) と遷移純関数 [`active_pane`]
-//! を shell.rs から分離したモジュール。egui 非依存の純関数群であり、
-//! ヘッドレスでユニットテスト可能。
-//!
-//! 呼び出し元 (main.rs / tests/) は従来どおり `crate::shell::{...}`
-//! (`anaden_studio::shell::{...}`) で参照できる（shell.rs が facade re-export）。
-
 use crate::app::AppMode;
 use crate::runner::RunnerPane;
 
-/// 統合 modebar のモード（Issue #157: 旧 6+1 タブを 2 タブへ集約）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum UnifiedMode {
-    /// ホーム（Tasks ペイン。Issue #154 の MAA 型タスク一覧・QueueExec 逐次実行）。
+    #[default]
     Home,
-    /// ツール（旧 6 タブ相当を [`ToolsSection`] サブバーで統合したビュー）。
     Tools,
 }
 
-impl Default for UnifiedMode {
-    /// 既定モードはホーム（Issue #157: 起動直後はタスク一覧が画面の主役）。
-    fn default() -> Self {
-        Self::Home
-    }
-}
-
 impl UnifiedMode {
-    /// modebar 表示ラベル（絵文字なし・豆腐回避）。
     pub fn label(self) -> &'static str {
         match self {
             Self::Home => "ホーム",
@@ -36,42 +16,22 @@ impl UnifiedMode {
         }
     }
 
-    /// 全モードを modebar 表示順に返す（Issue #157: 2 タブ構成）。
     pub const ALL: [UnifiedMode; 2] = [UnifiedMode::Home, UnifiedMode::Tools];
 }
 
-/// ツールビュー内のサブセクション（Issue #157: 旧 UnifiedMode タブの再マップ）。
-///
-/// 旧タブ（作成/バッチ評価/戦略/実行/履歴/設定）の機能は削除せず、
-/// このサブ切替からすべて到達できる（機能喪失なしの保証対象）。
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum ToolsSection {
-    /// テンプレート作成（StudioApp に委譲）。
+    #[default]
     Authoring,
-    /// 実演オーサリング (Issue #190: ライブビュー操作の記録 + 実機注入)。
-    /// StudioApp に委譲。
     LiveAuthoring,
-    /// バッチ評価（StudioApp に委譲）。
     Batch,
-    /// 戦略選択（runner の戦略ペイン。Issue #125 shard 3）。
     Strategy,
-    /// pipeline 実行（既存 runner UI・単発実行）。
     Run,
-    /// 実行履歴（既存 runner UI）。
     History,
-    /// 設定（runner の設定ペイン。Issue #125 shard 3）。
     Settings,
 }
 
-impl Default for ToolsSection {
-    /// 既定セクションは作成（旧 StudioApp の既定モード Authoring と同一）。
-    fn default() -> Self {
-        Self::Authoring
-    }
-}
-
 impl ToolsSection {
-    /// サブバー表示ラベル（絵文字なし・豆腐回避）。
     pub fn label(self) -> &'static str {
         match self {
             Self::Authoring => "作成",
@@ -84,8 +44,6 @@ impl ToolsSection {
         }
     }
 
-    /// 全セクションをサブバー表示順に返す（旧 modebar と同一順序 +
-    /// Issue #190 の実演オーサリング）。
     pub const ALL: [ToolsSection; 7] = [
         ToolsSection::Authoring,
         ToolsSection::LiveAuthoring,
@@ -96,7 +54,6 @@ impl ToolsSection {
         ToolsSection::Settings,
     ];
 
-    /// 対応する StudioApp 側モード（Authoring/LiveAuthoring/Batch 以外は None）。
     pub fn studio_mode(self) -> Option<AppMode> {
         match self {
             Self::Authoring => Some(AppMode::Authoring),
@@ -106,11 +63,6 @@ impl ToolsSection {
         }
     }
 
-    /// 対応する runner ペイン種別。
-    ///
-    /// Studio 系セクション (Authoring/LiveAuthoring/Batch) は [`active_pane`] が
-    /// [`UnifiedPane::Studio`] を返すためこの結果は使われない
-    /// （総関数として既定の Run を返す）。
     pub fn runner_pane(self) -> RunnerPane {
         match self {
             Self::Run => RunnerPane::Run,
@@ -122,21 +74,13 @@ impl ToolsSection {
     }
 }
 
-/// モードに対応する描画ペイン（描画分岐の純関数表現）。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum UnifiedPane {
-    /// MAA 型タスク一覧（ホーム画面・Issue #154）。
     Tasks,
-    /// StudioApp のパネル（作成/バッチ評価）。
     Studio,
-    /// PipelineRunnerApp のパネル（実行/戦略/履歴/設定）。
     Runner,
 }
 
-/// モード + ツールセクション → 描画ペインの純関数（単体テスト対象）。
-///
-/// ホームは常に Tasks。ツールはセクションが Studio 系 (Authoring/Batch) なら
-/// Studio、runner 系 (戦略/実行/履歴/設定) なら Runner。
 pub fn active_pane(mode: UnifiedMode, section: ToolsSection) -> UnifiedPane {
     match mode {
         UnifiedMode::Home => UnifiedPane::Tasks,

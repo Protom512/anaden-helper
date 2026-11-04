@@ -1,117 +1,44 @@
-//! シナリオ編集状態のバリデーション層 (Issue #160 UC-4 / Issue #173 で
-//! scenario_editor.rs から分割)。
-//!
-//! [`ScenarioEditorState`] の検査 (保存前 validate / フォーム全件一覧表示) と
-//! そのエラー型 [`ScenarioValidationError`]・ROI 検証基準の画面寸法
-//! ([`SCREEN_WIDTH`]/[`SCREEN_HEIGHT`]) を担う。検査メソッド
-//! (`validation_issues` / `validate`) は [`crate::scenario_state::ScenarioEditorState`]
-//! への追加分離 impl として本モジュールに置く (状態操作は
-//! [`crate::scenario_state`]、保存は [`crate::scenario_save`])。
-
 use std::path::Path;
 
 use anaden_core::GoalError;
 
 use crate::scenario_state::ScenarioEditorState;
 
-/// ROI 検証基準の画面寸法 (raw-1258x708 PC キャプチャ空間)。
-/// pipeline.rs テストの `assert_roi_within_1258x708` と同一契約。
 pub const SCREEN_WIDTH: u32 = 1258;
 pub const SCREEN_HEIGHT: u32 = 708;
 
-/// シナリオ編集状態のバリデーションエラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum ScenarioValidationError {
-    /// シナリオ名が空 (保存先ディレクトリ名になれない)。
     #[error("scenario name must not be empty")]
     EmptyName,
-    /// シナリオ名が保存先ディレクトリ名として不適 (パス区切り・`.`/`..` 等)。
-    /// `templates/pipelines/<name>/` の `<name>` は単一パス要素でなければならない。
     #[error("scenario name `{name}` is not a safe directory name")]
-    UnsafeName {
-        /// 不適だったシナリオ名。
-        name: String,
-    },
-    /// TaskDef が 1 つもない (manifest 単独では実行不能)。
+    UnsafeName { name: String },
     #[error("scenario must contain at least 1 task")]
     NoTasks,
-    /// start_task が未設定。
     #[error("start_task must be set")]
     EmptyStartTask,
-    /// start_task が TaskDef 名前空間に存在しない。
     #[error("start_task `{task}` does not match any TaskDef name")]
-    UnknownStartTask {
-        /// 不一致だった start_task 名。
-        task: String,
-    },
-    /// TaskDef 名の重複 (名前空間が一意でないと lookup が曖昧になる)。
+    UnknownStartTask { task: String },
     #[error("duplicate task name `{name}`")]
-    DuplicateTaskName {
-        /// 重複していたタスク名。
-        name: String,
-    },
-    /// next 参照が TaskDef 名前空間に存在しない。
+    DuplicateTaskName { name: String },
     #[error("task `{task}`: next reference `{next}` does not match any TaskDef name")]
-    UnresolvedNext {
-        /// 参照元タスク名。
-        task: String,
-        /// 解決不能だった next 参照先。
-        next: String,
-    },
-    /// Goal の不変量違反 (`Goal::validate` の委譲結果)。
+    UnresolvedNext { task: String, next: String },
     #[error("goal[{index}] `{goal_name}` invalid: {source}")]
     GoalInvalid {
-        /// `goals` 内のインデックス。
         index: usize,
-        /// ゴール名。
         goal_name: String,
-        /// 委譲先 (`Goal::validate`) のエラー。
         #[source]
         source: GoalError,
     },
-    /// ROI が画面外にはみ出す、または幅/高さが 0。
     #[error(
         "task `{task}`: roi {roi:?} exceeds screen {SCREEN_WIDTH}x{SCREEN_HEIGHT} or has zero size"
     )]
-    RoiOutOfBounds {
-        /// 対象タスク名。
-        task: String,
-        /// はみ出し/ゼロサイズだった ROI `[x, y, w, h]`。
-        roi: [u32; 4],
-    },
-    /// 新規・リネーム TaskDef 名が MAA/MDA pipeline 命名規約 (PascalCase 強制・
-    /// 連番禁止・過汎用名禁止) に違反 (Issue #160 UC-4 / 設計ノート C)。
-    /// ロード済み既存名
-    /// ([`crate::scenario_state::ScenarioEditorState::loaded_task_names`]) は対象外
-    /// (変更しない限り警告しない)。
+    RoiOutOfBounds { task: String, roi: [u32; 4] },
     #[error("task name `{name}` violates the pipeline node naming convention: {reason}")]
-    TaskNaming {
-        /// 違反したタスク名。
-        name: String,
-        /// 違反理由 ([`crate::scenario_load::task_name_issue`] 由来)。
-        reason: String,
-    },
+    TaskNaming { name: String, reason: String },
 }
 
 impl ScenarioEditorState {
-    /// 全バリデーション問題を収集して返す (フォームで全件一覧表示する用途)。
-    ///
-    /// 検査内容: シナリオ名非空・ディレクトリ名として安全・TaskDef 1 件以上・
-    /// タスク名一意・start_task が TaskDef 名前空間に存在・next 参照が解決可能・
-    /// 各 Goal の [`anaden_core::Goal::validate`] 委譲・ROI が
-    /// [`SCREEN_WIDTH`]x[`SCREEN_HEIGHT`] 画面内で有効サイズ・新規/リネーム
-    /// TaskDef 名が命名規約適合 ([`crate::scenario_load::task_name_issue`])。
-    ///
-    /// **UC-4 baseline ゲーティング**: 命名規約検査と ROI 画面内検査は
-    /// [`Self::loaded_task_names`] に含まれない名前 (= 新規追加・リネーム後)
-    /// にのみ適用する。既存 pipeline のタスクは (a) 名前は命名規約導入前の
-    /// 資産である可能性、(b) 20:9 pipeline の ROI は 1280 基準座標系で
-    /// PC 1258x708 空間の契約外 (例: `field_loop/tap_hud_tr.toml` の
-    /// `[1080,150,180,150]` は x+w=1260)、の理由で作成時検査の対象外とし、
-    /// 編集なき保存 (ロスレス往復) を妨げない。リネームすると両検査が再有効
-    /// になる (新規名は命名規約に、ROI は保存先座標系契約に従うべき)。
-    /// 出力順は決定論的 (名前 → TaskDef 存在 → 重複 → start_task → タスク毎 →
-    /// ゴール毎)。
     #[must_use]
     pub fn validation_issues(&self) -> Vec<ScenarioValidationError> {
         let mut issues = Vec::new();
@@ -122,13 +49,10 @@ impl ScenarioEditorState {
         issues
     }
 
-    /// scenario 名の検査: 空 / 保存先ディレクトリ名として不安全。
     fn check_scenario_name(&self, issues: &mut Vec<ScenarioValidationError>) {
         if self.name.trim().is_empty() {
             issues.push(ScenarioValidationError::EmptyName);
         }
-        // 保存先ディレクトリ名として安全か。file_name() が名前全体と一致すれば
-        // パス区切りを含まない単一要素 (`.`/`..`/末尾区切りは不一致になる)。
         let name = self.name.trim();
         if !name.is_empty() && Path::new(name).file_name() != Some(std::ffi::OsStr::new(name)) {
             issues.push(ScenarioValidationError::UnsafeName {
@@ -137,13 +61,11 @@ impl ScenarioEditorState {
         }
     }
 
-    /// タスク名前空間の検査: 空でない / 名前一意 / start_task が解決可能。
     fn check_task_namespace(&self, issues: &mut Vec<ScenarioValidationError>) {
         if self.tasks.is_empty() {
             issues.push(ScenarioValidationError::NoTasks);
         }
 
-        // タスク名一意性 (名前空間整合)。二件目以降の出現を報告する。
         for (i, task) in self.tasks.iter().enumerate() {
             if self.tasks[..i].iter().any(|t| t.name == task.name) {
                 issues.push(ScenarioValidationError::DuplicateTaskName {
@@ -161,8 +83,6 @@ impl ScenarioEditorState {
         }
     }
 
-    /// タスク毎の検査: 命名規約 (新規/リネーム分のみ) / next 参照解決 /
-    /// ROI 画面内 (新規/リネーム分のみ — UC-4 baseline ゲーティング)。
     fn check_task_references(&self, issues: &mut Vec<ScenarioValidationError>) {
         for task in &self.tasks {
             let is_loaded = self.loaded_task_names.iter().any(|n| n == &task.name);
@@ -194,7 +114,6 @@ impl ScenarioEditorState {
         }
     }
 
-    /// ゴール毎の検査 ([`anaden_core::Goal::validate`] 委譲)。
     fn check_goals(&self, issues: &mut Vec<ScenarioValidationError>) {
         for (index, goal) in self.goals.iter().enumerate() {
             if let Err(source) = goal.validate() {
@@ -207,10 +126,6 @@ impl ScenarioEditorState {
         }
     }
 
-    /// 最初のバリデーション問題を返す ([`anaden_core::Goal::validate`] と同じ契約)。
-    ///
-    /// # Errors
-    /// 1 つでも問題があればその最初の [`ScenarioValidationError`]。
     pub fn validate(&self) -> Result<(), ScenarioValidationError> {
         match self.validation_issues().into_iter().next() {
             Some(e) => Err(e),
@@ -219,7 +134,6 @@ impl ScenarioEditorState {
     }
 }
 
-/// ROI `[x, y, w, h]` が画面内で有効サイズか (pipeline.rs テストと同一契約)。
 fn roi_within_screen(roi: [u32; 4]) -> bool {
     let [x, y, w, h] = roi;
     w > 0 && h > 0 && x.saturating_add(w) <= SCREEN_WIDTH && y.saturating_add(h) <= SCREEN_HEIGHT

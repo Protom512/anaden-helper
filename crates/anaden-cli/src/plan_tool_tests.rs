@@ -1,6 +1,3 @@
-//! plan_tool の振る舞いテスト (公開関数経由・実データ込み)。
-//! plan_tool.rs から `#[path]` で読み込まれる子モジュール。
-
 use super::*;
 use crate::plan_data::{DifficultyTable, RewardSlots};
 
@@ -41,9 +38,6 @@ fn keys(h: &str, vh: &str) -> DifficultyTable<String> {
     }
 }
 
-/// 実データに依存しない邁縁ケース用の最小 tenmei doc。
-/// ダンジョン: 城 (スキップ可・天) / 秘境 (スキップ不可)。
-/// キャラ: ア (城+秘境+表外) / ベ (城のみ) / 該当なし (秘境のみ)。
 fn synthetic_tenmei() -> TenmeiDoc {
     TenmeiDoc {
         version: 1,
@@ -114,8 +108,6 @@ fn entry(dungeon: &str, difficulty: Difficulty, priority: u32) -> PlanEntry {
         note: String::new(),
     }
 }
-
-// ---- generate_plan (逆引き) ----
 
 #[test]
 fn generates_plan_for_aldo_from_real_data() {
@@ -208,8 +200,6 @@ fn all_excluded_char_is_error() {
     assert!(format!("{err}").contains("0 件"), "{err}");
 }
 
-// ---- expand_plan (静的展開) ----
-
 #[test]
 fn expands_real_plan_into_engine_validatable_routine() {
     let def = expand_plan(
@@ -263,8 +253,6 @@ fn expansion_fails_closed_on_unknown_not_skippable_and_duplicate() {
     let err = expand_plan(&empty, &synthetic_tenmei(), "p", "T").expect_err("must fail");
     assert!(format!("{err}").contains("[[entry]]"), "{err}");
 }
-
-// ---- コマンド本体 (ファイル入出力込み) ----
 
 #[test]
 fn run_plan_tenmei_writes_parseable_plan_file() {

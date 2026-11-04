@@ -1,51 +1,9 @@
-//! テンプレート画像の構造検証 (無構造テンプレート検出 — Issue #184)。
-//!
-//! Issue #182 の実機 E2E で、`templates/scenes/title_pc/version_label.png`
-//! (旧テンプレート) が輝度 stddev 3.76 のほぼ白一色だったことで
-//! TM_CCOEFF_NORMED が原理的に match できず、65 iterations で発火 0 という
-//! 恒久 NoMatch が発生した。この種の欠陥テンプレートは保存経路・loader の
-//! いずれでも検証されていなかったため素通りした。
-//!
-//! 本モジュールは輝度 stddev の計算と閾値判定の **単一実装** を提供する。
-//! GUI 保存経路 (anaden-studio) と pipeline loader ([`crate::pipeline::load_pipeline`])
-//! はこの実装を呼び、二重実装による閾値・計算法の drift を防ぐ (Issue #184 受入基準)。
-
 use std::path::Path;
 
 use image::DynamicImage;
 
-/// テンプレートが「構造を持つ」(= マッチ可能) と判定する輝度 stddev の下限閾値。
-///
-/// 根拠は Issue #182 の実測値:
-///
-/// | テンプレート | 輝度 stddev | 実機結果 |
-/// |---|---|---|
-/// | 旧 version_label.png (ほぼ白一色・無構造) | 3.76 | 65 iterations で発火 0 (恒久 NoMatch) |
-/// | 再生成版 version_label.png (ID 表示帯 138x20) | 53.1 | 実機でマッチ成立・フィールド到達 |
-///
-/// 3.76 (無構造) と 53.1 (実構造) の中間で両側に十分なマージンを保てる値として
-/// 20.0 を採用する (テスト `template_min_luma_stddev_sits_strictly_between_measured_values`
-/// がこの根拠との乖離を検出する)。
 pub const TEMPLATE_MIN_LUMA_STDDEV: f32 = 20.0;
 
-/// テンプレート画像全体の輝度 (luma) 標準偏差を返す。
-///
-/// - 変換は [`DynamicImage::to_luma8`] (Rec.601) — テンプレートマッチの前処理と同一。
-/// - ほぼ単色 (クロップ領域ミスで全面白/黑/単色になった場合など) は stddev ≈ 0 に
-///   近い値を返し、[`template_is_structured`] が false になる。
-/// - 0x0 画像 (幅・高さゼロ) は画素を持たないため 0.0 を返す (パニックしない)。
-///
-/// # Examples
-///
-/// ```
-/// use anaden_vision::template_luma_stddev;
-///
-/// // 単色画像の stddev は 0。
-/// let flat = image::DynamicImage::ImageLuma8(
-///     image::GrayImage::from_pixel(32, 16, image::Luma([255u8])),
-/// );
-/// assert_eq!(template_luma_stddev(&flat), 0.0);
-/// ```
 #[must_use]
 pub fn template_luma_stddev(img: &DynamicImage) -> f32 {
     let gray = img.to_luma8();
@@ -62,48 +20,15 @@ pub fn template_luma_stddev(img: &DynamicImage) -> f32 {
         return 0.0;
     }
     let mean = sum / n;
-    // 分散 = E[x^2] - E[x]^2。値域が u8 (<= 255^2 = 65,025) のため f64 の
-    // 桁落ちは stddev 測定精度 (0.01 程度) に対して無視できる。
-    // 浮動小数点誤差で負にならないよう clamp する。
     let var = (sum_sq / n - mean * mean).max(0.0);
     var.sqrt() as f32
 }
 
-/// テンプレート画像がマッチ可能な構造を持つか (stddev >= [`TEMPLATE_MIN_LUMA_STDDEV`])。
-///
-/// 無構造 (ほぼ単色) のテンプレートは TM_CCOEFF_NORMED の分母 (テンプレート分散)
-/// がほぼ 0 になるため原理的にマッチできず、恒久 NoMatch になる
-/// (Issue #182 実機証拠: stddev 3.76 → 65 iters 発火 0)。
-///
-/// # Examples
-///
-/// ```
-/// use anaden_vision::template_is_structured;
-///
-/// // チェッカーボード (0/255) は stddev 約 127.5 → 構造あり。
-/// let mut img = image::GrayImage::new(32, 32);
-/// for y in 0..32 {
-///     for x in 0..32 {
-///         let v: u8 = if (x + y) % 2 == 0 { 0 } else { 255 };
-///         img.put_pixel(x, y, image::Luma([v]));
-///     }
-/// }
-/// assert!(template_is_structured(&image::DynamicImage::ImageLuma8(img)));
-/// ```
 #[must_use]
 pub fn template_is_structured(img: &DynamicImage) -> bool {
     template_luma_stddev(img) >= TEMPLATE_MIN_LUMA_STDDEV
 }
 
-/// `path` のテンプレート画像が無構造の場合に loader 向け警告文を返す。
-///
-/// [`crate::pipeline::load_pipeline`] が needle PNG 読込時に呼ぶ (Issue #184)。
-/// 戻り値:
-/// - `Some(warning)`: ファイルが読め・かつ stddev が [`TEMPLATE_MIN_LUMA_STDDEV`]
-///   未満 (無構造 = 恒久 NoMatch 想定)。呼出側は `tracing::warn!` で表示する。
-/// - `None`: 構造あり、ファイル不在、デコード失敗のいずれか。
-///   load を失敗させない (既存 pipeline 資産の後方互換 — GUI 保存時の
-///   fail-visible 警告と異なり、loader は資産を弾かない)。
 pub(crate) fn unstructured_warning_for_path(path: &Path) -> Option<String> {
     let img = image::open(path).ok()?;
     let stddev = template_luma_stddev(&img);
@@ -120,33 +45,6 @@ pub(crate) fn unstructured_warning_for_path(path: &Path) -> Option<String> {
     ))
 }
 
-/// needle (テンプレート PNG) が TaskDef の ROI に収まるか (Issue #187)。
-///
-/// needle の幅/高さがそれぞれ ROI の幅/高さ以下であることがマッチの必要条件。
-/// [`crate::pipeline::TaskDef::detect`] は ROI と needle を同じ X/Y 比でスケールする
-/// ([`crate::scale::roi_to_normalized`] / `crate::scale::needle_to_normalized`) ため、
-/// 定義空間 (raw-1258 等) でのこの比較は正規化後も保たれる (両辺が同係数で
-/// 単調変換される)。needle が ROI より大きいと cropping 済み haystack 内に
-/// needle が置けず恒久 NoMatch になる (Issue #182: 再生成テンプレ 138px 幅 vs
-/// 旧 roi 幅 121 で発火しなかった実例)。
-///
-/// - `roi = None` は全面走査 ([`crate::pipeline::TaskDef::roi`]) のため常に `true`。
-/// - ROI の幅/高さが 0 の組み合わせも全面扱い (`true`) —
-///   `crate::pipeline::TaskDef::roi_to_region` が w/h 0 を `None` (全面) に
-///   正規化する挙動と揃える。
-///
-/// # Examples
-///
-/// ```
-/// use anaden_vision::needle_fits_roi;
-///
-/// // needle ≤ roi → 収まる (等辺も含む)。
-/// assert!(needle_fits_roi((100, 50), Some([10, 20, 100, 50])));
-/// // roi None = 全面 → 常に収まる。
-/// assert!(needle_fits_roi((4000, 2000), None));
-/// // needle 幅超過 → 恒久 NoMatch。
-/// assert!(!needle_fits_roi((138, 20), Some([8, 2, 121, 35])));
-/// ```
 #[must_use]
 pub fn needle_fits_roi(needle: (u32, u32), roi: Option<[u32; 4]>) -> bool {
     let [_, _, rw, rh] = match roi {
@@ -156,16 +54,6 @@ pub fn needle_fits_roi(needle: (u32, u32), roi: Option<[u32; 4]>) -> bool {
     rw == 0 || rh == 0 || (needle.0 <= rw && needle.1 <= rh)
 }
 
-/// `path` のテンプレート画像が ROI に収まらない場合に loader 向け警告文を返す
-/// (Issue #187・[`needle_fits_roi`] のパス版)。
-///
-/// [`crate::pipeline::load_pipeline`] が TaskDef の `template` × `roi` 検証に呼ぶ。
-/// 画像寸法は [`image::image_dimensions`] (ヘッダのみ読む・デコードしない) で取得する。
-///
-/// - `Some(warning)`: ファイルが読め・かつ needle が roi に収まらない
-///   (= 恒久 NoMatch 想定)。呼出側は `tracing::warn!` で表示する。
-/// - `None`: 収まる、roi = 全面、ファイル不在、デコード失敗のいずれか。
-///   [`unstructured_warning_for_path`] と同じく load は失敗させない (fail-visible)。
 pub(crate) fn needle_exceeds_roi_warning_for_path(
     path: &Path,
     roi: Option<[u32; 4]>,

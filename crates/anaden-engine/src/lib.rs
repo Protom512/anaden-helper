@@ -1,9 +1,3 @@
-//! 自動化エンジン。宣言的パイプライン (tick → capture/input ループ) を駆動する。
-//!
-//! 旧命令型 Orchestrator (Sense→Think→Act ループ・Android ADB 依存) は
-//! Issue #188 で Android 経路とともに削除された。
-//! Issue #199 で routine (複数 pipeline の連続実行) 系を追加した。
-
 mod diagnostics;
 mod jitter;
 mod pipeline_dir;

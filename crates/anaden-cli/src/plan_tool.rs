@@ -1,19 +1,3 @@
-//! `anaden-tool plan-tenmei` / `plan-expand` (Issue #248 offline)。
-//!
-//! - **plan-tenmei**: 上げたいキャラ名から `data/ad_tenmei.toml`
-//!   ([`crate::plan_data::TenmeiDoc`]) を逆引きし、計画 TOML
-//!   (`ticket_digest_plan.toml` 形式) を生成する
-//!   (設計 Wiki `Daily-Automation-ticket-digest` §6)。
-//! - **plan-expand**: 計画 TOML を routine TOML へ**静的展開**する
-//!   (設計 §7「1 ダンジョン 1 サイクル」「engine 変更不要」)。
-//!   エントリ 1 件 = routine ステップ 1 件に展開し、生成物は
-//!   `anaden_engine::load_routine` + `RoutineDef::validate` でそのまま検証できる。
-//!
-//! ループ・パラメタ化は engine に足さない (engine 変更不要の設計契約)。
-//! per-dungeon の FSM 差し替え (difficulty 選択・skip_btn 等) は live テンプレート
-//! 収集後の pipeline 拡張で扱う — 展開された各ステップは pipeline manifest の
-//! `start_task` (単一情報源) から開始する。
-
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
@@ -24,29 +8,17 @@ use crate::plan_data::{
     TenmeiDungeon, load_plan, load_tenmei, render_plan_toml, write_text_file,
 };
 
-/// 生成する routine 名 (evidence・履歴の識別子)。
 const ROUTINE_NAME: &str = "ticket_digest";
-/// 展開ステップのループ間隔 (秒)。
-///
-/// v0 pipeline の goal 安全弁 `Timeout(600)` と揃えるため
-/// interval 2s × max_iters 300 = 600s としている (FSM 拡張時に再調整)。
 const STEP_INTERVAL_SECS: u64 = 2;
-/// 展開ステップの最大サイクル数 (上記コメント参照)。
 const STEP_MAX_ITERS: u64 = 300;
 
-/// ダンジョン逆引き 1 件の判定結果 (生成ループの分岐をここに集約)。
 enum DungeonLookup<'a> {
-    /// 計画に含める (ダンジョン行を返す)。
     Include(&'a TenmeiDungeon),
-    /// `[[dungeon]]` 表に存在しない (スキップ対象 AD 一覧の外)。
     Unknown,
-    /// スキップ対象外 (`skip_target = false`)。
     NotSkippable,
-    /// 同一 (ダンジョン, 難易度) が上位優先度で既に登録済み。
     Duplicate,
 }
 
-/// ダンジョン名の逆引き判定 (純関数)。
 fn classify_dungeon<'a>(
     tenmei: &'a TenmeiDoc,
     dungeon_name: &str,
@@ -65,9 +37,6 @@ fn classify_dungeon<'a>(
     DungeonLookup::Include(row)
 }
 
-/// キャラ行とダンジョン行から `note` を組み立てる。
-///
-/// wiki 雛形の記法 (`ヘレナ冥 / VH報酬枠=天`) に揃える。
 fn note_for(char_row: &TenmeiChar, dungeon: &TenmeiDungeon, difficulty: Difficulty) -> String {
     let slot = dungeon
         .alignment
@@ -82,14 +51,6 @@ fn note_for(char_row: &TenmeiChar, dungeon: &TenmeiDungeon, difficulty: Difficul
     )
 }
 
-/// キャラ名列 (優先度順) から計画を逆引き生成する。
-///
-/// 判定: キャラは `[[char]].name` と完全一致 (不一致は fail-closed)。
-/// ダンジョンは `skip_target = true` のみ採用し、`[[dungeon]]` 表に無いものと
-/// 同一 (ダンジョン, 難易度) の重複は除外して `notes` に記録する。
-///
-/// # Errors
-/// キャラ名が存在しない場合、および除外の結果エントリ 0 件になる場合。
 pub fn generate_plan(
     tenmei: &TenmeiDoc,
     char_names: &[String],
@@ -167,14 +128,6 @@ pub fn generate_plan(
     ))
 }
 
-/// 計画 TOML を routine 定義へ静的展開する (エントリ 1 件 = ステップ 1 件)。
-///
-/// 設計 §6 の突合契約: 各 `entry.dungeon` は `ad_tenmei.toml` `[[dungeon]].name`
-/// と突合し、未知・`skip_target = false`・(ダンジョン, 難易度) 重複は
-/// fail-closed にエラー (手書き編集された計画の誤りを実行前に止める)。
-///
-/// # Errors
-/// 上記突合違反、およびエントリ 0 件の計画。
 pub fn expand_plan(
     plan: &PlanDoc,
     tenmei: &TenmeiDoc,
@@ -230,7 +183,6 @@ pub fn expand_plan(
     })
 }
 
-/// 生成 routine TOML のヘッダコメント (出所と v0 パラメタの根拠)。
 fn routine_header(plan_path: &Path, plan: &PlanDoc) -> String {
     let mode = match plan.on_ticket_empty {
         OnTicketEmpty::Stop => "stop",
@@ -252,23 +204,12 @@ fn routine_header(plan_path: &Path, plan: &PlanDoc) -> String {
     )
 }
 
-/// この crate から見た workspace ルート。
-///
-/// main.rs `cli_workspace_root` と同式 (bin をまたいで共有できないための
-/// 重複定義 — 値はコンパイル時に同一)。
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")
         .join("..")
 }
 
-/// `plan-tenmei` サブコマンド本体。
-///
-/// TOML 成果物は `out` 未指定時 stdout・指定時ファイルへ。経過メッセージは
-/// stderr (stdout の TOML がパイプでそのまま使えるようにする)。
-///
-/// # Errors
-/// データ読込・逆引き失敗 (未知キャラ等)・書込失敗。
 pub fn run_plan_tenmei(
     char_names: &[String],
     data_path: &Path,
@@ -295,15 +236,6 @@ pub fn run_plan_tenmei(
     Ok(())
 }
 
-/// `plan-expand` サブコマンド本体。
-///
-/// `start_task` は pipeline manifest (`pipeline.toml`) の宣言値を単一情報源として
-/// 採用する (FSM 拡張で manifest が書き換われば再生成で追従)。
-/// 生成 routine は `anaden routine <file>` でそのまま実行可能。
-///
-/// # Errors
-/// 計画・天冥データの読込失敗、pipeline 解決・manifest 読込失敗、
-/// 展開の突合違反、書込失敗。
 pub fn run_plan_expand(
     plan_path: &Path,
     data_path: &Path,

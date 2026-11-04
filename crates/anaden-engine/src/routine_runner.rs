@@ -1,58 +1,26 @@
-//! Routine 連続実行エンジン (Issue #199)。
-//!
-//! pipeline 実行を [`PipelineInvoker`] trait で抽象化し、本番は CLI 側の
-//! PipelineDriver 実装・テストは recording double へ差し替える
-//! (contract coupling: engine は Win32 に依存しない)。
-//! [`run_routine`] はステップ結果 (成功/失敗/発火数/停止理由) を集約し
-//! on_failure ポリシー (Stop/Skip) を適用、全体サマリ ([`RoutineSummary`]) を返す。
-
 use async_trait::async_trait;
 use serde::{Deserialize, Serialize};
 
 use crate::routine::{OnFailure, RoutineDef, RoutineError, RoutineStep};
 use crate::{LoopOutcome, LoopStopReason, resolve_pipeline_dir};
 
-/// 1ステップ (= pipeline 1実行) の起動抽象。
-///
-/// 本番実装は CLI 側 (`anaden-cli` の Win32RoutineInvoker) が PipelineDriver を
-/// 駆動する。engine は本 trait 経由でのみ pipeline を実行するため、
-/// テストは recording double で順序・集計・ポリシーを検証できる。
 #[async_trait]
 pub trait PipelineInvoker: Send + Sync {
-    /// ステップ指定の pipeline を実行してループ成果物を返す。
-    ///
-    /// # Errors
-    /// pipeline 読込失敗・デバイス構築失敗等、実行開始前後の異常は
-    /// [`RoutineError`] で返す (panic しない)。
     async fn invoke(&self, step: &RoutineStep) -> Result<LoopOutcome, RoutineError>;
 }
 
-/// ステップの実行結果分類。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum StepStatus {
-    /// 正常完了 (Stop/TerminalTask/GoalReached、または成果物のある MaxIterations 到達)。
     Completed(LoopStopReason),
-    /// 失敗 (CaptureError/ExecuteError/GoalTimeout または invoker エラー)。
     Failed(LoopStopReason),
-    /// MaxIterations 到達かつ一度も発火していない (no_fire・Issue #210)。
-    ///
-    /// 「サイクルを使い切ったが何も起こせなかった」= 完了ではなく失敗扱いにする
-    /// 明示的な終端。従来は MaxIterations が無条件で Completed になり、
-    /// routine 全 NoMatch・fired=0 でも exit 0「完了」と報告されていた誤解を解消する。
-    /// [`StepStatus::Failed`] と同じく失敗系 ([`Self::is_failure`] = true) で
-    /// on_failure ポリシーの対象。
     NoFire(LoopStopReason),
-    /// Ctrl+C 等の割り込みで中断 (on_failure ポリシーの対象外 = 常に中止)。
     Interrupted,
-    /// 実行しなかった (前方ステップ失敗 + on_failure=Stop、または割り込み後の残ステップ)。
     Skipped,
-    /// invoker が Err を返した (成果物なし・失敗扱い)。
     InvokerError(String),
 }
 
 impl StepStatus {
-    /// 失敗系 (Failed/NoFire/InvokerError) かどうか。
     #[must_use]
     pub fn is_failure(&self) -> bool {
         matches!(
@@ -62,60 +30,34 @@ impl StepStatus {
     }
 }
 
-/// 1ステップの実行記録。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineStepResult {
-    /// ステップ名。
     pub step: String,
-    /// pipeline ディレクトリ (未解決の定義文字列)。
     pub pipeline_dir: String,
-    /// 実行結果分類。
     pub status: StepStatus,
-    /// 実行サイクル数 (未実行・invoker エラー時は 0)。
     pub iterations: u64,
-    /// 発火コマンド数。
     pub fired_count: usize,
-    /// 終端タスク名 / 停止理由文字列 (未実行時は空)。
     pub terminal: String,
 }
 
-/// routine 全体の実行サマリ (ステップ別 + 合計)。
-///
-/// Serialize 付き (routine `--report-file` の機械可読契約 — run の
-/// `ProgressReport` report.json に対応する routine 版)。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct RoutineSummary {
-    /// routine 名。
     pub routine: String,
-    /// ステップ別の実行記録 (定義順)。
     pub results: Vec<RoutineStepResult>,
-    /// 全ステップのサイクル数合計。
     pub total_iterations: u64,
-    /// 全ステップの発火数合計。
     pub total_fired: usize,
-    /// 正常完了ステップ数。
     pub completed: usize,
-    /// 失敗ステップ数 (invoker エラー込み)。
     pub failed: usize,
-    /// 未実行 (skipped) ステップ数。
     pub skipped: usize,
-    /// 中断したか (on_failure=Stop での失敗 or 割り込み)。
     pub aborted: bool,
 }
 
 impl RoutineSummary {
-    /// 全ステップが失敗なく実行完了したか。
-    ///
-    /// `aborted` (失敗による中止・割り込み) や skipped ステップがあれば false。
     #[must_use]
     pub fn all_ok(&self) -> bool {
         self.failed == 0 && self.skipped == 0 && !self.aborted
     }
 
-    /// 全体成否の 1 行ラベル (studio 履歴テーブル・ステータスバーの単一情報源)。
-    ///
-    /// [`Self::format_text`] が複数行人間可読であるのに対し、本ラベルは
-    /// 1 行に収める必要がある UI 向け (run の `stop_reason_label` に対応)。
     #[must_use]
     pub fn outcome_label(&self) -> String {
         if self.all_ok() {
@@ -128,7 +70,6 @@ impl RoutineSummary {
         }
     }
 
-    /// 人間可読テキスト (CLI 出力・evidence `routine-summary.txt` の単一情報源)。
     #[must_use]
     pub fn format_text(&self) -> String {
         let mut out = String::new();
@@ -162,14 +103,6 @@ impl RoutineSummary {
     }
 }
 
-/// [`LoopStopReason`] を routine ステップの成否へ分類する。
-///
-/// - Completed: Stop / TerminalTask / GoalReached / MaxIterations
-///   (MaxIterations は成果物 (fired) の有無で [`StepStatus::NoFire`] へ切り替わる。
-///   判定は内部の step_result が発火数を併せて行う。本純関数は理由のみの射影)
-/// - Failed:    CaptureError / ExecuteError / GoalTimeout / RecoveryExhausted
-///   (RecoveryExhausted は環境故障で進行不能 = ハードエラー系。02-recovery-budget)
-/// - Interrupted: 割り込み (ユーザー中止 = on_failure に関わらず routine 中止)
 #[must_use]
 pub fn classify_reason(reason: &LoopStopReason) -> StepStatus {
     match reason {
@@ -185,7 +118,6 @@ pub fn classify_reason(reason: &LoopStopReason) -> StepStatus {
     }
 }
 
-/// [`StepStatus`] の1行ラベル (サマリ出力用)。
 #[must_use]
 pub fn step_status_label(status: &StepStatus) -> String {
     match status {
@@ -198,7 +130,6 @@ pub fn step_status_label(status: &StepStatus) -> String {
     }
 }
 
-/// [`LoopStopReason`] の日本語ラベル (CLI `run` の表示と同一語彙)。
 #[must_use]
 pub fn reason_label(reason: &LoopStopReason) -> &'static str {
     match reason {
@@ -214,16 +145,6 @@ pub fn reason_label(reason: &LoopStopReason) -> &'static str {
     }
 }
 
-/// routine を順次実行し、集計サマリを返す。
-///
-/// 事前に [`RoutineDef::validate`] 済みの定義を渡すこと (本関数は再検証しない)。
-/// - 各ステップを定義順に [`PipelineInvoker::invoke`] で実行し、
-///   内部の step_result (理由 + 発火数) で成否を分類する。
-/// - 失敗 (Failed/NoFire/InvokerError) 時: `on_failure == Stop` なら残りを
-///   [`StepStatus::Skipped`] として中止。`Skip` なら次ステップへ継続。
-/// - 割り込み (Interrupted): ポリシーに関わらず残りを Skipped として中止。
-///
-/// panic しない (invoker エラーは InvokerError ステップとして集計)。
 pub async fn run_routine(def: &RoutineDef, invoker: &dyn PipelineInvoker) -> RoutineSummary {
     let mut results = Vec::with_capacity(def.steps.len());
     let mut aborted = false;
@@ -244,9 +165,7 @@ pub async fn run_routine(def: &RoutineDef, invoker: &dyn PipelineInvoker) -> Rou
             },
         };
         let stop_routine = match &result.status {
-            // 割り込みはポリシーに関わらず中止 (ユーザー意思の尊重)。
             StepStatus::Interrupted => true,
-            // 失敗系は on_failure ポリシーに従う。
             status if status.is_failure() => step.on_failure == OnFailure::Stop,
             _ => false,
         };
@@ -256,12 +175,6 @@ pub async fn run_routine(def: &RoutineDef, invoker: &dyn PipelineInvoker) -> Rou
     summarize(def, results, aborted)
 }
 
-/// [`LoopOutcome`] からステップ記録を組み立てる。
-///
-/// MaxIterations 到達かつ一度も発火していない (fired=0) 場合は [`StepStatus::NoFire`]
-/// (失敗扱い・Issue #210)。サイクルを使い切って何も起こせなかったステップを
-/// 「完了」と報告する従来の誤解を解消する。fired >= 1 の MaxIterations は
-/// 従来どおり Completed (成果物のある打切り)。
 fn step_result(step: &RoutineStep, outcome: LoopOutcome) -> RoutineStepResult {
     let status =
         if outcome.reason == LoopStopReason::MaxIterations && outcome.fired_commands.is_empty() {
@@ -279,7 +192,6 @@ fn step_result(step: &RoutineStep, outcome: LoopOutcome) -> RoutineStepResult {
     }
 }
 
-/// 未実行ステップの記録。
 fn skipped_result(step: &RoutineStep) -> RoutineStepResult {
     RoutineStepResult {
         step: step.name.clone(),
@@ -291,7 +203,6 @@ fn skipped_result(step: &RoutineStep) -> RoutineStepResult {
     }
 }
 
-/// ステップ記録列から全体サマリを導出する (純関数)。
 fn summarize(def: &RoutineDef, results: Vec<RoutineStepResult>, aborted: bool) -> RoutineSummary {
     let total_iterations = results.iter().map(|r| r.iterations).sum();
     let total_fired = results.iter().map(|r| r.fired_count).sum();
@@ -316,11 +227,6 @@ fn summarize(def: &RoutineDef, results: Vec<RoutineStepResult>, aborted: bool) -
     }
 }
 
-/// Ctrl+C 等で routine 実行前に中断された場合のサマリ (CLI の select! 配線用)。
-///
-/// 全ステップを未実行 (skipped)・aborted として記録する。実行中ステップの
-/// 打ち切り詳細は残らない (future drop による中断のため) — 「中断された」事実
-/// と件数のみを誠実に報告する。
 #[must_use]
 pub fn interrupted_summary(def: &RoutineDef) -> RoutineSummary {
     RoutineSummary {
@@ -335,10 +241,6 @@ pub fn interrupted_summary(def: &RoutineDef) -> RoutineSummary {
     }
 }
 
-/// バリデーション済み routine の dry-run 表示テキスト (ステップ一覧)。
-///
-/// `--dry-run` の CLI 表示・GUI プレビューの単一情報源。pipeline_dir は
-/// root 基準で解決した絶対パスを併記する (解決不能なら定義文字列のまま)。
 #[must_use]
 pub fn format_dry_run(def: &RoutineDef, root: &std::path::Path) -> String {
     let mut out = format!(

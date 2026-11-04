@@ -1,53 +1,21 @@
-//! pipeline 実行履歴 (run history) のコア実装 (Issue #83 シャード: 履歴)。
-//!
-//! egui 非依存の純ロジック:
-//! - [`RunRecord`]: 1回の pipeline 実行の記録
-//!   (開始時刻・戦略・終了状態・exit code・ログ末尾スナップショット)
-//! - [`RunHistory`]: JSONL ファイルへの永続化と最大件数制限
-//!
-//! 保存先はアプリデータディレクトリ配下 (`history_path()` で解決)。
-//! CWD 相対に依存せず、環境変数 `ANADEN_STUDIO_HISTORY` で明示上書き可能。
-
 use std::io;
 use std::path::PathBuf;
 
 use serde::{Deserialize, Serialize};
 
-/// 履歴ファイル名 (app data dir 配下)。
 const HISTORY_FILE_NAME: &str = "history.jsonl";
-/// 履歴ファイルの明示上書き用環境変数。
 const HISTORY_ENV_VAR: &str = "ANADEN_STUDIO_HISTORY";
-/// 既定の最大記録件数。
 pub const DEFAULT_MAX_RECORDS: usize = 50;
-/// 1レコードあたりのログ末尾スナップショット行数の上限。
 pub const LOG_TAIL_MAX_LINES: usize = 20;
 
-/// 実行の終了状態。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunOutcome {
-    /// exit code 0 で正常終了。
     Success,
-    /// exit code 非零で異常終了。
     Failed,
-    /// ユーザー操作による中止。
     Cancelled,
-    /// exit code 0 だが run レポート上、成果ゼロの MaxIterations 打ち切り
-    /// (停止理由=最大サイクル到達・発火 0 回)。予算切れどまりで成果が無いため
-    /// 成功とは記録しない (04-studio-maxiters-outcome / F6 の誤成功排除)。
     BudgetExhausted,
 }
 
-/// run の成否を exit code (ゲート) と run レポート (report.json) の停止理由
-/// (第一情報源) から分類する純関数 (04-studio-maxiters-outcome / F6)。
-///
-/// 分類規約:
-/// 1. exit code 非零 / 不明 → [`RunOutcome::Failed`] (report より優先)
-/// 2. report の停止理由が `anaden_engine::LoopStopReason::MaxIterations` の場合 —
-///    - `fired_count == 0` → [`RunOutcome::BudgetExhausted`]
-///      (exit 0 でも成果ゼロの打ち切りどまり = 従来 Success だった誤成功)
-///    - `fired_count > 0`  → [`RunOutcome::Success`] (成果を伴う打ち切り)
-/// 3. それ以外 (report 無し・他の停止理由) かつ exit 0 → [`RunOutcome::Success`]
-///    (report を書かない古い anaden バイナリ・routine 実行の従来挙動を維持)
 #[must_use]
 pub fn classify_outcome(
     exit_code: Option<i32>,
@@ -65,37 +33,22 @@ pub fn classify_outcome(
     RunOutcome::Success
 }
 
-/// 1回の pipeline 実行の記録。
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRecord {
-    /// 実行開始時刻 (UNIX epoch 秒)。
     pub started_at_unix: u64,
-    /// 実行した戦略名 (例: "fishing")。
     pub strategy: String,
-    /// 終了状態。
     pub outcome: RunOutcome,
-    /// 子プロセスの exit code (中止等で採取不能な場合は None)。
     pub exit_code: Option<i32>,
-    /// ログ末尾スナップショット (LOG_TAIL_MAX_LINES 行まで)。
     pub log_tail: Vec<String>,
-    /// evidence 採取 run-id (Issue #202 UC-1)。routine 実行で evidence 採取
-    /// チェック ON のとき `--evidence-run-id` に渡した値。証跡ディレクトリは
-    /// `.omc/logs/{run-id}/`。未採取 (通常の pipeline 実行) は None。
-    /// 旧履歴ファイル (本フィールド不存在行) は None で復元される。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_run_id: Option<String>,
-    /// run レポート (report.json) 由来の停止理由ラベル (03-report-channel)。
-    /// 未読込 (古い anaden バイナリ・読込失敗)・旧履歴は None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub stop_reason: Option<String>,
-    /// run レポート由来の発火回数 (03-report-channel)。未読込・旧履歴は None。
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub fired_count: Option<u64>,
 }
 
 impl RunRecord {
-    /// 新規記録を生成する。`log_tail` は上限行数に切り詰められる。
-    /// evidence_run_id は None (必要なら [`RunRecord::with_evidence_run_id`] で付与)。
     pub fn new(
         started_at_unix: u64,
         strategy: impl Into<String>,
@@ -115,15 +68,12 @@ impl RunRecord {
         }
     }
 
-    /// evidence run-id を付与する (builder・routine 実行の履歴詳細用)。
     #[must_use]
     pub fn with_evidence_run_id(mut self, run_id: Option<String>) -> Self {
         self.evidence_run_id = run_id;
         self
     }
 
-    /// run レポート (report.json) 由来のサマリ (停止理由ラベル・発火回数) を
-    /// 付与する (builder・03-report-channel)。
     #[must_use]
     pub fn with_report_summary(
         mut self,
@@ -136,7 +86,6 @@ impl RunRecord {
     }
 }
 
-/// 末尾側を LOG_TAIL_MAX_LINES 行に切り詰める。
 fn truncate_tail(mut lines: Vec<String>) -> Vec<String> {
     if lines.len() > LOG_TAIL_MAX_LINES {
         let start = lines.len() - LOG_TAIL_MAX_LINES;
@@ -145,23 +94,14 @@ fn truncate_tail(mut lines: Vec<String>) -> Vec<String> {
     lines
 }
 
-/// JSONL ファイル-backed の実行履歴ストア。
-///
-/// 追記のたびに全レコードを保持した JSONL を書き直す
-/// (GUI ユースケースの件数 (≤ 数十) で十分な簡素化)。
 #[derive(Debug)]
 pub struct RunHistory {
-    /// JSONL ファイルパス。
     path: PathBuf,
-    /// 最大記録件数 (超過分は古い方から破棄)。
     max_records: usize,
-    /// メモリ上のレコード (新しい順 = index 0 が最新)。
     records: Vec<RunRecord>,
 }
 
 impl RunHistory {
-    /// 指定パス・最大件数で生成する。既存ファイルがあれば読み込む
-    /// (破損行は読み飛ばし、読めなければ空履歴から開始する)。
     pub fn open(path: impl Into<PathBuf>, max_records: usize) -> Self {
         let path = path.into();
         let mut records = Self::read_file(&path);
@@ -173,45 +113,28 @@ impl RunHistory {
         }
     }
 
-    /// 既定パス (`history_path()` 解決) で生成する。
     pub fn open_default() -> Self {
         Self::open(history_path(), DEFAULT_MAX_RECORDS)
     }
 
-    /// 履歴ファイルパスを解決する (純ロジック・テスト容易)。
-    ///
-    /// 優先順位:
-    /// 1. 環境変数 `ANADEN_STUDIO_HISTORY` (ファイルパスを明示指定)
-    /// 2. `{config_dir}/anaden-studio/history.jsonl`
-    ///    - `XDG_CONFIG_HOME` / `$HOME/.config` (Unix 系のフォールバック)
-    ///    - `{FOLDERID_RoamingAppData}` (`APPDATA`, Windows)
-    /// 3. いずれも解決不能な場合はカレントディレクトリ直下 (最終フォールバック)
     pub fn history_path() -> PathBuf {
         history_path()
     }
 
-    /// 記録を追加して永続化する。最大件数を超えた古い記録は破棄される。
-    ///
-    /// # Errors
-    /// ファイル書き込みに失敗した場合 (`io::Error`)。メモリ上のレコードには
-    /// 反映済みのため、リトライで復旧できる。
     pub fn append(&mut self, record: RunRecord) -> io::Result<()> {
         self.records.insert(0, record);
         truncate_oldest(&mut self.records, self.max_records);
         self.persist()
     }
 
-    /// 記録一覧 (新しい順)。
     pub fn records(&self) -> &[RunRecord] {
         &self.records
     }
 
-    /// 履歴ファイルパス。
     pub fn path(&self) -> &std::path::Path {
         &self.path
     }
 
-    /// JSONL 全行を書き込む (新しい順で書き出す)。
     fn persist(&self) -> io::Result<()> {
         if let Some(parent) = self.path.parent()
             && !parent.as_os_str().is_empty()
@@ -226,15 +149,12 @@ impl RunHistory {
                     buf.push_str(&line);
                     buf.push('\n');
                 }
-                // RunRecord は serialize 失敗しえないため、失敗時はその行をスキップ。
                 Err(_) => continue,
             }
         }
         std::fs::write(&self.path, buf)
     }
 
-    /// JSONL ファイルからレコードを読み込む (新しい順で保存されている前提)。
-    /// 破損行・読み取り失敗時は空ベクタを返す (fail-soft)。
     fn read_file(path: &std::path::Path) -> Vec<RunRecord> {
         let Ok(content) = std::fs::read_to_string(path) else {
             return Vec::new();
@@ -247,7 +167,6 @@ impl RunHistory {
     }
 }
 
-/// 履歴ファイルパスを解決する。
 pub fn history_path() -> PathBuf {
     if let Ok(explicit) = std::env::var(HISTORY_ENV_VAR)
         && !explicit.trim().is_empty()
@@ -257,12 +176,6 @@ pub fn history_path() -> PathBuf {
     config_dir().join("anaden-studio").join(HISTORY_FILE_NAME)
 }
 
-/// studio 管理の run レポートパス (03-report-channel)。
-///
-/// 履歴ファイルと同一の app data ディレクトリ配下 `reports/` に、ナノ秒
-/// 時刻ベースの一意なファイル名で生成する。spawn のたびに新規発行する
-/// (再実行で前回の report を上書きしない — Issue #204 と同一方針)。
-/// 子 (`anaden run`) へ `--report-file` で渡し、終了時に読み取る。
 #[must_use]
 pub fn new_report_path() -> PathBuf {
     let nanos = std::time::SystemTime::now()
@@ -276,7 +189,6 @@ pub fn new_report_path() -> PathBuf {
     base.join("reports").join(format!("{nanos}.json"))
 }
 
-/// プラットフォーム別の config ディレクトリを解決する。
 fn config_dir() -> PathBuf {
     if let Ok(appdata) = std::env::var("APPDATA")
         && !appdata.trim().is_empty()
@@ -296,7 +208,6 @@ fn config_dir() -> PathBuf {
     PathBuf::from(".")
 }
 
-/// 最大件数を超えた古いレコード (末尾側) を破棄する。
 fn truncate_oldest(records: &mut Vec<RunRecord>, max_records: usize) {
     if records.len() > max_records {
         records.truncate(max_records);

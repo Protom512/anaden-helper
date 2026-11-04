@@ -1,39 +1,21 @@
-//! テンプレートマッチングエンジン。
-//!
-//! `imageproc` の正規化誤差二乗和（SumOfSquaredErrorsNormalized）を使用して、
-//! 画面キャプチャ内からテンプレート画像の位置と信頼度を検出する。
-//! SSE は 0.0（完全一致）〜 大きい値（不一致）のため、信頼度は `1.0 - sse` に変換する。
-//!
-//! **パフォーマンス最適化**:
-//! - `find_best_match`: 最小SSEを1パスで発見（Vec確保なし）。高速。
-//! - `downscale_factor` で両画像を縮小してからマッチング。
-//! - デフォルトダウンスケール 1/2（1/4だと詳細がつぶれて誤検出が増える）。
-
 use image::{DynamicImage, GrayImage, Luma};
 use imageproc::template_matching::match_template;
 use tracing::debug;
 
 use anaden_core::{MatchConfidence, ScreenRegion};
 
-/// テンプレートマッチングの1件の検出結果。
 #[derive(Debug, Clone)]
 pub struct MatchResult {
-    /// マッチした領域（元の解像度の座標）
     pub region: ScreenRegion,
-    /// 信頼度（0.0〜1.0）
     pub confidence: MatchConfidence,
 }
 
-/// テンプレートマッチングを実行するエンジン。
 pub struct TemplateMatcher {
-    /// マッチ判定の最低閾値
     threshold: MatchConfidence,
-    /// ダウンスケール倍率（例: 2 で 1/2 に縮小してマッチング）
     downscale_factor: u32,
 }
 
 impl TemplateMatcher {
-    /// 指定閾値とダウンスケール倍率でマッチャーを作成する。
     pub fn new(threshold: MatchConfidence, downscale_factor: u32) -> Self {
         let factor = if downscale_factor == 0 {
             1
@@ -46,20 +28,14 @@ impl TemplateMatcher {
         }
     }
 
-    /// デフォルト設定（閾値85%、1/2ダウンスケール）でマッチャーを作成する。
     pub fn with_defaults() -> Self {
         Self::new(MatchConfidence::DEFAULT_THRESHOLD, 2)
     }
 
-    /// 指定閾値のみ指定（ダウンスケールなし）。
     pub fn threshold_only(threshold: MatchConfidence) -> Self {
         Self::new(threshold, 1)
     }
 
-    /// 最も信頼度の高いマッチを1つだけ返す。見つからなければ `None`。
-    ///
-    /// **高速実装**: `match_template` の結果から最小SSEピクセルを
-    /// 1パスで発見する。Vec確保もソートも不要。
     pub fn find_best_match(
         &self,
         haystack: &DynamicImage,
@@ -76,7 +52,6 @@ impl TemplateMatcher {
             imageproc::template_matching::MatchTemplateMethod::SumOfSquaredErrorsNormalized,
         );
 
-        // 1パスで最小SSE（= 最良マッチ）を見つける。Vec確保なし。
         let mut best_x = 0u32;
         let mut best_y = 0u32;
         let mut best_sse = f32::MAX;
@@ -111,10 +86,6 @@ impl TemplateMatcher {
         })
     }
 
-    /// 画面画像内からテンプレート画像を検索し、閾値を超える全マッチを返す。
-    ///
-    /// **注意**: これは全画素走査するため `find_best_match` より遅い。
-    /// NMS（非最大抑制）が必要な場合のみ使用する。
     pub fn find_matches(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Vec<MatchResult> {
         let (haystack_work, needle_work) = match self.downscale_images(haystack, needle) {
             Some(imgs) => imgs,
@@ -158,11 +129,6 @@ impl TemplateMatcher {
         matches
     }
 
-    /// マッチスコアの全体マップを返す（ヒートマップ用）。
-    ///
-    /// 戻り値は各テンプレート開始位置の信頼度を 0-255 にスケールしたグレースケア画像。
-    /// サイズは `(画面幅 - テンプレート幅 + 1) × (画面高 - テンプレート高 + 1)`（ダウンスケール空間）。
-    /// テンプレートが画面より大きい場合は `None`。
     pub fn score_map(&self, haystack: &DynamicImage, needle: &DynamicImage) -> Option<GrayImage> {
         let (haystack_work, needle_work) = self.downscale_images(haystack, needle)?;
 
@@ -187,7 +153,6 @@ impl TemplateMatcher {
         Some(out)
     }
 
-    /// 両画像をダウンスケールする。テンプレートが画面より大きい場合は None。
     fn downscale_images(
         &self,
         haystack: &DynamicImage,

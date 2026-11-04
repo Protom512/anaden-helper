@@ -1,36 +1,10 @@
-//! ヒューマンライクな入力ゆらぎ — タップ座標ジッタと interval ランダム化 (Issue #253)。
-//!
-//! 現行 [`crate::PipelineDriver`] は固定 interval・ROI 中心の固定タップで、操作パターンに
-//! 分散がない。デイリー自動化を毎日 0/6/12/18 時に動かす運用では一定さが目立つため、
-//! タップ座標に ±`tap_radius_px` px (normalize 後 1280 空間) の一様ジッタ、
-//! ループ間隔に ±`interval_ratio` (±10-20%) のジッタを加える。
-//!
-//! # 再現性 (evidence 規約との整合)
-//!
-//! 乱数は外部 crate に依存しない決定論的 SplitMix64。シードは [`Jitter::seed`] で
-//! 取得でき、[`crate::ProgressReport::jitter_seed`] 経由で report.json に記録される。
-//! 同一シード + 同一タスク列 → 同一ゆらぎ列を完全再現できる。
-//!
-//! # 適用空間
-//!
-//! タップ座標のジッタは **normalize 後 1280 空間** で適用する (デバイス解像度非依存。
-//! 1280 空間の ±3px は実機 1484px 幅で約 ±3.5px に相当)。rescale (実機座標への逆変換)
-//! の前段で挿入することで、どの解像度でも同じ「人間の指ぶれ」の大きさになる。
-
 use std::time::Duration;
 
 use crate::pipeline_runner::InputCommand;
 
-/// ジッタの強度パラメータ。
-///
-/// 既定値は Issue #253 仕様案の中央値 (タップ ±3px / interval ±15%)。
 #[derive(Debug, Clone, Copy, PartialEq)]
 pub struct JitterConfig {
-    /// タップ座標ジッタの半径 (px, normalize 後 1280 空間)。[-r, +r] の一様分布。
-    /// 0 で座標ジッタ無効。
     pub tap_radius_px: i32,
-    /// interval ジッタの比率 (0.15 = ±15%)。factor = 1 ± ratio の一様分布。
-    /// 0.0 で interval ジッタ無効。
     pub interval_ratio: f64,
 }
 
@@ -43,12 +17,6 @@ impl Default for JitterConfig {
     }
 }
 
-/// シード指定可能な決定論的ジッタ発生器 (SplitMix64)。
-///
-/// [`PipelineDriver`](crate::PipelineDriver) の `with_jitter` に渡すと、
-/// 発火タップ座標とループ interval にゆらぎを加える。
-/// 内部状態は SplitMix64 の 64bit 1 個のみで、シードから完全決定論的に推移する。
-/// (設定に f64 を含むため [`Eq`] は導出しない。)
 #[derive(Debug, Clone, PartialEq)]
 pub struct Jitter {
     cfg: JitterConfig,
@@ -57,16 +25,13 @@ pub struct Jitter {
 }
 
 impl Jitter {
-    /// 既定強度 ([`JitterConfig::default`]) でシードを固定して作る。
     #[must_use]
     pub fn new(seed: u64) -> Self {
         Self::with_config(seed, JitterConfig::default())
     }
 
-    /// 強度を明示して作る。
     #[must_use]
     pub fn with_config(seed: u64, cfg: JitterConfig) -> Self {
-        // 状態初期値が 0 でも SplitMix64 は問題なく推移する (golden gamma 加算方式)。
         Self {
             cfg,
             seed,
@@ -74,13 +39,11 @@ impl Jitter {
         }
     }
 
-    /// このインスタンスのシード (report.json 記録用)。
     #[must_use]
     pub fn seed(&self) -> u64 {
         self.seed
     }
 
-    /// SplitMix64: 決定論的 64bit 乱数を 1 つ進める。
     fn next_u64(&mut self) -> u64 {
         self.state = self.state.wrapping_add(0x9E37_79B9_7F4A_7C15);
         let mut z = self.state;
@@ -89,7 +52,6 @@ impl Jitter {
         z ^ (z >> 31)
     }
 
-    /// [-radius, +radius] の一様整数。
     fn uniform_offset(&mut self, radius: i32) -> i32 {
         if radius <= 0 {
             return 0;
@@ -98,13 +60,10 @@ impl Jitter {
         (self.next_u64() % span) as i32 - radius
     }
 
-    /// [0, 1) の一様 f64。
     fn uniform_unit(&mut self) -> f64 {
-        // 上位 53bit を使用 (f64 仮数部_full)。
         (self.next_u64() >> 11) as f64 / (1u64 << 53) as f64
     }
 
-    /// タップ座標 1 点にジッタを適用する。負座標へは飽和 (0 未満にしない)。
     #[must_use]
     pub fn jitter_point(&mut self, x: u32, y: u32) -> (u32, u32) {
         let r = self.cfg.tap_radius_px;
@@ -113,8 +72,6 @@ impl Jitter {
         (jx as u32, jy as u32)
     }
 
-    /// 発火コマンド (normalize 後 1280 空間) にジッタを適用する。
-    /// Tap は座標、Swipe は始点・終点それぞれ独立に揺らす。
     #[must_use]
     pub fn jitter_command(&mut self, cmd: InputCommand) -> InputCommand {
         match cmd {
@@ -133,19 +90,13 @@ impl Jitter {
         }
     }
 
-    /// ループ間隔にジッタを適用する。
-    ///
-    /// `base` を中心に ±`interval_ratio` の一様分布で揺らす。
-    /// 計算はミリ秒精度。結果は最低 1ms にクランプ (0ms interval がジッタで
-    /// さらに 0 になることはあっても、負や ゼロ未満にはならない)。
-    /// `interval_ratio == 0.0` のときは `base` をそのまま返す。
     #[must_use]
     pub fn jitter_interval(&mut self, base: Duration) -> Duration {
         if self.cfg.interval_ratio == 0.0 {
             return base;
         }
-        let u = self.uniform_unit(); // [0, 1)
-        let factor = 1.0 + self.cfg.interval_ratio * (2.0 * u - 1.0); // [1-r, 1+r)
+        let u = self.uniform_unit();
+        let factor = 1.0 + self.cfg.interval_ratio * (2.0 * u - 1.0);
         let ms = base.as_millis() as f64 * factor;
         Duration::from_millis(ms.max(1.0) as u64)
     }

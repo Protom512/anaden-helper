@@ -1,33 +1,15 @@
-//! Routine 選択・実行 UI (Issue #199)。
-//!
-//! `templates/routines/*.toml` を離散スキャンして ComboBox で選択させ、
-//! 選択された routine を `anaden routine <path>` 子プロセスとして起動する
-//! 引数列を組み立てる。実行・履歴記録は既存 runner 経路
-//! ([`crate::runner_exec::PipelineRunnerApp::start_pipeline`]) を再利用する
-//! (二重の子プロセス管理を持たない)。
-//!
-//! 状態操作 (discovery・args 組立) は egui 非依存の純関数/メソッドに切り出し
-//! ヘッドレスでユニットテスト可能にしている (strategy_ui.rs と同一パターン)。
-
 use std::path::{Path, PathBuf};
 
 use egui::Ui;
 
-/// routine 定義ディレクトリ (workspace ルート相対)。
 const ROUTINES_DIR: &str = "templates/routines";
 
-/// evidence run-id のプレフィックス (Issue #202 UC-1)。
 const EVIDENCE_RUN_ID_PREFIX: &str = "routine";
 
-/// Routine UI パネルの状態。
 #[derive(Debug, Clone)]
 pub struct RoutinePanel {
-    /// 発見した routine 一覧 (ファイル名 stem と絶対パス・名前順)。
     discovered: Vec<(String, PathBuf)>,
-    /// 選択中の routine stem。未選択は None。
     selected: Option<String>,
-    /// evidence 採取チェック (既定 ON・Issue #202 UC-1)。
-    /// ON 時の spawn 引数に `--evidence-run-id routine-<timestamp>` が付く。
     evidence_enabled: bool,
 }
 
@@ -38,7 +20,6 @@ impl Default for RoutinePanel {
 }
 
 impl RoutinePanel {
-    /// workspace ルート基準で `templates/routines/*.toml` をスキャンして構築する。
     #[must_use]
     pub fn new(root: &Path) -> Self {
         Self {
@@ -48,13 +29,11 @@ impl RoutinePanel {
         }
     }
 
-    /// 発見した routine の (stem, パス) 一覧。
     #[must_use]
     pub fn routines(&self) -> &[(String, PathBuf)] {
         &self.discovered
     }
 
-    /// 選択中の routine パス (未選択は None)。
     #[must_use]
     pub fn selected_path(&self) -> Option<&Path> {
         let sel = self.selected.as_ref()?;
@@ -64,31 +43,26 @@ impl RoutinePanel {
             .map(|(_, p)| p.as_path())
     }
 
-    /// 選択中の routine stem (履歴ラベル用・未選択は None)。
     #[must_use]
     pub fn selected_name(&self) -> Option<&str> {
         self.selected.as_deref()
     }
 
-    /// routine を選択する (未発見の名前は無視 — UI は発見一覧のみ提示)。
     pub fn select(&mut self, name: &str) {
         if self.discovered.iter().any(|(n, _)| n == name) {
             self.selected = Some(name.to_string());
         }
     }
 
-    /// evidence 採取チェックの現在値 (Issue #202 UC-1・既定 ON)。
     #[must_use]
     pub fn evidence_enabled(&self) -> bool {
         self.evidence_enabled
     }
 
-    /// evidence 採取チェックを切り替える (ヘッドレス等価・テスト用)。
     pub fn set_evidence_enabled(&mut self, enabled: bool) {
         self.evidence_enabled = enabled;
     }
 
-    /// パネルを描画する。戻り値は「選択状態が変化した」フラグ。
     pub fn ui(&mut self, ui: &mut Ui) -> bool {
         let mut changed = false;
         if self.discovered.is_empty() {
@@ -118,8 +92,6 @@ impl RoutinePanel {
                     }
                 }
             });
-        // evidence 採取チェック (Issue #202 UC-1・既定 ON)。ON 時の spawn に
-        // --evidence-run-id が付く (履歴詳細から evidence ディレクトリを追跡可能)。
         ui.checkbox(
             &mut self.evidence_enabled,
             "evidence 採取 (.omc/logs/ へ証跡保存)",
@@ -127,7 +99,6 @@ impl RoutinePanel {
         changed
     }
 
-    /// ルーチンタブの選択状態サマリ (runner 戦略サマリと同形式の純関数)。
     #[must_use]
     pub fn summary(&self) -> String {
         match self.selected_name() {
@@ -137,9 +108,6 @@ impl RoutinePanel {
     }
 }
 
-/// `templates/routines/*.toml` をスキャンして (stem, 絶対パス) の名前順一覧を返す。
-///
-/// ディレクトリが存在しない場合は空 Vec (GUI は案内表示のみ・エラーにしない)。
 #[must_use]
 pub fn discover_routines(root: &Path) -> Vec<(String, PathBuf)> {
     let dir = root.join(ROUTINES_DIR);
@@ -163,14 +131,6 @@ pub fn discover_routines(root: &Path) -> Vec<(String, PathBuf)> {
     out
 }
 
-/// 選択された routine を起動する `anaden` CLI 引数列 (サブコマンド以降)。
-///
-/// パスは絶対化して渡す (子プロセス側 cwd 依存の解決を回避 —
-/// `resolve_pipeline_arg` と同一の動機)。
-///
-/// `evidence_run_id` に [`Some`] を渡すと `--evidence-run-id <run-id>` を付与する
-/// (Issue #202 UC-1・GUI の evidence 採取チェック ON)。run-id 文字列は呼出側で
-/// 生成する (テストでは固定値を注入でき、実運用では [`new_evidence_run_id`])。
 #[must_use]
 pub fn build_routine_args(routine_path: &Path, evidence_run_id: Option<&str>) -> Vec<String> {
     let path = if routine_path.is_absolute() {
@@ -186,15 +146,11 @@ pub fn build_routine_args(routine_path: &Path, evidence_run_id: Option<&str>) ->
     args
 }
 
-/// evidence run-id (`routine-<YYYYMMDD-HHMMSS>`) をタイムスタンプから組む純関数。
-///
-/// timestamp は引数注入のためテスト決定的 (実運用は [`new_evidence_run_id`])。
 #[must_use]
 pub fn evidence_run_id(timestamp: &str) -> String {
     format!("{EVIDENCE_RUN_ID_PREFIX}-{timestamp}")
 }
 
-/// 現在時刻から evidence run-id を生成する (spawn 実行時に呼ぶ)。
 #[must_use]
 pub fn new_evidence_run_id() -> String {
     let unix = std::time::SystemTime::now()
@@ -204,23 +160,18 @@ pub fn new_evidence_run_id() -> String {
     evidence_run_id(&compact_utc_timestamp(unix))
 }
 
-/// Unix 秒を UTC `YYYYMMDD-HHMMSS` へ変換する (chrono 非依存の最小実装)。
-///
-/// 日付変換は civil-from-days (Howard Hinnant) の手書き変換で、
-/// `anaden-cli` e2e::iso8601_utc と同一アルゴリズム (既知値テストで検証)。
 fn compact_utc_timestamp(unix_secs: u64) -> String {
     let days = (unix_secs / 86_400) as i64;
     let secs_of_day = unix_secs % 86_400;
-    // civil_from_days: days=1970-01-01 起点の経過日 → y/m/d
     let z = days + 719_468;
     let era = if z >= 0 { z } else { z - 146_096 } / 146_097;
-    let doe = z - era * 146_097; // [0, 146096]
-    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365; // [0, 399]
+    let doe = z - era * 146_097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146_096) / 365;
     let y = yoe + era * 400;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100); // [0, 365]
-    let mp = (5 * doy + 2) / 153; // [0, 11]
-    let d = doy - (153 * mp + 2) / 5 + 1; // [1, 31]
-    let m = if mp < 10 { mp + 3 } else { mp - 9 }; // [1, 12]
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
     let y = if m <= 2 { y + 1 } else { y };
     format!(
         "{y:04}{m:02}{d:02}-{:02}{:02}{:02}",
@@ -230,7 +181,6 @@ fn compact_utc_timestamp(unix_secs: u64) -> String {
     )
 }
 
-/// コンパイル時に確定する workspace ルート (anaden-studio manifest から 2 階層上昇)。
 fn workspace_root() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR"))
         .join("..")

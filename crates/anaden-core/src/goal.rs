@@ -1,135 +1,36 @@
-//! 宣言的ゴール（終端状態）と停止条件のドメインモデル。
-//!
-//! パイプラインは「ここに到達したら停止する」という終端条件を宣言できる。
-//! 本モジュールは純粋な契約層であり、I/O も async も持たない。
-//! 上位層（`anaden-engine`）がループ毎に [`evaluate`] を呼び、
-//! [`GoalStatus`] に基づいて構造化終了を行う。
-//!
-//! ## ゴールの意味論（count-tracking）
-//!
-//! [`GoalStatusContext::iterations`] は **tick 数**（`evaluate` の呼出回数）を数える。
-//! すなわち、画像認識 NoMatch やアクションエラーを含む全反復を 1 tick として扱う。
-//! 「N回成功したら停止」ではなく「N回評価したら停止」が `LoopCount` の意味である。
-//!
-//! これは UC-1 の `loop_count=50` を「パイプラインを50周したら停止」という
-//! 時間駆動の意味に固定し、認識成功率に依存しない終端保証を与える。
-//!
-//! ## 複数ゴールの AND/OR 合成
-//!
-//! [`StopCondition::All`] / [`StopCondition::Any`] で複数条件を合成できる:
-//! - `All`: 全ての子条件が `Reached` になったら `Reached`。1つでも `Failed` なら `Failed`。
-//! - `Any`: **`Failed` 優先（安全弁）**。子に `Failed` が1つでもあれば `Failed`
-//!   （異常を正常で上書きしない）。`Failed` がなければ、1つでも `Reached` があれば
-//!   `Reached`。全て `NotYet` なら `NotYet`。評価順序に依存しない。
-//!
-//! 合成は [`evaluate`] 内で再帰的に解決するため、上位層（`pipeline_driver`）の
-//! `run_loop_with_goal` 本体ロジックは変更不要。
-//!
-//! ## 非スコープ
-//!
-//! 自動リスタート、動的ゴール変更は扱わない。
-
 use serde::{Deserialize, Serialize};
 
 use crate::ScreenRegion;
 
-/// ゴールの停止条件。
-///
-/// 各バリアントがユースケース1つに対応する:
-/// - `LoopCount`: UC-1（指定回数の反復で停止）
-/// - `TemplateMatch`: UC-2（テンプレートマッチで停止）
-/// - `Timeout`: UC-3（指定秒数経過で停止）
-/// - `All` / `Any`: 複数条件の AND/OR 合成（Issue #50）
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub enum StopCondition {
-    /// 指定回数の反復（tick）に到達したら停止する。
-    ///
-    /// `target` は正の整数でなければならない（`validate` 参照）。
-    LoopCount {
-        /// 目標反復数。1以上。
-        target: u64,
-    },
-    /// 指定タスクのテンプレートが閾値以上の信頼度でマッチしたら停止する。
-    ///
-    /// `confidence` は (0.0, 1.0] の範囲でなければならない。
-    TemplateMatch {
-        /// マッチ対象のタスク名（テンプレート識別子）。
-        task: String,
-        /// マッチ判定の信頼度閾値。0.0 < confidence <= 1.0。
-        confidence: f32,
-    },
-    /// 指定秒数が経過したら停止する。
-    Timeout {
-        /// タイムアウトまでの秒数。1以上。
-        secs: u64,
-    },
-    /// 全ての子条件が `Reached` になったら `Reached`（AND 合成）。
-    /// 1つでも `Failed` があれば `Failed`。空リストは `validate` で拒否。
-    All {
-        /// 合成する子停止条件群。1以上（空は `validate` で拒否）。
-        conditions: Vec<StopCondition>,
-    },
-    /// いずれかの子条件が `Reached` になったら `Reached`（OR 合成）。
-    /// **`Failed` 優先（安全弁）**: `Failed` と `Reached` が混在する場合は
-    /// `Failed` を優先（異常を正常で上書きしない — 評価順序非依存。
-    /// `docs/goal-manifest.md` の `EXIT_run_TIMEOUT = 2` に直結）。
-    /// 空リストは `validate` で拒否。
-    Any {
-        /// 合成する子停止条件群。1以上（空は `validate` で拒否）。
-        conditions: Vec<StopCondition>,
-    },
+    LoopCount { target: u64 },
+    TemplateMatch { task: String, confidence: f32 },
+    Timeout { secs: u64 },
+    All { conditions: Vec<StopCondition> },
+    Any { conditions: Vec<StopCondition> },
 }
 
-/// ゴール検証エラー。
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum GoalError {
-    /// `LoopCount::target` または `Timeout::secs` が 0 だった。
     #[error("value must be greater than 0 (field: {field})")]
-    NonPositive {
-        /// 0 だったフィールド名。
-        field: &'static str,
-    },
-    /// `TemplateMatch::confidence` が (0.0, 1.0] の範囲外だった。
+    NonPositive { field: &'static str },
     #[error("confidence must be in (0.0, 1.0], got {value}")]
-    InvalidConfidence {
-        /// 入力された信頼度。
-        value: f32,
-    },
-    /// `All` / `Any` の `conditions` が空だった。
+    InvalidConfidence { value: f32 },
     #[error("composition variant `{variant}` requires at least 1 condition")]
-    EmptyComposition {
-        /// 空だったバリアント名（`"All"` / `"Any"`）。
-        variant: &'static str,
-    },
-    /// `All` / `Any` のネスト深度が上限を超えた（DoS / stack overflow 対策）。
+    EmptyComposition { variant: &'static str },
     #[error("composition depth {depth} exceeds limit {max}")]
-    CompositionTooDeep {
-        /// 検出時の深度。
-        depth: u32,
-        /// 上限値（[`StopCondition::MAX_COMPOSITION_DEPTH`]）。
-        max: u32,
-    },
+    CompositionTooDeep { depth: u32, max: u32 },
 }
 
 impl StopCondition {
-    /// `All` / `Any` 合成の最大ネスト深度（DoS / stack overflow 対策）。
     pub const MAX_COMPOSITION_DEPTH: u32 = 16;
 
-    /// 停止条件の不変量を検証する。
-    ///
-    /// - `LoopCount { target }`: `target > 0`
-    /// - `TemplateMatch { confidence, .. }`: `0.0 < confidence <= 1.0`
-    /// - `Timeout { secs }`: `secs > 0`
-    /// - `All` / `Any`: ネスト深度 <= [`Self::MAX_COMPOSITION_DEPTH`]
-    ///
-    /// # Errors
-    /// 不変量違反の場合、対応する [`GoalError`] バリアントを返す。
     pub fn validate(&self) -> Result<(), GoalError> {
         self.validate_with_depth(0)
     }
 
-    /// 深度追跡付きの内部 validate。`All` / `Any` 再帰時に `depth + 1` を渡す。
     fn validate_with_depth(&self, depth: u32) -> Result<(), GoalError> {
         if depth > Self::MAX_COMPOSITION_DEPTH {
             return Err(GoalError::CompositionTooDeep {
@@ -178,48 +79,30 @@ impl StopCondition {
     }
 }
 
-/// 宣言的ゴール。1つの [`StopCondition`] を終端状態として保持する。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Goal {
-    /// ゴール的人間可読名（レポート・ログ用）。
     pub name: String,
-    /// 終端条件。
     pub stop: StopCondition,
 }
 
 impl Goal {
-    /// 停止条件を検証する（[`StopCondition::validate`] への転送）。
-    ///
-    /// # Errors
-    /// [`StopCondition::validate`] が返す [`GoalError`] をそのまま返す。
     pub fn validate(&self) -> Result<(), GoalError> {
         self.stop.validate()
     }
 }
 
-/// ゴール評価時に参照する、ループの進行状況。
-///
-/// `iterations` は **tick 数**（`evaluate` 呼出毎に +1 される）。
-/// 認識成功・NoMatch・エラーを含む全反復を数える（モジュール doc 参照）。
 #[derive(Debug, Clone, Default, PartialEq)]
 pub struct GoalStatusContext {
-    /// これまでの評価回数（tick 数）。
     pub iterations: u64,
-    /// 最後にマッチしたテンプレート情報（タスク名、信頼度、領域）。
-    /// まだ一度もマッチしていない場合は `None`。
     pub last_match: Option<(String, f32, ScreenRegion)>,
 }
 
 impl GoalStatusContext {
-    /// 空コンテキスト（0反復、マッチ無し）を作成する。
     pub fn new() -> Self {
         Self::default()
     }
 
-    /// 反復数を1つ進め、必要に応じて `last_match` を更新する。
-    ///
-    /// `last_match` は `Some` の場合常に上書きし、直近のマッチを保持する。
     pub fn tick(&mut self, last_match: Option<(String, f32, ScreenRegion)>) {
         self.iterations = self.iterations.saturating_add(1);
         if let Some(m) = last_match {
@@ -228,48 +111,22 @@ impl GoalStatusContext {
     }
 }
 
-/// ゴール評価の結果としての終端状態。
-///
-/// pure 関数 [`evaluate`] が返す。上位層はこれを見て構造化終了する。
 #[derive(Debug, Clone, PartialEq)]
 pub enum GoalStatus {
-    /// まだ終端に到達していない。ループを継続する。
     NotYet,
-    /// ゴールに到達した（正常終端）。レポートを含む。
     Reached(GoalReport),
-    /// ゴール評価が失敗した（異常終端）。レポートを含む。
     Failed(GoalReport),
 }
 
-/// ゴール到達/失敗時の構造化レポート。
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct GoalReport {
-    /// 評価対象だったゴール名。
     pub goal: String,
-    /// 到達時の反復数（tick 数）。
     pub iterations: u64,
-    /// 終端理由の人間可読記述。
     pub reason: String,
-    /// 最後にマッチしたテンプレート情報（任意）。
     pub last_match: Option<(String, f32, ScreenRegion)>,
 }
 
-/// ゴールを現在のコンテキストに対して純粋評価する。
-///
-/// 入力も出力も値のみ。I/O・時間・乱数に依存しない（`Timeout` は
-/// 与えられた `elapsed_secs` と宣言値の比較のみを行う）。
-///
-/// # 引数
-/// - `goal`: 評価対象のゴール。
-/// - `ctx`: 現在の進行状況。
-/// - `elapsed_secs`: タイムアウト判定用の経過秒数（呼出側が計測）。
-///
-/// # 戻り値
-/// - `Reached`: 停止条件を満たした。
-/// - `Failed`: `Timeout` で `elapsed_secs >= secs` に到達。
-///   （`LoopCount`/`TemplateMatch` の到達は正常終端 `Reached` 扱い。）
-/// - `NotYet`: まだ継続。
 pub fn evaluate(goal: &Goal, ctx: &GoalStatusContext, elapsed_secs: u64) -> GoalStatus {
     match &goal.stop {
         StopCondition::LoopCount { target } => {
@@ -316,8 +173,6 @@ pub fn evaluate(goal: &Goal, ctx: &GoalStatusContext, elapsed_secs: u64) -> Goal
     }
 }
 
-/// [`GoalReport`] 構築ヘルパー。全 arm で共通の「親名継承 + 現在 tick 数 +
-/// 直近マッチ」埋め込みを 1 箇所に集約する (reason だけが arm 固有)。
 fn make_report(goal: &Goal, ctx: &GoalStatusContext, reason: String) -> GoalReport {
     GoalReport {
         goal: goal.name.clone(),
@@ -327,30 +182,12 @@ fn make_report(goal: &Goal, ctx: &GoalStatusContext, reason: String) -> GoalRepo
     }
 }
 
-/// 合成条件の種別 (All = AND / Any = OR)。決定表の違いのみを保持。
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Composition {
-    /// AND: 全子 `Reached` のみ `Reached`。**評価順短絡**: 最初の `NotYet`
-    /// または `Failed` が勝つ (Issue #230 — Timeout 安全弁の即発火)。
     All,
-    /// OR: **Failed 優先（安全弁）** — 子に `Failed` が1つでもあれば `Failed`
-    /// （異常を正常で上書きしない — 評価順序に依存しない。
-    /// `docs/goal-manifest.md` の exit code 分岐 `EXIT_run_TIMEOUT = 2` に直結)。
     Any,
 }
 
-/// `StopCondition::All` / `StopCondition::Any` の合成評価。
-///
-/// 子を全て評価して (first_failure, any_reached, any_not_yet) に集計し、
-/// [`Composition`] の決定表で確定する:
-///
-/// | mode | 判定順 |
-/// |------|--------|
-/// | All | **評価順短絡**: 最初の NotYet または Failed が勝つ (Issue #230 で復元)。全 Reached のみ Reached |
-/// | Any | 全子評価・順序非依存: first_failure → Failed (安全弁) → any_reached → Reached → NotYet |
-///
-/// All の短絡は観測可能: [Failed, NotYet] の並びで Failed が勝つ (Timeout 安全弁の
-/// 即発火)。短絡解除すると NotYet が常勝ちになり安全弁が遅れる (Issue #230)。
 fn evaluate_composition(
     goal: &Goal,
     ctx: &GoalStatusContext,
@@ -392,8 +229,6 @@ fn evaluate_composition(
     }
 }
 
-/// All (AND) 合成の評価順短絡実装 (Issue #230 で復元)。
-/// 最初に現れた NotYet または Failed が勝つ — Timeout 安全弁の即発火を保証。
 fn evaluate_all_in_order(
     goal: &Goal,
     ctx: &GoalStatusContext,
@@ -409,7 +244,7 @@ fn evaluate_all_in_order(
                 failed = Some(report);
                 break;
             }
-            GoalStatus::Reached(_) => { /* 続行: 全て Reached が必要 */ }
+            GoalStatus::Reached(_) => {}
         }
     }
     match failed {
@@ -426,10 +261,6 @@ fn evaluate_all_in_order(
     }
 }
 
-/// 子停止条件を評価するためのヘルパー。
-///
-/// 親ゴール名（`Goal.name`）を継承した一時 [`Goal`] を構築して
-/// [`evaluate`] に委譲する。子の [`GoalReport::goal`] は親名で上書きされる。
 fn evaluate_child(
     cond: &StopCondition,
     parent: &Goal,

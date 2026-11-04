@@ -1,54 +1,15 @@
-//! 宣言的パイプラインの純粋実行層。
-//!
-//! [`anaden_vision::run_step`] を駆動し、action から入力コマンド([`InputCommand`])への変換と
-//! next への状態遷移([`PipelineState::tick`])を行う。デバイス IO・async・ADB 文字列は一切持たず、
-//! 入力([`anaden_vision::TaskDef`]・[`image::DynamicImage`]・現在タスク名)だけに依存する純粋層。
-//!
-//! 実デバイス発火([`InputCommand`] -> [`anaden_core::InputAction`] 変換 + InputExecutor::execute)は
-//! 本モジュールの範囲外。caller は [`PipelineState::tick`] の戻り値 [`TickResult`] を消費して
-//! ループを駆動する。
-
 use image::DynamicImage;
 use serde::{Deserialize, Serialize};
 
 use anaden_core::ScreenRegion;
 use anaden_vision::{Action, StepOutcome, TaskDef, TaskDefError, roi_to_normalized, run_step};
 
-/// デバイスへ発火すべき入力コマンド（ピクセル座標）。
-///
-/// **座標空間**: 全バリアントの座標は **normalize 後1280空間**（黒帯除去後描画領域を
-/// 幅1280基準へ正規化した空間）に統一される。実デバイス生画像（黒帯込み）への逆変換は
-/// 後段の [`crate::pipeline_driver::rescale_command`] が [`anaden_vision::CropInfo`] を使って行う。
-///
-/// - [`Action::ClickSelf`] / [`Action::ClickRect`] は [`InputCommand::Tap`]、
-///   [`Action::Swipe`] は [`InputCommand::Swipe`] へ 1:1 対応する。
-///
-/// duration_ms は現状 [`Action::Swipe`] にパラメータが無いため持たない。後段の発火層が
-/// デフォルト値を埋める。将来 [`Action::Swipe`] に duration が増えたらフィールド追加で拡張する。
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum InputCommand {
-    /// 指定座標をタップ。
     Tap { x: u32, y: u32 },
-    /// `from` から `to` へスワイプ。
     Swipe { from: (u32, u32), to: (u32, u32) },
 }
 
-/// アクションから入力コマンドへ変換する。全座標は **normalize 後空間**（screenshot と同じ
-/// 座標空間。PC版16:9なら1280x720、20:9端末なら1280x576 等）へ統一される。
-///
-/// 座標空間の整合（C1 修正）:
-/// - [`Action::ClickSelf`] は `matched_region` の中心をタップ。`matched_region` は
-///   [`run_step`] が screenshot（=normalize後空間）と同じ空間で返すため、**既に同空間**。
-///   そのまま `Tap` へ。`matched_region` が [`None`] の場合は [`None`]（安全側: 発火しない）。
-/// - [`Action::ClickRect`] の `roi`・[`Action::Swipe`] の `from`/`to` は TOML 定義上
-///   **raw-1258x708 空間**。これを [`roi_to_normalized`] で `(norm_w, norm_h)` 空間へ変換してから
-///   中心を取り、`Tap`/`Swipe` へ載せる。detect（[`run_step`]）が ROI/needle をスケールするのと
-///   **同一の `(norm_w, norm_h)`** を渡すことで、ClickRect 座標が matched_region と同じ空間に揃う
-///   （従来は raw-1258 のまま `InputCommand` に入り、空間不整合でタップが外れていた）。
-/// - [`Action::DoNothing`] / [`Action::Stop`] は入力コマンドではないため [`None`]。
-///
-/// `action` は参照で受け Clone 回避。戻り値 [`Option<InputCommand>`]: [`None`] は
-/// 「この tick では入力を発火しない」を意味し、caller は状態遷移だけ進める。
 pub fn action_to_command(
     action: &Action,
     matched_region: Option<ScreenRegion>,
@@ -64,14 +25,12 @@ pub fn action_to_command(
             None => None,
         },
         Action::ClickRect { roi } => {
-            // roi は raw-1258 空間 → (norm_w, norm_h) 空間へ変換して中心を取る。
             let nroi = roi_to_normalized([roi.x, roi.y, roi.width, roi.height], norm_w, norm_h);
             let nr = ScreenRegion::new(nroi[0], nroi[1], nroi[2], nroi[3]);
             let (x, y) = nr.center();
             Some(InputCommand::Tap { x, y })
         }
         Action::Swipe { from, to } => {
-            // from/to も raw-1258 空間 → (norm_w, norm_h) 空間へ変換して中心を取る。
             let nfrom =
                 roi_to_normalized([from.x, from.y, from.width, from.height], norm_w, norm_h);
             let nto = roi_to_normalized([to.x, to.y, to.width, to.height], norm_w, norm_h);
@@ -85,12 +44,6 @@ pub fn action_to_command(
     }
 }
 
-/// マッチ結果から次のタスク名を決める。
-///
-/// - [`Action::Stop`] は next の有無に関わらず [`None`]（停止指示）。
-/// - それ以外は `outcome.next[0]` を返す。next が空（終端タスク）なら [`None`]。
-///
-/// 純粋: `outcome` の参照のみ、副作用なし。caller は戻り値で `current` を置き換える。
 pub fn advance_next(outcome: &StepOutcome) -> Option<String> {
     match outcome.action {
         Action::Stop => None,
@@ -98,72 +51,34 @@ pub fn advance_next(outcome: &StepOutcome) -> Option<String> {
     }
 }
 
-/// 1 tick の結果。
-///
-/// `command` は発火すべき入力コマンド（無ければ [`None`]）。
-/// `next_current` は遷移先タスク名。停止・待機（next 空・Stop）の場合は [`None`]。
-///
-/// `next_current` は caller のログ/デバッグ用参照情報。実際の `current` 更新は
-/// [`PipelineState::tick`] 内で行うため、caller は戻り値をそのまま消費してよい。
-///
-/// `matched_confidence` / `matched_region` はマッチしたテンプレートの信頼度と領域。
-/// Issue #37 T4: 宣言的ゴールの TemplateMatch(UC-2) 評価が `last_match` を構築するために
-/// 必要。`run_step` の [`StepOutcome`][anaden_vision::StepOutcome] が保持する値をここへ伝播する。
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickResult {
-    /// 発火すべき入力コマンド。[`None`] はこの tick で入力無し。
     pub command: Option<InputCommand>,
-    /// 遷移先タスク名。[`None`] は停止 or 待機（caller が別判断）。
     pub next_current: Option<String>,
-    /// マッチしたテンプレートの信頼度（0.0..=1.0）。
-    /// テンプレ未マッチ時は [`None`] だが、本構造体はマッチ成功時のみ構築されるため
-    /// 実運用上は常に [`Some`]。UC-2 評価用。
     pub matched_confidence: Option<f32>,
-    /// マッチしたテンプレート領域（スクリーンショット元解像度座標）。
-    /// UC-2 評価用（`GoalStatusContext::last_match` の region 要素）。
     pub matched_region: Option<ScreenRegion>,
 }
 
-/// パイプラインの実行状態ホルダ。現在タスク名だけを持つ最小の状態。
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PipelineState {
-    /// 現在のタスク名。
     pub current: String,
 }
 
 impl PipelineState {
-    /// 現在タスク名を指定して生成。
     pub fn new(current: impl Into<String>) -> Self {
         Self {
             current: current.into(),
         }
     }
 
-    /// 現在のタスク名への参照。
     pub fn current(&self) -> &str {
         &self.current
     }
 
-    /// 現在のタスク名を強制設定する。
-    ///
-    /// [`Self::tick`] は `next[0]` へ自動遷移するが、発火後検証で対象が残存した場合など
-    /// caller が current を発火前へ巻き戻したいときに使う(アンドゥ用途)。
-    /// 通常のループ駆動では使わない(tick が current を管理する)。
     pub fn set_current(&mut self, current: impl Into<String>) {
         self.current = current.into();
     }
 
-    /// 1ステップ認識を実行し、コマンド変換 + next 遷移を行う。
-    ///
-    /// 内部で [`run_step`]（現在タスク名で [`TaskDef`] を検索 → detect）を呼ぶ。
-    /// 戻り値 [`Result<Option<TickResult>, TaskDefError>`]:
-    /// - マッチ成功 → `Ok(Some(TickResult))`。`command` は action から変換、`next_current` は `next[0]`。
-    ///   `next_current` が [`Some`] なら `current` をそこへ更新する。
-    /// - 非マッチ・閾値下・ROI 外・未知タスク名 → `Ok(None)`（`current` は変更せず = NoMatch 扱い）。
-    /// - テンプレート読込失敗等の detect エラー → `Err(TaskDefError)`（F34: NoMatch に潰さず
-    ///   伝播。caller ([`crate::PipelineDriver::run_once`]) は停止系エラーとして扱う）。
-    ///
-    /// `screenshot`/`tasks` は借用参照。変更するのは `current` のみ（純粋計算 + 状態遷移）。
     pub fn tick(
         &mut self,
         screenshot: &DynamicImage,
@@ -175,8 +90,6 @@ impl PipelineState {
         };
         let matched_region = outcome.matched_region;
         let matched_confidence = Some(outcome.matched_confidence);
-        // ClickRect/Swipe の roi/from/to を screenshot（=normalize後空間）と同じ空間へ揃えるため、
-        // その寸法を action_to_command へ渡す（detect の roi_to_normalized と同一 norm_w/norm_h）。
         let command = action_to_command(
             &outcome.action,
             Some(matched_region),

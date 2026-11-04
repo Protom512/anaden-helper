@@ -1,42 +1,19 @@
-//! run サブコマンドの成果物永続化 (03-report-channel)。
-//!
-//! F7 解消: `ProgressReport` は Serialize 付きなのに run の成果サマリが
-//! どこにも永続化されていなかった。本モジュールは機械可読レポート
-//! (report.json) の書込先解決・事前作成・書込の単一実装を担う。
-//! studio はこのレポートを読むことで CLI の人間可読 stdout 行の文字列解析
-//! (F11) から脱却する。
-//!
-//! loop 10: routine サブコマンドにも run と対称な既定永続化
-//! (`.anaden-routine/<timestamp>/`) を提供する。resolver のみを本モジュールが
-//! 担い、書込本体は `routine::write_routine_report` (RoutineSummary の JSON)。
-
 use std::io;
 use std::path::{Path, PathBuf};
 
 use anaden_engine::LoopOutcome;
 
-/// 既定の成果物ディレクトリ名 (pipeline_dir 直下)。
 const DEFAULT_ARTIFACTS_DIR: &str = ".anaden-run";
-/// レポートファイル名。
 const REPORT_FILE_NAME: &str = "report.json";
-/// tracing 二重出力 (run.log) のファイル名。
 const RUN_LOG_FILE_NAME: &str = "run.log";
 
-/// 1 回の run の成果物書込先。
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct RunArtifacts {
-    /// report.json の書込先 (`None` = 永続化しない)。
     pub report_path: Option<PathBuf>,
-    /// run.log (tracing ファイル出力) のパス (`None` = stdout のみ)。
     pub log_path: Option<PathBuf>,
 }
 
 impl RunArtifacts {
-    /// 成果物ディレクトリと run.log を事前作成する (report は run 終了時に書込)。
-    ///
-    /// run.log を起動時に作成しておくことで、run 中に異常終了しても
-    /// 「どのディレクトリで実行したか」が残る。永続化なし (`None` のみ) の
-    /// 場合は何もしない。
     pub(crate) fn prepare(&self) -> io::Result<()> {
         if let Some(p) = &self.log_path {
             if let Some(parent) = p.parent()
@@ -50,21 +27,10 @@ impl RunArtifacts {
     }
 }
 
-/// routine 既定の成果物ディレクトリ名 (routine ファイルの置かれたディレクトリ直下)。
 const DEFAULT_ROUTINE_ARTIFACTS_DIR: &str = ".anaden-routine";
-/// routine レポートファイル名 (run の report.json と区別)。
 const ROUTINE_REPORT_FILE_NAME: &str = "routine-report.json";
-/// tracing 二重出力 (routine.log) のファイル名。
 const ROUTINE_LOG_FILE_NAME: &str = "routine.log";
 
-/// フラグ → 成果物パス解決の共通コア (run / routine で優先順位契約は同一)。
-///
-/// - `report_file = Some(p)`: 明示指定を最優先。`--no-persist` は既定永続化の
-///   無効化フラグであり、明示指定には効かない (ユーザが明示的に要求した
-///   ファイルは黙って捨てない)。
-/// - 既定 (`report_file = None`, `no_persist = false`):
-///   `<base_dir>/<default_dir>/<timestamp>/` へ report + log。
-/// - `no_persist = true` (明示指定なし): 何も永続化しない。
 fn resolve_artifacts_at(
     base_dir: &Path,
     report_file: Option<&Path>,
@@ -90,10 +56,6 @@ fn resolve_artifacts_at(
     }
 }
 
-/// フラグ → パスの解決 (run 用・純関数・テスト可能)。
-///
-/// 既定 (`report_file = None`, `no_persist = false`) は
-/// `<pipeline_dir>/.anaden-run/<timestamp>/` へ report.json + run.log。
 pub(crate) fn resolve_run_artifacts(
     pipeline_dir: &Path,
     report_file: Option<&Path>,
@@ -111,11 +73,6 @@ pub(crate) fn resolve_run_artifacts(
     )
 }
 
-/// フラグ → パスの解決 (routine 用・純関数・テスト可能 — loop 10)。
-///
-/// run と対称な既定永続化: 未指定時は
-/// `<routine_dir>/.anaden-routine/<timestamp>/` へ routine-report.json +
-/// routine.log。優先順位契約 (明示最優先 / `--no-persist`) は run と同一。
 pub(crate) fn resolve_routine_artifacts(
     routine_dir: &Path,
     report_file: Option<&Path>,
@@ -133,11 +90,6 @@ pub(crate) fn resolve_routine_artifacts(
     )
 }
 
-/// run 終了時のレポート書込 (fail-closed: 失敗は呼出元へ伝播し exit 非ゼロ)。
-///
-/// 中身は `LoopOutcome::progress_report` (`ProgressReport`) の JSON。
-/// `LoopOutcome` 全体ではなく report 単体とするのは、studio 消費の契約を
-/// 最小にするため (停止理由は `stop_reason` フィールドで読める)。
 pub(crate) fn write_report(path: &Path, outcome: &LoopOutcome) -> io::Result<()> {
     if let Some(parent) = path.parent()
         && !parent.as_os_str().is_empty()
@@ -149,10 +101,6 @@ pub(crate) fn write_report(path: &Path, outcome: &LoopOutcome) -> io::Result<()>
     std::fs::write(path, json)
 }
 
-/// Unix 秒 → ファイル名安全なタイムスタンプ (`YYYYMMDD-HHMMSS`, UTC)。
-///
-/// `e2e::date_parts_unix` (civil-from-days) と同一の変換源。ISO 8601 と違い
-/// コロンを含まないため Windows パス部品として安全。
 pub(crate) fn run_artifact_timestamp(unix_secs: u64) -> String {
     let (y, m, d, hh, mm, ss) = crate::e2e::date_parts_unix(unix_secs);
     format!("{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}")

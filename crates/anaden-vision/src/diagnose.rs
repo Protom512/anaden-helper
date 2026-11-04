@@ -1,12 +1,3 @@
-//! テンプレート別 conf 内訳の診断モード（Issue #71）。
-//!
-//! [`crate::pipeline::TaskDef::detect`] と同じ ROI/needle スケール経路
-//! （[`crate::scale::roi_to_normalized`] / [`crate::scale::needle_to_normalized`]）と
-//! 同一の前処理済みテンプレートキャッシュ (05-template-cache) を通り、
-//! threshold=0.0 のエンジンで best conf を閾値によらず取得する。
-//! NoMatch 原因特定をデータドリブン化するための純粋関数層（テンプレート解決は
-//! [`crate::pipeline`] のキャッシュ経由 — detect と同じ前処理結果を共有する）。
-
 use std::path::PathBuf;
 
 use image::DynamicImage;
@@ -19,36 +10,20 @@ use crate::matcher::TemplateMatcher;
 use crate::pipeline::{Algorithm, TaskDef};
 use crate::scale::{PC_CLIENT_HEIGHT_MEASURED, PC_CLIENT_WIDTH_MEASURED, roi_to_normalized};
 
-/// 1タスク分の診断結果。
-///
-/// `best_confidence` / `best_region` は「マッチ不能（needle が画面より大きい等）」の
-/// skipped 表現として `None` を取る。閾値は `TaskDef::threshold` のまま報告するが、
-/// 取得自体は threshold=0.0 で行うため閾値に切り捨てられない。
 #[derive(Debug, Clone)]
 pub struct DiagnoseEntry {
-    /// タスク名。
     pub task: String,
-    /// テンプレート画像パス。
     pub template_path: PathBuf,
-    /// 認識アルゴリズム。
     pub algorithm: Algorithm,
-    /// TaskDef 宣言の閾値（報告用。取得には使われない）。
     pub threshold: f32,
-    /// 閾値 0.0 で取得した best conf。マッチ不能時は `None`。
     pub best_confidence: Option<f32>,
-    /// best conf の領域（screenshot と同じ座標空間・ROI オフセット戻し済み）。
     pub best_region: Option<ScreenRegion>,
-    /// 正規化後空間へスケールした ROI。`roi = None`（全面）時は `None`。
     pub scaled_roi: Option<ScreenRegion>,
-    /// X/Y 別スケール倍率 `(sx, sy)`（norm/1258, norm/708）。
     pub scale_factors: (f32, f32),
-    /// スケール後の needle 寸法 `(w, h)`。テンプレ読込失敗時は `None`。
     pub needle_scaled_size: Option<(u32, u32)>,
-    /// マッチ不能・読込失敗の理由。正常時は `None`。
     pub error: Option<String>,
 }
 
-/// 1タスクを診断する。テンプレート読込失敗や needle 過大もエントリとして返す（Result ではない）。
 pub fn diagnose_task(task: &TaskDef, screenshot: &DynamicImage) -> DiagnoseEntry {
     let norm_w = screenshot.width();
     let norm_h = screenshot.height();
@@ -85,10 +60,6 @@ pub fn diagnose_task(task: &TaskDef, screenshot: &DynamicImage) -> DiagnoseEntry
         error: None,
     };
 
-    // テンプレート解決: pipeline と同一の前処理済みキャッシュ (05-template-cache /
-    // F13/F17) を使う。diagnose の全タスク走査 (diagnose_all) も detect と同じ
-    // (パス, norm_w, norm_h) キーのエントリを共有し、disk 読込+リサイズ+ccoeff 前処理を
-    // 繰り返さない。
     let prepared = match crate::pipeline::prepared_template(&task.template, norm_w, norm_h) {
         Ok(p) => p,
         Err(e) => {
@@ -126,7 +97,6 @@ pub fn diagnose_task(task: &TaskDef, screenshot: &DynamicImage) -> DiagnoseEntry
             entry.best_region = Some(m.region);
         }
         None => {
-            // threshold=0.0 で None = エンジンが走査不能（needle が画面/ROI より大きい等）。
             entry.error = Some("needle larger than haystack (or empty scan space)".to_string());
         }
     }
@@ -134,7 +104,6 @@ pub fn diagnose_task(task: &TaskDef, screenshot: &DynamicImage) -> DiagnoseEntry
     entry
 }
 
-/// 全タスクを診断し、best_confidence 降順（`None` は末尾）で返す。
 pub fn diagnose_all(tasks: &[TaskDef], screenshot: &DynamicImage) -> Vec<DiagnoseEntry> {
     let mut entries: Vec<DiagnoseEntry> =
         tasks.iter().map(|t| diagnose_task(t, screenshot)).collect();
@@ -147,7 +116,6 @@ pub fn diagnose_all(tasks: &[TaskDef], screenshot: &DynamicImage) -> Vec<Diagnos
     entries
 }
 
-/// ROI cropping ヘルパ（pipeline::crop_imm と同じ clamp 挙動）。
 fn crop_clamped(img: &DynamicImage, r: ScreenRegion) -> DynamicImage {
     let x = r.x.min(img.width().saturating_sub(1));
     let y = r.y.min(img.height().saturating_sub(1));
@@ -156,13 +124,10 @@ fn crop_clamped(img: &DynamicImage, r: ScreenRegion) -> DynamicImage {
     img.crop_imm(x, y, w, h)
 }
 
-/// エントリの conf と threshold の差分（conf - threshold）。閾値未達は負値。
-/// skipped（`None`）時は `None`。
 fn threshold_diff(entry: &DiagnoseEntry) -> Option<f32> {
     entry.best_confidence.map(|c| c - entry.threshold)
 }
 
-/// conf 降順（`None` は末尾）の比較関数。[`diagnose_all`] と同一順序。
 fn compare_conf_desc(a: &DiagnoseEntry, b: &DiagnoseEntry) -> std::cmp::Ordering {
     match (a.best_confidence, b.best_confidence) {
         (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
@@ -172,12 +137,6 @@ fn compare_conf_desc(a: &DiagnoseEntry, b: &DiagnoseEntry) -> std::cmp::Ordering
     }
 }
 
-/// 診断レポート全体を markdown 文字列として生成する純粋関数（ファイル IO なし）。
-///
-/// 含まれる要素:
-/// - ヘッダ（title / haystack サイズ / エントリ数）
-/// - conf 降順テーブル（未ソート入力でも降順に行を並べ替える）
-/// - 各行: conf / threshold / 差分 / scaled ROI / スケール倍率 / needle 寸法 / 領域 / 備考
 pub fn format_diagnose_report(
     title: &str,
     haystack_size: (u32, u32),
