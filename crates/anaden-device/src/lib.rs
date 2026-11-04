@@ -27,6 +27,11 @@ mod win32_proc;
 // cfg(windows) で gating し、Linux ではコンパイル対象外とする。
 #[cfg(windows)]
 mod win32_terminate;
+// PC版(Windows) readiness probe の I/O 層 (Issue #275)。キャプチャと TCP ソケット
+// 計上を有界サンプリングで行い、判定コア (readiness) へ入力する。
+// cfg(windows) で gating し、Linux ではコンパイル対象外とする。
+#[cfg(windows)]
+mod win32_readiness;
 
 /// ゲーム起動保証の成果物 enum ([`Win32Launch::ensure_open`] 等)。
 ///
@@ -51,6 +56,12 @@ pub use win32_input::{InputMethod, Win32InputExecutor};
 #[cfg(windows)]
 pub use win32_launch::{
     DEFAULT_CHILD, DEFAULT_LAUNCHER, DEFAULT_WAIT, DEFAULT_WORKDIR, Win32Launch,
+};
+/// PC版(Windows) readiness probe の I/O (フレーム取得 + TCP ソケット計上・Issue #275)。
+#[cfg(windows)]
+pub use win32_readiness::{
+    DEFAULT_READINESS_INTERVAL, DEFAULT_READINESS_SAMPLES, ReadinessProbeConfig, count_tcp_sockets,
+    probe_readiness,
 };
 /// PC版(Windows) 既存ゲームプロセスの段階的終了 (WM_CLOSE → 待機 → TerminateProcess・Issue #266)。
 #[cfg(windows)]

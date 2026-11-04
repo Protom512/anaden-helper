@@ -85,4 +85,8 @@ windows = { version = "0.62", features = [
     "Win32_System_Diagnostics_ToolHelp",
     # 段階的終了テストフィクスチャ (Issue #266): ウィンドウクラス登録用モジュールハンドル
     "Win32_System_LibraryLoader",
+    # readiness probe (Issue #275): 対象 PID の TCP ソケット数計上 (GetExtendedTcpTable)
+    "Win32_NetworkManagement_IpHelper",
+    # 同上: AF_INET / AF_INET6 アドレスファミリ定数
+    "Win32_Networking_WinSock",
 ] }
