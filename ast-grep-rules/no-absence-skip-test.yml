@@ -14,7 +14,7 @@ rule:
       has:
         field: name
         regex: 'pc_title_pc_roi_derivation_matches_column_variance_runs_or_documents_gap'
-message: absence-skip early `return;` を #[test] に新規導入しないこと。プローブ/アセット不在時は #[ignore] + feature gate（pc-e2e）で三値化し、不在時は fail-loud (panic) させること（Issue #19 / R1）。
+message: 'absence-skip early `return;` を #[test] に新規導入しないこと。プローブ/アセット不在時は #[ignore] + feature gate（pc-e2e）で三値化し、不在時は fail-loud (panic) させること（Issue #19 / R1）。'
 note: |
   この return; は CI/fresh-clone でアセットが存在しなくてもテストが green で完了する
   「偽 green」を生む。修正パターン:
