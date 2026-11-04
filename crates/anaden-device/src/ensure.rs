@@ -13,4 +13,8 @@ pub enum EnsureOutcome {
     Launched,
     /// 起動したが待機期間経過でも生存・前景化を確認できなかった。タイムアウト。
     Timeout,
+    /// 起動・生存は確認できたが、readiness probe が splash-hang (not-ready) を
+    /// 検出した (フレーム不変 + TCP ソケット 0)。プロセス生存 ≠ ready の
+    /// vacuous green を fail-closed に分離する (Issue #275)。
+    NotReady,
 }

@@ -9,6 +9,8 @@
 
 mod ensure;
 mod error;
+// readiness (splash-hang) 判定コア。純関数のみでプラットフォーム非依存 (Issue #275)。
+mod readiness;
 // PC版(Windows) Win32 バックエンド。capture/input/launch の3モジュール。
 // 全体を cfg(windows) で gating し、Linux ではコンパイル対象外とする。
 #[cfg(windows)]
@@ -25,6 +27,11 @@ mod win32_proc;
 // cfg(windows) で gating し、Linux ではコンパイル対象外とする。
 #[cfg(windows)]
 mod win32_terminate;
+// PC版(Windows) readiness probe の I/O 層 (Issue #275)。キャプチャと TCP ソケット
+// 計上を有界サンプリングで行い、判定コア (readiness) へ入力する。
+// cfg(windows) で gating し、Linux ではコンパイル対象外とする。
+#[cfg(windows)]
+mod win32_readiness;
 
 /// ゲーム起動保証の成果物 enum ([`Win32Launch::ensure_open`] 等)。
 ///
@@ -35,6 +42,10 @@ mod win32_terminate;
 pub use ensure::EnsureOutcome;
 /// capture / input / launch 共通のデバイス操作エラー。
 pub use error::DeviceError;
+/// readiness (splash-hang) 判定のコア型と純関数 (Issue #275)。
+pub use readiness::{
+    FrameDigest, ReadinessSample, ReadinessVerdict, classify_readiness, frame_digest,
+};
 /// PC版(Windows) `PrintWindow` ベースのキャプチャ（`DEFAULT_PROCESS_NAME` = 対象プロセス名）。
 #[cfg(windows)]
 pub use win32_capture::{DEFAULT_PROCESS_NAME, Win32Capture};
@@ -45,6 +56,12 @@ pub use win32_input::{InputMethod, Win32InputExecutor};
 #[cfg(windows)]
 pub use win32_launch::{
     DEFAULT_CHILD, DEFAULT_LAUNCHER, DEFAULT_WAIT, DEFAULT_WORKDIR, Win32Launch,
+};
+/// PC版(Windows) readiness probe の I/O (フレーム取得 + TCP ソケット計上・Issue #275)。
+#[cfg(windows)]
+pub use win32_readiness::{
+    DEFAULT_READINESS_INTERVAL, DEFAULT_READINESS_SAMPLES, ReadinessProbeConfig, count_tcp_sockets,
+    probe_readiness,
 };
 /// PC版(Windows) 既存ゲームプロセスの段階的終了 (WM_CLOSE → 待機 → TerminateProcess・Issue #266)。
 #[cfg(windows)]
