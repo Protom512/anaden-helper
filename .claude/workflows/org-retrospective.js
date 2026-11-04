@@ -136,7 +136,6 @@ log(`Generated ${analysis.proposals.length} structural change proposals`);
 // ── Phase 3: Propose ──
 phase('Propose');
 
-// Log proposals for CEO review
 for (const p of analysis.proposals) {
   log(`[${p.impact} impact / ${p.effort} effort / ${p.risk} risk] ${p.title}`);
 }

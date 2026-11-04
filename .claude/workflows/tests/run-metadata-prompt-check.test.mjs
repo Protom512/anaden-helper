@@ -1,10 +1,3 @@
-// TDD tests for Issue #97 Task 2: Commit Gate / Release Review / evidence collector
-// の各 agent プロンプトへ runTimestamp 照合指示 (run-metadata.json の runTimestamp を
-// 読み、evidence の recordedAt と照合。メタデータ欠損ディレクトリは unknown として
-// fail-closed。遡及補填はしない — Issue #97 非スコープ) を追記したかの drift-guard。
-//
-// Source-scan pattern (workflow script is not importable):
-//   Run: node --test .claude/workflows/tests/run-metadata-prompt-check.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -14,7 +7,6 @@ import assert from 'node:assert/strict';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-// marker block: prompt 共通指示 (Issue #97 Task 2)
 const RUN_TS_CHECK_BEGIN = 'run-metadata-prompt-check-begin';
 const RUN_TS_CHECK_END = 'run-metadata-prompt-check-end';
 
@@ -43,17 +35,13 @@ test('marker block states the runTimestamp cross-check semantics (read run-metad
 
 test('Commit Gate reviewer prompts embed the runTimestamp check instruction', () => {
   const block = markerBlock();
-  // FEEDBACK_INSTRUCTION (shared by all gate dimension prompts) must interpolate the
-  // marker block constant so every gate lane receives the instruction.
   const fiAt = src.indexOf('const FEEDBACK_INSTRUCTION');
   assert.ok(fiAt > -1, 'FEEDBACK_INSTRUCTION exists');
   const fiEnd = src.indexOf('GATE_DIMENSIONS', fiAt);
   const fi = src.slice(fiAt, fiEnd);
   assert.ok(fi.includes('${RUN_TS_CHECK}'), 'FEEDBACK_INSTRUCTION interpolates RUN_TS_CHECK');
   assert.ok(src.includes('const RUN_TS_CHECK'), 'RUN_TS_CHECK constant declared');
-  // declared before FEEDBACK_INSTRUCTION (no TDZ)
   assert.ok(src.indexOf('const RUN_TS_CHECK') < fiAt, 'RUN_TS_CHECK precedes FEEDBACK_INSTRUCTION');
-  // the constant's content is derived from the marker block region
   const declAt = src.indexOf('const RUN_TS_CHECK');
   const declEnd = src.indexOf(';', declAt);
   assert.ok(declEnd > declAt);
@@ -72,16 +60,12 @@ test('evidence collector prompt instructs reading runTimestamp from run-metadata
 });
 
 test('Release Review reviewer prompts (team path + fallback path) embed the runTimestamp check instruction', () => {
-  // both reviewer prompt constructions must include RUN_TS_CHECK
   const uses = (src.match(/\$\{RUN_TS_CHECK\}/g) || []).length;
-  // 1 in FEEDBACK_INSTRUCTION + 1 team reviewerPrompt + 1 fallback parallel() prompt = 3
   assert.ok(uses >= 3, `RUN_TS_CHECK interpolated in >=3 prompts (found ${uses})`);
-  // team path prompt
   const teamAt = src.indexOf('RELEASE REVIEWER teammate');
   assert.ok(teamAt > -1, 'team reviewer prompt exists');
   const teamPrompt = src.slice(teamAt, src.indexOf('PR 情報', teamAt));
   assert.ok(teamPrompt.includes('${RUN_TS_CHECK}'), 'team reviewer prompt embeds RUN_TS_CHECK');
-  // fallback path prompt
   const fbAt = src.indexOf('RELEASE REVIEWER ${i + 1}/3');
   assert.ok(fbAt > -1, 'fallback reviewer prompt exists');
   const fbPrompt = src.slice(fbAt, src.indexOf('PR 情報', fbAt));

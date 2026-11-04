@@ -15,19 +15,9 @@ export const meta = {
 };
 
 // [run-metadata-begin]
-// Issue #97 UC-1: run 開始時刻 (ISO 8601 タイムゾーン付き) と runId を pipeline
-// 起動直後 (Phase 0 Coordinate 前) に生成する。runId は filesystem-safe
-// (Windows コロ制約) で runTimestamp と分離 — タイムスタンプ文字列は ':' を
-// 含むためディレクトリ名には使えない。helpers は ESM import 不可のため inline
-// (drift-guard: tests/run-metadata.test.mjs が marker block を抽出して検証)。
-// Workflow runtime は Date.now()/new Date() を禁止 (resume 安全性) ため、
-// timestamp は args 経由で受け取る (メインループが ISO 8601 を注入)。
-// 未指定時は 'unknown' で fail-closed 扱い (.claude/rules/pipeline-evidence-verification.md)。
-// NOTE: ランタイムは export 構文を剥がすため meta は未定義 — phases は args 経由で
-// 受け取る (未指定時は meta.phases と同じ既定リストを inline)。
 const PIPELINE_PHASES = ['Coordinate', 'Request', 'Estimate', 'Approve', 'Implement', 'Commit Gate', 'Release', 'Release Review', 'Merge & Close', 'Self-Improve'];
 const argsObj = (typeof args !== 'undefined' && args && typeof args === 'object') ? args : {};
-const runTimestamp = argsObj.runTimestamp || 'unknown'; // ISO 8601 with TZ (Z 形式)
+const runTimestamp = argsObj.runTimestamp || 'unknown';
 const runId = argsObj.runId || 'run-manual';
 const PHASES = argsObj.phases || PIPELINE_PHASES;
 const ISO_8601_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
@@ -52,7 +42,7 @@ function buildRunMetadata(input) {
     || !input.phases.every((p) => typeof p === 'string')) {
     errors.push('phases: non-empty string array required');
   }
-  if (errors.length > 0) return { value: null, errors }; // fail-closed
+  if (errors.length > 0) return { value: null, errors };
   return {
     value: {
       runTimestamp: input.runTimestamp,
@@ -184,7 +174,6 @@ Even when pushing back, your "recommendation" field MUST contain a description o
 
 log(`Coordinator: ${recommendation.recommendation}`);
 
-// Veto handling: block if vetoed unless CEO explicitly overrides
 if (recommendation.veto && !/強行|force|override/i.test(coordinatorArgs)) {
   log(`VETOED: ${recommendation.veto_reason}`);
   return { status: 'vetoed', reason: recommendation.veto_reason, recommendation };
@@ -192,9 +181,6 @@ if (recommendation.veto && !/強行|force|override/i.test(coordinatorArgs)) {
 
 const effectiveArgs = isBacklogPick ? recommendation.recommendation : coordinatorArgs;
 
-// ── resolveScope: git を唯一の真実源(SoT)としてスコープを取得 (R2改善) ──
-// estimate.tasks[].files 静的リストでなく、git diff HEAD + git status の実行結果を
-// 全フェーズ(PM/Estimate/Gate/Release)で共有。これが changed files の唯一の真実源。
 const scopeResult = await agent(
   `SCOPE RESOLVER。以下を実行し結果を返す:
 1. \`git diff HEAD --name-only\` — HEAD に対する変更ファイル(tracked)
@@ -206,28 +192,10 @@ const scopeResult = await agent(
 const changedFilesList = (scopeResult && scopeResult.changedFiles) ? scopeResult.changedFiles.join(', ') : '(git diff で確認)';
 log(`Scope resolved (git SoT): ${changedFilesList.slice(0, 120)}`);
 
-// R5 → Issue #99: 旧 changedCrates 手動導出 (resolve-scope 時点の静的導出) は
-// ticket precheck 生成メタデータ (deriveSliceMetadata 実測値) に置換済み —
-// ticket-precheck wiring ブロック (Request 直後) で changedCrates / diffKind を
-// 上書き宣言 (このコメントに wiring marker 文字列を含めないこと —
-// tests/ticket-precheck-wiring.test.mjs の位置検証が誤反応する)。
-// ここでは changedFilesArr (contrast / basisFiles 用) のみ保持。
 const changedFilesArr = (scopeResult && scopeResult.changedFiles) ? scopeResult.changedFiles : [];
-// run-metadata-lookup-begin (drift-guard marker: tests/run-metadata.test.mjs slices from AFTER this comment line to BEFORE the end marker and eval via new Function)
-// Issue #97 UC-2/UC-3: 過去実行の照合ヘルパー。.omc/logs/{run-id}/run-metadata.json
-// の runTimestamp (run 開始時刻, ISO 8601 tz付き) で過去実行を照合する。
-// 注意: runTimestamp は「run 開始時刻」であり、各 evidence ファイルに記録される
-// recordedAt / collectedAt (採取時刻) とは別物 — 二重管理ではなく役割分離
-// (traceability: どの実行で採取された evidence か)。
-// fail-closed: メタデータ欠損 (run-metadata.json 無し / JSON 破損 /
-// runTimestamp フィールド無し / 非文字列) ディレクトリは 'unknown' に分類
-// (pipeline-evidence-verification.md「空・unknown は green 払いしない」原則)。
-// 既存ログ (issue95-p008-verification 等メタデータ無し) は unknown 扱い —
-// 照合可能なのは新規 run のみ。
+// run-metadata-lookup-begin
 const RUN_TIMESTAMP_UNKNOWN = 'unknown';
 function buildRunTimestampIndex(entries) {
-  // entries: [{ runId, metadata }] — metadata は run-metadata.json の parse 済み
-  // オブジェクト (欠損時 null)。戻り値: Map<runId, { runId, runTimestamp }>
   const index = new Map();
   for (const entry of Array.isArray(entries) ? entries : []) {
     if (!entry || typeof entry.runId !== 'string' || entry.runId === '') continue;
@@ -251,13 +219,7 @@ function matchRunByTimestamp(index, runTimestamp) {
   return null;
 }
 // run-metadata-lookup-end
-// gate-diff-kind-begin (drift-guard marker: tests slice from AFTER this comment line to BEFORE the matching end marker line and eval via new Function)
-// Issue #95 (P-008): diff-kind classifier (docs-only / code / mixed) による lane
-// short-circuit。gate-diff-kind.js の canonical copy を inline (Workflow runtime は
-// ESM import を reject するため script は self-contained 必須 — review-gate.js と
-// 同じ構造、drift は tests/gate-diff-kind-wiring.test.mjs が正準比較で guard)。
-// Fail-closed (UC-3): 空・malformed・unknown 入力は 'code' に分類され、review lane を
-// skip できない構造。docs-only は全 changed path が docs pattern に一致する場合のみ。
+// gate-diff-kind-begin
 const DOCS_DIR_PREFIXES = ['docs/', 'doc/'];
 const DOCS_ROOT_PREFIXES = ['.claude/rules/', 'CLAUDE.d/'];
 function isDocsPath(path) {
@@ -287,8 +249,6 @@ function classifyDiffKind(changedFiles) {
   let sawCode = false;
   for (const f of changedFiles) {
     if (typeof f !== 'string' || f.trim().length === 0) {
-      // Malformed entry is "unclassified" → fail-closed straight to 'code'
-      // (UC-3: structurally prevent a false short-circuit).
       return 'code';
     }
     if (isDocsPath(f)) {
@@ -302,28 +262,14 @@ function classifyDiffKind(changedFiles) {
   }
   return sawDocs ? 'mixed' : 'code';
 }
-// gate-diff-kind-end (drift-guard marker — see begin marker above)
-// Issue #99: 旧 Coordinate 時点の diffKind 分類は ticket precheck 生成メタデータ
-// で上書きされる (Request 直後の precheck wiring ブロックで再宣言)。ここでは宣言しない。
-// SR-3 → P-008 (diff-grounded gate routing): docs-only fast-path。非機能 lane
-// (reliability/performance/extensibility) は pure-docs 変更に構造的 N/A。lane 選択は
-// GATE_DIMENSIONS 定義側の `lanes: 'code'` メタで行う (governance + integration は
-// 常時維持 — fail-closed: 决して 0 lane にはならない。code/mixed は全 6 lane)。
-// Release Review (3 reviewers) は引き続き第二 gate として実行される。
-// 注意: GATE_DIMENSIONS は ticket を template に使うため後方 (Commit Gate 直前) で
-// 宣言される。ACTIVE_GATE_DIMENSIONS への反映もその位置で行う (ここでは分類のみ)。
+// gate-diff-kind-end
 const DOCS_ONLY_SKIP_KEYS = ['reliability', 'performance', 'extensibility'];
 function GATE_DIFF_KIND_LANES() {
-  // Issue #99: lane 選択は precheck 生成メタデータ (precheckDiffKind = 実 diff 由来
-  // classifyDiffKind 結果) で上書き。diffKind は precheckDiffKind のエイリアス。
   const lanes = GATE_DIMENSIONS.filter(
     (d) => !(precheckDiffKind === 'docs-only' && DOCS_ONLY_SKIP_KEYS.includes(d.key))
   );
   return lanes.length > 0 ? lanes : GATE_DIMENSIONS;
 }
-// integration gate Step1 は「スライスが crate を触ったか」で分岐(触ってない=docs/data/assets/test のみなら per-slice コード層は N/A)。
-// NOTE: hasChangedCrate/changedCratesList は precheck (Issue #99) の後方で宣言されるため、
-// 即時評価すると TDZ 違反。関数化して消費時 (integration lane プロンプト構築時) に評価する。
 function integrationSliceCheckText() {
   return hasChangedCrate
     ? `各 changed crate (${changedCratesList}) について実行し、緑であることを確認:
@@ -335,12 +281,7 @@ function integrationSliceCheckText() {
 
 // ── Phase 1: Request ──
 phase('Request');
-// [pm-ticket-files-begin] (Issue #99 Task 1 / UC-3: drift-guard marker — tests/pm-ticket-files.test.mjs)
-// ticket-declared files: PM はチケットが触る予定ファイルを files: string[] で宣言する。
-// この宣言が precheck (ticket-precheck) で実 diff と機械検証される (evidence は自己申告不可)。
-// 継続系 ("next") 指示時は新機能テンプレート (persona/motivation/use cases) を機械適用せず、
-// 未マージブランチ・open PR の残作業サマリ形式 (対象ブランチ/PR/未了工程 + 受け入れ基準) で
-// チケット生成する。
+// [pm-ticket-files-begin]
 const ticket = await agent(
   `You are the Product Manager. Create a structured feature ticket based on this request:
 
@@ -404,9 +345,6 @@ GitHub Issue using: gh issue create`,
       issueNumber: { type: 'string' },
       files: { type: 'array', items: { type: 'string' } },
       ticketKind: { type: 'string', enum: ['new-implementation', 'continuation'] },
-      // Issue #150: continuation チケットの subject open PR 番号 (optional —
-      // required には追加しない。new-implementation / branch-only continuation は
-      // 宣言なし正常)。数値でも /^\d+$/ 数値文字列でも許容 (pure fn で正規化)。
       subjectPrNumber: { type: ['number', 'string', 'null'] },
     },
     required: ['title', 'priority', 'summary', 'files', 'ticketKind'],
@@ -415,18 +353,12 @@ GitHub Issue using: gh issue create`,
 log(`Ticket created: ${ticket.title} (Priority: ${ticket.priority})`);
 // [pm-ticket-files-end]
 
-// [run-metadata-persist-begin]
-// Issue #97 UC-1: run metadata の永続化。ticket の issue/title が確定した時点
-// (Request phase 直後) で .omc/logs/{runId}/run-metadata.json を haiku
-// persister agent に書き出させる (diff-kind rationale persister と同一パターン)。
-// fail-closed: buildRunMetadata が検証エラーを返す場合は空オブジェクトで
-// 書き出さず errors を log に残す (evidence は自己申告不可)。
 const runMeta = buildRunMetadata({
   runTimestamp,
   runId,
   issue: Number(ticket.issueNumber) || null,
   title: ticket.title,
-  phases: PHASES, // meta 未定義 (export剥がし) のため args/inline の PHASES を使用
+  phases: PHASES,
 });
 if (runMeta.value) {
   await agent(
@@ -439,22 +371,8 @@ ${JSON.stringify(runMeta.value, null, 2)}
 } else {
   log(`Run metadata (Issue #97 UC-1): FAIL-CLOSED, not persisted — ${runMeta.errors.join('; ')}`);
 }
-// [run-metadata-persist-end]
 
 // [ticket-precheck-wiring-begin]
-// Issue #99 Task 3: ticket precheck wiring。Request phase (ticket 確定) 直後・
-// Estimate 前に evaluateTicketPrecheck を実行し、ticket-declared files と実 diff
-// (working-tree + untracked + commit-range fallback) を機械検証する。
-// FAIL 時は status 'precheck-failed' で short-circuit (resolveReleaseAbort /
-// evidence-failed と同型の resumable status)。PASS 時は slice メタデータ
-// (changedCrates / diffKind) を deriveSliceMetadata の実測値で確定し、以降の
-// Estimate / Gate プロンプトへ注入する (自己申告メタデータの廃止)。
-// Workflow runtime は ESM import を reject するため ticket-precheck.js の
-// canonical copy を inline (drift は tests/ticket-precheck-wiring.test.mjs が guard)。
-// diff-kind 分類は inline 済み classifyDiffKind (gate-diff-kind.js) を再利用
-// (estimate approval condition: 第二の drift surface を作らない)。
-// 補足: helper 名は canonical (normalizePath / toNormalizedSet) と同一にする
-// (drift-guard test が関数名一致で inline copy を検証する)。
 function normalizePath(path) {
   if (typeof path !== 'string') {
     return null;
@@ -486,7 +404,6 @@ function toNormalizedSet(files) {
   }
   return { set, ordered, malformed };
 }
-// canonical: ticket-precheck.js evaluateTicketPrecheck (verbatim inline copy)
 const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') => {
   const declared = toNormalizedSet(declaredFiles);
   const changed = toNormalizedSet(changedFiles);
@@ -503,11 +420,6 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') =>
     }
   }
   const preImpl = mode === 'pre-implementation';
-  // Issue #226 (TOCTOU race): pre-implementation チケットは「これから実装する」
-  // files を宣言するため、宣言外の changed files は並行エディタのコミット (外国変更)
-  // の可能性が高い。これを FAIL にすると ticket 作成→dispatch 間の race で
-  // 必ず再起票ループに陥る (#217→#219→#220 の連鎖)。pre-implementation では
-  // undeclared を foreignChanges として報告のみ行い、dispatch 側の判断に委ねる。
   const foreignChanges = preImpl ? undeclared : [];
   const hasMismatch = preImpl ? false : (undeclared.length > 0 || missing.length > 0);
   const fail =
@@ -542,11 +454,6 @@ const evaluateTicketPrecheck = (declaredFiles, changedFiles, mode = 'strict') =>
     reason: fail ? `ticket-precheck FAIL (${mode}) — ${parts.join('; ')}` : (`ticket-precheck PASS (${mode})${foreignNote}` || (preImpl && missing.length > 0 ? `ticket-precheck PASS (pre-implementation) — ${missing.length} declared file(s) pending implementation` : 'ticket-precheck PASS — declared files match changed files')),
   };
 };
-// canonical: ticket-precheck.js evaluateIssuePremise (verbatim inline copy)。
-// Issue #109 Task 1: stale (closed+merged) / duplicate (open PR) dispatch 検出。
-// Issue #150: continuation + declared subject open PR 一致の duplicate 例外
-// (subject 以外の open PR が残る / new-implementation / malformed は FAIL 維持)。
-// fail-closed: malformed/null 入力も FAIL (検証実施不能は dispatch 拒否)。
 const evaluateIssuePremise = (input) => {
   const invalid = { verdict: 'FAIL', stale: false, duplicate: false };
   if (input === null || typeof input !== 'object' || Array.isArray(input)) {
@@ -562,18 +469,12 @@ const evaluateIssuePremise = (input) => {
   if (!Array.isArray(openPRs)) {
     return { ...invalid, reason: 'issue-premise FAIL — malformed openPRs (fail-closed: expected array)' };
   }
-  // Issue #150: optional ticketKind — absent (undefined) = legacy behavior;
-  // present-but-invalid (incl. null) is fail-closed FAIL, never ignored.
   if (ticketKind !== undefined && ticketKind !== 'new-implementation' && ticketKind !== 'continuation') {
     return { ...invalid, reason: 'issue-premise FAIL — malformed ticketKind (fail-closed: expected "new-implementation"|"continuation")' };
   }
-  // subjectPrNumber is only meaningful for continuation tickets — declaring it
-  // alongside new-implementation (or without any ticketKind) is contradictory.
   if (subjectPrNumber !== undefined && ticketKind !== 'continuation') {
     return { ...invalid, reason: 'issue-premise FAIL — contradictory input: subjectPrNumber declared without ticketKind "continuation" (fail-closed)' };
   }
-  // Normalize subjectPrNumber: positive integer, or /^\d+$/ numeric string
-  // converted to number ("149" -> 149). Zero / negative / non-numeric FAIL.
   let subjectPr = null;
   if (subjectPrNumber !== undefined) {
     let n = null;
@@ -599,14 +500,10 @@ const evaluateIssuePremise = (input) => {
         : 'issue-premise FAIL — stale: issue is closed and already merged into trunk',
     };
   }
-  // Issue #150 continuation duplicate exemption. Only reached when not stale
-  // (stale keeps priority — the exemption targets duplicate exclusively).
   if (ticketKind === 'continuation' && subjectPr !== null) {
     const isSubjectPr = (pr) =>
       pr !== null && typeof pr === 'object' && pr.number === subjectPr;
     if (!openPRs.some(isSubjectPr)) {
-      // Declared subject PR is not open (merged / number mismatch): the
-      // continuation premise itself is broken -> FAIL even when openPRs=[].
       return {
         verdict: 'FAIL',
         stale: false,
@@ -616,8 +513,6 @@ const evaluateIssuePremise = (input) => {
     }
     const remaining = openPRs.filter((pr) => !isSubjectPr(pr));
     if (remaining.length === 0) {
-      // Exemption: every open PR referencing this issue IS the declared
-      // subject — the continuation ticket is not a duplicate of itself.
       return {
         verdict: 'PASS',
         stale: false,
@@ -647,8 +542,6 @@ const evaluateIssuePremise = (input) => {
     reason: `issue-premise PASS — issue is ${issueState}, not merged into trunk, no open duplicate PRs`,
   };
 };
-// canonical: ticket-precheck.js deriveSliceMetadata (verbatim inline copy)。
-// crates/* 導出は旧 changedCrates 手動導出 (R5, L209-336 相当) を置換。
 const deriveSliceMetadata = (changedFiles) => {
   const changed = toNormalizedSet(changedFiles);
   const crates = changed.ordered
@@ -661,10 +554,6 @@ const deriveSliceMetadata = (changedFiles) => {
     diffKind: classifyDiffKind(changedFiles),
   };
 };
-// precheck scope resolver: working-tree + untracked + commit-range fallback。
-// UC-3: "next" 継続系指示で ticket が PR-verification files を宣言しても
-// working tree が clean (commit 済み slice) の場合、HEAD~1..HEAD / merge-base の
-// commit-range diff を fallback として結合する (Issue #91 P-007 と同一パターン)。
 const precheckScope = await agent(
   `PRECHECK SCOPE RESOLVER (Issue #99)。以下を実行し結果を返す:
 1. \`git diff HEAD --name-only\` — working-tree tracked 変更
@@ -691,21 +580,9 @@ const precheckScope = await agent(
 const precheckWorkingTree = (precheckScope && Array.isArray(precheckScope.workingTreeFiles)) ? precheckScope.workingTreeFiles : [];
 const precheckUntracked = (precheckScope && Array.isArray(precheckScope.untrackedFiles)) ? precheckScope.untrackedFiles : [];
 const precheckRangeFiles = (precheckScope && Array.isArray(precheckScope.commitRangeFiles)) ? precheckScope.commitRangeFiles : [];
-// working-tree + untracked を優先し、両方空の場合のみ commit-range fallback (UC-3)。
-// Issue #104 修正: commit-range fallback は continuation (未マージ成果物の残作業検証)
-// のみに適用。new-implementation (ゼロから実装) では直前の無関係コミット (直前PR等) を
-// 自チケットの diff と誤検出するため fallback しない (空 = 実装前の正常状態)。
 const precheckTicketKind = (ticket.ticketKind === 'continuation') ? 'continuation' : 'new-implementation';
-// Issue #127 修正 (3度目の同型誤検出): continuation の commit-range fallback が直前の
-// squash merge (= 直前PR。subject が "(#N)" で終わる) を拾い、自runと無関係の diff を
-// 「undeclared changed files」として FAIL させる構造バグ。直前コミットが PR merge なら
-// それは pipeline 自身の成果物であり自チケットの残作業ではないため fallback から除外する
-// (空 = 検証タスクとして正常)。判定は scope agent の commitRangeLastSubject を用いる。
 const precheckRangeLastSubject = (typeof precheckScope?.commitRangeLastSubject === 'string')
   ? precheckScope.commitRangeLastSubject.trim() : '';
-// 除外条件 (Issue #127/#129): 直前コミットが (a) PR squash merge (subject が
-// "(#N)" 終端) または (b) local merge commit ("Merge ..." 始点 = git pull 取り込みで
-// HEAD~1..HEAD が直前PRのdiffを拾う) のいずれかなら fallback から除外する。
 const precheckRangeFromPrMerge = /\(#\d+\)\s*$/.test(precheckRangeLastSubject)
   || /^Merge /.test(precheckRangeLastSubject);
 const precheckChangedFiles = (precheckWorkingTree.length > 0 || precheckUntracked.length > 0)
@@ -713,22 +590,13 @@ const precheckChangedFiles = (precheckWorkingTree.length > 0 || precheckUntracke
   : (precheckTicketKind === 'continuation' && !precheckRangeFromPrMerge
       ? [...new Set(precheckRangeFiles)]
       : []);
-// Issue #102 修正: この位置は実装前 (Request->Estimate 間) のため mode='pre-implementation' —
-// declared-but-unchanged は FAIL にしない (実装が宣言に先行するのは通常)。
-// undeclared (宣言外の実 diff) と malformed/空宣言のみ FAIL。gate 時は strict。
 const ticketPrecheck = evaluateTicketPrecheck(ticket.files, precheckChangedFiles, 'pre-implementation');
 const precheckSliceMetadata = deriveSliceMetadata(precheckChangedFiles);
-// Issue #99: slice メタデータ (changedCrates / diffKind) は precheck 生成の
-// 実測値で上書き — Coordinate 時点の resolve-scope 手動導出 (旧 L209-336) を
-// 置換 (自己申告・静的導出の排除)。
 const changedCrates = precheckSliceMetadata.changedCrates;
 const changedCratesList = changedCrates.join(', ');
 const hasChangedCrate = changedCrates.length > 0;
-// precheck-derived diffKind で GATE_DIMENSIONS lane 選択を上書き。
 const precheckDiffKind = precheckSliceMetadata.diffKind;
 const diffKind = precheckDiffKind;
-// evidence persistence: precheck verdict を .omc/logs/{runId}/ticket-precheck.json
-// へ永続化 (pipeline-evidence-verification.md — evidence は自己申告不可)。
 await agent(
   `EVIDENCE PERSISTER (Issue #99)。以下の JSON をファイル .omc/logs/${runId}/ticket-precheck.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
 ${JSON.stringify({
@@ -743,8 +611,6 @@ ${JSON.stringify({
     missing: ticketPrecheck.missing,
     changedCrates: precheckSliceMetadata.changedCrates,
     diffKind: precheckSliceMetadata.diffKind,
-    // treeHash: git write-tree 実測値 (空 diff / vacuous PASS 検出用)。欠損時は
-    // 'unknown' (fail-closed 規約 — 欠損を黙って green 払いしない)。
     treeHash: (precheckScope && typeof precheckScope.treeHash === 'string' && precheckScope.treeHash.length > 0)
       ? precheckScope.treeHash
       : 'unknown',
@@ -753,10 +619,6 @@ ${JSON.stringify({
   { label: 'request:persist-ticket-precheck', phase: 'Request', model: 'sonnet' }
 );
 if (ticketPrecheck.verdict !== 'PASS') {
-  // fail-closed short-circuit (resolveReleaseAbort / evidence-failed と同型)。
-  // Estimate 以降 (Implement / Gate / Release) を一切実行しない。実 diff は
-  // working tree / commit に残るため ticket.files を修正して再実行すれば
-  // 再開可能 (resumable status)。
   log(`Ticket precheck FAIL (Issue #99): ${ticketPrecheck.reason}`);
   return {
     status: 'precheck-failed',
@@ -778,17 +640,6 @@ if (ticketPrecheck.verdict !== 'PASS') {
 log(`Ticket precheck PASS (Issue #99): declared ${ticketPrecheck.declared.length} file(s) match changed files; slice metadata crates=[${changedCratesList || 'none'}] diffKind=${diffKind} (precheck-derived)`);
 
 // [issue-premise-wiring-begin]
-// Issue #109 Task 2: issue premise precheck (Request→Estimate 間)。stale
-// (closed かつ trunk merged issue) / duplicate (open PR 既存) を機械検出して
-// Estimate 以降の dispatch を拒否する。evidence 収集は gh / git コマンドで、
-// 判定は canonical ticket-precheck.js evaluateIssuePremise の inline copy
-// (drift は tests/ticket-precheck-wiring.test.mjs / drift test が guard)。
-// fail-closed: gh 認証失敗・rate limit で evidence が欠損した場合は
-// malformed input として FAIL verdict (fail-open は stale 検出を素通りさせる)。
-// (evaluateIssuePremise inline copy は前方 [ticket-premise] ブロック内に一元化済み —
-//  Task 1/Task 2 並列実装による二重宣言を解消)
-// evidence collector: gh issue view + git branch --contains (trunk membership)
-// + gh pr list --search。各コマンド失敗時は null を返す (fail-closed)。
 const issueNumberForPremise = ticket.issueNumber;
 const premiseEvidence = issueNumberForPremise ? await agent(
   `ISSUE-PREMISE PROBE (Issue #109)。issue #${issueNumberForPremise} の前提検証 evidence を以下のコマンドで収集せよ:
@@ -806,14 +657,6 @@ const premiseEvidence = issueNumberForPremise ? await agent(
     openPRs: { type: ['array', 'null'], items: { type: 'object', properties: { number: { type: 'number' }, title: { type: 'string' } } } },
   } }, label: 'request:issue-premise-evidence', phase: 'Request', model: 'sonnet' }
 ) : null;
-// fail-closed: evidence 欠損 (issueNumber 無し / collector 失敗 / null フィールド)
-// はそのまま pure fn へ流し malformed として FAIL 判定させる。
-// Issue #150: PM チケットの ticketKind / subjectPrNumber を配線 (continuation
-// チケットが自分の subject open PR で duplicate FAIL する自己 BLOCK の解消)。
-// ticketKind は schema required+enum — 不正値は pure fn が fail-closed FAIL。
-// subjectPrNumber は optional で schema type に null を含む (StructuredOutput の
-// 「値なし」表現) ため、null は undefined (= 宣言なし = 従来挙動) に正規化する。
-// null 以外の malformed 値は pure fn が FAIL させる (fail-open しない)。
 const issuePremise = evaluateIssuePremise({
   issueState: premiseEvidence && premiseEvidence.issueState,
   linkedBranchesContainIssue: premiseEvidence && premiseEvidence.linkedBranchesContainIssue,
@@ -821,9 +664,6 @@ const issuePremise = evaluateIssuePremise({
   ticketKind: ticket.ticketKind,
   subjectPrNumber: (ticket.subjectPrNumber === null) ? undefined : ticket.subjectPrNumber,
 });
-// evidence persistence: verdict を .omc/logs/${runId} の
-// .omc/logs/{runId}/issue-premise-precheck.json へ永続化
-// (pipeline-evidence-verification.md — evidence は自己申告不可)。
 await agent(
   `EVIDENCE PERSISTER (Issue #109)。以下の JSON をファイル .omc/logs/${runId}/issue-premise-precheck.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
 ${JSON.stringify({
@@ -831,7 +671,6 @@ ${JSON.stringify({
     runId,
     issue: 109,
     issueNumber: issueNumberForPremise || null,
-    // Issue #150: 例外判定の入力を evidence に残す (適用されたら exemption 根拠)。
     ticketKind: ticket.ticketKind ?? null,
     subjectPrNumber: ticket.subjectPrNumber ?? null,
     verdict: issuePremise.verdict,
@@ -844,8 +683,6 @@ ${JSON.stringify({
   { label: 'request:persist-issue-premise-precheck', phase: 'Request', model: 'sonnet' }
 );
 if (issuePremise.verdict !== 'PASS') {
-  // fail-closed short-circuit (precheck-failed と同型の resumable status)。
-  // Estimate 以降 (Implement / Gate / Release) を dispatch しない。
   log(`Issue premise precheck FAIL (Issue #109): ${issuePremise.reason}`);
   return {
     status: 'precheck-failed',
@@ -956,10 +793,6 @@ log(`CTO Decision: ${approval.decision} - ${approval.rationale}`);
 if (approval.decision === 'REJECT') {
   return { status: 'rejected', reason: approval.rationale, ticket, estimate, approval };
 }
-// P-003 (2026-08-21): DEFER は「条件付き再提出要求」— Implementation を実行せず
-// ここで停止する。cycle-15 では DEFER 判定が REJECT 分岐をすり抜けて空コミット
-// PR (#64) まで到達し Release Review 0/3 NO-GO で阻止された (issue #63)。
-// DEFER の conditions を issue コメントに残し、人間/次サイクルの再提出判断に供する。
 if (approval.decision === 'DEFER') {
   log(`CTO DEFER: Implementation をスキップ (条件付き再提出要求)`);
   try {
@@ -971,7 +804,6 @@ if (approval.decision === 'DEFER') {
       { label: 'defer-comment' }
     );
   } catch (_e) {
-    // コメント失敗は DEFER 停止自体には影響させない (org-feedback に記録のみ)
     log('DEFER コメント追記に失敗 (issue 手動確認推奨)');
   }
   return {
@@ -985,15 +817,6 @@ if (approval.decision === 'DEFER') {
 }
 
 // [implement-lane-begin]
-// Issue #99 Task 4: Implementation Engineer テンプレート分岐。
-// merge 前提タスク (未マージブランチ/Open PR 検証・コミット整理) に TDD 実装
-// テンプレートを機械適用しない。判定は estimate task の metadata.lane
-// ('release'|'merge') で明示的に行う — description パターンマッチは
-// operator-gated 判定で起きた偽陽性と同種の問題を招くため禁止。
-// fail-closed: lane metadata 欠損・不正値は TDD テンプレートへ黙墜ちせず
-// タスクを 'lane-missing' として報告する (estimate approval 条件)。
-// Pure block — unit-tested by .claude/workflows/tests/implement-lane-template.test.mjs
-// (same marker-extraction pattern as done-evidence #68).
 const IMPLEMENT_LANE_INVESTIGATION = new Set(['release', 'merge']);
 const IMPLEMENT_LANE_TDD = 'tdd';
 const resolveImplementLane = (task) => {
@@ -1006,13 +829,11 @@ const resolveImplementLane = (task) => {
   }
   const lane = meta.lane;
   if (lane === IMPLEMENT_LANE_TDD) {
-    // 明示的な TDD 宣言 — 従来の実装テンプレート
     return { mode: 'tdd', lane };
   }
   if (typeof lane !== 'string' || !IMPLEMENT_LANE_INVESTIGATION.has(lane)) {
     return { mode: 'fail-closed', reason: 'unknown-lane', lane };
   }
-  // 'release' | 'merge' → 実態調査型 (PR 状態確認・trunk-membership・merge/close 判定)
   return { mode: 'investigation', lane };
 };
 const buildEngineerPrompt = (laneResult, task, ticket, approval) => {
@@ -1036,7 +857,6 @@ append a single line to .claude/org-feedback.md:
 [YYYY-MM-DD] [engineer] [category: workflow|tooling|role-ambiguity|bottleneck|suggestion] specific constructive feedback
 Only append if you have genuine feedback. Be specific.`;
   }
-  // mode: 'tdd' — 従来の TDD 実装テンプレート
   return `You are an Implementation Engineer. Implement this task using TDD:
 
 Task: ${JSON.stringify(task)}
@@ -1062,16 +882,6 @@ Only append if you have genuine feedback. Be specific.`;
 // [implement-lane-end]
 
 // [file-ownership-begin]
-// Issue #106 (cycle-40 retrospective proposal 3/5): タスク files 重複検出と
-// 直列化ディスパッチ。computeFileOwnership は task.files[] から file→taskId[]
-// の所有権マップを導出し、findFileConflicts は同一ファイルに触るタスク群を
-// 検出、resolveDispatchGroups は重複ペアを含むタスクを直列チェーンへ、
-// 分離タスクを同一グループで並列維持する (UC-1)。
-// UC-3 fail-closed: files 未宣言 ([]・フィールド欠損・非配列) のタスクは
-// 全 in-flight タスクと重複する可能性があるものとして直列化末尾に配置する
-// (黙って並列に混ぜない)。
-// Pure block — unit-tested by .claude/workflows/tests/ownership-serialization.test.mjs
-// (same marker-extraction pattern as implement-lane #99 / done-evidence #68).
 const normalizeOwnedPath = (p) =>
   (typeof p === 'string') ? p.replace(/\\/g, '/') : null;
 const taskDeclaredFiles = (task) => {
@@ -1094,7 +904,6 @@ const computeFileOwnership = (tasks) => {
     if (id === null) continue;
     const files = taskDeclaredFiles(t);
     if (files === null || files.length === 0) {
-      // files 未宣言: all-unknown — ownership map に入れず fail-closed 扱い
       undeclaredIds.push(id);
       continue;
     }
@@ -1114,8 +923,6 @@ const findFileConflicts = (tasks) => {
     }
   }
   if (undeclaredIds.length > 0 && (Object.keys(ownership).length > 0 || undeclaredIds.length > 1)) {
-    // UC-3: 未宣言タスクは全 in-flight タスク (宣言済み他タスク or 他の未宣言タスク)
-    // と重複しうる — file: null の potential conflict として報告
     const allIds = Object.values(ownership).flat();
     for (const id of undeclaredIds) allIds.push(id);
     conflicts.push({ file: null, taskIds: [...new Set(allIds)] });
@@ -1131,7 +938,6 @@ const resolveDispatchGroups = (tasks) => {
   if (!Array.isArray(tasks)) {
     return { groups, undeclaredIds, duplicateFiles, serializedPairs: [], status: 'ownership-undeclared' };
   }
-  // 宣言済みタスクの union-find: 重複ファイル経由で連結なタスクは同一直列チェーン
   const parent = new Map();
   const find = (x) => {
     let root = x;
@@ -1160,14 +966,12 @@ const resolveDispatchGroups = (tasks) => {
       else fileOwners.set(f, id);
     }
   }
-  // 連結成分ごとに、サイズ 1 なら並列グループへ集約、サイズ >1 ならタスク順の直列チェーン
   const components = new Map();
   for (const { id } of declaredTasks) {
     const root = find(id);
     if (!components.has(root)) components.set(root, []);
     components.get(root).push(id);
   }
-  // 直列化されたタスク対 (入力順、rationale 永続用 — 同一連結成分内の隣接対)
   const serializedPairs = [];
   for (const ids of components.values()) {
     if (ids.length > 1) {
@@ -1176,7 +980,6 @@ const resolveDispatchGroups = (tasks) => {
       for (let i = 1; i < chain.length; i++) serializedPairs.push([chain[i - 1], chain[i]]);
     }
   }
-  // 並列維持タスクは順序安定で 1 グループへ
   const serialIds = [];
   for (const ids of components.values()) {
     if (ids.length > 1) serialIds.push(...ids);
@@ -1187,37 +990,23 @@ const resolveDispatchGroups = (tasks) => {
   const finalGroups = [];
   if (orderedParallel.length > 0) finalGroups.push({ tasks: orderedParallel, parallel: true });
   for (const id of orderedSerial) finalGroups.push({ tasks: [id], parallel: false });
-  // UC-3: 未宣言タスクは fail-closed — 直列化末尾に 1 タスクずつ配置
   for (const id of undeclaredIds) finalGroups.push({ tasks: [id], parallel: false });
   return {
     groups: finalGroups,
     undeclaredIds,
     duplicateFiles,
     serializedPairs,
-    // status: 全タスクが files を宣言していれば 'ok'。未宣言タスクが 1 つでも
-    // あれば 'ownership-undeclared' (fail-closed — 並列グループは構成しない)。
     status: undeclaredIds.length > 0 ? 'ownership-undeclared' : 'ok',
   };
 };
-// Issue #134 修正: ownership チェックの対象は実装系 (tdd lane) タスクのみ。
-// 検証系タスク (lane: merge|release — PR 状態確認・trunk-membership 検証等) は
-// コード変更しないため files 宣言が意味を持たず、未宣言を理由に dispatch 拒否
-// すると検証チケット全体が進行不能になる (過剰ブロック)。
 function ownershipRelevantTasks(tasks) {
   if (!Array.isArray(tasks)) return [];
   return tasks.filter((t) => {
     const meta = (t && t.metadata && typeof t.metadata === 'object') ? t.metadata : null;
     const lane = meta && typeof meta.lane === 'string' ? meta.lane : 'tdd';
-    // lane 未宣言は resolveImplementLane が fail-closed で別途拒否するため
-    // ここでは tdd 扱い (実装系として ownership チェック対象) に含める。
     return lane === 'tdd';
   });
 }
-// Issue #106 Task 2: 直列化判定根拠の rationale builder。Evidence は自己申告不可
-// (.claude/rules/pipeline-evidence-verification.md §2) — 重複ファイル・タスク対・
-// グループ構成・treeHash を .omc/logs/{run-id}/ownership-serialization.json へ
-// 永続化する payload を構築する (Date API 禁制のため recordedAt は runTimestamp
-// を流用 — Issue #95 の diff-kind short-circuit rationale と同じ規約)。
 const buildOwnershipSerializationRationale = (tasks, treeHash, rid, rts) => {
   const { ownership, undeclaredIds } = computeFileOwnership(tasks);
   const { groups, duplicateFiles, serializedPairs, status } = resolveDispatchGroups(tasks);
@@ -1246,39 +1035,11 @@ const buildOwnershipSerializationRationale = (tasks, treeHash, rid, rts) => {
 // [file-ownership-end]
 
 // [dependency-readiness-begin]
-// Issue #104 Task 1: dependency-readiness pure block。Implement フェーズ
-// dispatcher がタスク N を dispatch する前に、依存タスク d ∈ deps(N) の成果物が
-// 「コミット済み (commit SHA が現在ブランチから到達可能) かつテスト green
-// evidence が .omc/logs/{run-id}/ 永続ログに存在」することを機械検証する
-// (.claude/rules/pipeline-evidence-verification.md §4 の機械強制化)。
-// 静的 deps 宣言のみを信じない — RED テスト・部分実装・working-tree のみの
-// 成果物の引き継ぎを fail-closed で block する (2026-08-25/26 entries)。
-// Pure block — unit-tested by .claude/workflows/tests/dependency-readiness.test.mjs
-// (same marker-extraction pattern as file-ownership #106 / done-evidence #68).
-//
-// depRecords 契約 (collector evidence — Task 2 wiring で固定):
-//   { [depTaskId]: {
-//       committed: boolean,     // dep の declared files に触る最終 commit SHA が存在
-//       reachable: boolean,     // branch-contains 相当 (現在ブランチから到達可能)
-//       greenEvidence: boolean, // .omc/logs/{run-id}/ 永続ログに green 記録あり
-//       commitSha?: string,     // 情報用 (verdict 判定には不要)
-//   } }
-// UC-3 (Issue #97 'unknown' 規約): record 欠損・malformed・flag 非 boolean は
-// 'unknown-evidence' で block — 一切 green-by-default にしない。deps を 1 つも
-// 宣言しないタスク (dependencies 非配列/null/欠損を含む) は trivially ready。
 const taskDeclaredDeps = (task) => {
   const t = (task && typeof task === 'object') ? task : null;
   if (!t || !Array.isArray(t.dependencies)) return [];
   return t.dependencies.filter((d) => typeof d === 'string' && d.length > 0);
 };
-// 依存 1 件の collector evidence record → verdict。判定順序 (fail-closed):
-//   record 欠損/malformed → unknown-evidence
-//   > committed !== true → dep-not-committed (working-tree only, UC-2)
-//   > reachable !== true → dep-not-committed (stranded snapshot)
-//   > greenEvidence !== true → dep-evidence-missing
-//   > 全て true → ready
-// unknown 時は committed/reachable/greenEvidence を null で返す
-// (boolean を主張しない — Issue #97 'unknown' 規約)。
 const evaluateDepRecord = (depId, record) => {
   if (record === null || record === undefined || typeof record !== 'object' || Array.isArray(record)) {
     return {
@@ -1341,11 +1102,6 @@ const evaluateDepRecord = (depId, record) => {
     detail: 'committed + reachable + persistent green evidence all verified',
   };
 };
-// タスク単位の依存 readiness 判定。返り値: { taskId, ready, verdict, reason, deps }
-//   - ready: deps 全員が verdict 'ready' のときのみ true (deps 空は trivially true)
-//   - verdict: ready なら 'ready'、それ以外は宣言順で最初の blocking verdict
-//     ('dep-not-committed' | 'dep-evidence-missing' | 'unknown-evidence')
-//   - reason: ready なら null、それ以外は blocking dep の説明 (CEO 通知・ログ用)
 const evaluateDependencyReadiness = (task, depRecords) => {
   const t = (task && typeof task === 'object') ? task : null;
   const taskId = (t && (typeof t.id === 'string' || typeof t.id === 'number')) ? String(t.id) : null;
@@ -1363,11 +1119,6 @@ const evaluateDependencyReadiness = (task, depRecords) => {
     deps,
   };
 };
-// Issue #104 §2 evidence: 判定根拠を .omc/logs/{run-id}/dependency-readiness.json
-// へ永続化する payload (per-task per-dep verdicts + treeHash)。recordedAt は
-// Date API 禁制のため runTimestamp を流用 (Issue #95 diff-kind short-circuit /
-// Issue #106 ownership rationale と同じ規約)。runTimestamp/treeHash 欠損は
-// 'unknown' (Issue #97 規約)。tasks 非配列は fail-closed で ready=false。
 const buildDependencyReadinessRationale = (tasks, depRecords, treeHash, rid, rts) => {
   const ts = (typeof rts === 'string' && rts.length > 0) ? rts : 'unknown';
   const taskResults = (Array.isArray(tasks) ? tasks : [])
@@ -1386,11 +1137,6 @@ const buildDependencyReadinessRationale = (tasks, depRecords, treeHash, rid, rts
     classifier: 'feature-pipeline.js evaluateDependencyReadiness (marker block, drift-guarded by tests/dependency-readiness.test.mjs)',
   };
 };
-// Issue #104 Task 2: DEPENDENCY EVIDENCE COLLECTOR の StructuredOutput 契約。
-// deps は動的キーになるため map でなく配列形式で申告させ、正規化側で
-// { [depTaskId]: record } へ変換する (precheck scope resolver の schema 指定と
-// 同一パターン)。flag の boolean 厳密検証はここでなく evaluateDepRecord が
-// 行う (schema は申告形式の強制、verdict は fail-closed 判定 — 責務分離)。
 const DEPENDENCY_COLLECTOR_SCHEMA = {
   type: 'object',
   required: ['deps'],
@@ -1411,28 +1157,12 @@ const DEPENDENCY_COLLECTOR_SCHEMA = {
     },
   },
 };
-// Issue #104 Task 2: collector 出力の正規化。structured object (StructuredOutput)
-// / fenced-or-bare JSON 文字列の両方を受容し depRecords map へ変換する
-// (normalizeGateEvidence と同一パターン)。unparseable / missing → null —
-// この場合 evaluateDependencyReadiness は全 dep を unknown-evidence で
-// fail-closed block する (AC-2/AC-3。決して green-by-default にしない)。
-// greenEvidence の採用契約 (collector プロンプトに同一文面で指示):
-//   (a) 機械検証可能な green verdict (gate evidence の nextestExitCode=0 等)
-//   (b) 当該 dep の declared files の明示的参照 (ticket-precheck.json の
-//       declared/changed, gate-diff.json の basisFiles, ownership-serialization.json
-//       の taskFiles 等) — run 全体の包括 PASS のみでは不十分
-//   の両方を満たす .omc/logs/<run>/ 下の永続 JSON (現在 runId 優先、他 run は
-//   run-metadata.json で runTimestamp 検証可能なもののみ — Issue #97)。
-// dep エントリの除外 (null / dep 非文字列) は黙って無視すると record 欠損 =
-// unknown-evidence になるため fail-closed 側に倒れる (安全方向の劣化)。
 const normalizeDependencyCollectorOutput = (result) => {
   let obj = null;
   if (result && typeof result === 'object' && !Array.isArray(result)) {
     obj = result;
   } else if (typeof result === 'string' && result.length > 0) {
     const fenced = result.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
-    // bare path は末尾 greedy ("deps" 以降最後の } まで) — lazy だと内側オブジェクトの
-    // } で打ち切られ壊れた JSON になる。過捕捉時は parse 失敗 → null (fail-closed 側)。
     const bare = fenced ? null : result.match(/\{[\s\S]*?"deps"[\s\S]*\}/);
     const candidate = fenced ? fenced[1] : (bare ? bare[0] : null);
     if (candidate) {
@@ -1462,18 +1192,9 @@ const normalizeDependencyCollectorOutput = (result) => {
 
 // ── Phase 3: Implement ──
 // [ownership-serialization-wiring-begin]
-// Issue #106 Task 2: ファイル所有権に基づく直列化ディスパッチ。
-// 旧来の `pipeline(estimate.tasks, ...)` 平坦並列は files 重複タスク同士で
-// mid-edit 競合を起こしうるため、resolveDispatchGroups のグループ構成に
-// 書き換える — 直列グループ (parallel:false) は上から順に 1 タスクずつ
-// await し、並列グループ (parallel:true) のみ pipeline() で同時実行する。
-// UC-3 fail-closed: 未宣言タスクがある場合 status 'ownership-undeclared' を
-// 返し、タスクを 1 つも dispatch しない (黙って並列化しない)。
 phase('Implement');
-// Issue #134: ownership 判定は実装系タスクのみで行う (検証系は除外)。
 const ownershipPlan = resolveDispatchGroups(ownershipRelevantTasks(estimate.tasks));
 if (ownershipPlan.status !== 'ok') {
-  // Evidence 永続 (§2): 直列化不能の根拠を機械検証可能な形で残す
   const ownershipRationale = buildOwnershipSerializationRationale(
     estimate.tasks, (precheckScope && precheckScope.treeHash) || '', runId, runTimestamp,
   );
@@ -1493,7 +1214,6 @@ ${JSON.stringify(ownershipRationale, null, 2)}
     ],
   };
 }
-// 判定根拠の永続化 (重複ファイル・直列ペア・グループ構成・treeHash — §2)
 {
   const ownershipRationale = buildOwnershipSerializationRationale(
     estimate.tasks, (precheckScope && precheckScope.treeHash) || '', runId, runTimestamp,
@@ -1508,14 +1228,7 @@ ${JSON.stringify(ownershipRationale, null, 2)}
 }
 const implResults = [];
 const runImplementTask = async (task) => {
-    // C: operator-gated task（capture/probe/live frame/ゲーム操作 等）は
-    //    executor agent では実行不可（人間によるゲーム操作・キャプチャ取得が必要）。
-    //    human-in-loop としてスキップし、ステータスを human-gated で報告。
     const _desc = ((task && task.description) || '').toLowerCase();
-    // operator-gated 判定: 物理的ゲーム操作/実機キャプチャ「取得」が必須のタスクのみスキップ。
-    // "probe skip pattern" / "capture backend" 等、コード修正タスクがパターン名で言及するだけの
-    // 偽陽性を弾くため、(a) 物理/operator 操作シグナル AND (b) コード変更シグナルでない、を条件とする
-    // （直前の失敗: BLOCKER FIX タスクが "probe skip pattern" に引っかかりスキップされた）。
     const _operatorAction = /(live\s*game|park(?:ed)?\s*game|operator\s*(?:runs?|drives?|must|capture)|physical\s*device|手動(?:による)?(?:の)?キャプチャ|実機(?:プローブ|デバイス|操作)|ゲーム(?:画面)?(?:へ?の?)?操作|navigate.*title.*screen|取得.*title_pc_probe|capture.*title_pc_probe)/i.test(_desc);
     const _codeChange = /(fix|refactor|add\s+(?:a\s+)?test|assert|absence-skip|\.rs\b|pipeline\.rs|contract\s+test|cargo\s+(?:nextest|clippy|fmt|check))/i.test(_desc);
     if (_operatorAction && !_codeChange) {
@@ -1526,10 +1239,6 @@ const runImplementTask = async (task) => {
         reason: 'operator/capture task — 人間によるゲーム操作・キャプチャ取得が必要。executor agent は実行不可。Approve時にBLOCKER/外部依存として扱うこと。',
       };
     }
-    // Issue #99 Task 4: TDD テンプレートと実態調査型プロンプトの分岐。
-    // 判定は task.metadata.lane の明示値のみ (パターンマッチ禁止 — operator-gated
-    // 判定で起きた偽陽性と同種の問題を避ける)。fail-closed: lane 欠損・不正値は
-    // TDD テンプレートへ黙墜ちせず 'lane-missing' で報告 (estimate approval 条件)。
     const laneResult = resolveImplementLane(task);
     if (laneResult.mode === 'fail-closed') {
       log(`[lane-gate] task ${task.id}: ${laneResult.reason} → fail-closed (no dispatch)`);
@@ -1540,20 +1249,8 @@ const runImplementTask = async (task) => {
       };
     }
     // [dependency-readiness-wiring-begin]
-    // Issue #104 Task 2: dependency-readiness gate wiring。lane-gate 通過後・
-    // engineer dispatch 前に、deps を宣言するタスク (gated task) の依存成果物を
-    // 機械検証する — 静的 deps 宣言のみを信頼せず「コミット済み (SHA 到達可能)
-    // + テスト green evidence」を要求 (pipeline-evidence-verification.md §4 の
-    // 機械強制化)。RED テスト・部分実装・working-tree のみの成果物の引き継ぎを
-    // fail-closed で block する。per-task non-fatal: blocked は status
-    // 'dependency-not-ready' で1タスクだけスキップ (lane-missing / human-gated
-    // と同型) — workflow 全体は継続する。
     const _declaredDeps = taskDeclaredDeps(task);
     if (_declaredDeps.length > 0) {
-      // (1) DEPENDENCY EVIDENCE COLLECTOR — gated task ごとに1回 dispatch。
-      //     collector 出力は normalizeDependencyCollectorOutput で depRecords へ
-      //     正規化。unparseable/missing は null → 全 dep unknown-evidence で
-      //     block (AC-2/AC-3, Issue #97 'unknown' 規約 — green 払いしない)。
       const _depTargets = _declaredDeps.map((depId) => {
         const depTask = (Array.isArray(estimate.tasks) ? estimate.tasks : [])
           .find((t) => t && String(t.id) === depId) || null;
@@ -1579,12 +1276,9 @@ ${_depTargets.map(({ depId, files }) => `- dep ${depId}: declared files = ${file
           schema: DEPENDENCY_COLLECTOR_SCHEMA,
         }
       );
-      // (2) gate call — collector records を evaluateDependencyReadiness へ。
       const depRecords = normalizeDependencyCollectorOutput(collectorRaw);
       const readiness = evaluateDependencyReadiness(task, depRecords);
       if (!readiness.ready) {
-        // blocked → 判定根拠を永続化して非 dispatch (§2 evidence は自己申告不可)。
-        // persister は ownership-serialization.json と同じ prompt shape (haiku)。
         const depRationale = buildDependencyReadinessRationale(
           [task], depRecords,
           (precheckScope && precheckScope.treeHash) || '', runId, runTimestamp,
@@ -1604,16 +1298,12 @@ ${JSON.stringify(depRationale, null, 2)}
       }
       log(`[dependency-gate] task ${task.id}: deps [${_declaredDeps.join(', ')}] verified ready — dispatching`);
     }
-    // (3) ready / deps 空 → 従来どおり dispatch (下記 agent 呼び出し)。
     // [dependency-readiness-wiring-end]
     return agent(
       buildEngineerPrompt(laneResult, task, ticket, approval),
       { label: `engineer:${task.id}`, phase: 'Implement', model: 'sonnet' }
     );
 };
-// グループ構成に従うディスパッチ: 並列グループのみ pipeline() 同時実行、
-// 直列グループは 1 タスクずつ await (ファイル所有権の重複するタスクは
-// 一度に 1 つだけ in-flight — mid-edit 競合の構造的防止)。
 for (const group of ownershipPlan.groups) {
   if (group.parallel && group.tasks.length > 1) {
     const groupTasks = estimate.tasks.filter((t) => group.tasks.includes(String(t.id)));
@@ -1634,12 +1324,6 @@ for (const group of ownershipPlan.groups) {
 log(`Implementation: ${implResults.filter(Boolean).length}/${estimate.tasks.length} tasks completed`);
 // [ownership-serialization-wiring-end]
 
-// ── R7: atomic snapshot commit (preserve implementation BEFORE the gate) ──
-// Implement は「Do NOT commit」でコードを書くだけ。commit は Phase 5 Release が gate 後に
-// 行うため、gate が stall/incomplete すると未コミット WIP が作業ブランチ上で行方不明に
-// なる(R7 — 本セッション run wmvxllox5 で gate-incomplete→手動救出 を発端)。
-// ここで gate 前に feature branch へ snapshot commit し、gate 成否に関わらず実装を保全する。
-// 非破壞: try/catch で囲み失敗しても workflow は従来通り継続。master は触らない。
 const _slug = ((ticket && ticket.title) || 'feature')
   .toLowerCase()
   .replace(/[^a-z0-9]+/g, '-')
@@ -1663,40 +1347,14 @@ Final line MUST be exactly: SNAPSHOT_BRANCH=${snapshotBranch}`,
 // ── Phase 4: Commit Gate (6-dimension non-functional review) ──
 phase('Commit Gate');
 
-// ── S2 (Issue #68 Task 3): evidence-collector — Done 判定を主張でなく構造化 evidence に紐付ける ──
-// Gate 直前に fresh-checkout (worktree) で cargo build --workspace --all-targets と
-// cargo nextest run --workspace --all-targets を1回強制実行し、その exit code /
-// pass 数を evidence として全 reviewer レーンへ注入する。evidence 欠落・build 赤・
-// test 赤は fail-closed（Done 判定不可）。org-feedback 構造カテゴリB
-// 「DoDが主張単位」の根源解消。
-// ── Issue #68 (S2) Task 1: Done-evidence pure block ──
-// Done 判定を主張でなく構造化 evidence に紐付ける (org-feedback 構造カテゴリB
-// 「DoDが主張単位」の根治)。Gate 直前に fresh-checkout で
-// cargo build --workspace --all-targets + cargo nextest run --workspace --all-targets
-// を強制実行し、この pure 関数で機械的に判定する。fail-closed: evidence 欠落や
-// 非 zero exit は一切 Done と認めない。
-// Pure block — unit-tested by .claude/workflows/tests/done-evidence.test.mjs
-// (same marker-extraction pattern as release-precheck #66).
 // [done-evidence-begin]
 const DONE_EVIDENCE_MAX_TAIL = 2000;
 const isNonNegInt = (v) => Number.isInteger(v) && v >= 0;
-// 返り値: { done, reason, evidenceSummary }
-//  - done=true: 全 evidence が揃い build/test 成功 & checkout clean
-//  - done=false + reason: 'missing-evidence' | 'missing-run-timestamp' | 'build-failed' | 'tool-missing' | 'tests-failed' | 'dirty-checkout'
-//    判定順序 (precedence): missing > missing-run-timestamp > build > tool-missing > tests > dirty — より上流の障害を優先。
-//    Task 3: tool-missing (cargo-nextest 不在, exit 127 等) は tests-failed と区別する
-//    (estimate approval condition — reason の曖昧性排除)。
-// Issue #97 UC-3: runTimestamp 欠損は 'missing-run-timestamp' で fail-closed。
-// **collectedAt との使い分け (二重管理ではない)**: collectedAt = evidence agent が
-// build/test を採取した時刻 (freshness 判定に使用)。runTimestamp = pipeline run の
-// 開始時刻 (run metadata 由来。「どの run の evidence か」の traceability に使用)。
-// collector は runTimestamp を自前生成せず run metadata から継承するため直交する関心。
 const evaluateDoneEvidence = (input) => {
   const e = (input && typeof input === 'object') ? input : {};
   const missing = () => ({ done: false, reason: 'missing-evidence', evidenceSummary: 'evidence missing or malformed (fail-closed)' });
   if (typeof e.buildExitCode !== 'number' || typeof e.nextestExitCode !== 'number') return missing();
   if (!isNonNegInt(e.passed) || !isNonNegInt(e.failed)) return missing();
-  // skipped は 0 でも null/undefined でも許容 (スキップ0件は正当な状態)
   const skipped = (e.skipped === null || e.skipped === undefined) ? 0 : e.skipped;
   if (!isNonNegInt(skipped)) return missing();
   if (typeof e.checkoutClean !== 'boolean') return missing();
@@ -1722,11 +1380,6 @@ const evaluateDoneEvidence = (input) => {
     evidenceSummary: `build exit=0, nextest exit=0, passed=${e.passed}, failed=0, skipped=${skipped}, checkout clean (${e.collectedAt})`,
   };
 };
-// formatEvidenceForReviewers: reviewer 全レーンの prompt に注入する平文 blob。
-// R8 GATE_DIFF と並んで注入されるため outputTail は DONE_EVIDENCE_MAX_TAIL 文字で cap。
-// evidence 欠落時も「欠落している」事実を明示 (reviewer が静かに pass しないよう)。
-// Issue #97 Task 3: 第2引数 runTimestamp は run 開始時刻 (UC-1)。欠損時は
-// 'unknown' を明示 (UC-3 fail-closed — collectedAt は採取時刻で別物, 役割分離)。
 const formatEvidenceForReviewers = (evidence, runTimestamp) => {
   const runTs = (typeof runTimestamp === 'string' && runTimestamp.trim() !== '')
     ? runTimestamp
@@ -1751,10 +1404,6 @@ runTimestamp=${(typeof evidence.runTimestamp === 'string' && evidence.runTimesta
 // [done-evidence-end]
 
 // [gate-evidence-begin]
-// Pure evidence logic, unit-tested by
-// .claude/workflows/tests/gate-evidence.test.mjs (TDD, Issue #68 Task 3).
-// R7 snapshot branch を stranded にしないため、evidence 失敗時は resumable な
-// 構造化 status 'evidence-failed' で short-circuit する（precheck-failed と同型）。
 const GATE_EVIDENCE_STATUS_FAILED = 'evidence-failed';
 const GATE_DIFF_EMPTY_STATUS = 'diff-empty-failed';
 const GATE_EVIDENCE_SCHEMA = {
@@ -1766,8 +1415,6 @@ const GATE_EVIDENCE_SCHEMA = {
     failed: { type: 'number' },
     checkoutClean: { type: 'boolean' },
     collectedAt: { type: 'string' },
-    // Issue #97 UC-3: runTimestamp = pipeline run 開始時刻 (run metadata 由来)。
-    // collectedAt (採取時刻) とは直交 — freshness は collectedAt、traceability は runTimestamp。
     runTimestamp: { type: 'string' },
     toolMissing: { type: 'boolean' },
     tool: { type: 'string' },
@@ -1775,8 +1422,6 @@ const GATE_EVIDENCE_SCHEMA = {
   },
   required: ['buildExitCode', 'nextestExitCode', 'checkoutClean', 'collectedAt', 'runTimestamp'],
 };
-// structured object / fenced-or-bare JSON 文字列の両方を受容し、数値を検証して
-// 正規化する。不正入力は null（fail-closed: lane MISSING 相当）。
 const normalizeGateEvidence = (result) => {
   let obj = null;
   if (result && typeof result === 'object' && !Array.isArray(result)) {
@@ -1804,11 +1449,7 @@ const normalizeGateEvidence = (result) => {
     failed: failed === null ? null : failed,
     checkoutClean: obj.checkoutClean === true,
     collectedAt: typeof obj.collectedAt === 'string' ? obj.collectedAt : '',
-    // Issue #97 UC-3: 欠損時は '' (evaluateDoneEvidence が 'missing-run-timestamp' で
-    // fail-closed、formatEvidenceForReviewers は 'unknown' 表示 — NOT COLLECTED 相当)。
     runTimestamp: typeof obj.runTimestamp === 'string' ? obj.runTimestamp : '',
-    // nextest/tool missing ≠ tests failed（曖昧性排除 — estimate approval condition）。
-    // cargo-nextest 不在は exit 127 / "no such subcommand" 出力で現れる。
     toolMissing: obj.toolMissing === true,
     tool: typeof obj.tool === 'string' ? obj.tool : null,
     outputTail: typeof obj.outputTail === 'string' ? obj.outputTail : '',
@@ -1816,9 +1457,6 @@ const normalizeGateEvidence = (result) => {
 };
 // [gate-evidence-end]
 
-// evidence collector agent: snapshot branch の fresh worktree で build+nextest を
-// 1回実行する（dirty working tree は使わない）。R7 snapshot 失敗時も working tree の
-// HEAD 相当で実行するが、その場合は checkoutClean=false を報告させる。
 const gateEvidenceRaw = await agent(
   `EVIDENCE COLLECTOR (S2, Issue #68). Commit Gate 用に fresh-checkout で build と test を1回ずつ実行し、構造化 evidence を返す。**dirty な working tree では実行しないこと** — 必ず新規 worktree を作る:
 1. \`git worktree add ../gate-evidence-wt ${snapshotBranch}\`（branch が無い場合は \`git worktree add ../gate-evidence-wt HEAD\`）。Windows で lock エラーになる場合は \`git worktree add --no-checkout\` 後 checkout。
@@ -1835,8 +1473,6 @@ const doneEvidence = evaluateDoneEvidence(gateEvidence);
 log(`S2 gate evidence: done=${doneEvidence.done}${doneEvidence.reason ? ` reason=${doneEvidence.reason}` : ''}`);
 const evidenceShortCircuit = !doneEvidence.done;
 if (evidenceShortCircuit) {
-  // fail-closed: evidence が無効なら reviewer を spawn しない。R7 snapshot branch は
-  // 成立済みなので実装は失われない（stranded にしない — resumable status）。
   log(`Commit Gate EVIDENCE-FAILED (${doneEvidence.reason}): Done 判定に必要な evidence が無効のため gate を短絡する (Issue #68 S2, fail-closed)。snapshot=${snapshotBranch}`);
   return {
     status: GATE_EVIDENCE_STATUS_FAILED,
@@ -1852,13 +1488,6 @@ if (evidenceShortCircuit) {
 const GATE_EVIDENCE = formatEvidenceForReviewers(gateEvidence, runTimestamp);
 
 // [run-metadata-prompt-check-begin]
-// Issue #97 Task 2: Commit Gate / Release Review / evidence collector の各 agent
-// プロンプトへ注入する共通の runTimestamp 照合指示。runTimestamp は pipeline run の
-// 開始時刻 (.omc/logs/{runId}/run-metadata.json 由来) であり、evidence の
-// recordedAt/collectedAt (採取時刻) と照合して「どの run の evidence か」を検証する。
-// メタデータ欠損ディレクトリ (run-metadata.json 無し / JSON 破損 / runTimestamp
-// フィールド無し) は unknown として fail-closed 扱い。遡及補填はしない
-// (Issue #97 の非スコープ — 照合可能なのは新規 run のみ)。
 const RUN_TS_CHECK = `【runTimestamp 照合 (Issue #97)】.omc/logs/${runId}/run-metadata.json の runTimestamp を読み、
 evidence の recordedAt (採取時刻) と照合せよ。runTimestamp = run 開始時刻、recordedAt = 採取時刻であり
 両者は役割が異なる (二重管理ではない)。run-metadata.json が無い・JSON が破損している・runTimestamp
@@ -1866,34 +1495,6 @@ evidence の recordedAt (採取時刻) と照合せよ。runTimestamp = run 開�
 根拠にしないこと。メタデータ欠損ディレクトリへの遡及補填はしない (Issue #97 の非スコープ)。`;
 // [run-metadata-prompt-check-end]
 
-// 【Issue #63 Task 4 — Commit Gate の TeamCreate 接続 (wired, capability-gated)】
-// gate 6レーンを TeamCreate teammate として並列化する経路を下記 runCommitGateViaTeam
-// で接続した。詳細仕様は ./team-gate-protocol.js の PROTOCOL_SPEC
-// (node --test team-gate-protocol.test.mjs / tests/team-gate-wiring.test.mjs で検証)。
-// activation は capability-gated: ハーネスが team primitives を公開しない場合は
-// 従来の `parallel()` + StructuredOutput 経路 (R8 diff-inject / R9 opus retry /
-// R6 text fall-back) へ透過的に fall-back する (Task 1 probe の実測: サブエージェント
-// サンドボックスから teammate spawn 不可 — org-feedback 2026-08-21)。
-// 元 DEFER 条件の帰結:
-//   1. Task 1 (probe) 実施済み: primitives は呼べるが teammate 起動は top-level
-//      セッション必須 → capability-gated 構造を採用 (fall-back が正経路として常設)
-//   2. 30% ウォールクロック短縮は計測されず → 並列化自体は既存 parallel() が達成。
-//      team 経路は structured verdict (JSON envelope first) の付加価値経路として接続
-//   3. verdict 伝達は構造化 (JSON envelope) 維持 — プレーンテキスト parse は R6 最終フォールバックのみ
-//   4. gate-incomplete 時 release block / consensus semantics は不変 (既存ロジックを再利用)
-
-// ── R8 (large-diff gate robustness): diff-inject ──
-// 6人の sonnet レビュアーがそれぞれ独立に working tree を再探索すると、大diff
-// (≥1500行) でターン予算をファイル読出に費やし StructuredOutput 呼出に到達
-// できない → gate-incomplete（検証: runs wkjg81zgu/wr3v60rky, Issue #37 T4/T5,
-// ~1800行 diff で6次元全滅）。diff を1回 agent 取得して全レビュアーへ埋め込み、
-// 「探索」を「提供済み diff の直接分析」へ変える。小diff(#39等)では影響なし。
-// Issue #91 (P-007) T2: fetch は commit-range diff (HEAD~1..HEAD / merge-base)
-// と tree hash も収集し、working-tree 空 diff 時は commit-range へ fallback。
-// 両方空なら fail-closed (vacuous GO 防止)。helpers は review-gate-diff.js の
-// canonical copy を inline (Workflow runtime は ESM import を reject するため
-// script は self-contained 必須 — review-gate.js と同じ構造、drift は
-// tests/gate-commit-range-diff.test.mjs が正準比較で guard)。
 function extractDiffSection(raw, name) {
   if (typeof raw !== 'string' || raw === '') return '';
   const startMarker = `=== ${name} ===`;
@@ -1933,13 +1534,6 @@ function buildCommitRangeDiffInput(input, options = {}) {
   }
   return out;
 }
-// [gate-unified-diff-begin]
-// Issue #102 T2/T3: canonical buildUnifiedGateDiff (review-gate-diff.js) の
-// inline copy — 決定論的 fallback chain (working-tree → HEAD~1..HEAD →
-// merge-base → untracked-only/intent-to-add → fail-closed)。429/rate-limit
-// placeholder 検出は trim 後の完全一致のみ (部分一致で正当 diff を fail-closed
-// にしない — estimate approval condition #1)。drift は
-// tests/gate-commit-range-diff.test.mjs が正準比較で guard。
 const PLACEHOLDER_SENTINELS = ['429', 'rate limit', 'placeholder'];
 function isPlaceholderSection(text) {
   const t = (text ?? '').trim();
@@ -1973,7 +1567,6 @@ function buildUnifiedGateDiff(input) {
   const stat = str(input.stat);
   const diff = str(input.diff);
 
-  // 429-placeholder detection — EXACT match only.
   if (isPlaceholderSection(stat) || isPlaceholderSection(diff)) {
     return fail('429-placeholder',
       'gate diff input is a 429/rate-limit placeholder string; must fail-closed instead of vacuous GO');
@@ -2044,7 +1637,6 @@ function buildUnifiedGateDiff(input) {
   return fail('all-empty',
     'working-tree, HEAD~1..HEAD and merge-base diffs are all empty and no untracked files exist');
 }
-// [gate-unified-diff-end]
 const diffFetch = await agent(
   `Diff fetcher for the Commit Gate (Issue #91 P-007). In the repo CWD run these and return ONE plain-text string (no JSON, no commentary wrapper):
 1. \`git --no-pager diff HEAD --stat\`
@@ -2067,9 +1659,6 @@ const GATE_DIFF_RAW = (typeof diffFetch === 'string'
   ? diffFetch
   : (diffFetch == null ? '' : JSON.stringify(diffFetch))
 ).slice(0, 30000);
-// Issue #102 T2: fetch-diff が列挙した untracked ファイル内容セクション
-// (=== UNTRACKED FILE CONTENTS: <path> === ...) を raw テキストから抽出して連結する。
-// reviewer は intent-to-add mode でファイル名だけでなく中身を確認できる。
 function extractUntrackedFileContents(raw) {
   if (typeof raw !== 'string' || raw === '') return '';
   const marker = '=== UNTRACKED FILE CONTENTS:';
@@ -2083,13 +1672,6 @@ function extractUntrackedFileContents(raw) {
   }
   return parts.join('\n');
 }
-// [gate-commit-range-diff-begin]
-// Issue #91 (P-007) T2 / Issue #102 T2: working-tree diff が空 (commit 済み slice)
-// の場合は commit-range diff (HEAD~1..HEAD) → merge-base (origin/master...HEAD)
-// → untracked-only (intent-to-add) へ決定論的 fallback し、tree hash を evidence
-// に添付する。全 basis が空 (または 429 placeholder) なら fail-closed — 空の diff
-// を reviewer に注入して vacuous GO させることはしない
-// (pipeline-evidence-verification.md §2, S2 evidence fail-closed と同一構造)。
 const gateDiffInput = buildUnifiedGateDiff({
   stat: extractDiffSection(GATE_DIFF_RAW, 'STAT'),
   diff: extractDiffSection(GATE_DIFF_RAW, 'DIFF'),
@@ -2100,17 +1682,9 @@ const gateDiffInput = buildUnifiedGateDiff({
   mergeBaseDiff: extractDiffSection(GATE_DIFF_RAW, 'MERGE-BASE DIFF'),
   treeHash: extractDiffSection(GATE_DIFF_RAW, 'TREE HASH') || null,
 });
-// Issue #102 T2: fetch-diff 採取の untracked ファイル内容 (セクション列)。
-// intent-to-add mode の reviewer snapshot に本文を含める (ファイル名列挙のみで
-// vacuous GO させない — S2 修正案の untracked-only 深掘り)。
 const gateUntrackedFileContents = extractUntrackedFileContents(GATE_DIFF_RAW);
 if (gateDiffInput.mode === 'fail-closed') {
-  // fail-closed: 空 diff / 429 placeholder を reviewer に注入しない (fan-out 前
-  // 短絡)。R7 snapshot branch は成立済みなので実装は失われない (evidence-failed
-  // と同じ短絡構造)。
   log(`Commit Gate DIFF-EMPTY-FAILED: ${gateDiffInput.reason}${gateDiffInput.note ? ` note=${gateDiffInput.note}` : ''} — gate を短絡する (Issue #102, fail-closed)。snapshot=${snapshotBranch}`);
-  // Issue #102 T3: fail-closed 判定根拠も gate-diff.json へ永続化 (evidence は
-  // 自己申告不可 — 成功時のみでなく失敗時も機械検証可能にする)。
   await agent(
     `EVIDENCE PERSISTER (Issue #102 gate-diff)。以下の JSON をファイル .omc/logs/${runId}/gate-diff.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
 ${JSON.stringify({
@@ -2143,8 +1717,6 @@ ${JSON.stringify({
   };
 }
 const GATE_DIFF = [
-  // Issue #97 Task 3: reviewer が diff を読む際、どの run (runTimestamp/runId) の
-  // evidence か追跡できるよう冒頭に run メタデータを注入。
   `=== RUN TIMESTAMP === ${runTimestamp} (runId=${runId})`,
   '=== DIFF BASIS ===',
   gateDiffInput.basis,
@@ -2155,21 +1727,12 @@ const GATE_DIFF = [
   ...(gateDiffInput.mode === 'intent-to-add' && gateDiffInput.untrackedFiles
     ? ['=== UNTRACKED FILES (intent-to-add; Read each file individually) ===',
       ...gateDiffInput.untrackedFiles,
-      // Issue #102 T2: fetch-diff が列挙したファイル本文 (ヘッダー付きセクション列)
       ...(gateUntrackedFileContents ? [gateUntrackedFileContents] : [])]
     : ['=== UNTRACKED ===', gateDiffInput.untracked]),
   ...(gateDiffInput.treeHash ? ['=== TREE HASH ===', gateDiffInput.treeHash] : []),
 ].join('\n').slice(0, 30000);
 log(`Commit Gate: injected diff context (${GATE_DIFF.length} chars, mode=${gateDiffInput.mode}, basis=${gateDiffInput.basis}) into all reviewers (R8)`);
-// Issue #102 T3 (UC-2): gate-diff 決定根拠 (mode/basis/treeHash/snapshot) を
-// .omc/logs/{runId}/gate-diff.json へ永続化する builder。snapshot は全 lane へ
-// 同一の GATE_DIFF 文字列を注入する単一情報源 — 永続化する snapshot も同一値。
-// NOTE: ACTIVE_GATE_DIMENSIONS は後方 ([gate-diff-kind-persist-apply]) で確定
-// するため、ここでは builder のみ定義し、確定後に構築・永続化する (TDZ 前科
-// integrationSliceCheck と同じ教訓 — estimate approval condition #3)。
 const buildGateDiffEvidence = () => ({
-  // recordedAt は evidence 採取時刻。runTimestamp (run 開始時刻) を流用する
-  // (ticket-precheck.json と同一パターン — 別採取コマンドを増やさない単一ソース化)。
   recordedAt: runTimestamp,
   runTimestamp,
   runId,
@@ -2187,22 +1750,8 @@ const buildGateDiffEvidence = () => ({
   classifier: 'review-gate-diff.js buildUnifiedGateDiff (inline copy, drift-guarded by tests/gate-commit-range-diff.test.mjs)',
 });
 
-// [gate-diff-kind-persist-begin]
-// Issue #95 (P-008) T3c: short-circuit 判定根拠の永続化。Evidence は自己申告不可
-// (.claude/rules/pipeline-evidence-verification.md) — diff 分類 (classification)、
-// 根拠ファイル (basisFiles)、分類対象 tree の識別子 (treeHash) を
-// .omc/logs/{run-id}/diff-kind-short-circuit.json へ書き出し、機械検証可能にする。
-// treeHash は gate:fetch-diff が採取した git write-tree 値 (working-tree の構成を
-// 一意に特定 — 「どの diff が分類されたか」の追跡性)。
-// Issue #97 Task 3: runId/runTimestamp は run 開始時の共有値を使用し
-// .omc/logs/{runId}/ (run-metadata.json と同一ディレクトリ) へ書き出す —
-// 全永続 JSON から runTimestamp が参照可能 (UC-2 照合)。
-// recordedAt は採取時刻、runTimestamp は run 開始時刻 (役割分離)。
-// NOTE: ACTIVE_GATE_DIMENSIONS は GATE_DIMENSIONS (ticket 依存) の後方で宣言される
-// ため、rationale JSON の構築をここで実行すると TDZ 違反。builder として定義し、
-// ACTIVE_GATE_DIMENSIONS 確定直後 ([gate-diff-kind-persist-apply]) で構築・永続化する。
 const buildDiffKindRationale = () => ({
-  recordedAt: runTimestamp, // Date API 禁制のため run 開始時刻を流用 (採取時刻の厳密分離は諦め)
+  recordedAt: runTimestamp,
   runTimestamp,
   runId,
   issue: 95,
@@ -2214,18 +1763,7 @@ const buildDiffKindRationale = () => ({
   treeHash: gateDiffInput.treeHash,
   classifier: 'gate-diff-kind.js classifyDiffKind (inline copy, drift-guarded by tests/gate-diff-kind-wiring.test.mjs)',
 });
-// NOTE: builder の呼び出し (agent 永続化を含む) は ACTIVE_GATE_DIMENSIONS が
-// 確定する後方の [gate-diff-kind-persist-apply] に移動済み (TDZ 違反修正)。
 
-// [gate-contrast-begin]
-// Issue #91 (P-007) T5: intent<->fact contrast check。ticket の意図 (title,
-// design/tasks declared files) と実際の diff (facts) の整合を機械的に検査し、
-// 結果を全 reviewer prompt (FEEDBACK_INSTRUCTION 経由) に注入する。
-// mismatch は advisory: reviewer は CONDITIONAL + 明示的 override 根拠を要求
-// (hard NO-GO ではない — CEO 承認ポイントでの override 可能)。
-// helpers は review-gate-contrast.js の canonical copy を inline (Workflow
-// runtime は ESM import を reject — tests/gate-contrast-wiring.test.mjs が
-// 正準比較 + 振る舞い contract で drift guard)。
 function extractChangedPaths(diff) {
   const paths = new Set();
   if (typeof diff !== 'string') return [...paths];
@@ -2295,7 +1833,6 @@ mismatch が妥当な理由 (例: 工夫されたスライス構成・declared f
 **CONDITIONAL** を返し、summary に「contrast mismatch override に必要な追加確認事項」を明記すること。
 mismatch を無視して無条件 GO に*しない*こと (override には明示的正当化が必須 — CEO 承認ポイント)。`;
 log(`Commit Gate contrast (P-007): ${gateContrast.consistent ? 'consistent' : `MISMATCH (${gateContrast.mismatches.map((m) => m.kind).join(', ')})`} — mismatch がある場合 reviewer は CONDITIONAL + override 根拠を要求`);
-// [gate-contrast-end]
 
 const V_SCHEMA = {
   type: 'object',
@@ -2367,8 +1904,6 @@ CRITICAL: Your verdict is delivered ONLY by calling the StructuredOutput tool wi
 action. Do NOT end your turn with a prose-only summary — if no tool is called, the
 review is recorded as MISSING and blocks the release.`;
 
-// P-008 (Issue #95): lane 定義。docs-only diff では ACTIVE_GATE_DIMENSIONS が
-// reliability/performance/extensibility を落とす (governance + integration 常時維持)。
 const GATE_DIMENSIONS = [
   { key: 'reliability', prompt: `RELIABILITY REVIEWER. Evaluate error handling, edge cases, and fault tolerance of the changes.
 
@@ -2460,19 +1995,9 @@ verdict は「per-slice 層(Step1)」の結果で出す(GO/NO-GO)。baseline-deb
 証拠(テスト件数, コマンド出力, baseline-debt issue 番号)を添えること。${FEEDBACK_INSTRUCTION}` },
 ];
 
-// P-008 (Issue #95): 分類結果 (diffKind, Coordinate フェーズで算出) を lane 構成へ反映。
-// GATE_DIMENSIONS がここで確定するため ACTIVE_GATE_DIMENSIONS の計算もこの位置。
-// fail-closed: フィルタ結果が空になることは GATE_DIFF_KIND_LANES が GATE_DIMENSIONS
-// 全体へ fallback するため構造的にない (governance + integration は docs-only でも維持)。
 const ACTIVE_GATE_DIMENSIONS = GATE_DIFF_KIND_LANES();
 const activeLaneCount = ACTIVE_GATE_DIMENSIONS.length;
-// [gate-diff-kind-persist-apply]
-// TDZ 修正: buildDiffKindRationale (前方で定義した builder) を ACTIVE_GATE_DIMENSIONS
-// 確定後に呼び出して rationale JSON を構築し、haiku persister で永続化する。
 const diffKindRationale = buildDiffKindRationale();
-// Issue #102 T3 (UC-2): gate-diff 永続化 — ACTIVE_GATE_DIMENSIONS 確定後 (TDZ 安全
-// 位置) に builder を実行し、mode/basis/treeHash/snapshot (全 lane 共有の単一
-// 情報源) を .omc/logs/{runId}/gate-diff.json へ書き出す。
 const gateDiffEvidence = buildGateDiffEvidence();
 await agent(
   `EVIDENCE PERSISTER (Issue #102 gate-diff)。以下の JSON をファイル .omc/logs/${runId}/gate-diff.json へ書き出せ（ディレクトリが無ければ作成。親ディレクトリは repo root の .omc/logs/）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
@@ -2488,7 +2013,6 @@ ${JSON.stringify(diffKindRationale, null, 2)}
 );
 log(`Diff-kind (P-008): short-circuit rationale persisted to .omc/logs/${runId}/diff-kind-short-circuit.json (classification=${diffKind}, lanes=${activeLaneCount}, treeHash=${gateDiffInput.treeHash || 'n/a'})`);
 log(`Gate-diff (Issue #102): unified diff decision persisted to .omc/logs/${runId}/gate-diff.json (mode=${gateDiffEvidence.mode}, basis=${gateDiffEvidence.basis}, treeHash=${gateDiffEvidence.treeHash}, snapshot=${gateDiffEvidence.snapshotChars} chars)`);
-// [gate-diff-kind-persist-apply-end]
 if (diffKind === 'docs-only') {
   log(`Diff-kind (P-008): docs-only diff — short-circuiting ${DOCS_ONLY_SKIP_KEYS.length} code-adjacent lane(s); ${activeLaneCount} lane(s) remain (governance + integration). Reason: every changed path matches a docs pattern (classifyDiffKind fail-closed for empty/unknown).`);
 } else {
@@ -2496,15 +2020,6 @@ if (diffKind === 'docs-only') {
 }
 
 // [gate-team-begin]
-// Pure verdict-normalization and aggregation logic for the TeamCreate Commit Gate
-// path (Issue #63 Task 4). Extracted as a marker-delimited block and unit-tested by
-// .claude/workflows/tests/team-gate-wiring.test.mjs (TDD).
-//
-// Transport precedence (PROTOCOL_SPEC — structured-first):
-//   1. structured object (StructuredOutput / TaskUpdate metadata)
-//   2. fenced or bare JSON envelope in a string body (GATE_VERDICT_JSON)
-//   3. R6 lenient keyword text parse — LAST RESORT only
-// Anything else → null → lane stays MISSING → gate-incomplete refusal (invariant).
 const GATE_TEAM_VERDICT_ENUM = ['GO', 'NO-GO', 'CONDITIONAL'];
 const GATE_TEAM_COERCE = (raw) => {
   if (typeof raw !== 'string') return null;
@@ -2513,7 +2028,6 @@ const GATE_TEAM_COERCE = (raw) => {
   return GATE_TEAM_VERDICT_ENUM.includes(upper) ? upper : null;
 };
 const normalizeGateReview = (result, dimension) => {
-  // Path 1: already-structured object.
   if (result && typeof result === 'object' && !Array.isArray(result)) {
     const verdict = GATE_TEAM_COERCE(result.verdict);
     if (!verdict) return null;
@@ -2527,7 +2041,6 @@ const normalizeGateReview = (result, dimension) => {
     };
   }
   if (typeof result !== 'string' || result.length === 0) return null;
-  // Path 2: JSON envelope (fenced ```json / bare object containing "verdict").
   const fenced = result.match(/```(?:json)?\s*(\{[\s\S]*?\})\s*```/);
   const bare = fenced ? null : result.match(/\{[\s\S]*"verdict"[\s\S]*\}/);
   const candidate = fenced ? fenced[1] : bare ? bare[0] : null;
@@ -2545,10 +2058,8 @@ const normalizeGateReview = (result, dimension) => {
           summary: typeof obj.summary === 'string' ? obj.summary : '',
         };
       }
-    } catch { /* fall through to R6 */ }
+    } catch { }
   }
-  // Path 3 (LAST RESORT): R6 lenient keyword parse. NO-GO/NOGO tested before GO
-  // so a "NO-GO" never false-matches GO; \b prevents GOOD/GOING false positives.
   const m = result.match(/\b(?:VERDICT:\s*)?(NO-GO|NOGO|CONDITIONAL|GO)\b/i);
   if (!m) return null;
   return {
@@ -2558,14 +2069,7 @@ const normalizeGateReview = (result, dimension) => {
     summary: `(R6 text fall-back — 構造化 envelope 欠如のため verdict を parse)\n${result.slice(-1500)}`,
   };
 };
-// Deterministic aggregate (pre-verdict for the CONSENSUS JUDGE). Semantics
-// identical to the in-pipeline gate: any missing lane → INCOMPLETE (never
-// synthesize from partial evidence); ANY NO-GO → NO-GO; all GO → GO; else CONDITIONAL.
 const aggregateGateReviews = (reviews, expectedDimensions = 6) => {
-  // Issue #95 (P-008) T3: only the first `expectedDimensions` entries are
-  // "expected" lanes. Entries beyond the expected count were intentionally
-  // short-circuited away (docs-only) and must NOT count as MISSING — a stale
-  // full-length array would false-fire gate-incomplete.
   const list = (Array.isArray(reviews) ? reviews : []).slice(0, expectedDimensions);
   const present = list.filter(Boolean);
   const missing = list.map((r, i) => (r == null ? i : -1)).filter((i) => i >= 0);
@@ -2584,9 +2088,6 @@ const aggregateGateReviews = (reviews, expectedDimensions = 6) => {
 };
 // [gate-team-end]
 
-// TeamCreate-based Commit Gate (Issue #63 Task 4, capability-gated wiring).
-// Returns the 6 normalized gateReviews array, or null when the team path is
-// unavailable/failed (caller then runs the existing parallel() route unchanged).
 const gateTeamPrimitivesAvailable = () =>
   typeof TeamCreate === 'function' &&
   typeof SendMessage === 'function' &&
@@ -2595,10 +2096,10 @@ const gateTeamPrimitivesAvailable = () =>
   typeof TaskUpdate === 'function';
 const runCommitGateViaTeam = async () => {
   if (!gateTeamPrimitivesAvailable()) {
-    log('Commit Gate (team): team primitives unavailable in this harness — falling back to parallel() path');
+    log('Commit Gate (team): Task 4 wired — capability-gated; team primitives unavailable in this harness — falling back to parallel() path');
     return null;
   }
-  const teamName = `commit-gate-${runId}`; // Date API 禁制のため runId を使用
+  const teamName = `commit-gate-${runId}`;
   try {
     await TeamCreate({ team_name: teamName, description: `Commit Gate for issue #${ticket.issueNumber || 'none'}` });
   } catch (e) {
@@ -2606,9 +2107,6 @@ const runCommitGateViaTeam = async () => {
     return null;
   }
   try {
-    // Fan out the 6 dimension prompts as teammates. R8 diff-inject is already
-    // embedded in each dimension prompt; the teammate protocol demands a
-    // GATE_VERDICT_JSON envelope reply (structured-first).
     const spawnResult = await agent(
       `TEAM SPAWNER。team "${teamName}" に6名の gate reviewer teammate を追加せよ。
 各 teammate へ以下のプロンプトを割り当てること（Agent tool, team_name: "${teamName}"）:
@@ -2616,8 +2114,6 @@ ${ACTIVE_GATE_DIMENSIONS.map((d) => `--- teammate gate-${d.key} へのプロン�
 報告: 追加した teammate 名のリスト。`,
       { phase: 'Commit Gate', label: 'gate:team-spawn', model: 'sonnet' }
     );
-    // Poll TaskList until all 6 lanes are completed (structured metadata) or timeout.
-    // Date API 禁制のため反復回数ベースの cap (15s interval × 80 = 20 min 相当)。
     const MAX_POLLS = 80;
     const collected = new Array(ACTIVE_GATE_DIMENSIONS.length).fill(null);
     for (let poll = 0; poll < MAX_POLLS; poll++) {
@@ -2639,7 +2135,7 @@ ${ACTIVE_GATE_DIMENSIONS.map((d) => `--- teammate gate-${d.key} へのプロン�
     log(`Commit Gate (team ${teamName}): ${agg.goCount}/${ACTIVE_GATE_DIMENSIONS.length} GO${agg.noGoCount > 0 ? `, ${agg.noGoCount} NO-GO` : ''}${!agg.complete ? `, ${collected.filter((v) => v == null).length} MISSING (block)` : ''} [spawn: ${String(spawnResult).slice(0, 200)}]`);
     return collected;
   } finally {
-    try { await (typeof TeamDelete === 'function' ? TeamDelete({ team_name: teamName }) : null); } catch (_e) { /* best effort */ }
+    try { await (typeof TeamDelete === 'function' ? TeamDelete({ team_name: teamName }) : null); } catch (_e) { }
   }
 };
 
@@ -2652,25 +2148,15 @@ try {
   gateReviews = null;
 }
 if (gateReviews == null) {
-  // Fallback: original parallel() + StructuredOutput route (R6-hardened, unchanged).
 
 const runGateDimension = (d) =>
   agent(d.prompt, { label: `gate:${d.key}`, phase: 'Commit Gate', model: 'sonnet', schema: V_SCHEMA });
 
-// R9 (gate schema-flakiness robustness): sonnet reviewers intermittently finish
-// without calling StructuredOutput even with R8 diff-inject (verified run wnt9x6yy4:
-// #42 small-diff shard, 4/6 sonnet reviewers null after retry+R6). opus (used by
-// impl/CTO/issue-verify) reliably calls the tool in this harness. Retry null
-// dimensions with opus before the text fallback. Sonnet-first keeps cost down on
-// healthy runs; opus only on the failing minority.
 const runGateDimensionOpus = (d) =>
   agent(d.prompt, { label: `gate-retry:${d.key}`, phase: 'Commit Gate', model: 'opus', schema: V_SCHEMA });
 
 gateReviews = await parallel(ACTIVE_GATE_DIMENSIONS.map((d) => () => runGateDimension(d)));
 
-// A reviewer that ends without calling StructuredOutput resolves to null.
-// Retry each missing dimension once with a fresh agent so a flaky
-// StructuredOutput call does not silently drop a review.
 const missingAfterFirst = ACTIVE_GATE_DIMENSIONS
   .map((d, i) => (gateReviews[i] == null ? i : -1))
   .filter((i) => i >= 0);
@@ -2684,14 +2170,6 @@ if (missingAfterFirst.length > 0) {
   });
 }
 
-// ── R6 mitigation: text fall-back for schema-reluctant reviewers ──
-// sonnet gate reviewers intermittently finish without calling StructuredOutput
-// (R6 — strand verified-correct releases at gate-incomplete). When a dimension
-// is still null after the retry, make ONE more attempt WITHOUT a schema, asking
-// the reviewer to emit a final `VERDICT: GO|NO-GO|CONDITIONAL` line, then parse
-// it into the minimal V_SCHEMA shape. No semantic change on healthy runs (the
-// schema path is still preferred); strictly better than gate-incomplete.
-// Verified 2026-07-04: rescued cycle-4 (PR #31) from gate-incomplete → merged.
 const stillMissingAfterRetry = ACTIVE_GATE_DIMENSIONS
   .map((d, i) => (gateReviews[i] == null ? i : -1))
   .filter((i) => i >= 0);
@@ -2705,8 +2183,6 @@ if (stillMissingAfterRetry.length > 0) {
         { label: `gate-fallback:${d.key}`, phase: 'Commit Gate', model: 'opus' }
       ).then((text) => {
         if (!text) return null;
-        // R9 lenient parse: accept verdict keyword anywhere, with or without VERDICT: prefix.
-        // NO-GO/NOGO tested before GO to avoid false GO. \bGO\b won't match GOOD/GOING.
         const m = text.match(/\b(?:VERDICT:\s*)?(NO-GO|NOGO|CONDITIONAL|GO)\b/i);
         if (!m) return null;
         const raw = m[1].toUpperCase();
@@ -2723,14 +2199,10 @@ if (stillMissingAfterRetry.length > 0) {
     if (fallbackResults[k] != null) gateReviews[idx] = fallbackResults[k];
   });
 }
-} // end fallback (parallel()) route — team route above fills gateReviews directly
+}
 
-// Unified semantics gate (both routes): compute the deterministic aggregate.
-// The CONSENSUS JUDGE receives this pre-verdict in both paths (PROTOCOL_SPEC).
 gateTeamAgg = aggregateGateReviews(gateReviews, ACTIVE_GATE_DIMENSIONS.length);
 
-// Refuse to release on an incomplete gate rather than letting the consensus
-// judge synthesize a GO from partial evidence (org-feedback 2026-06-17).
 const missingDimensions = ACTIVE_GATE_DIMENSIONS
   .map((d, i) => (gateReviews[i] == null ? d.key : null))
   .filter(Boolean);
@@ -2746,7 +2218,6 @@ if (missingDimensions.length > 0) {
   };
 }
 
-// Consensus Judge
 const consensus = await agent(
   `CONSENSUS JUDGE. Synthesize 6 gate reviews into final GO/NO-GO.
 
@@ -2796,10 +2267,6 @@ Only append if you have genuine feedback. Be specific.`,
 
 log(`Commit Gate: ${consensus.final_verdict}`);
 
-// Issue #152 / S2 FP-2: Commit Gate verdict の永続化 (§1.1 — PR review または
-// .omc/logs/{run-id}/ 永続ログ。PR 本文 interpolation と二重の evidence)。
-// NO-GO early return の前に置く — gate-blocked run の verdict こそ evidence。
-// best-effort: 失敗しても gate 判定には影響しない。
 try {
   await agent(
     `EVIDENCE PERSISTER (Issue #152 gate-verdicts)。以下の JSON を .omc/logs/${runId}/gate-verdicts.json へ書き出せ（ディレクトリが無ければ作成）。内容はこの JSON をそのまま pretty-print (2-space indent) したもの:
@@ -2807,14 +2274,12 @@ ${JSON.stringify({ recordedAt: runTimestamp, runTimestamp, runId, issue: 152, fi
 書き出したら "persisted" とだけ返せ。`,
     { label: 'gate:persist-verdicts', phase: 'Commit Gate', model: 'sonnet' }
   );
-} catch (_e) { /* best-effort — gate 判定に影響させない */ }
+} catch (_e) { }
 
 if (consensus.final_verdict === 'NO-GO') {
   return {
     status: 'gate-blocked',
     ticket, estimate, approval, implResults,
-    // R7: 実装は gate 前に snapshot commit 済み（snapshotBranch）。NO-GO でも成果物は
-    // この branch に保全されているため、requiredFixes 適用後に再開可能（未コミット WIP で消失しない）。
     snapshotBranch,
     gate: { reviews: gateReviews, consensus },
     requiredFixes: consensus.blocking_issues,
@@ -2822,40 +2287,20 @@ if (consensus.final_verdict === 'NO-GO') {
 }
 
 // ── Phase 5: Release — mechanical empty-release precheck (Issue #66) ──
-// 3回再発した空リリースサイクル (PR #64/#65, cycle-14 stale PR title) の根絶。
-// LLM Release エージェントの prompt 任せではなく、workflow JS レベルで機械的に
-// 「リリースすべき tracked 変更が存在するか」を判定してからエージェントを起動する。
-// SoT は resolve-scope と同一 (git diff HEAD --name-only + git status --porcelain)。
-// R7 誤検知ガード: snapshot commit が存在する場合は work は既に commit 済みなので
-// empty diff でもアボートしない (Release エージェントが branch を push するだけ)。
 
 // [release-precheck-begin]
-// Pure precheck logic, unit-tested by
-// .claude/workflows/tests/release-precheck.test.mjs (TDD, Issue #66 Task 1).
 const RELEASE_EXCLUDE_PATTERNS = [
   /^\.claude\//, /^\.claude\.old\//, /^\.omc\//, /^\.understand-anything\//,
   /\.local$/i, /\.lnk$/i,
 ];
 const isReleaseExcluded = (f) =>
   typeof f === 'string' && f.length > 0 && RELEASE_EXCLUDE_PATTERNS.some((re) => re.test(f));
-// porcelain 1行 (e.g. " M src/a.rs", "M  b.rs", "?? c.txt") から tracked 変更パスを抽出。
-// untracked ("?? ") は Release のステージ対象外 (除外パターン相当として扱わないが
-// tracked 変更ゼロ判定の救済にもしない — untracked は R7 snapshot が .claude/ 等を
-// 除外して add する運用と同様、空リリース防止のため対象外)。
 const trackedPathFromPorcelain = (line) => {
   if (typeof line !== 'string' || line.length < 4) return null;
   if (line.startsWith('??')) return null;
   const p = line.slice(3).trim();
   return p.length > 0 ? p : null;
 };
-// 返り値: { abort, reason, staged, excluded, untrackedCount }
-//  - abort=false: Release エージェントを起動してよい
-//  - abort=true + reason='no-tracked-changes': tracked 変更ゼロ & snapshot なし
-//  - abort=true + reason='exclusion-only-changes': 変更はあるが全て除外パターン
-//  - abort=true + reason='gitignored-only-artifacts' (P-003/step-3, Issue #109):
-//    hasSnapshotCommit=false かつ staged=0 かつ untracked 全部が gitignore 対象の
-//    成果物パスの場合。成果物が gitignored で git diff --cached が空のまま
-//    空 PR が出るのを hard-fail する。
 const GITIGNORED_ARTIFACT_PATTERNS = [
   /^\.omc\//, /^target\//, /^dist\//, /^build\//, /^node_modules\//,
   /^coverage\//, /\.log$/i, /\.tmp$/i,
@@ -2895,8 +2340,6 @@ const evaluateReleasePrecheck = (input) => {
   const staged = all.filter((f) => !isReleaseExcluded(f));
   const excluded = all.filter((f) => isReleaseExcluded(f));
   if (hasSnapshotCommit === true) {
-    // R7 guard が最優先: snapshot commit があれば work は commit 済みのため
-    // gitignored-only 判定を適用しない (空 diff 正常パスを壊さない — Issue #109 task 4)。
     return { abort: false, reason: null, staged, excluded, untrackedCount };
   }
   if (staged.length === 0
@@ -2915,8 +2358,6 @@ const evaluateReleasePrecheck = (input) => {
 // [release-precheck-end]
 
 phase('Release');
-// Issue #66: Release エージェント起動前の機械的プレチェック。SoT 収集は
-// resolve-scope と同じ git コマンドをこの時点で再実行 (実装後の状態を取得)。
 const releaseScope = await agent(
   `RELEASE PRECHECK SCOPE RESOLVER。以下を実行し結果を返す:
 1. \`git diff HEAD --name-only\` — HEAD に対する変更ファイル(tracked)
@@ -2930,28 +2371,15 @@ const releaseScope = await agent(
     porcelainLines: { type: 'array', items: { type: 'string' } },
     hasSnapshotCommit: { type: 'boolean' },
   } }, label: 'release:precheck-scope', phase: 'Release', model: 'sonnet' }
-// P-005 (2026-08-21): model: 'sonnet' // P-005: haiku は GLM backend で Unknown Model 400 (sonnet へ) は GLM バックエンドで "Unknown Model" 400 になり
-// agent が StructuredOutput を呼べず workflow 全体が throw した (cycle-18)。
-// haiku 指定はこのハーネスで使用不可 — sonnet へ修正。
 );
 const precheck = evaluateReleasePrecheck({
   diffNames: releaseScope && releaseScope.diffNames,
   porcelainLines: releaseScope && releaseScope.porcelainLines,
   hasSnapshotCommit: releaseScope && releaseScope.hasSnapshotCommit === true,
 });
-// ── Issue #66 Task 3: empty-release abort status branch ──
-// org-feedback.md 参照エントリ:
-//   [2026-08-21] [tech-lead] empty-release 欠陥が3回再発、機械的プレチェックで構造的に防止 (issue #66)
-//   [2026-08-21] [cto] JS 判定ロックは unit test で保護しないと静かに退化する (Issue #66)
-// アボート時は Phase 6-7 (Release Review / Merge) をスキップし、Phase 8 Self-Improve
-// へ直接進んだ上で return status 'empty-release-aborted' を返す。
 // [release-abort-status-begin]
 const RELEASE_ABORT_STATUS = 'empty-release-aborted';
 const ABORT_TOKEN_RE = /\bABORTED\b/;
-// resolveReleaseAbort: unify (a) the mechanical JS precheck (Task 1) and
-// (b) the Release agent's own ABORTED report token (Task 2 prompt guard).
-// Pure function — unit-tested by .claude/workflows/tests/release-abort-status.test.mjs.
-// Fail-closed: either signal reporting an abort wins.
 const resolveReleaseAbort = (input) => {
   const { precheck, releaseResult } = (input && typeof input === 'object') ? input : {};
   if (precheck && typeof precheck === 'object' && precheck.abort === true) {
@@ -2965,31 +2393,16 @@ const resolveReleaseAbort = (input) => {
 // [release-abort-status-end]
 let precheckAbort = null;
 if (precheck.abort) {
-  // 実装が失われたわけではない: R7 snapshot が無かった場合のみここに来るため、
-  // working tree / 既存 branch はそのまま。再開情報として現在の状態を返す。
-  // (Task 3: early return せず、Phase 6-7 をスキップして Self-Improve へ直接進む)
   precheckAbort = precheck;
   log(`Release PRECHECK ABORT (${precheck.reason}): tracked staged=0, excluded=[${precheck.excluded.join(', ')}], untracked=${precheck.untrackedCount} — empty release prevented (Issue #66)`);
 }
 log(`Release precheck (Issue #66): staged=${precheck.staged.length} excluded=${precheck.excluded.length} — proceeding to Release agent`);
 // [release-prompt-begin]
-// Issue #66 Task 2: Release エージェントのプロンプト自体にも防御手順を明記（二重防御）。
-// Task 1 の JS プレチェックに加え、エージェント内でも commit 直前に
-// git diff --cached --name-only を確認し、tracked 変更ゼロなら push/PR を中止する。
-// R7 整合: snapshot commit が存在し差分がそれのみの場合は正常パス扱い。
-// Issue #152 要件1 (UC-1/UC-2): Commit Gate consensus の実 verdict を interpolation。
-// 固定文字列 "(6次元 all GO)" (header) / "6-dimension commit gate: all GO" (PR body) は
-// 廃止し、buildGateVerdictSection が per-lane verdict・final verdict・CONDITIONAL 解消根拠
-// (judgment_calls の consensus 文) を生成する。"all GO" は全 active lane GO 時のみ出力。
-// lane 数は ACTIVE_GATE_DIMENSIONS 由来 (P-008 docs-only short-circuit で 6 未満になり得る)。
-// Unit-tested by .claude/workflows/tests/release-prompt-guard.test.mjs (TDD).
-// per-lane review の verdict 表示ラベル。欠損 (null/空) は MISSING (fail-closed 表示)。
 const gateVerdictLabel = (raw) => {
   if (typeof raw !== 'string' || raw.length === 0) return 'MISSING';
   const upper = raw.toUpperCase();
   return upper === 'NOGO' ? 'NO-GO' : upper;
 };
-// activeDimensions は ACTIVE_GATE_DIMENSIONS ({key, prompt}) と等価の配列。key 文字列配列も許容。
 const activeDimensionKeysOf = (activeDimensions) =>
   (Array.isArray(activeDimensions) ? activeDimensions : [])
     .map((d) => {
@@ -2998,13 +2411,6 @@ const activeDimensionKeysOf = (activeDimensions) =>
       return null;
     })
     .filter((k) => k != null);
-// 純関数 (Issue #152 要件1): consensus 実 verdict の gate セクション文字列を生成。
-//  - per-lane verdict 行 (lane 名 + GO/NO-GO/CONDITIONAL、欠損 lane は MISSING)
-//  - final verdict 行 (consensus.final_verdict)
-//  - CONDITIONAL lane の解消根拠 (consensus.judgment_calls の consensus 文)
-//  - "all GO" 文字列は全 active lane GO 時のみ出力 (UC-2 乖離防止)
-// gateReviews は ACTIVE_GATE_DIMENSIONS と同順 (parallel() map / team collected[idx])。
-// dimension 文字列一致を優先し、不一致時のみ同順 fallback (stale full-length 配列耐性)。
 const buildGateVerdictSection = (consensus, gateReviews, activeDimensionKeys) => {
   const keys = activeDimensionKeysOf(activeDimensionKeys);
   const reviews = Array.isArray(gateReviews) ? gateReviews : [];
@@ -3117,7 +2523,7 @@ Execute:
 };
 // [release-prompt-end]
 const releaseResult = precheckAbort
-  ? `ABORTED (precheck: ${precheckAbort.reason}) — Release agent skipped (Issue #66 Task 3)`
+  ? `ABORTED (precheck: ${precheckAbort.reason}) — Release agent skipped (issue #66 Task 3)`
   : await agent(
       buildReleasePrompt(consensus, gateReviews, ACTIVE_GATE_DIMENSIONS, ticket, snapshotBranch),
       { label: 'release:branch-push-pr', phase: 'Release', model: 'sonnet' }
@@ -3129,21 +2535,11 @@ let verdicts;
 let releaseDecision = { goCount: 0, missingCount: 3, expectedTotal: 3, allGo: false, releaseBlocked: true };
 let allGo = false;
 let goCount = 0;
-// P-006 (cycle-20): mergeResult は else ブロック内で宣言されていたが最終 return が
-// ブロック外から参照 → 正常完走時 (3/3 GO merge 実行後) に限り ReferenceError で
-// workflow 死亡 (PR #70 マージは実施済みなのに status が返らない)。
-// hoist 宣言で修正。以降の Phase 6-7 変数は else ブロック内スコープのまま。
 let mergeResult = null;
-// Issue #152 (UC-3/UC-4/UC-5): Release Review verdict 永続化の成果。Phase 6 の
-// wiring は !aborted ブロック内で実行されるが、最終 return はブロック外から参照
-// する → P-006 と同一の hoist パターンで宣言 (aborted 時は 0 / false のまま =
-// persistedLog '未収集' の fail-closed 表示)。
 let prReviewsPosted = 0;
 let persistedLogOk = false;
 
 if (releaseAbort.aborted) {
-  // Issue #66 Task 3: skip Phase 6-7 (Release Review / Merge) — nothing was
-  // pushed/PR'd, so there is nothing to review or merge. Fall through to
   // Phase 8 Self-Improve (defect-class feedback must still be collected).
   log(`Release ABORTED (${releaseAbort.reason}): skipping Phase 6-7 (Release Review / Merge) → Self-Improve (Issue #66)`);
 } else {
@@ -3162,34 +2558,19 @@ const reviewLens = [
   '品質証拠: テスト/gate 証拠が PR 本文に提示され再現可能か。コミットが 6次元 gate GO を経ているか。',
   '副作用・スコープ: 既存機能への回帰、スコープ逸脱、Closes #N の対象違い(不適切な issue close)がないか。',
 ];
-// Issue #152 Task 2: Release Review lane 表示名 (reviewLens 先頭語由来 — verdict と
-// 1:1 対応。永続化 md の lane 表・PR review COMMENT の lane 行で使用)。
 const releaseLaneLabel = (i) => {
   const lens = reviewLens[i];
   const head = typeof lens === 'string' ? lens.split(':')[0].trim() : '';
   return `${i + 1}: ${head || `lane-${i + 1}`}`;
 };
 // [team-verdict-begin]
-// Pure verdict logic shared by the TeamCreate path and the parallel() fallback path.
-// Extracted as a marker-delimited block and unit-tested by
-// .claude/workflows/tests/team-verdict.test.mjs (TDD, Issue #63 Task 3).
-//
-// Semantics (INVARIANT — must not change): merge iff exactly 3/3 GO.
-// A missing/failed review NEVER counts as GO and blocks the release.
-//
-// Strict structured token: a teammate verdict message must contain exactly one
-// `VERDICT: GO|NO-GO` token (case-insensitive, VERDICT:= prefix required).
-// Ambiguous or prose-only messages are MISSING → release blocked. This mirrors
-// the StructuredOutput discipline of the fallback path: plain prose is not a
-// verdict channel (CTO approval condition: no regression to text-parse leniency).
 const TEAM_VERDICT_RE = /\bVERDICT\s*[:=]\s*(NO-GO|NOGO|GO)\b/gi;
 const ANY_NOGO_RE = /\b(NO-GO|NOGO)\b/i;
 const parseTeamVerdict = (text) => {
   if (typeof text !== 'string' || text.length === 0) return null;
   const matches = [...text.matchAll(TEAM_VERDICT_RE)].map((m) => m[1].toUpperCase());
-  if (matches.length !== 1) return null; // zero or conflicting tokens → MISSING
+  if (matches.length !== 1) return null;
   const verdict = matches[0] === 'NOGO' ? 'NO-GO' : matches[0];
-  // Safety: a structured GO alongside any stray NO-GO mention is ambiguous → MISSING (never a false GO).
   if (verdict === 'GO' && ANY_NOGO_RE.test(text.replace(TEAM_VERDICT_RE, ''))) return null;
   return { verdict };
 };
@@ -3203,18 +2584,7 @@ const mergeReleaseVerdicts = (verdicts, expectedTotal = 3) => {
 // [team-verdict-end]
 
 // [release-verdict-persistence-begin]
-// Issue #152 要件2 (UC-3/UC-4/UC-5): Release Review 3 lane verdict の自動永続化
-// 純関数群 (Task 2)。TeamCreate 経路・parallel() 経路の両方から利用される。
-// scope-free な marker block として抽出し、
-// .claude/workflows/tests/release-verdict-persistence.test.mjs が eval して単体検証する
-// (team-verdict / release-prompt と同一の TDD 規律)。
-// モデル: .omc/logs/run-1788474181/release-review-verdicts.md (PR #151 remediation
-// で確立した lane 表構造)。Date API 禁制 (workflow runtime) のため時刻は常に
-// runTimestamp 引数由来 — 新規に時刻を生成しない。
 
-// per-lane entry 正規化: StructuredOutput / TaskUpdate metadata 形式
-// {verdict, rationale} を永続化形式 {lane, verdict, rationale, reviewer} へ。
-// GO/NO-GO 以外 (欠損・malformed) は null = MISSING (fail-closed — fabrication しない)。
 const normalizeReleaseLaneEntry = (entry, lane, reviewer) => {
   if (!(entry && typeof entry === 'object')) return null;
   if (entry.verdict !== 'GO' && entry.verdict !== 'NO-GO') return null;
@@ -3226,8 +2596,6 @@ const normalizeReleaseLaneEntry = (entry, lane, reviewer) => {
   };
 };
 
-// release agent 報告から PR_NUMBER=<n> を抽出 (最終行優先 — 報告末尾の
-// 「最終行に必ず PR_NUMBER=<番号> を記載」指示と整合)。欠損時は null。
 const extractPrNumber = (releaseResult) => {
   if (typeof releaseResult !== 'string' || releaseResult.length === 0) return null;
   const lines = releaseResult.split(/\r?\n/);
@@ -3238,12 +2606,6 @@ const extractPrNumber = (releaseResult) => {
   return null;
 };
 
-// PR review COMMENT 本文 (UC-3): 冒頭機械可読 "VERDICT: GO|NO-GO" 行 + lane 名。
-// parseTeamVerdict (strict single-token 規約) との round-trip 互換が要件:
-//  - rationale 内の "VERDICT[:=]GO|NO-GO|NOGO" トークンは除去 (複数トークン化防止)
-//  - GO コメントでは反対 verdict 語 (NO-GO/NOGO) も除去 (ANY_NOGO_RE 誤検出 →
-//    fail-closed null 化の防止。tests が round-trip を pin)
-// verdict が GO/NO-GO 以外 (MISSING/malformed) は null = 投稿しない (fabrication なし)。
 const PR_VERDICT_TOKEN_RE = /\bVERDICT\s*[:=]\s*(?:NO-GO|NOGO|GO)\b/gi;
 const PR_OPPOSING_NOGO_RE = /\b(?:NO-GO|NOGO)\b/gi;
 const buildPrReviewComment = (lane, verdict, rationale) => {
@@ -3267,12 +2629,6 @@ const buildPrReviewComment = (lane, verdict, rationale) => {
   ].join('\n');
 };
 
-// .omc/logs/{runId}/release-review-verdicts.md 本文 (UC-3/UC-4)。
-// run-1788474181 の lane 表構造 (Lane | Reviewer agent | VERDICT | 記録時刻) に準拠。
-// 時刻は runTimestamp 由来のみ (Date API 禁制)。collected の malformed 要素は
-// MISSING 行として真実表示 (fabrication しない)。releaseDecision は
-// mergeReleaseVerdicts の出力 ({goCount, missingCount, releaseBlocked}) を想定するが、
-// 欠損時は collected から再計算する (自己申告に頼らない二重防御)。
 const buildReleaseVerdictsMd = (runId, runTimestamp, prNumber, collected, releaseDecision) => {
   const list = Array.isArray(collected) ? collected : [];
   const rows = [0, 1, 2].map((i) => {
@@ -3334,13 +2690,6 @@ const buildReleaseVerdictsMd = (runId, runTimestamp, prNumber, collected, releas
 };
 // [release-verdict-persistence-end]
 
-// TeamCreate-based Release Review (Issue #63 Task 3).
-// - reviewLens 3視点を teammate に割り当て、verdict を受信して 3/3 GO 判定する。
-//   verdict は TaskUpdate metadata (structured) を正経路とし、SendMessage 受信文は
-//   parseTeamVerdict (strict VERDICT: token) でのみ補助パースする。
-// - ハーネスが TeamCreate/SendMessage/TaskCreate/TaskList/TaskUpdate を公開していない
-//   場合（Task 1 probe 未実施のため未保証）は従来の parallel() + StructuredOutput
-//   経路へ fall-back する。両経路とも mergeReleaseVerdicts で同一 semantics を強制。
 const runReleaseReviewViaTeam = async () => {
   const has =
     typeof TeamCreate === 'function' &&
@@ -3352,7 +2701,7 @@ const runReleaseReviewViaTeam = async () => {
     log('Release Review (team): team primitives unavailable in this harness — falling back to parallel() path');
     return null;
   }
-  const teamName = `release-review-${runId}`; // Date API 禁制のため runId を使用
+  const teamName = `release-review-${runId}`;
   try {
     await TeamCreate({ team_name: teamName, description: `Release Review for issue #${ticket.issueNumber || 'none'}` });
   } catch (e) {
@@ -3375,7 +2724,6 @@ Ticket: ${ticket.title} (issue #${ticket.issueNumber || 'none'})
 加えて team-lead 宛 SendMessage で「VERDICT: GO」または「VERDICT: NO-GO」の
 1トークンを必ず送ること（監査ログ）。prose-only で完了した場合、review は
 MISSING とみなされ release 全体が block される。`;
-    // Spawn 3 reviewers (one per lens) as teammates.
     const spawnResult = await agent(
       `TEAM SPAWNER。team "${teamName}" に3名の reviewer teammate を追加せよ。
 各 teammate へ以下のプロンプトを割り当てること（Agent tool, team_name: "${teamName}"）:
@@ -3383,8 +2731,6 @@ ${reviewerLensSpawnerPrompt(reviewerPrompt)}
 報告: 追加した teammate 名のリスト。`,
       { phase: 'Release Review', label: 'release-review:team-spawn', model: 'sonnet' }
     );
-    // Poll TaskList until all 3 verdict tasks are completed (structured metadata) or timeout.
-    // Date API 禁制のため反復回数ベースの cap (15s interval × 80 = 20 min 相当)。
     const MAX_POLLS = 80;
     const rawCollected = new Array(3).fill(null);
     for (let poll = 0; poll < MAX_POLLS; poll++) {
@@ -3404,26 +2750,18 @@ ${reviewerLensSpawnerPrompt(reviewerPrompt)}
     }
     const merged = mergeReleaseVerdicts(rawCollected, 3);
     log(`Release Review (team ${teamName}): ${merged.goCount}/3 GO${merged.missingCount > 0 ? `, ${merged.missingCount} MISSING (block)` : ''} [spawn: ${String(spawnResult).slice(0, 200)}]`);
-    // Issue #152 Task 2: 実 per-lane verdict を merged と併せて返す (goCount 由来の
-    // verdicts 再構成は呼び出し元で廃止)。lane 名は reviewLens 先頭語由来。
-    // rawCollected (TaskUpdate metadata {verdict, rationale}) を永続化形式
-    // {lane, verdict, rationale, reviewer} へ正規化して collected として返す。
     const collected = rawCollected.map((entry, i) =>
       normalizeReleaseLaneEntry(entry, releaseLaneLabel(i), `reviewer-${i + 1} (team)`));
     return { collected, merged };
   } finally {
-    // TeamDelete requires team_name — argument-less call silently deletes nothing (Issue #63 Task 3).
-    try { await (typeof TeamDelete === 'function' ? TeamDelete({ team_name: teamName }) : null); } catch (_e) { /* best effort */ }
+    try { await (typeof TeamDelete === 'function' ? TeamDelete({ team_name: teamName }) : null); } catch (_e) { }
   }
 };
-// helper: build the spawner prompt body (kept outside runReleaseReviewViaTeam for clarity)
 function reviewerLensSpawnerPrompt(makePrompt) {
   return reviewLens.map((lens, i) => `--- teammate reviewer-${i + 1} へのプロンプト ---\n${makePrompt(lens, i)}`).join('\n');
 }
 
 let releaseReviewMerged = null;
-// Issue #152 Task 2: team 経路の実 per-lane verdict ({lane, verdict, rationale,
-// reviewer}[] — MISSING lane は null entry)。
 let releaseReviewCollected = null;
 try {
   const teamOutcome = await runReleaseReviewViaTeam();
@@ -3438,23 +2776,12 @@ try {
 }
 
 verdicts = [];
-// Fallback 経路の実 per-lane verdict (位置保持 — 失敗 lane は null = MISSING)。
 let fallbackLaneVerdicts = null;
 if (releaseReviewMerged) {
-  // Team path completed: real per-lane verdicts (GO/NO-GO ともに実データ —
-  // goCount 由来の fabrication は廃止, Issue #152 Task 2)。
   verdicts = releaseReviewCollected
     .filter(Boolean)
     .map((v) => ({ verdict: v.verdict, rationale: v.rationale }));
 } else {
-  // Fallback path: original parallel() + StructuredOutput (R6-hardened route)。
-  // Issue #152 Task 3 (per-lane verdict 真実化): 旧 master は parallel() 結果を
-  // [...verdicts, null, null, null].slice(0, 3) で mergeReleaseVerdicts へ渡して
-  // おり、結果自体は使用済みだった (= 常に全 MISSING ではなかった)。実害は
-  // (1) .filter(Boolean) による位置崩壊 — 失敗 lane が詰められ、生存 verdict の
-  // lane 帰属がズレる — と (2) team 経路の goCount fabrication — NO-GO lane が
-  // GO/null へ上書きされ verdict が消失する — の2点。位置を保持して (失敗 lane は
-  // null) normalizeReleaseLaneEntry で正規化し verdicts / releaseCollected へ反映。
   const fallbackRaw = await parallel(
     reviewLens.map((lens, i) => () =>
       agent(
@@ -3473,17 +2800,12 @@ prose-only で終了した場合、review は MISSING とみなされ release �
       )
     )
   );
-  // 位置保持の正規化 (失敗 lane は null = MISSING — fabrication しない)。
   fallbackLaneVerdicts = (Array.isArray(fallbackRaw) ? fallbackRaw : []).map((entry, i) =>
     normalizeReleaseLaneEntry(entry, releaseLaneLabel(i), `reviewer-${i + 1} (parallel)`));
   verdicts = fallbackLaneVerdicts
     .filter(Boolean)
     .map((v) => ({ verdict: v.verdict, rationale: v.rationale }));
 }
-// Unified semantics gate (both paths): 3/3 GO required; missing/NO-GO blocks.
-// Issue #152 Task 3: 入力は両経路の実 per-lane データ (releaseCollected) に統一 —
-// goCount からの verdicts 再構成 (fabrication) は廃止。MISSING lane は null entry
-// のまま mergeReleaseVerdicts が missingCount / releaseBlocked へ反映 (fail-closed)。
 const releaseCollected = (releaseReviewMerged && releaseReviewCollected)
   ? releaseReviewCollected
   : (fallbackLaneVerdicts || []);
@@ -3492,20 +2814,10 @@ goCount = releaseDecision.goCount;
 log(`Release Review: ${goCount}/3 GO`);
 allGo = releaseDecision.allGo;
 
-// ── Issue #152 (UC-3/UC-4/UC-5): verdict 永続化 — Phase 7 merge 判定の前・
-// if (allGo) の外 = NO-GO 時も実行 (blocked release の verdict も evidence)。──
-// PR review COMMENT 投稿 (UC-3) と .omc/logs/{runId}/release-review-verdicts.md
-// 永続化 (UC-4) はいずれも best-effort: 失敗しても merge 判定 (releaseDecision)
-// には影響しない。PR review 投稿失敗/スキップ時は永続ログが evidence の
-// fail-closed 保全先 (UC-5)。persister まで失敗した場合のみ return の
-// persistedLog を '未収集' で明示 (黙って収集済扱いにしない)。
 const prNumber = extractPrNumber(releaseResult);
 if (prNumber == null) {
   log('Issue #152: PR_NUMBER not extractable — PR review 投稿スキップ (persistence log only, UC-5)');
 } else {
-  // 各 lane のコメント本文を純関数で生成 (冒頭機械可読 VERDICT 行 = 契約)。
-  // MISSING lane (null entry) は buildPrReviewComment が null → 投稿しない
-  // (fabrication なし)。
   const commentBodies = releaseCollected
     .map((entry) => (entry ? buildPrReviewComment(entry.lane, entry.verdict, entry.rationale) : null))
     .filter(Boolean);
@@ -3530,7 +2842,6 @@ ${commentBodies.map((body) => `=== comment ===\n${body}`).join('\n')}
 報告: 各投稿の成否 + 最終行 "POSTED <n>"。`,
       { phase: 'Release Review', label: 'release-review:pr-comment-poster', model: 'sonnet' }
     );
-    // poster 報告の "POSTED <n>" を parse — 不明時は 0 (fail-closed)。
     const postedMatch = String(posterReport || '').match(/POSTED\s+(\d+)/);
     prReviewsPosted = postedMatch ? Number(postedMatch[1]) : 0;
   } catch (e) {
@@ -3539,9 +2850,6 @@ ${commentBodies.map((body) => `=== comment ===\n${body}`).join('\n')}
   }
 }
 try {
-  // EVIDENCE PERSISTER: verdict を .omc/logs/{runId}/release-review-verdicts.md へ。
-  // 時刻は runTimestamp 由来のみ (Date API 禁制 — buildReleaseVerdictsMd 契約)。
-  // PR_NUMBER 未抽出 (prNumber == null) 時も実行 — PR: unknown 行として真実記録。
   const verdictsMd = buildReleaseVerdictsMd(runId, runTimestamp, prNumber, releaseCollected, releaseDecision);
   const persisterResult = await agent(
     `EVIDENCE PERSISTER (Issue #152)。Release Review 3 lane verdict の永続化 (UC-4)。
@@ -3555,8 +2863,6 @@ ${verdictsMd}
 (機械可読 token — 呼び出し元が persistedLogOk をこの token で fail-closed parse する)。`,
     { phase: 'Release Review', label: 'release-review:evidence-persister', model: 'sonnet' }
   );
-  // persister 報告の "persisted" token を parse — 不明時は false のまま (fail-closed。
-  // poster の "POSTED <n>" parse と対称化)。throw 時は catch で false 維持。
   persistedLogOk = /persisted/i.test(String(persisterResult || ''));
 } catch (e) {
   log(`Issue #152: verdict 永続化 agent 失敗 (${e}) — persistedLog は '未収集' で報告 (UC-5 fail-closed)`);
@@ -3565,7 +2871,6 @@ ${verdictsMd}
 
 // ── Phase 7: Merge & Close ──
 phase('Merge & Close');
-// mergeResult は hoist 済み (P-006)。ここでは再宣言しない。
 if (allGo) {
   mergeResult = await agent(
     `RELEASE MANAGER (Step 3: merge + close)。3/3 GO 確認済み。
@@ -3582,7 +2887,7 @@ Execute:
 } else {
   log(`Merge skipped: review NO-GO あり (${goCount}/3 GO)`);
 }
-} // end if (!releaseAbort.aborted) — Issue #66 Task 3: Phase 6-7 skip on abort
+}
 
 // ── Phase 8: Self-Improve（局所最適化を避け、すべての問題の構造的根源を改善）──
 phase('Self-Improve');
@@ -3600,8 +2905,6 @@ Read .claude/org-feedback.md の全エントリ。
 );
 log('Self-Improve: 構造改善案を生成');
 
-// Issue #66 Task 3: return status enum — 'released' / 'review-rejected' に
-// 'empty-release-aborted' を追加。アボート時は Phase 6-7 をスキップしたままここへ到達。
 const finalStatus = releaseAbort.aborted ? RELEASE_ABORT_STATUS : (allGo ? 'released' : 'review-rejected');
 void finalStatus;
 return {
@@ -3611,8 +2914,6 @@ return {
   releaseResult,
   releaseAbort: releaseAbort.aborted ? {
     reason: releaseAbort.reason,
-    // 実装は失われたわけではない: R7 snapshot が無かった場合のみアボートするため、
-    // working tree / 既存 branch はそのまま残る（再開可能）。
     snapshotBranch,
     resumableInfo: {
       note: 'tracked 変更ゼロ(または除外パターンのみ)のため空リリースをアボートした。Phase 6-7 (Release Review / Merge) はスキップ済み。除外対象外の変更を加えるか、意図的に除外パターンをリリースする場合は手動で release-pipeline を実行すること。',
@@ -3623,8 +2924,6 @@ return {
   } : null,
   releaseReview: {
     verdicts, goCount,
-    // Issue #152 (UC-4/UC-5): verdict evidence の保全状態。persister 失敗時は
-    // '未収集' を明示 (fail-closed — 黙って収集済扱いにしない)。
     persistedLog: persistedLogOk ? `.omc/logs/${runId}/release-review-verdicts.md` : '未収集',
     prReviewsPosted,
   },

@@ -1,34 +1,3 @@
-// TDD tests for Issue #104 Task 1: dependency-readiness pure block.
-// feature-pipeline.js exposes a pure block between
-//   // [dependency-readiness-begin]  ...  // [dependency-readiness-end]
-// containing:
-//   taskDeclaredDeps(task)  — estimate task .dependencies を正規化
-//                             (非配列/null → deps なし扱い = trivially ready)。
-//   evaluateDependencyReadiness(task, depRecords)
-//                            — 依存タスクごとに collector evidence
-//                             (committed / reachable / greenEvidence) から
-//                             verdict を出し、全体 gate を fail-closed 判定。
-//                             verdict: 'ready' | 'dep-not-committed' |
-//                                      'dep-evidence-missing' | 'unknown-evidence'
-//   buildDependencyReadinessRationale(tasks, depRecords, treeHash, runId, runTimestamp)
-//                            — .omc/logs/{run-id}/dependency-readiness.json へ
-//                              永続する payload (recordedAt=runTimestamp, issue:104,
-//                              per-task per-dep verdicts, treeHash, classifier)。
-//
-// depRecords 契約 (collector evidence — T2 で wiring 時に固定):
-//   { [depTaskId]: {
-//       committed: boolean,     // dep の declared files に触る最終 commit SHA が存在
-//       reachable: boolean,     // branch-contains 相当 (現在ブランチから到達可能)
-//       greenEvidence: boolean, // .omc/logs/{run-id}/ 永続ログに green 記録あり
-//       commitSha?: string,     // 情報用 (verdict 判定には不要)
-//   } }
-//   UC-3 (Issue #97 'unknown' 規約): record 欠損・malformed・flag 非_boolean は
-//   一切 green 扱いにしない — 'unknown-evidence' で block。
-//
-// Wiring (Task 2, [dependency-readiness-wiring-begin/end]) の drift-guard テストは
-// 本ファイル末尾 (Task 2 wiring セクション) に追記済み。
-//
-// Run: node --test .claude/workflows/tests/dependency-readiness.test.mjs
 import { readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
@@ -59,8 +28,6 @@ test('markers exist and pure block evaluates', () => {
   assert.equal(typeof api.buildDependencyReadinessRationale, 'function');
 });
 
-// ── taskDeclaredDeps ──
-
 test('extracts declared dependency ids as string array', () => {
   const deps = loadApi().taskDeclaredDeps({ id: 'T2', dependencies: ['T1', 'T0'] });
   assert.deepEqual(deps, ['T1', 'T0']);
@@ -90,8 +57,6 @@ test('filters non-string and empty entries from dependencies array', () => {
   });
   assert.deepEqual(deps, ['T1', 'T2']);
 });
-
-// ── evaluateDependencyReadiness: UC-1 (正常系 — 全 dep ready → dispatchable) ──
 
 const READY_RECORD = {
   committed: true,
@@ -159,8 +124,6 @@ test('malformed task input (null / string / number) → trivially ready, taskId 
   }
 });
 
-// ── evaluateDependencyReadiness: UC-2 (working-tree-only dep → blocked) ──
-
 test('UC-2: dep committed=false (working-tree only) → blocked dep-not-committed', () => {
   const r = loadApi().evaluateDependencyReadiness(
     { id: 'T2', dependencies: ['T1'] },
@@ -188,7 +151,6 @@ test('UC-2: one ready dep + one working-tree-only dep → blocked (fail-closed a
     { T1: READY_RECORD, T2: { ...READY_RECORD, committed: false } },
   );
   assert.equal(r.ready, false);
-  // overall verdict = 最初の blocking dep の verdict (宣言順・決定論的)
   assert.equal(r.verdict, 'dep-not-committed');
   assert.deepEqual(
     r.deps.map((d) => d.verdict),
@@ -196,17 +158,14 @@ test('UC-2: one ready dep + one working-tree-only dep → blocked (fail-closed a
   );
 });
 
-// ── evaluateDependencyReadiness: UC-3 (evidence 欠損・malformed → fail-closed) ──
-
 test('UC-3: dep record absent from collector output → unknown-evidence, blocked (never green-by-default)', () => {
   const r = loadApi().evaluateDependencyReadiness(
     { id: 'T2', dependencies: ['T1'] },
-    {}, // collector が T1 について何も収集できていない
+    {},
   );
   assert.equal(r.ready, false, JSON.stringify(r));
   assert.equal(r.verdict, 'unknown-evidence');
   assert.equal(r.deps[0].verdict, 'unknown-evidence');
-  // unknown な flag 値は boolean を主張しない (Issue #97 'unknown' 規約)
   assert.equal(r.deps[0].committed, null);
   assert.equal(r.deps[0].reachable, null);
   assert.equal(r.deps[0].greenEvidence, null);
@@ -232,9 +191,9 @@ test('UC-3: non-boolean evidence flags → unknown-evidence (strict typing, fail
     { committed: 1, reachable: true, greenEvidence: true },
     { committed: true, reachable: undefined, greenEvidence: true },
     { committed: true, reachable: true, greenEvidence: 'true' },
-    { reachable: true, greenEvidence: true }, // committed 欠損
-    { committed: true, greenEvidence: true }, // reachable 欠損
-    { committed: true, reachable: true },     // greenEvidence 欠損
+    { reachable: true, greenEvidence: true },
+    { committed: true, greenEvidence: true },
+    { committed: true, reachable: true },
     {},
   ]) {
     const r = api.evaluateDependencyReadiness(
@@ -278,8 +237,6 @@ test('null / non-object depRecords with declared deps → all unknown-evidence, 
   }
 });
 
-// ── buildDependencyReadinessRationale (§2 evidence payload) ──
-
 const UC1_TASKS = [
   { id: 'T1', files: ['a.rs'] },
   { id: 'T2', files: ['b.rs'], dependencies: ['T1'] },
@@ -293,11 +250,10 @@ test('rationale carries issue/runId/runTimestamp/recordedAt/treeHash/classifier 
   assert.equal(r.issue, 104);
   assert.equal(r.runId, 'run-x');
   assert.equal(r.runTimestamp, '2026-09-04T00:00:00Z');
-  assert.equal(r.recordedAt, '2026-09-04T00:00:00Z'); // recordedAt = runTimestamp (Date API 禁制)
+  assert.equal(r.recordedAt, '2026-09-04T00:00:00Z');
   assert.equal(r.treeHash, 'deadbeef');
   assert.equal(typeof r.classifier, 'string');
   assert.ok(r.classifier.includes('evaluateDependencyReadiness'), r.classifier);
-  // per-task per-dep verdicts
   const t2 = r.tasks.find((t) => t.taskId === 'T2');
   assert.equal(t2.ready, true);
   assert.deepEqual(
@@ -387,8 +343,8 @@ test('rationale: mixed ready/blocked tasks aggregate fail-closed', () => {
   const r = loadApi().buildDependencyReadinessRationale(
     [
       { id: 'T1', files: ['a.rs'] },
-      { id: 'T2', files: ['b.rs'], dependencies: ['T1'] },   // ready
-      { id: 'T3', files: ['c.rs'], dependencies: ['T2'] },   // T2 record なし → unknown
+      { id: 'T2', files: ['b.rs'], dependencies: ['T1'] },
+      { id: 'T3', files: ['c.rs'], dependencies: ['T2'] },
     ],
     { T1: READY_RECORD },
     'h', 'run-x', 'ts',
@@ -398,30 +354,6 @@ test('rationale: mixed ready/blocked tasks aggregate fail-closed', () => {
   const t3 = r.tasks.find((t) => t.taskId === 'T3');
   assert.equal(t3.verdict, 'unknown-evidence');
 });
-
-// ═══════════════════════════════════════════════════════════════════
-// Task 2 wiring — [dependency-readiness-wiring-begin/end] drift-guard
-// ═══════════════════════════════════════════════════════════════════
-// Wiring contract (Issue #104 Task 2):
-//  (a) wiring block sits INSIDE runImplementTask, AFTER the lane-gate
-//      fail-closed check and BEFORE the engineer agent() dispatch
-//  (b) gated task (non-empty declared deps) → DEPENDENCY EVIDENCE
-//      COLLECTOR dispatched once (sonnet + StructuredOutput schema):
-//      git log -1 --format=%H per dep files / git branch -a --contains
-//      reachability / .omc/logs/{runId}/ + prior-run (run-metadata.json,
-//      Issue #97) green-evidence scan
-//  (c) collector output normalized by normalizeDependencyCollectorOutput
-//      (pure block) — unparseable/missing → null → unknown-evidence
-//      (AC-2/AC-3 fail-closed, never green-by-default)
-//  (d) blocked → haiku EVIDENCE PERSISTER to .omc/logs/${runId}/
-//      dependency-readiness.json + status 'dependency-not-ready' return
-//      WITHOUT dispatch (same per-task non-fatal pattern as 'lane-missing' /
-//      'human-gated')
-//  (e) ready or deps-empty → dispatch unchanged (buildEngineerPrompt path)
-//  (f) no regression: operator-gated skip / lane-gate / ownership-
-//      serialization dispatch ordering all intact
-//  (g) bidirectional drift-guard: pure block stays runtime-free; wiring
-//      block never redefines pure-block functions
 
 const WIRING_BEGIN = '// [dependency-readiness-wiring-begin]';
 const WIRING_END = '// [dependency-readiness-wiring-end]';
@@ -443,8 +375,6 @@ const loadWiringApi = () => {
     `${block}; return { normalizeDependencyCollectorOutput, DEPENDENCY_COLLECTOR_SCHEMA };`
   )();
 };
-
-// ── (a) wiring position ──
 
 test('wiring: markers exist; block nested inside ownership-serialization wiring region', () => {
   const wBegin = src.indexOf(WIRING_BEGIN);
@@ -469,8 +399,6 @@ test('wiring: sits after lane-gate fail-closed check, before engineer agent disp
   assert.ok(wEnd < dispatch, 'engineer dispatch follows dependency wiring');
 });
 
-// ── (b) collector dispatch ──
-
 test('wiring: collector agent dispatched once per gated task (sonnet + StructuredOutput schema)', () => {
   const w = wiringBlock();
   assert.match(w, /taskDeclaredDeps\(task\)/, 'declared deps resolved from task');
@@ -485,25 +413,17 @@ test('wiring: collector agent dispatched once per gated task (sonnet + Structure
   assert.match(w, /taskDeclaredFiles\(/, 'dep declared files sourced from estimate tasks');
 });
 
-// ── (c) gate call on normalized records, no bypass ──
-
 test('wiring: gate call on collector records; unparseable output is fail-closed, never bypassed', () => {
   const w = wiringBlock();
   assert.match(w, /normalizeDependencyCollectorOutput\(/, 'collector output normalized');
   assert.match(w, /evaluateDependencyReadiness\(task,/, 'gate evaluated on normalized records');
-  // 正確な条件式: blocked 分岐は必ず gate 結果に key される (if(false) 等の
-  // 弱体化ミューテーションを検出するための exact-match)。
   assert.match(w, /if \(!readiness\.ready\) \{/, 'blocked branch keyed on !readiness.ready');
   const bypass = w.match(/ready\s*=\s*true/);
   assert.equal(bypass, null, 'no hardcoded ready=true bypass of the gate');
 });
 
-// ── (d) blocked path: persist + status without dispatch ──
-
 test('wiring: blocked → persist rationale + status dependency-not-ready WITHOUT dispatch', () => {
   const w = wiringBlock();
-  // lastIndexOf: 最後の出現 = status リテラルを運ぶ return オブジェクト
-  // (先頭の出現は wiring コメント内の言及)。
   const blocked = w.lastIndexOf("'dependency-not-ready'");
   assert.ok(blocked > 0, "status 'dependency-not-ready' literal surfaced in wiring");
   assert.match(w, /dependency-readiness\.json/, 'persister file name dependency-readiness.json');
@@ -520,13 +440,9 @@ test('wiring: blocked return precedes wiring end (no dispatch on the blocked pat
   const w = wiringBlock();
   const blocked = w.indexOf("'dependency-not-ready'");
   const afterBlocked = w.slice(blocked);
-  // the wiring block itself must not contain the engineer dispatch — the
-  // dispatch lives after WIRING_END so the blocked early-return skips it
   assert.equal(/buildEngineerPrompt/.test(afterBlocked), false,
     'wiring block must not contain the engineer dispatch (blocked path returns early)');
 });
-
-// ── (e) ready / deps-empty → dispatch unchanged ──
 
 test('wiring: ready or deps-empty → dispatch unchanged (engineer agent call preserved)', () => {
   const wEnd = src.indexOf(WIRING_END);
@@ -536,8 +452,6 @@ test('wiring: ready or deps-empty → dispatch unchanged (engineer agent call pr
   assert.match(dispatchCtx, /model: 'sonnet'/, 'engineer dispatch keeps sonnet');
   assert.match(dispatchCtx, /engineer:\$\{task\.id\}/, 'engineer label unchanged');
 });
-
-// ── (f) no regression: operator-gated / lane-gate / ownership ordering ──
 
 test('no regression: operator-gated skip and lane-gate fail-closed precede dependency wiring', () => {
   const human = src.indexOf("status: 'human-gated'");
@@ -556,8 +470,6 @@ test('no regression: ownership-serialization dispatch ordering intact (groups lo
   assert.match(region, /resolveDispatchGroups/, 'group composition unchanged');
   assert.match(region, /'ownership-undeclared'/, 'ownership fail-closed status intact');
 });
-
-// ── (g) bidirectional drift-guard ──
 
 test('drift-guard: pure block stays runtime-free (no wiring smuggled into the pure block)', () => {
   const begin = src.indexOf(BEGIN);
@@ -578,8 +490,6 @@ test('drift-guard: wiring block does not redefine pure-block functions', () => {
     assert.equal(redefined, false, `${name} must not be redefined in wiring block`);
   }
 });
-
-// ── normalizeDependencyCollectorOutput behavior (collector output contract) ──
 
 test('normalizer: structured object with deps array → dep-keyed record map', () => {
   const out = loadWiringApi().normalizeDependencyCollectorOutput(
@@ -644,8 +554,6 @@ test('normalizer: collector omitting a declared dep leaves it absent → downstr
   assert.equal(r.verdict, 'unknown-evidence');
 });
 
-// ── composition: collector output → gate verdict (AC-2/AC-3 wiring semantics) ──
-
 test('composition: unparseable collector output + declared deps → gate blocks unknown-evidence (AC-2/AC-3)', () => {
   const records = loadWiringApi().normalizeDependencyCollectorOutput(
     'collector could not run',
@@ -678,8 +586,6 @@ test('composition: UC-1 collector output (all verified) → gate ready → dispa
   assert.equal(r.ready, true);
   assert.equal(r.verdict, 'ready');
 });
-
-// ── collector schema (StructuredOutput contract) ──
 
 test('schema: DEPENDENCY_COLLECTOR_SCHEMA requires per-dep boolean evidence fields', () => {
   const schema = loadWiringApi().DEPENDENCY_COLLECTOR_SCHEMA;

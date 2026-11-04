@@ -1,16 +1,6 @@
-// TDD tests for Issue #95 (P-008) T1: diff-kind classifier pure function.
-//
-// classifyDiffKind(changedFiles) -> 'docs-only' | 'code' | 'mixed'
-// - docs patterns: **/*.md, .claude/rules/**, docs/**
-// - empty input / null / non-array -> 'code' (fail-closed, UC-3)
-// - unknown/blank paths -> 'code' (fail-closed)
-//
-// Run: node --test .claude/workflows/tests/gate-diff-kind.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyDiffKind, isDocsPath } from '../gate-diff-kind.js';
-
-// ── docs-only ──
 
 test('markdown-only diff -> docs-only', () => {
   assert.equal(classifyDiffKind(['README.md', 'docs/guide.md']), 'docs-only');
@@ -35,8 +25,6 @@ test('nested .md anywhere -> docs-only', () => {
   assert.equal(classifyDiffKind(['crates/foo/README.md']), 'docs-only');
 });
 
-// ── code ──
-
 test('rust source diff -> code', () => {
   assert.equal(classifyDiffKind(['crates/foo/src/lib.rs']), 'code');
 });
@@ -45,8 +33,6 @@ test('config/build files -> code (fail-closed to code)', () => {
   assert.equal(classifyDiffKind(['Cargo.toml']), 'code');
   assert.equal(classifyDiffKind(['package.json', 'run.js']), 'code');
 });
-
-// ── mixed ──
 
 test('docs + code -> mixed', () => {
   assert.equal(
@@ -58,8 +44,6 @@ test('docs + code -> mixed', () => {
     'mixed',
   );
 });
-
-// ── fail-closed (UC-3) ──
 
 test('empty array -> code (fail-closed)', () => {
   assert.equal(classifyDiffKind([]), 'code');
@@ -80,8 +64,6 @@ test('unknown extension -> code (fail-closed)', () => {
   assert.equal(classifyDiffKind(['data/schema.json']), 'code');
   assert.equal(classifyDiffKind(['image.png']), 'code');
 });
-
-// ── isDocsPath helper ──
 
 test('isDocsPath basic contract', () => {
   assert.equal(isDocsPath('a/b.md'), true);

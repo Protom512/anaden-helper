@@ -1,7 +1,3 @@
-// TDD tests for Issue #91 Task 4: intent<->fact contrast check.
-// Pure module test — imports review-gate-contrast.js directly (ESM, node --test).
-//
-// Run: node --test .claude/workflows/tests/review-gate-contrast.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { testContrast, extractChangedPaths } from '../review-gate-contrast.js';
@@ -32,7 +28,7 @@ test('title-diff mismatch: no changed path overlaps any title keyword', () => {
     ticketTitle: 'feat(lexer): token span fix',
     designFiles: ['crates/tsql-lexer/src/lib.rs'],
     taskFiles: ['crates/tsql-lexer/src/token.rs'],
-    diff: CONSISTENT_DIFF, // only .claude/workflows/* changed
+    diff: CONSISTENT_DIFF,
   });
   assert.equal(r.consistent, false);
   assert.ok(r.mismatches.some((m) => m.kind === 'title-diff'), 'has title-diff mismatch');

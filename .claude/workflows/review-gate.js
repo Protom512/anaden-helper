@@ -1,19 +1,7 @@
-// R8 diff-inject (Issue #78): helpers ported from feature-pipeline.js
-// (L589-635) so reviewer prompts carry the actual working-tree diff instead of
-// only a changed-file name list. Cap values kept consistent with feature-pipeline
-// (28000/24000/30000). NOTE: inlined (not imported) because the Workflow runtime
-// rejects ESM imports — the script must be self-contained for scriptPath launch.
-// review-gate-diff.js remains the canonical helper module; keep values in sync
-// (guarded by tests/review-gate-diff-inject.test.mjs drift check).
 
-// ── inlined from review-gate-findings.js (canonical copy: .claude/workflows/review-gate-findings.js) ──
-// Issue #79: findings dedup/normalization before the Judge (QC Manager) phase.
-// Drift guarded by review-gate-findings.test.mjs.
 
-/** severity arbitration rank: higher wins on dedup merge */
 const SEVERITY_RANK = { critical: 4, high: 3, medium: 2, low: 1 };
 
-/** Normalize a file path for dedup keys (unify separators, strip leading ./). Fail-open. */
 function normalizeFilePath(file) {
   if (typeof file !== 'string') return '';
   return file
@@ -22,12 +10,6 @@ function normalizeFilePath(file) {
     .replace(/^(\.\\)+/, '');
 }
 
-/**
- * Deterministic dedup key for a finding: normalizedFile|line|category.
- * `line` undefined/missing (e.g. line-less maintainability findings) falls back
- * to 0 so line-less and line-0 findings of the same category on the same file
- * collide. Category is the problem-kind key (schema field, not description text).
- */
 function findingKey(finding) {
   const f = finding ?? {};
   const file = normalizeFilePath(f.file);
@@ -40,14 +22,6 @@ function severityRankOf(finding) {
   return SEVERITY_RANK[finding.severity] ?? 0;
 }
 
-/**
- * Merge multiple reviewers' findings into a deduped list keyed by findingKey.
- * - severity: max across reviewers (critical > high > medium > low)
- * - reviewers: all reviewer labels that reported the key
- * - description: all distinct descriptions joined with ' / '
- * - fix: first non-empty fix string
- * Reviews without findings / null input → [] (fail-open).
- */
 function mergeFindings(reviews) {
   const merged = new Map();
   for (const review of reviews ?? []) {
@@ -81,7 +55,6 @@ function mergeFindings(reviews) {
   return [...merged.values()];
 }
 
-// ── inlined from review-gate-diff.js (canonical copy: .claude/workflows/review-gate-diff.js) ──
 const DIFF_TRUNCATE_THRESHOLD = 28000;
 const DIFF_BODY_CAP = 24000;
 const TOTAL_DIFF_CAP = 30000;
@@ -97,14 +70,6 @@ const DIFF_FETCH_PROMPT = `Diff fetcher for the Review Gate (Issue #102 T4 — f
 8. \`git write-tree\` (tree hash — 「green だが実体は空」検出用)
 Concatenate with headers "=== STAT ===", "=== DIFF ===", "=== UNTRACKED ===", "=== COMMIT-RANGE STAT ===", "=== COMMIT-RANGE DIFF ===", "=== MERGE-BASE STAT ===", "=== MERGE-BASE DIFF ===", "=== TREE HASH ===". If the DIFF, COMMIT-RANGE DIFF or MERGE-BASE DIFF section exceeds ${DIFF_TRUNCATE_THRESHOLD} chars, emit full STAT + UNTRACKED + the other sections but only the FIRST ${DIFF_BODY_CAP} chars of the oversized DIFF section, then a line "[DIFF TRUNCATED]". Return ONLY the concatenated text.`;
 
-// ── inlined from review-gate-diff.js (Issue #91 T1 canonical copy, T3 inline) ──
-// buildCommitRangeDiffInput: working-tree diff が空 (commit 済み slice) の場合は
-// commit-range diff (HEAD~1..HEAD / merge-base) へ fallback し、tree hash を
-// evidence に添付する。両方空なら fail-closed — 空の diff を reviewer に注入して
-// vacuous GO させることはしない (pipeline-evidence-verification.md §2)。
-// Drift guarded by tests/review-gate-diff-inject.test.mjs (input/output pair comparison).
-
-/** Commit-range spec per variant. */
 const RANGE_VARIANTS = {
   'head-prev': 'HEAD~1..HEAD',
   'merge-base': 'origin/master...HEAD',
@@ -142,18 +107,6 @@ function buildCommitRangeDiffInput(input, options = {}) {
   return out;
 }
 
-// ── inlined from review-gate-diff.js (Issue #102 T1 canonical copy, T4 inline) ──
-// buildUnifiedGateDiff: 決定論的 fallback チェーン (単一情報源)。
-//   (a) working-tree STAT/DIFF 非空 → 'working-tree'
-//   (b) 空 → HEAD~1..HEAD commit-range
-//   (c) まだ空 → merge-base (origin/master...HEAD)
-//   (d) untracked のみ → 'intent-to-add' (file list + 個別 Read)
-//   (e) 全空 / 429 placeholder → 'fail-closed'
-// 429 placeholder 検出は exact match (trimmed section === sentinel) に限定 —
-// 正当な diff 内の部分一致で fail-closed にしない (estimate approval condition #1)。
-// Drift guarded by tests/review-gate-unified-diff.test.mjs (input/output pair comparison).
-
-/** Exact-match 429/placeholder sentinels. */
 const PLACEHOLDER_SENTINELS = ['429', 'rate limit', 'placeholder'];
 
 function isPlaceholderSection(text) {
@@ -169,7 +122,6 @@ function assembleSnapshot(stat, diff, header) {
   return (header ? `${header}\n` : '') + parts.join('\n');
 }
 
-/** Parse `git status --porcelain` untracked lines into file paths. */
 function parseUntrackedFiles(untracked) {
   return untracked
     .split('\n')
@@ -192,14 +144,11 @@ function buildUnifiedGateDiff(input) {
   const stat = str(input.stat);
   const diff = str(input.diff);
 
-  // (e) 429-placeholder detection — EXACT match only (see PLACEHOLDER_SENTINELS).
   if (isPlaceholderSection(stat) || isPlaceholderSection(diff)) {
     return fail('429-placeholder',
       'gate diff input is a 429/rate-limit placeholder string; must fail-closed instead of vacuous GO');
   }
 
-  // (a) working-tree mode — reuses buildCommitRangeDiffInput as the lower
-  // routine for the working-tree vs HEAD~1..HEAD decision.
   const headPrev = buildCommitRangeDiffInput({
     stat, diff, untracked: str(input.untracked),
     rangeStat: str(input.headPrevStat),
@@ -225,7 +174,6 @@ function buildUnifiedGateDiff(input) {
     };
   }
 
-  // (c) merge-base fallback (origin/master...HEAD).
   const mergeStat = str(input.mergeBaseStat);
   const mergeDiff = str(input.mergeBaseDiff);
   if (isPlaceholderSection(mergeStat) || isPlaceholderSection(mergeDiff)) {
@@ -246,7 +194,6 @@ function buildUnifiedGateDiff(input) {
     return out;
   }
 
-  // (d) untracked-only → intent-to-add mode (file list + individual Read).
   const untracked = str(input.untracked);
   if (untracked.trim() !== '') {
     const files = parseUntrackedFiles(untracked);
@@ -264,7 +211,6 @@ function buildUnifiedGateDiff(input) {
     };
   }
 
-  // (e) everything empty → fail-closed.
   return fail('all-empty',
     'working-tree, HEAD~1..HEAD and merge-base diffs are all empty and no untracked files exist');
 }
@@ -349,10 +295,6 @@ Return the analysis.`,
 );
 log(`Review scope: ${changes.changeType} (${changes.changedFiles.length} files)`);
 
-// ── Issue #78: R8 diff-inject (ported from feature-pipeline.js) ──
-// reviewer が changedFiles 名一覧のみでレビューすると指摘が PR diff 由来である
-// 保証がない。working-tree diff を1回取得して全 reviewer プロンプトへ埋め込み、
-// 「探索」を「提供済み diff の直接分析」へ変える (R8 パターンの移植)。
 const diffFetch = await agent(
   DIFF_FETCH_PROMPT,
   { label: 'review:fetch-diff', phase: 'Analyze' }
@@ -361,12 +303,6 @@ const GATE_DIFF_RAW = (typeof diffFetch === 'string'
   ? diffFetch
   : (diffFetch == null ? '' : JSON.stringify(diffFetch))
 ).slice(0, TOTAL_DIFF_CAP);
-// Issue #102 T4: working-tree → commit-range (HEAD~1..HEAD) → merge-base
-// (origin/master...HEAD) → untracked-only (intent-to-add) → fail-closed の
-// 決定論的 fallback チェーン (T1 buildUnifiedGateDiff inline copy)。
-// 空 diff・429 placeholder は reviewer に注入せず fail-closed — vacuous GO
-// させない (feature-pipeline.js gate と同一挙動のミラー適用,
-// pipeline-evidence-verification.md §2)。
 const gateDiff = buildUnifiedGateDiff({
   stat: extractDiffSection(GATE_DIFF_RAW, 'STAT'),
   diff: extractDiffSection(GATE_DIFF_RAW, 'DIFF'),
@@ -378,8 +314,6 @@ const gateDiff = buildUnifiedGateDiff({
   treeHash: extractDiffSection(GATE_DIFF_RAW, 'TREE HASH') || null,
 });
 if (gateDiff.mode === 'fail-closed') {
-  // fail-closed: 空 diff / 429 placeholder では reviewer に注入しない。
-  // NO-GO として即時終了。
   log(`Review Gate DIFF-EMPTY-FAILED: ${gateDiff.reason}${gateDiff.note ? ` note=${gateDiff.note}` : ''} — gate を短絡する (Issue #102 T4, fail-closed, basis=${gateDiff.basis})`);
   return {
     status: 'DIFF_EMPTY_FAILED',
@@ -396,9 +330,6 @@ if (gateDiff.mode === 'fail-closed') {
     },
   };
 }
-// intent-to-add mode: tracked diff は無いが untracked ファイルがある。
-// snapshot (untracked file list) を注入し、reviewer に個別 Read を促す
-// (vacuous GO 防止 — S2 修正案 UC-1 (d))。
 const REVIEW_DIFF_RAW = gateDiff.mode === 'intent-to-add'
   ? `=== UNTRACKED FILES (intent-to-add; Read each file individually) ===\n${gateDiff.untrackedFiles.join('\n')}`.slice(0, TOTAL_DIFF_CAP)
   : [
@@ -417,7 +348,6 @@ log(`Review Gate: injected diff context (${REVIEW_DIFF_SECTION.length} chars, mo
 phase('Review');
 const reviewers = [];
 
-// Always include Architecture reviewer for library changes
 if (changes.hasLibraryChanges || changes.changeType === 'standard') {
   reviewers.push(() => agent(
     withDiffContext(`Architecture Review (MAGI MELCHIOR):
@@ -467,7 +397,6 @@ Decision: GO or NO-GO`, REVIEW_DIFF_SECTION),
   ));
 }
 
-// Always include Functional reviewer for any changes
 reviewers.push(() => agent(
   withDiffContext(`Functional Review (MAGI BALTHASAR):
 
@@ -510,7 +439,6 @@ Decision: GO or NO-GO`, REVIEW_DIFF_SECTION),
   }}
 ));
 
-// Include Maintainability reviewer for library changes
 if (changes.hasLibraryChanges || changes.changeType === 'standard') {
   reviewers.push(() => agent(
     withDiffContext(`Maintainability Review (MAGI CASPER):
@@ -558,7 +486,6 @@ Decision: GO or NO-GO`, REVIEW_DIFF_SECTION),
 const reviews = await parallel(reviewers);
 const validReviews = reviews.filter(Boolean);
 
-// Issue #79: normalize + dedup findings across reviewers (severity max arbitration)
 const mergedFindings = mergeFindings(validReviews);
 log(`Findings after dedup: ${mergedFindings.length} (Issue #79)`);
 

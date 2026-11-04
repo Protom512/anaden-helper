@@ -1,5 +1,3 @@
-// Tests for the TeamCreate-based Commit Gate protocol (Issue #63 Task 2 — design).
-// TDD: written BEFORE the implementation. Run: node --test .claude/workflows/team-gate-protocol.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 
@@ -13,8 +11,6 @@ import {
   buildConsensusJudgePrompt,
   decideReviewRoute,
 } from './team-gate-protocol.js';
-
-// ── parseStructuredEnvelope: structured verdict transport (preferred path) ──
 
 test('parseStructuredEnvelope: valid JSON envelope yields structured verdict', () => {
   const text = 'review done\n```json\n{"verdict":"GO","dimension":"reliability","findings":[],"summary":"ok"}\n```';
@@ -35,8 +31,6 @@ test('parseStructuredEnvelope: returns null on non-JSON prose', () => {
 test('parseStructuredEnvelope: rejects JSON with invalid verdict enum', () => {
   assert.equal(parseStructuredEnvelope('{"verdict":"MAYBE","dimension":"x","findings":[],"summary":"s"}', 'x'), null);
 });
-
-// ── parseVerdictText: R6 lenient keyword fall-back (maintained on teammate protocol) ──
 
 test('parseVerdictText: VERDICT: GO prefix', () => {
   assert.equal(parseVerdictText('VERDICT: GO'), 'GO');
@@ -64,8 +58,6 @@ test('parseVerdictText: null on no keyword', () => {
   assert.equal(parseVerdictText('特筆すべき問題なし'), null);
 });
 
-// ── aggregateGateVerdicts: CONSENSUS JUDGE rules (team-lead side, deterministic pre-check) ──
-
 const rv = (verdict, dimension, extra = {}) => ({ verdict, dimension, findings: [], summary: '', ...extra });
 
 test('aggregate: all GO → GO', () => {
@@ -84,7 +76,7 @@ test('aggregate: any NO-GO → NO-GO', () => {
 });
 
 test('aggregate: missing dimension → incomplete (never synthesize from partial evidence)', () => {
-  const reviews = ['reliability','performance'].map((d) => rv('GO', d)); // only 2 of 6
+  const reviews = ['reliability','performance'].map((d) => rv('GO', d));
   const r = aggregateGateVerdicts(reviews, { expectedDimensions: 6 });
   assert.equal(r.preVerdict, 'INCOMPLETE');
   assert.ok(r.missing.length > 0);
@@ -95,10 +87,8 @@ test('aggregate: null entries count as missing, not as GO', () => {
   reviews.push(null);
   const r = aggregateGateVerdicts(reviews, { expectedDimensions: 6 });
   assert.equal(r.preVerdict, 'INCOMPLETE');
-  assert.deepEqual(r.missing, ['?']); // dimension unknown for null lane
+  assert.deepEqual(r.missing, ['?']);
 });
-
-// ── planRetry: R9 retry maintained on the teammate protocol ──
 
 test('planRetry: healthy first pass → no retry, no fallback', () => {
   const dims = ['reliability','performance'];
@@ -124,14 +114,12 @@ test('planRetry: null after retry → R6 text fallback lane', () => {
   assert.deepEqual(p.fallback, ['security']);
 });
 
-// ── teammate prompt builders: protocol invariants ──
-
 test('buildReviewerTeammatePrompt: contains structured envelope contract + R6 fallback + reply-to rule', () => {
   const p = buildReviewerTeammatePrompt({ key: 'security', dimensionPrompt: 'SECURITY REVIEWER...', teamLead: 'team-lead' });
   assert.match(p, /SendMessage/);
   assert.match(p, /team-lead/);
-  assert.match(p, /GATE_VERDICT_JSON/); // structured envelope must remain (CTO condition: no plain-text-only regression)
-  assert.match(p, /NO-GO|NOGO|CONDITIONAL|GO/); // R6 keyword fallback maintained
+  assert.match(p, /GATE_VERDICT_JSON/);
+  assert.match(p, /NO-GO|NOGO|CONDITIONAL|GO/);
 });
 
 test('buildConsensusJudgePrompt: deterministic pre-verdict + judge role on team-lead side', () => {
@@ -140,8 +128,6 @@ test('buildConsensusJudgePrompt: deterministic pre-verdict + judge role on team-
   assert.match(p, /CONSENSUS JUDGE/);
   assert.match(p, /"preVerdict":"GO"/);
 });
-
-// ── decideReviewRoute: team vs fall-back routing after primitive check (Issue #63 Task 6) ──
 
 test('decideReviewRoute: full primitives → team route', () => {
   const r = decideReviewRoute({
