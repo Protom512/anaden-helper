@@ -207,6 +207,7 @@ enum Commands {
     /// **終了コード契約(run とは異なる・純加算)**:
     /// - AlreadyOpen / Launched => exit 0(CI gate success)
     /// - Timeout                => exit 2(CI gate **失敗**。ソフト失敗)
+    /// - NotReady(splash-hang)  => exit 3(CI gate **失敗**。プロセス生存だが not-ready・Issue #275)
     /// - ハードエラー(spawn / OpenProcess 失敗) => exit 1
     ///
     /// 注意: `anaden run` は Timeout を soft warn として **継続** するが、本サブコマンドは
@@ -216,17 +217,25 @@ enum Commands {
         /// `run` の `--ensure-open-wait-secs`(既定 30) と同等。
         #[arg(long, default_value_t = 30)]
         wait_secs: u64,
+        /// 起動後の readiness probe(フレーム不変 + TCP ソケット 0 = splash-hang 検出)を
+        /// 有効化する(Issue #275)。not-ready 検出で exit 3。無効化する場合は
+        /// `--readiness false`(プロセス生存のみの旧挙動)。
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        readiness: bool,
     },
     /// ゲームを無条件で起動する(AlreadyOpen チェックをスキップ、Issue #21)。
     ///
     /// `ensure-open` との違い: 起動済みかに関わらず常に launch を1回実行し、生存を
     /// 確認する。リカバリ用途(プロセス異常時の強制再起動)向け。終了コード契約は
-    /// `ensure-open` に同じ(Launched=0 / Timeout=2 / ハードエラー=1)。
+    /// `ensure-open` に同じ(Launched=0 / Timeout=2 / NotReady=3 / ハードエラー=1)。
     Launch {
         /// 起動/生存確認待ちのタイムアウト(秒)。Timeout 到達で exit 2。
         /// `run` の `--ensure-open-wait-secs`(既定 30) と同等。
         #[arg(long, default_value_t = 30)]
         wait_secs: u64,
+        /// 起動後の readiness probe(Issue #275)。`ensure-open` の `--readiness` に同じ。
+        #[arg(long, default_value_t = true, action = clap::ArgAction::Set)]
+        readiness: bool,
     },
 }
 
@@ -608,6 +617,12 @@ async fn run_with_windows(
                 "ゲーム起動がタイムアウト({}s)。そのまま続行するが初回 NoMatch が増える可能性あり",
                 ensure_open_wait_secs
             ),
+            // run パスは現状 readiness probe を挟まないため到達しない (standalone
+            // ensure-open/launch 専用の NotReady)。run は NoMatch リカバリが
+            // hang 押し込みを担うため、soft warn 継続の契約に合わせる (Issue #275)。
+            anaden_device::EnsureOutcome::NotReady => warn!(
+                "ゲームは生存しているが readiness probe が splash-hang を検出。そのまま続行するが NoMatch リカバリが発火する可能性あり"
+            ),
         }
     }
 
@@ -877,6 +892,7 @@ where
 async fn run_ensure_open_or_launch(
     wait_secs: u64,
     force_launch: bool,
+    readiness: bool,
 ) -> Result<anaden_device::EnsureOutcome> {
     let wait = Duration::from_secs(wait_secs);
     // force_launch 時の先行 launch は起動済みかに関わらず常に 1 回行う(launch サブコマンド専用)。
@@ -884,7 +900,55 @@ async fn run_ensure_open_or_launch(
     if force_launch {
         force_launch_app().await?;
     }
-    ensure_open_outcome(wait).await
+    let outcome = ensure_open_outcome(wait).await?;
+    if readiness {
+        return apply_readiness_probe(outcome).await;
+    }
+    Ok(outcome)
+}
+
+/// 起動保証後の readiness probe 適用(Issue #275)。
+///
+/// 生存確認済み(AlreadyOpen / Launched)の outcome に対してのみ splash-hang 検出を
+/// 行う。Timeout は起動未確認のため probe 対象外(そのまま返す)。probe のサンプルが
+/// 「フレーム不変 + TCP ソケット 0」なら [`EnsureOutcome::NotReady`] へ差し替え、
+/// exit_standalone が `EXIT_NOT_READY`(3) で fail-closed する。probe 自体の失敗は
+/// `Err`(ハードエラー exit 1)で伝播する。
+#[cfg(windows)]
+async fn apply_readiness_probe(
+    outcome: anaden_device::EnsureOutcome,
+) -> Result<anaden_device::EnsureOutcome> {
+    use anaden_device::ReadinessVerdict;
+
+    if !matches!(
+        outcome,
+        anaden_device::EnsureOutcome::AlreadyOpen | anaden_device::EnsureOutcome::Launched
+    ) {
+        return Ok(outcome);
+    }
+    let samples = anaden_device::probe_readiness(
+        anaden_device::DEFAULT_PROCESS_NAME,
+        anaden_device::ReadinessProbeConfig::default(),
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("readiness probe に失敗: {e}"))?;
+    if anaden_device::classify_readiness(&samples) == ReadinessVerdict::SplashHang {
+        warn!(
+            "readiness probe: フレーム不変かつ TCP ソケット 0 = splash-hang (not-ready)。exit 3 で fail-closed"
+        );
+        return Ok(anaden_device::EnsureOutcome::NotReady);
+    }
+    Ok(outcome)
+}
+
+/// `apply_readiness_probe` の非 Windows ビルド向けフォールバック(コンパイルエラー回避)。
+#[cfg(not(windows))]
+async fn apply_readiness_probe(
+    outcome: anaden_device::EnsureOutcome,
+) -> Result<anaden_device::EnsureOutcome> {
+    anyhow::bail!(
+        "このバイナリは Windows 向けではないため readiness probe (Win32) を使用できません"
+    )
 }
 
 /// スタンドアロン(`ensure-open`/`launch`)サブコマンドの成果物→終了コード適用(唯一の exit 点)。
@@ -1169,14 +1233,21 @@ async fn main() -> Result<()> {
             }
             Ok(())
         }
-        Commands::EnsureOpen { wait_secs } => {
-            // ensure-open: 起動状態確認＋必要なら起動。Timeout は CI gate 失敗(exit 2)。
+        Commands::EnsureOpen {
+            wait_secs,
+            readiness,
+        } => {
+            // ensure-open: 起動状態確認＋必要なら起動。Timeout は CI gate 失敗(exit 2)、
+            // splash-hang (not-ready) は exit 3 (Issue #275)。
             // Ok/Err 双方の終了コードを `exit_standalone`(唯一の exit 点)で適用する。
-            exit_standalone(run_ensure_open_or_launch(wait_secs, false).await);
+            exit_standalone(run_ensure_open_or_launch(wait_secs, false, readiness).await);
         }
-        Commands::Launch { wait_secs } => {
+        Commands::Launch {
+            wait_secs,
+            readiness,
+        } => {
             // launch: 無条件起動(AlreadyOpen チェックなし)。終了コード契約は ensure-open に同じ。
-            exit_standalone(run_ensure_open_or_launch(wait_secs, true).await);
+            exit_standalone(run_ensure_open_or_launch(wait_secs, true, readiness).await);
         }
         Commands::Routine {
             routine_path,

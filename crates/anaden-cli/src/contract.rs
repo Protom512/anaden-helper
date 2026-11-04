@@ -26,12 +26,19 @@ pub const EXIT_HARDCERROR: i32 = 1;
 /// `ensure-open` / `launch` では CI gate が失敗と見なせるよう非ゼロとする。
 pub const EXIT_TIMEOUT: i32 = 2;
 
+/// プロセスは生存しているが readiness probe が splash-hang (not-ready) を検出した
+/// (フレーム不変 + TCP ソケット 0) の終了コード (Issue #275)。
+/// Timeout(2) = 起動未確認、hard error(1) = spawn/API 失敗、と区別される
+/// 「起動したが実体は hang」の第 4 状態。CI gate は exit 3 を fail-closed 扱いする。
+pub const EXIT_NOT_READY: i32 = 3;
+
 /// [`EnsureOutcome`] を終了コードへ射影する純粋関数。
 ///
-/// 契約(Issue #21 AC):
+/// 契約(Issue #21 AC / Issue #275 拡張):
 ///   - [`EnsureOutcome::AlreadyOpen`] → [`EXIT_ALREADY_OR_LAUNCHED`] = 0
 ///   - [`EnsureOutcome::Launched`]    → [`EXIT_ALREADY_OR_LAUNCHED`] = 0
 ///   - [`EnsureOutcome::Timeout`]     → [`EXIT_TIMEOUT`] = 2
+///   - [`EnsureOutcome::NotReady`]    → [`EXIT_NOT_READY`] = 3 (プロセス生存だが splash-hang)
 ///
 /// ハードエラー(spawn / OpenProcess 失敗)の終了コード
 /// ([`EXIT_HARDCERROR`] = 1)は、呼び出し側が `Err` を受け取った時に使う。
@@ -42,6 +49,7 @@ pub fn ensure_open_exit_code(outcome: &EnsureOutcome) -> i32 {
         EnsureOutcome::AlreadyOpen => EXIT_ALREADY_OR_LAUNCHED,
         EnsureOutcome::Launched => EXIT_ALREADY_OR_LAUNCHED,
         EnsureOutcome::Timeout => EXIT_TIMEOUT,
+        EnsureOutcome::NotReady => EXIT_NOT_READY,
     }
 }
 
@@ -71,6 +79,9 @@ pub fn ensure_outcome_label(outcome: &EnsureOutcome) -> &'static str {
         EnsureOutcome::AlreadyOpen => "起動不要(既に起動中)",
         EnsureOutcome::Launched => "起動し生存を確認",
         EnsureOutcome::Timeout => "起動タイムアウト",
+        EnsureOutcome::NotReady => {
+            "起動したが splash-hang(not-ready: フレーム不変・TCP ソケット 0)を検出"
+        }
     }
 }
 
