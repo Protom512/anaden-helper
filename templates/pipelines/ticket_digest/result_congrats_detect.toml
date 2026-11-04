@@ -1,12 +1,7 @@
 name      = "ResultCongratsDetectPc"
 state     = "ad_result_pc"
 algorithm = "ccoeff"
-# ticket_digest v0 — 戦闘勝利/スキップクリアの報酬画面 Congratulations バナー。
-# リザルト多段 OK 連打 (run_once_verified) の入口検出アンカー。
 template  = "result_congrats.png"
-# 検出 ROI: Congratulations バナー左中段の高コントラスト部 (240x40) を囲む
-# スラック窓 (±15px)。光るテキストは全面拾いより部分拾いの方が conf が立つ
-# (実測: 全面 620x55 → 0.8854 / 240x40 → 0.95+。Issue #208 の version_label 教訓と同系)。
 roi       = [345, 80, 270, 70]
 threshold = 0.85
 action    = { type = "do_nothing" }

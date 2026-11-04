@@ -2,13 +2,5 @@ name      = "MenuPcBag"
 state     = "menu_pc"
 algorithm = "sse"
 template  = "bag.png"
-# PC版(Windows 16:9) menu シーン参照テンプレ (Task #28 / Issue #6 / 親 Issue #5)。
-# Issue #268: 3.17.50 メニューバーUI変更への追従 (導出手法・座標系は party.toml 参照)。
-# bag = 左から5タイル目 (ラベル「持ち物」— 4x ズームクロップで判読。旧バーでも bag=持ち物)。
-# 4タイル目「夢見」は旧7対象に相当するタスクがないため本バンクでは未アンカー。
-#
-# 生成コマンド (絶対命令: 生成コマンドをログに残す):
-#   resize_crop_template e5_menu_now.png templates/scenes/menu_pc/bag.png \
-#       --letterbox 10 --roi 474,567,92,93
 roi       = [474, 567, 92, 93]
 threshold = 0.95

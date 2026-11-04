@@ -2,13 +2,5 @@ name      = "MenuPcRecord"
 state     = "menu_pc"
 algorithm = "sse"
 template  = "record.png"
-# PC版(Windows 16:9) menu シーン参照テンプレ (Task #28 / Issue #6 / 親 Issue #5)。
-# Issue #268: 3.17.50 メニューバーUI変更への追従 (導出手法・座標系は party.toml 参照)。
-# record = 左から6タイル目 (ラベル「記録」— r2 session §3 の VLM 位置指定読 x=338 と
-# 4x ズームクロップ判読の両方で確認。赤バッジは隣タイル「お知らせ」由来で本タイル外)。
-#
-# 生成コマンド (絶対命令: 生成コマンドをログに残す):
-#   resize_crop_template e5_menu_now.png templates/scenes/menu_pc/record.png \
-#       --letterbox 10 --roi 582,567,92,93
 roi       = [582, 567, 92, 93]
 threshold = 0.95

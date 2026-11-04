@@ -2,13 +2,5 @@ name      = "MenuPcGrasta"
 state     = "menu_pc"
 algorithm = "sse"
 template  = "grasta.png"
-# PC版(Windows 16:9) menu シーン参照テンプレ (Task #28 / Issue #6 / 親 Issue #5)。
-# Issue #268: 3.17.50 メニューバーUI変更への追従 (導出手法・座標系は party.toml 参照)。
-# grasta = 左から2タイル目 (ラベル「グラスタ」— 4x/6x ズームクロップで判読。
-# 旧バーの4番目から2番目へ移動)。
-#
-# 生成コマンド (絶対命令: 生成コマンドをログに残す):
-#   resize_crop_template e5_menu_now.png templates/scenes/menu_pc/grasta.png \
-#       --letterbox 10 --roi 146,567,92,93
 roi       = [146, 567, 92, 93]
 threshold = 0.95

@@ -1,21 +1,7 @@
-# アナダン 天冥値データ — ダンジョン定義 + クリア時天冥アップキャラ対応
-# source: https://altema.jp/anaden/anotherdungeon (2026-11-01 時点)
-#
-# 用途:
-#   - ticket_digest の計画生成 (上げたいキャラ → 周回するダンジョンを逆引き)
-#   - `anaden-tool plan-tenmei <キャラ名>` (新規ツール、未実装) の入力データ
-#
-# 備考:
-#   - 天冥アップは「主人公・ストーリー加入 (配布) キャラ」対象。確率は低いが
-#     クリア報酬枠の天冥値合計を上げるほどアップ機会が増える。
-#   - alignment: ten=天 / mei=冥 / both=天冥両方 / all_dist=全配布キャラ
-#   - key: H=グリーン1, VH=レッド1, iseki=グリーン2
-#   - skip_target: ねこの手特急券のスキップ対象 (Ver3.10.10 時点)
 
 version = 1
 source = "https://altema.jp/anaden/anotherdungeon"
 
-# --- 報酬枠解放に必要な天冥値 ---
 
 [reward_slots]
 vh = [24, 60, 120]
@@ -24,7 +10,6 @@ iseki_vh = [48, 120, 180]
 iseki_hard = [0, 60, 120]
 gallerea = [24, 60, 120, 240, 360]
 
-# --- ダンジョン一覧 (特急券スキップ対象を中心) ---
 
 [[dungeon]]
 name = "月影の森"
@@ -168,7 +153,7 @@ alignment = { H = "both", VH = "both" }
 
 [[dungeon]]
 name = "ミグランス地下迷宮"
-category = "side"   # 外伝
+category = "side"
 skip_target = true
 key = { H = "green", VH = "red" }
 alignment = { H = "both", VH = "both" }
@@ -245,7 +230,7 @@ alignment = { H = "both", VH = "both" }
 
 [[dungeon]]
 name = "古代ゼルベリヤ雷"
-category = "gaiten"   # 外典
+category = "gaiten"
 skip_target = true
 key = { H = "green", VH = "red" }
 alignment = { H = "both", VH = "both" }
@@ -266,7 +251,7 @@ alignment = { H = "both", VH = "both" }
 
 [[dungeon]]
 name = "異夢・時の塔"
-category = "cymbel"   # 協奏
+category = "cymbel"
 skip_target = true
 key = { H = "green", VH = "red" }
 alignment = { H = "both", VH = "both" }
@@ -281,34 +266,31 @@ alignment = { H = "both", VH = "both" }
 [[dungeon]]
 name = "異境・バルオキー地方"
 category = "iseki"
-skip_target = true          # 1〜3層のみ (4層は対象外)
+skip_target = true
 key = { H = "green2", VH = "green2" }
-alignment = { H = "mei", VH = "mei" }   # 4層ボス報酬枠は冥
+alignment = { H = "mei", VH = "mei" }
 
 [[dungeon]]
 name = "異境・ラトル地方"
 category = "iseki"
 skip_target = true
 key = { H = "green2", VH = "green2" }
-alignment = { H = "ten", VH = "ten" }   # 4層ボス報酬枠は天
+alignment = { H = "ten", VH = "ten" }
 
 [[dungeon]]
 name = "異境・エルジオン地方"
 category = "iseki"
 skip_target = true
 key = { H = "green2", VH = "green2" }
-alignment = { H = "ten", VH = "ten" }   # 4層ボス報酬枠は天
+alignment = { H = "ten", VH = "ten" }
 
-# スキップ対象外だが天冥上げで言及されるもの (参考)
 [[dungeon]]
 name = "トト・シアターワールド"
-category = "hiseki"        # 秘境
+category = "hiseki"
 skip_target = false
 key = {}
-alignment = { VH = "all_dist" }   # 全配布キャラの天冥がアップ
+alignment = { VH = "all_dist" }
 
-# --- クリア時 天冥アップキャラ対応 (キャラ -> ダンジョン) ---
-# 主人公・ストーリー加入 (配布) キャラ対象。低確率でクリア時にアップ。
 
 [[char]]
 name = "アルド"
@@ -570,8 +552,6 @@ name = "カムラナージュ"
 alignment = "mei"
 dungeons = ["エントラーナ"]
 
-# NOTE: アルテマ表では冥側に「サイラス＝欲深き者の旅路」の記載あり。
-# 天側「サイラス＝人喰い沼」との整合は実機/wiki 再確認が必要 (スタイル違いの可能性)。
 [[char]]
 name = "サイラス(冥側表記・要確認)"
 alignment = "mei"

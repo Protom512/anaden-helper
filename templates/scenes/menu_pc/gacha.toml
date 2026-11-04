@@ -2,22 +2,5 @@ name      = "MenuPcGacha"
 state     = "menu_pc"
 algorithm = "sse"
 template  = "gacha.png"
-# PC版(Windows 16:9) menu シーン参照テンプレ (Task #28 / Issue #6 / 親 Issue #5)。
-# pc-scoped 名前空間(scenes/menu_pc/)。20:9 既存 templates/scenes/menu/gacha.toml
-# (旧 schema, 20:9 座標) は共存(非破壊)。
-#
-# 座標系: **RAW 1258x708 ピクセル空間**(PC版 GetClientRect 実測)。ScreenScaler は常に1280幅基準へリサイズ（早期return廃止）。
-#
-# ROI 導出: menu_pc_probe.png (旧UI) の下部アイコンバー右クラスタ7アイコンのうち
-# gacha(左から5番目)。
-#
-# ⚠️ Issue #268 (3.17.50 UI変更): 新メニューバー (全12タイル: パーティ/グラスタ/ボード/夢見/
-# 持ち物/記録/お知らせ/その他/ショップ/ねこ/食事/ボックス、スクロール矢印なし) に
-# 「ガチャ」タイルは存在しない。旧ガチャタイルは 3.17.50 でバーから削除されたと判断し、
-# 本アンカーは旧UI由来のまま意図的に保持している (test は 7 TOML 構成を要求するため
-# 削除せず、live で代替先 — ショップ内ガチャ等 — を確認して再構築するまで stale)。
-# menu_pc_probe.png は 3.17.50 キャプチャへ差し替え済みのため、pc-e2e ゲート
-# (pc_menu_pc_templates_match_real_capture_above_threshold) は本タスクのみ失敗する
-# 既知の状態。
 roi       = [998, 579, 68, 73]
 threshold = 0.95

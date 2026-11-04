@@ -11,8 +11,6 @@ path = "src/main.rs"
 [[bench]]
 name = "log_snapshot_bench"
 harness = false
-# cargo test (nextest 未環境のフォールバック) でベンチ本体まで走らないよう
-# 明示的に test = false とする (criterion は cargo bench 経由のみ実行)。
 test = false
 
 [dependencies]
@@ -23,7 +21,7 @@ anaden-strategies.workspace = true
 anaden-vision.workspace = true
 anyhow.workspace = true
 eframe = "0.34.3"
-egui = "0.34"          # eframe 0.34.3 と同系バージョン (re-export ではなく直接依存)
+egui = "0.34"
 image.workspace = true
 rfd = "0.17.2"
 serde.workspace = true
