@@ -117,12 +117,8 @@ pub fn spawn_output_readers(
 mod tests {
     use super::*;
 
-    // ---- spawn_output_readers (stdout/stderr 並行 drain) ----
-
     #[test]
     fn output_readers_stream_both_stdout_and_stderr() {
-        // stdout と stderr の両方へ書く子。逐次読み取りなら stderr が
-        // パイプ容量で詰まる可能性があるが、並行 drain で両方届く。
         let cmd = if cfg!(windows) {
             let mut c = std::process::Command::new("cmd");
             c.args(["/C", "echo out-line & echo err-line 1>&2"]);
@@ -161,11 +157,8 @@ mod tests {
         );
     }
 
-    // ---- spawn_stdout_reader (echo プロセスで統合確認) ----
-
     #[test]
     fn stdout_reader_streams_lines_and_exit() {
-        // Windows は cmd /c、それ以外は sh。どちらも2行出力して終了する。
         let cmd = if cfg!(windows) {
             let mut c = std::process::Command::new("cmd");
             c.args(["/C", "echo one & echo two"]);

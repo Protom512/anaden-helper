@@ -95,11 +95,8 @@ pub fn check_windows_process(_exe: &str) -> ConnectionStatus {
 mod tests {
     use super::*;
 
-    // ---- Issue #139 T3: 接続状態可視化 ----
-
     #[test]
     fn connection_state_badges_are_ascii_no_tofu() {
-        // バッジ文字列は Unicode 絵文字を含まない (豆腐排除)。
         for (state, expected) in [
             (ConnectionState::Unknown, "[?] 接続未確認"),
             (ConnectionState::Checking, "[..] 接続確認中"),
@@ -107,7 +104,6 @@ mod tests {
             (ConnectionState::Disconnected, "[NG] 未接続"),
         ] {
             assert_eq!(state.badge(), expected);
-            // 絵文字ブロック (U+1F300 以上) を含まないことを機械検証。
             assert!(
                 state.badge().chars().all(|c| c < '\u{1F300}'),
                 "badge must not contain emoji: {}",

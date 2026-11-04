@@ -81,9 +81,6 @@ fn from_base(p: (f32, f32), dst: (u32, u32)) -> Option<(u32, u32)> {
 mod tests {
     use super::*;
 
-    // ---- ウィジェット ↔ フレームピクセル ----
-
-    /// 恒等: 描画矩形 == フレーム寸法なら座標も一致する。
     #[test]
     fn widget_to_frame_identity_when_rect_matches_frame() {
         let rect = ViewRect {
@@ -99,7 +96,6 @@ mod tests {
         );
     }
 
-    /// スケール: 2 倍のキャンバスでは座標が半分になる。
     #[test]
     fn widget_to_frame_scales_on_larger_canvas() {
         let rect = ViewRect {
@@ -114,7 +110,6 @@ mod tests {
         );
     }
 
-    /// 端点: 矩形右下端はフレーム最終有効ピクセル (w-1, h-1) へクランプされる。
     #[test]
     fn widget_to_frame_endpoints_map_to_valid_pixels() {
         let rect = ViewRect {
@@ -123,7 +118,6 @@ mod tests {
             width: 640.0,
             height: 360.0,
         };
-        // 右下端 (境界含む) → (1279, 719)。フレーム幅そのもの (1280) にはならない。
         assert_eq!(
             widget_to_frame((640.0, 360.0), rect, (1280, 720)),
             Some((1279, 719))
@@ -131,7 +125,6 @@ mod tests {
         assert_eq!(widget_to_frame((0.0, 0.0), rect, (1280, 720)), Some((0, 0)));
     }
 
-    /// 矩形外の点は `None`。
     #[test]
     fn widget_to_frame_outside_rect_is_none() {
         let rect = ViewRect {
@@ -146,7 +139,6 @@ mod tests {
         assert_eq!(widget_to_frame((400.0, 820.1), rect, (300, 400)), None);
     }
 
-    /// オフセット付き・非正方形キャンバスでも軸ごとに正しくスケールする。
     #[test]
     fn widget_to_frame_handles_offset_and_portrait_canvas() {
         let rect = ViewRect {
@@ -155,19 +147,16 @@ mod tests {
             width: 600.0,
             height: 800.0,
         };
-        // 矩形中心 (10+300, 20+400) → フレーム (150, 200)。
         assert_eq!(
             widget_to_frame((310.0, 420.0), rect, (300, 400)),
             Some((150, 200))
         );
-        // 4 分割点: 縦横独立にスケールすることを確認。
         assert_eq!(
             widget_to_frame((160.0, 220.0), rect, (300, 400)),
             Some((75, 100))
         );
     }
 
-    /// 往復: ウィジェット → フレーム → ウィジェットは元の点 (半ピクセル精度内) に戻る。
     #[test]
     fn widget_frame_roundtrip_stays_within_half_pixel() {
         let rect = ViewRect {
@@ -195,7 +184,6 @@ mod tests {
         }
     }
 
-    /// 退化寸法 (フレーム 0 / 矩形 0) は `None`。
     #[test]
     fn widget_to_frame_degenerate_dims_are_none() {
         let rect = ViewRect {
@@ -215,9 +203,6 @@ mod tests {
         assert_eq!(widget_to_frame((0.0, 0.0), zero, (100, 100)), None);
     }
 
-    // ---- フレームピクセル ↔ 正規化空間 ----
-
-    /// 正規化済みフレーム (幅 1280) では正規化空間へ恒等。
     #[test]
     fn frame_to_normalized_identity_at_base_width() {
         assert_eq!(
@@ -226,22 +211,18 @@ mod tests {
         );
     }
 
-    /// 2 倍幅フレーム (2560) では座標が半分の正規化値になる。
     #[test]
     fn frame_to_normalized_scales_by_width_ratio() {
         assert_eq!(
             frame_to_normalized((1280, 720), (2560, 1440)),
             Some((640.0, 360.0))
         );
-        // PC 版実測 1258x708 → 1280 基準 (ScreenScaler と同一の単一ファクタ:
-        // 縦横とも 1280/1258 倍 — 720/708 倍ではないため y=354 は 360.19… へ)。
         let (x, y) = frame_to_normalized((629, 354), (1258, 708)).unwrap();
         let s = BASE_WIDTH as f32 / 1258.0;
         assert!((x - 640.0).abs() < 0.01, "x: {x}");
         assert!((y - 354.0 * s).abs() < 0.01, "y: {y}");
     }
 
-    /// 往復: フレーム → 正規化 → フレームで元のピクセルに戻る (one-to-one)。
     #[test]
     fn frame_normalized_frame_roundtrip_restores_pixel() {
         for frame in [(1280u32, 720u32), (2560, 1440), (1258, 708), (1280, 576)] {
@@ -259,17 +240,12 @@ mod tests {
         }
     }
 
-    // ---- 正規化空間 → クライアント (SendInput 用) ----
-
-    /// PC 版実測寸法 (1258x708) で正規化前の実ピクセル座標が復元される。
     #[test]
     fn normalized_to_client_restores_raw_client_pixels() {
-        // 生 (629,354) → 正規化 (≈640,≈360) → クライアント (629,354)。
         let n = frame_to_normalized((629, 354), (1258, 708)).unwrap();
         assert_eq!(normalized_to_client(n, (1258, 708)), Some((629, 354)));
     }
 
-    /// 端クランプ: 正規化空間の外側 (過大/負) はクライアント有効範囲に収まる。
     #[test]
     fn normalized_to_client_clamps_to_client_bounds() {
         assert_eq!(
@@ -282,7 +258,6 @@ mod tests {
         );
     }
 
-    /// クライアント寸法 0 は `None`。
     #[test]
     fn normalized_to_client_zero_client_is_none() {
         assert_eq!(normalized_to_client((640.0, 360.0), (0, 708)), None);

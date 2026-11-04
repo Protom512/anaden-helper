@@ -1,28 +1,3 @@
-// "Tests untouched" guard for the anaden-helper workspace (Issue #214, Phase 0 / T3).
-//
-// Structural guarantee for the complexity-reduction campaign: no hunk of a git
-// diff may touch test code — a #[cfg(test)] module/item region (including the
-// attribute lines themselves) or a file under tests/. The protective core:
-// existing test code may change only by provably format-only deltas or via an
-// explicitly reviewed allowlist entry, and deletions of test files are never
-// allowed. Three narrow allowances (Issue #272): (1) a whole-file diff whose
-// old/new sources normalize equal (format-only: reindent, rewrap, and rustfmt
-// trailing-comma normalization outside literals) is not a test change; (2) a
-// brand-new file under tests/ (zero old lines) is the repo's additive pattern
-// for new coverage; (3) residual violations in files listed in
-// assert-tests-untouched-allowlist.json pass, and an entry matching no
-// violation in the current diff fails as stale so the list cannot rot.
-// Token edits (including inside string literals), mixed hunks, and deletions
-// fail as before.
-//
-// Usage:
-//   node scripts/quality/assert_tests_untouched.mjs [base]
-//     base omitted -> diff HEAD (staged + unstaged vs HEAD)
-//     base given   -> diff <base> (e.g. master, HEAD~3)
-//
-// Exit codes: 0 = no test code touched, 1 = violations, 2 = tool/parse error
-// (fail-closed). An empty diff passes trivially — this is a mechanical
-// pre-commit check, not a review gate.
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -32,17 +7,9 @@ import { computeTestRegions, classifyPath } from './complexity_gate.mjs';
 const scriptDir = path.dirname(fileURLToPath(import.meta.url));
 const normalizePath = (p) => String(p).replace(/\\/g, '/');
 
-// ---------------------------------------------------------------------------
-// Unified diff parsing
-// ---------------------------------------------------------------------------
 
 const HUNK_HEADER = /^@@ -(\d+)(?:,(\d+))? \+(\d+)(?:,(\d+))? @@/;
 
-/**
- * Parses a unified diff into file entries with per-side changed line numbers:
- * `[{ path, isNew, isDeleted, hunks: [{ oldLines: [n..], newLines: [n..] }] }]`.
- * Context lines advance both cursors; `\ No newline` markers are skipped.
- */
 export function parseDiff(diffText) {
   const files = [];
   let current = null;
@@ -57,21 +24,16 @@ export function parseDiff(diffText) {
       continue;
     }
     if (!current) continue;
-    // Issue #239: hunk 本体内では `---`/`+++` ヘッダマッチを無効化する。
-    // 削除行の内容が `-- select ...` 等で始まると `--- a/...` と誤判定し、
-    // 行番号カウントが 1 つずれて test region 内削除を見逃す。
     if (!inHunks) {
       if (raw.startsWith('new file mode ')) current.isNew = true;
       if (raw.startsWith('deleted file mode ')) current.isDeleted = true;
       if (raw.startsWith('Binary files ') || raw.startsWith('GIT binary patch')) {
         current.isBinary = true;
-        // Issue #245: binary 削除も path を復元 (oldPath から) して検出対象に。
         if (raw.includes(' and /dev/null differ')) current.path = current.oldPath ?? null;
         continue;
       }
       if (raw.startsWith('rename from ')) current.oldPath = normalizePath(raw.slice('rename from '.length));
       if (raw.startsWith('rename to ')) current.path = normalizePath(raw.slice('rename to '.length));
-      // Issue #231: `--- a/<path>` は `+++` より先に現れるため保持 (削除ファイル対応)。
       const minusMatch = /^--- (?:a\/)?(.+)$/.exec(raw);
       if (minusMatch && minusMatch[1] !== '/dev/null') {
         current.oldPath = normalizePath(minusMatch[1]);
@@ -106,26 +68,12 @@ export function parseDiff(diffText) {
     } else if (raw.startsWith(' ')) {
       oldCursor += 1;
       newCursor += 1;
-    } // '\\ No newline at end of file' and anything else: skip
+    }
   }
   return files.filter((f) => f.path !== null);
 }
 
-// ---------------------------------------------------------------------------
-// Format-only normalization (Issue #272 v2)
-// ---------------------------------------------------------------------------
 
-/**
- * Normalizes Rust source for format-only comparison.
- * Outside literals and comments, drops all whitespace and every trailing
- * comma (a comma whose next non-whitespace character is `)`, `]`, or `}`).
- * String, byte-string, raw-string, and char literals keep their bytes
- * verbatim, so a change like "key zero" -> "keyzero" inside a literal is a
- * semantic edit, never a reformat. Comment text is kept with whitespace
- * dropped, so comment reflow passes while wording edits do not. Char-vs-
- * lifetime is a heuristic: 'x' / '\x' + closing quote reads as a char
- * literal, anything else as a lifetime, which needs no special handling.
- */
 export function normalizeRustSource(src) {
   const text = String(src);
   const n = text.length;
@@ -137,9 +85,6 @@ export function normalizeRustSource(src) {
     out.push(noTrailingCommas.replace(/\s+/g, ''));
   };
 
-  // Returns the index just past a cooked string's closing quote (`"` at start,
-  // backslash escapes honored). Unterminated input consumes to the end, which
-  // still compares deterministically on both sides.
   const scanQuoted = (start) => {
     let j = start + 1;
     while (j < n) {
@@ -176,9 +121,6 @@ export function normalizeRustSource(src) {
       codeStart = i = j;
       continue;
     }
-    // Raw strings: r"..." / r#"..."# (##+) and the br-prefixed forms. An `r`
-    // not followed by the quote shapes (e.g. the raw identifier `r#type`)
-    // falls through as ordinary code.
     let rawPrefixLen = 0;
     if (!isIdentChar(prev)) {
       if (c === 'r' && (text[i + 1] === '"' || text[i + 1] === '#')) rawPrefixLen = 1;
@@ -222,15 +164,7 @@ export function normalizeRustSource(src) {
   return out.join('');
 }
 
-// ---------------------------------------------------------------------------
-// Region checks
-// ---------------------------------------------------------------------------
 
-/**
- * Evaluates a parsed diff against old/new sources.
- * Returns `{ violations: [{file, side, line, reason}], filesChecked }`.
- * Throws when a needed source is missing (callers fail closed).
- */
 export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
   const violations = [];
   let filesChecked = 0;
@@ -245,10 +179,6 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
     const newLines = file.hunks.flatMap((h) => h.newLines);
     const classification = classifyPath(file.path);
     filesChecked += 1;
-    // A file whose old/new sources normalize equal is a pure reformat
-    // (reindent, rewrap, rustfmt trailing-comma normalization) and moves no
-    // token a test can observe (Issue #272). New files have no old side, so
-    // tests/ additions still fall through to the checks below.
     const oldSrc = oldSources[file.path];
     const newSrc = newSources[file.path];
     if (
@@ -259,8 +189,6 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
       continue;
     }
     if (classification === 'tests-dir') {
-      // Brand-new tests/ files (zero old lines) are additive new coverage; the
-      // guarded cases below are modification and deletion (Issue #272).
       if (oldLines.length === 0) continue;
       for (const line of newLines) {
         violations.push({ file: file.path, side: 'new', line, reason: 'tests/ directory file changed' });
@@ -270,7 +198,7 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
       }
       continue;
     }
-    if (classification !== 'scan') continue; // benches are out of test scope
+    if (classification !== 'scan') continue;
     if (newLines.length > 0) {
       const regions = computeTestRegions(sourceFor(newSources, file.path, 'new'));
       for (const line of newLines) {
@@ -289,15 +217,7 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
   return { violations, filesChecked };
 }
 
-// ---------------------------------------------------------------------------
-// CLI
-// ---------------------------------------------------------------------------
 
-/**
- * CLI entry point. Returns the process exit code (0/1/2).
- * `opts` exists for tests: `{ root, base, diffText, oldSources, newSources, allowlist }`
- * injects everything so no git command is executed.
- */
 export function main(argv = [], opts = {}) {
   const root = opts.root ?? path.resolve(scriptDir, '..', '..');
   const base = opts.base ?? argv[0] ?? 'HEAD';
@@ -338,8 +258,6 @@ export function main(argv = [], opts = {}) {
     for (const file of parseDiff(diffText)) {
       if (!file.path.endsWith('.rs')) continue;
       if (file.hunks.some((h) => h.oldLines.length > 0)) {
-        // Issue #245: rename+modify の場合、old source は oldPath (元ファイル名)
-        // から取得する。file.path は新しい名前のため git show が失敗する。
         const oldPath = file.oldPath && file.oldPath !== file.path ? file.oldPath : file.path;
         const show = spawnSync('git', ['-C', root, 'show', `${base}:${oldPath}`], { encoding: 'utf8' });
         if (show.error || show.status !== 0) {

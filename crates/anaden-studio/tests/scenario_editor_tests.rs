@@ -1,18 +1,3 @@
-//! Issue #160 T3 (UC-1/UC-2) シナリオエディタ統合テスト — AC-1 機械保証。
-//!
-//! GUI のシナリオエディタ状態 (`ScenarioEditorState` + `ScenarioPanel`) から
-//! 保存した pipeline が、既存 anaden-vision の loader
-//! (`load_pipeline` / `load_pipeline_manifest`) で parse 可能であることを
-//! 検証する (保存 -> load 往復・start_task 解決・テンプレート PNG 実在)。
-//!
-//! - UC-1 (シナリオ作成): 多 TaskDef + manifest 保存が `templates/pipelines/<name>/`
-//!   互換形式で書き出される
-//! - UC-2 (テンプレート連携): 実リポジトリ `templates/` の PNG を相対参照した
-//!   タスクが load 後に実在パスへ解決される
-//!
-//! ヘッドレス (ウィンドウ生成なし)。egui パネル描画は `app.rs` 単体テストと
-//! 同じ `Context::default()` + `Ui::new` 方式でパニック無しを検証する。
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::panic)]
 #![allow(clippy::expect_used)]
@@ -27,9 +12,6 @@ use anaden_studio::scenario_ui::{
 use anaden_vision::{Action, Algorithm, TaskDef};
 use image::{DynamicImage, GrayImage, Luma};
 
-/// テスト用 TaskDef (roi=[10,20,100,50]・threshold=0.8・click_self・next 空)。
-/// `template` は ROI 追加フロー (`pipeline_task_spec`) 相当の裸相対 `<name>.png`
-/// (保存時の PNG 名 `<name>.png` と一致させる。大文字小文字保持)。
 fn task_def(name: &str) -> TaskDef {
     TaskDef {
         name: name.to_string(),
@@ -44,12 +26,10 @@ fn task_def(name: &str) -> TaskDef {
     }
 }
 
-/// 単色 GrayImage (サイズは可変・塗り値でタスク間を識別)。
 fn solid_image(w: u32, h: u32, v: u8) -> DynamicImage {
     DynamicImage::ImageLuma8(GrayImage::from_pixel(w, h, Luma([v])))
 }
 
-/// 検証可能な最小シナリオ状態 (タスク 1 件 + LoopCount goal)。
 fn minimal_state(name: &str) -> ScenarioEditorState {
     let mut st = ScenarioEditorState::new(name);
     st.add_task(task_def("Start"));
@@ -60,8 +40,6 @@ fn minimal_state(name: &str) -> ScenarioEditorState {
     st
 }
 
-/// ディレクトリ内ファイル名 → (ファイル名, バイト長) のソート済み snapshot。
-/// 「拒否時に 1 バイトも書いていない」ことのバイト比較 evidence に使う。
 fn dir_snapshot(dir: &Path) -> Vec<(String, u64)> {
     let mut out: Vec<_> = std::fs::read_dir(dir)
         .expect("read dir")
@@ -75,9 +53,6 @@ fn dir_snapshot(dir: &Path) -> Vec<(String, u64)> {
     out
 }
 
-// ---- レビュー M-1: 既存 pipeline 上書きガード (PipelineDirAlreadyExists) ----
-
-/// M-1 t1: 新規シナリオ名が既存 pipeline と衝突 → 保存拒否・バイト不変。
 #[test]
 fn save_scenario_refuses_existing_pipeline_dir_of_other_scenario() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -86,7 +61,6 @@ fn save_scenario_refuses_existing_pipeline_dir_of_other_scenario() {
     save_scenario(&minimal_state("login"), &[], &root).expect("create victim pipeline");
     let before = dir_snapshot(&victim);
 
-    // 別の新規シナリオ (loaded_from = None) が同名で保存しようとしても拒否。
     let mut other = minimal_state("login");
     other.task_mut("Start").unwrap().threshold = 0.99;
     let err = save_scenario(&other, &[], &root).expect_err("must refuse existing dir");
@@ -97,7 +71,6 @@ fn save_scenario_refuses_existing_pipeline_dir_of_other_scenario() {
     assert_eq!(dir_snapshot(&victim), before, "拒否時は 1 バイトも書かない");
 }
 
-/// M-1 t2: ロード済み pipeline の同一 dir 書き戻しは許可 (UC-4 編集保存)。
 #[test]
 fn save_scenario_allows_writeback_to_loaded_source_dir() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -115,7 +88,6 @@ fn save_scenario_allows_writeback_to_loaded_source_dir() {
     save_scenario(&st, &[], &root).expect("writeback to loaded dir must be allowed");
 }
 
-/// M-1 t3: ロード編集でリネーム先が別の既存 pipeline と衝突 → 拒否・バイト不変。
 #[test]
 fn save_scenario_refuses_rename_onto_other_existing_pipeline() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -126,7 +98,7 @@ fn save_scenario_refuses_rename_onto_other_existing_pipeline() {
 
     let mut st =
         anaden_studio::scenario_load::load_scenario_from_dir(&root.join("alpha")).expect("load");
-    st.name = "beta".to_string(); // alpha を編集して beta へ保存 (save-as 衝突)
+    st.name = "beta".to_string();
     let err = save_scenario(&st, &[], &root).expect_err("must refuse rename onto beta");
     assert!(
         matches!(err, ScenarioSaveError::PipelineDirAlreadyExists { .. }),
@@ -135,7 +107,6 @@ fn save_scenario_refuses_rename_onto_other_existing_pipeline() {
     assert_eq!(dir_snapshot(&root.join("beta")), before, "beta は不変");
 }
 
-/// M-1 t4: パネル経由の連続保存 (新規作成 → 保存 → 再保存) は同一 dir 所有で許可。
 #[test]
 fn panel_consecutive_saves_of_new_scenario_are_allowed() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -152,7 +123,6 @@ fn panel_consecutive_saves_of_new_scenario_are_allowed() {
         Some(saved_dir.as_path())
     );
 
-    // 2 回目の保存は dir が既存でも所有対象のため拒否されない。
     panel.state.task_mut("Start").unwrap().threshold = 0.95;
     panel.save(&mut status);
     assert!(
@@ -161,9 +131,6 @@ fn panel_consecutive_saves_of_new_scenario_are_allowed() {
     );
 }
 
-/// AC-1: エディタ状態 → 保存 → load_pipeline / load_pipeline_manifest 往復。
-/// ROI 追加タスク (pending PNG) 込みで manifest・TaskDef・PNG が揃い、
-/// start_task が解決し、各タスクのテンプレート PNG が実在する。
 #[test]
 fn save_scenario_roundtrips_through_loaders_with_pngs() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -190,14 +157,12 @@ fn save_scenario_roundtrips_through_loaders_with_pngs() {
     let dir = save_scenario(&st, &pngs, &root).expect("save");
     assert_eq!(dir, root.join("fishing2"));
 
-    // ディスク上の構成: manifest + TaskDef TOML + ROI crop PNG。
     assert!(dir.join("pipeline.toml").exists());
     assert!(dir.join("Start.toml").exists());
     assert!(dir.join("Loop.toml").exists());
     assert!(dir.join("Start.png").exists());
     assert!(dir.join("Loop.png").exists());
 
-    // manifest は load_pipeline_manifest で parse 可能・start_task 解決。
     let manifest = anaden_vision::load_pipeline_manifest(&dir).expect("load manifest");
     assert_eq!(manifest.start_task, "Start");
     assert_eq!(manifest.goals.len(), 2);
@@ -207,7 +172,6 @@ fn save_scenario_roundtrips_through_loaders_with_pngs() {
     );
     assert_eq!(manifest.goals[1].stop, StopCondition::Timeout { secs: 600 });
 
-    // TaskDef 群は load_pipeline で parse 可能・next 鎖と PNG 実在を検証。
     let defs = anaden_vision::load_pipeline(&dir).expect("load pipeline");
     assert_eq!(
         defs.len(),
@@ -234,7 +198,6 @@ fn save_scenario_roundtrips_through_loaders_with_pngs() {
     );
 }
 
-/// fail-closed: 不正状態 (TaskDef 0 件) は Err + 何も書かない。
 #[test]
 fn save_scenario_fails_closed_on_invalid_state() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -251,7 +214,6 @@ fn save_scenario_fails_closed_on_invalid_state() {
     assert!(!root.join("empty_scenario").exists(), "1 バイトも書かない");
 }
 
-/// fail-closed: パス区切りを含むシナリオ名は UnsafeName で拒否。
 #[test]
 fn save_scenario_rejects_unsafe_name() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -269,8 +231,6 @@ fn save_scenario_rejects_unsafe_name() {
     assert!(!root.join("a").exists(), "親ディレクトリ脱出を書かない");
 }
 
-/// UC-2: 実リポジトリ templates/ の PNG を相対参照したタスクが、
-/// 保存 -> load 後に実在絶対パスへ解決される (テンプレート作成ペイン成果物連携)。
 #[test]
 fn uc2_reference_to_real_templates_png_resolves_to_existing_file() {
     let repo_templates = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -319,8 +279,6 @@ fn uc2_reference_to_real_templates_png_resolves_to_existing_file() {
     );
 }
 
-/// ScenarioPanel の GUI フロー (候補追加・重複拒否・next 鎖・ゴール・
-/// ヘッドレス描画・保存) を通した AC-1 検証。
 #[test]
 fn panel_flow_candidate_add_goal_save_roundtrip() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -328,7 +286,6 @@ fn panel_flow_candidate_add_goal_save_roundtrip() {
     let mut panel = ScenarioPanel::new(root.clone());
     panel.state.name = "panel_flow".to_string();
 
-    // 候補追加 (app::pipeline_task_spec 経由 = Authoring ペインと同一導出)。
     let (tap, tap_png) = gui_candidate("TapA", ScreenRegion::new(10, 20, 100, 50));
     panel.add_candidate(tap, tap_png).expect("add TapA");
     let (dup, dup_png) = gui_candidate("TapA", ScreenRegion::new(0, 0, 30, 30));
@@ -339,14 +296,12 @@ fn panel_flow_candidate_add_goal_save_roundtrip() {
     let (wait, wait_png) = gui_candidate("WaitB", ScreenRegion::new(5, 5, 40, 40));
     panel.add_candidate(wait, wait_png).expect("add WaitB");
 
-    // next 鎖 (TapA -> WaitB) とゴール。
     panel.state.task_mut("TapA").unwrap().next = Some(vec!["WaitB".to_string()]);
     panel.state.add_goal(Goal {
         name: "loop5".to_string(),
         stop: StopCondition::LoopCount { target: 5 },
     });
 
-    // ヘッドレス描画 (候補あり/なし両方) がパニック無しで完了する。
     let mut status = String::new();
     let ctx = egui::Context::default();
     ctx.begin_pass(egui::RawInput::default());
@@ -355,7 +310,6 @@ fn panel_flow_candidate_add_goal_save_roundtrip() {
     panel.ui(&mut child_ui(&ctx), None, &mut status);
     let _ = ctx.end_pass();
 
-    // 保存 -> AC-1 往復検証。
     panel.save(&mut status);
     assert!(status.contains("シナリオ保存"), "status: {status}");
     let dir = root.join("panel_flow");
@@ -377,7 +331,6 @@ fn panel_flow_candidate_add_goal_save_roundtrip() {
     assert_eq!(tap.next.as_deref(), Some(&["WaitB".to_string()][..]));
 }
 
-/// ヘッドレス egui コンテキスト内に子 Ui を作る (app.rs 単体テストと同一方式)。
 fn child_ui(ctx: &egui::Context) -> egui::Ui {
     egui::Ui::new(
         ctx.clone(),
@@ -389,7 +342,6 @@ fn child_ui(ctx: &egui::Context) -> egui::Ui {
     )
 }
 
-/// `pipeline_task_spec` + crop PNG で Authoring ペインの追加候補を構築する。
 fn gui_candidate(name: &str, roi: ScreenRegion) -> (TaskDef, DynamicImage) {
     let task = pipeline_task_spec(
         name,

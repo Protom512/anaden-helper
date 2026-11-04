@@ -200,8 +200,6 @@ pub fn drain_channel_into(
 mod tests {
     use super::*;
 
-    // ---- LogLevel ----
-
     #[test]
     fn level_detects_error_and_warn_anywhere_in_line() {
         assert_eq!(
@@ -224,8 +222,6 @@ mod tests {
         assert_eq!(LogLevel::from_line("WARN then ERROR"), LogLevel::Error);
     }
 
-    // ---- LogBuffer ----
-
     #[test]
     fn buffer_evicts_oldest_beyond_max() {
         let mut b = LogBuffer::new(3);
@@ -247,8 +243,6 @@ mod tests {
         assert_eq!(b.status.summary(), "未実行");
     }
 
-    // ---- SharedLogBuffer drain ----
-
     #[test]
     fn shared_buffer_drains_channel_and_appends_exit_line() {
         let (tx, rx) = std::sync::mpsc::sync_channel(16);
@@ -264,15 +258,9 @@ mod tests {
         assert_eq!(buf_lines.len(), 2);
         assert!(buf_lines[1].line.contains("exit=0"));
         assert!(shared.with_buf(|b| b.status.running).unwrap());
-        // 空チャネルの再 drain は追記しない（drain はバッファ全体を返すため
-        // 行数は増えないことを検証する）。
         assert_eq!(shared.drain(&rx).len(), 2);
     }
 
-    // ---- revision / changed_entries / drain_channel_into (Issue #160 UC-5) ----
-
-    /// 変化なしのフレームでは changed_entries は None を返す
-    /// (全行 clone が発生しないことの契約)。
     #[test]
     fn changed_entries_returns_none_when_buffer_unchanged() {
         let shared = SharedLogBuffer::new(100);
@@ -283,7 +271,6 @@ mod tests {
         assert!(shared.changed_entries(rev).is_none());
     }
 
-    /// push 後は改訂番号が進み、全行 (既存 + 新規) のスナップショットを返す。
     #[test]
     fn changed_entries_returns_full_entries_after_push() {
         let shared = SharedLogBuffer::new(100);
@@ -296,7 +283,6 @@ mod tests {
         assert_eq!(lines, vec!["line-1", "line-2"]);
     }
 
-    /// clear も改訂番号を進める (クリア後の stale スナップショット残留防止)。
     #[test]
     fn changed_entries_detects_clear_as_change_to_empty() {
         let shared = SharedLogBuffer::new(100);
@@ -309,7 +295,6 @@ mod tests {
         assert!(shared.changed_entries(rev2).is_none());
     }
 
-    /// 上限到達後の push (最古行破棄) も改訂番号を進め、破棄込みの内容を返す。
     #[test]
     fn changed_entries_reflects_eviction_at_capacity() {
         let shared = SharedLogBuffer::new(3);
@@ -324,8 +309,6 @@ mod tests {
         assert_eq!(lines, vec!["l1", "l2", "l3"]);
     }
 
-    /// drain_channel_into (単一ロック版): 行数カウント・Exit 行記録・
-    /// 最初の Exit のみ観測という契約は旧実装と同一。
     #[test]
     fn drain_channel_into_batches_lines_and_first_exit_wins() {
         let (tx, rx) = std::sync::mpsc::sync_channel(16);
@@ -336,7 +319,6 @@ mod tests {
         tx.send(LogEvent::Exit(Some(2))).unwrap();
         tx.send(LogEvent::Line("tail".into())).unwrap();
         let (new_lines, exit) = drain_channel_into(&shared, &rx);
-        // 行 2 + Exit 行 2 が記録され、観測 Exit は最初の 1 件のみ。
         assert_eq!(new_lines, 4);
         assert_eq!(exit, Some(Some(0)));
         let lines = shared
@@ -346,8 +328,6 @@ mod tests {
         assert!(lines.iter().any(|e| e.line.contains("exit=0")));
         assert!(lines.iter().any(|e| e.line == "tail"));
     }
-
-    // ---- LogLevel 強化 (T4: [stderr] 接頭辞・panic 系行の検出) ----
 
     #[test]
     fn level_stderr_prefix_lines_are_warn() {

@@ -1,14 +1,3 @@
-//! Issue #160 UC-4 (Shard 5) 統合テスト — 既存 pipeline のエディタロード・
-//! 編集・保存のロスネス往復機械保証。
-//!
-//! リポジトリ実 4 pipeline (`templates/pipelines/*`) 全てについて (Issue #188 で
-//! android 版 4 pipeline を削除し 8 → 4):
-//! load → `ScenarioEditorState` → (編集なし) save → 再 load の TaskDef ベクタ
-//! 意味比較 + manifest 比較 + 元ファイル名 (stem) 保全を検証する。
-//! リポジトリ実ファイルを書き換えないよう、TOML のみをテンポラリ dir へ
-//! コピーした同一階層構造上で検証する (`load_pipeline` / `save_task_def` は
-//! PNG 実体を読み書きしないため PNG コピーは不要)。
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::panic)]
 #![allow(clippy::expect_used)]
@@ -19,7 +8,6 @@ use anaden_studio::scenario_load::{ScenarioLoadError, load_scenario_from_dir};
 use anaden_studio::scenario_ui::{ScenarioPanel, save_scenario};
 use anaden_vision::{TaskDef, load_pipeline, load_pipeline_manifest};
 
-/// リポジトリ実 `templates/` ルート。
 fn repo_templates() -> PathBuf {
     Path::new(env!("CARGO_MANIFEST_DIR"))
         .join("..")
@@ -27,9 +15,6 @@ fn repo_templates() -> PathBuf {
         .join("templates")
 }
 
-/// `templates/pipelines/` 配下の `*.toml` のみを `dst/templates/pipelines/` へ
-/// 同一階層構造でコピーし、コピー先の pipelines ルートを返す
-/// (vision 側 `copy_toml_files_only` と同じ手法)。
 fn copy_pipelines_tomls(dst: &Path) -> PathBuf {
     let src = repo_templates().join("pipelines");
     let out = dst.join("templates").join("pipelines");
@@ -57,7 +42,6 @@ fn copy_toml_tree(src: &Path, dst: &Path) {
     }
 }
 
-/// pipelines ルート直下の pipeline ディレクトリ一覧 (辞書順)。
 fn pipeline_dirs(root: &Path) -> Vec<PathBuf> {
     let mut dirs: Vec<PathBuf> = std::fs::read_dir(root)
         .expect("read pipelines")
@@ -69,7 +53,6 @@ fn pipeline_dirs(root: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// ディレクトリ内の非 manifest `*.toml` ファイル名集合 (sorted・比較用)。
 fn task_toml_names(dir: &Path) -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(dir)
         .expect("read dir")
@@ -87,14 +70,11 @@ fn task_toml_names(dir: &Path) -> Vec<String> {
     names
 }
 
-/// TaskDef ベクタを name 辞書順へソート (load_pipeline の read_dir 順は OS 依存
-/// のため、意味比較を決定論化する)。
 fn sorted_by_name(mut defs: Vec<TaskDef>) -> Vec<TaskDef> {
     defs.sort_by(|a, b| a.name.cmp(&b.name));
     defs
 }
 
-/// ヘッドレス egui コンテキスト内に子 Ui を作る (scenario_editor_tests と同一方式)。
 fn child_ui(ctx: &egui::Context) -> egui::Ui {
     egui::Ui::new(
         ctx.clone(),
@@ -106,10 +86,6 @@ fn child_ui(ctx: &egui::Context) -> egui::Ui {
     )
 }
 
-/// 正常系 1: リポジトリ実 pipeline 全てについて load → (編集なし) save →
-/// 再 load が意味等価。TaskDef ベクタ・manifest・元ファイル名 (stem) が保全され、
-/// template 相対参照 (`../`・`../../`・サブディレクトリ) が元の形で書き戻る。
-/// pipeline 数は追加 (ticket_digest #248 等) で増えるため固定しない (空でないことのみ前提)。
 #[test]
 fn all_repo_pipelines_roundtrip_losslessly() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -140,11 +116,9 @@ fn all_repo_pipelines_roundtrip_losslessly() {
             state.validation_issues()
         );
 
-        // 編集なし保存 (テンポラリコピーの同一 dir へ上書き)。
         let saved = save_scenario(&state, &[], &root).expect("edit-free save");
         assert_eq!(saved, *dir, "既定の保存先 = ロード元 dir");
 
-        // TaskDef ベクタの意味比較 (PartialEq・template 絶対パス含む)。
         let after = sorted_by_name(load_pipeline(dir).expect("load after"));
         assert_eq!(
             after,
@@ -153,7 +127,6 @@ fn all_repo_pipelines_roundtrip_losslessly() {
             dir.display()
         );
 
-        // 元ファイル名 (stem ≠ name) が保全され、name ファイルが二重に作られない。
         assert_eq!(
             task_toml_names(dir),
             files_before,
@@ -161,7 +134,6 @@ fn all_repo_pipelines_roundtrip_losslessly() {
             dir.display()
         );
 
-        // manifest 比較。
         let manifest_after = load_pipeline_manifest(dir).expect("manifest after save");
         match manifest_before {
             Some(before) => assert_eq!(
@@ -171,8 +143,6 @@ fn all_repo_pipelines_roundtrip_losslessly() {
                 dir.display()
             ),
             None => {
-                // manifest 無し pipeline: 保存で新規生成。空 goals は goal 行自体が
-                // 出ない (= 無限ループの手書き後方互換)。
                 assert!(
                     manifest_after.goals.is_empty(),
                     "{}: 空 goals 互換",
@@ -189,7 +159,6 @@ fn all_repo_pipelines_roundtrip_losslessly() {
         }
     }
 
-    // template 相対参照の保存形式保全 (サブディレクトリ・../ 参照含む)。
     let fishing = std::fs::read_to_string(root.join("fishing").join("fishing_start.toml"))
         .expect("fishing_start.toml");
     assert!(
@@ -202,12 +171,7 @@ fn all_repo_pipelines_roundtrip_losslessly() {
         login.contains("template = \"../../scenes/title_pc/title_logo_corner.png\""),
         "../../ 参照が元の形で書き戻る:\n{login}"
     );
-    // (旧 worldmap_loop の裸相対 template 参照チェックは Issue #188 で android 版
-    //  pipeline を削除したため対象が消滅 — 現行 4 pipeline の参照は全て ../ 相対)。
 
-    // manifest 付き pipeline の保存 TOML は手書き pipeline.toml と toml::Value 等価
-    // (= 「保存済み TOML は人間可読・既存形式と互換」の構造的証明)。
-    // (DEF-006 で nav_to_field_pc も手書き manifest を持つため比較対象に追加)
     for name in ["field_loop_pc", "nav_to_field_pc", "fishing", "login"] {
         let handwritten = std::fs::read_to_string(
             repo_templates()
@@ -224,13 +188,6 @@ fn all_repo_pipelines_roundtrip_losslessly() {
     }
 }
 
-/// 正常系 2 (焦点): manifest 無し pipeline の load → save で pipeline.toml が
-/// 新規生成され、start_task は resolve_start_task と同一規則 (辞書順先頭 TOML
-/// stem) のファイルの **TaskDef name** になる (anaden CLI の `t.name ==
-/// start_task` 実行契約と整合)。
-/// (旧 _title_load は Issue #188 で削除。nav_to_field_pc は DEF-006 で manifest
-///  を整備したため現行リポジトリに manifestless pipeline は無い — コピーから
-///  manifest を除去した合成 fixture で契約を維持する)
 #[test]
 fn manifestless_save_creates_behavior_compatible_manifest() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -240,8 +197,6 @@ fn manifestless_save_creates_behavior_compatible_manifest() {
     assert!(!dir.join("pipeline.toml").exists(), "前提: manifest 無し");
 
     let state = load_scenario_from_dir(&dir).expect("load");
-    // nav_to_field_pc の TaskDef TOML の stem 辞書順先頭は field_hud_top.toml で、
-    // その name は FieldHudTopPc。
     assert_eq!(
         anaden_studio::tasks::resolve_start_task(&dir).as_deref(),
         Some("field_hud_top"),
@@ -262,8 +217,6 @@ fn manifestless_save_creates_behavior_compatible_manifest() {
     );
 }
 
-/// 正常系 3: ロード → threshold / next 編集 → save で当該フィールドのみ変化し、
-/// 他 (state/algorithm/template/roi/base/action) は意味保存される。
 #[test]
 fn edit_threshold_and_next_changes_only_edited_fields() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -286,7 +239,6 @@ fn edit_threshold_and_next_changes_only_edited_fields() {
     save_scenario(&state, &[], &root).expect("save after edit");
 
     let after = sorted_by_name(load_pipeline(&dir).expect("load after"));
-    // 期待値 = before に同じ編集を適用したもの (他フィールドは全て before 由来)。
     let mut expected = before.clone();
     expected
         .iter_mut()
@@ -299,7 +251,6 @@ fn edit_threshold_and_next_changes_only_edited_fields() {
         .unwrap()
         .next = Some(vec!["TapHudTrPc".to_string()]);
     assert_eq!(after, expected, "編集フィールドのみ変化・他は意味保存");
-    // 編集が実際に反映されていること (vacuous pass 防止)。
     let hud_after = after
         .iter()
         .find(|d| d.name == "TapHudTrPc")
@@ -307,9 +258,6 @@ fn edit_threshold_and_next_changes_only_edited_fields() {
     assert!((hud_after.threshold - 0.77).abs() < 1e-6);
 }
 
-/// 正常系 4: ヘッドレス egui で「開く → 編集 → 保存」フロー (UC-4 GUI)。
-/// 「既存 pipeline を開く」UI を含むパネル描画がパニック無しで完了し、
-/// 保存実体がロード元 dir に記録される。
 #[test]
 fn headless_open_edit_save_flow_via_panel() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -320,14 +268,12 @@ fn headless_open_edit_save_flow_via_panel() {
     let mut status = String::new();
     assert!(panel.open_existing(&dir, &mut status), "status: {status}");
 
-    // ヘッドレス描画 2 パス (オープン UI・コンボ列挙を含む)。
     let ctx = egui::Context::default();
     ctx.begin_pass(egui::RawInput::default());
     panel.ui(&mut child_ui(&ctx), None, &mut status);
     panel.ui(&mut child_ui(&ctx), None, &mut status);
     let _ = ctx.end_pass();
 
-    // 編集 (threshold) → 保存 → 保存実体 = ロード元 dir。
     panel.state.task_mut("LoginTapTitlePc").unwrap().threshold = 0.66;
     panel.save(&mut status);
     assert_eq!(panel.saved_pipeline(), Some(dir.as_path()));
@@ -338,7 +284,6 @@ fn headless_open_edit_save_flow_via_panel() {
             .any(|d| d.name == "LoginTapTitlePc" && (d.threshold - 0.66).abs() < 1e-6),
         "編集が反映されている: {defs:?}"
     );
-    // manifest も保存され直される (goal 含む)。
     let manifest = load_pipeline_manifest(&dir).expect("manifest");
     assert_eq!(manifest.start_task, "LoginTapTitlePc");
     assert_eq!(
@@ -348,20 +293,16 @@ fn headless_open_edit_save_flow_via_panel() {
     );
 }
 
-/// エッジ 1: 不正 pipeline dir / TaskDef ゼロ / 不正 TOML → エラー伝播。
 #[test]
 fn load_fails_closed_on_invalid_inputs() {
     let tmp = tempfile::tempdir().expect("tempdir");
-    // 不在 dir。
     let e = load_scenario_from_dir(&tmp.path().join("ghost")).unwrap_err();
     assert!(matches!(e, ScenarioLoadError::NoTaskDefs { .. }), "{e:?}");
-    // TaskDef ゼロ (manifest のみ)。
     let only = tmp.path().join("only_manifest");
     std::fs::create_dir_all(&only).expect("mkdir");
     std::fs::write(only.join("pipeline.toml"), "start_task = \"X\"\n").expect("write");
     let e = load_scenario_from_dir(&only).unwrap_err();
     assert!(matches!(e, ScenarioLoadError::NoTaskDefs { .. }), "{e:?}");
-    // 不正 TaskDef TOML。
     let broken = tmp.path().join("broken");
     std::fs::create_dir_all(&broken).expect("mkdir");
     std::fs::write(
@@ -379,15 +320,11 @@ fn load_fails_closed_on_invalid_inputs() {
     );
 }
 
-/// エッジ 2: 命名バリデータ — 既存 pipeline 編集時は既存名を警告せず、
-/// リネーム・新規追加名は MDA 規約 (PascalCase 強制・snake_case/連番/過汎用名拒否)
-/// で検出する。GUI フロー (validation_issues) 経由で検証。
 #[test]
 fn loaded_pipeline_editing_warns_only_new_and_renamed_names() {
     let tmp = tempfile::tempdir().expect("tempdir");
     let root = copy_pipelines_tomls(tmp.path());
 
-    // 既存 pipeline をロードしたままでは既存名 (PascalCase 適合済み) は無警告。
     let mut state = load_scenario_from_dir(&root.join("nav_to_field_pc")).expect("load");
     assert!(
         !state.validation_issues().iter().any(|i| matches!(
@@ -397,7 +334,6 @@ fn loaded_pipeline_editing_warns_only_new_and_renamed_names() {
         "既存名は変更しない限り警告しない"
     );
 
-    // リネーム: snake_case 名へは警告。
     state.task_mut("FieldHudTopPc").unwrap().name = "field_hud_v2".to_string();
     assert!(
         state
@@ -407,7 +343,6 @@ fn loaded_pipeline_editing_warns_only_new_and_renamed_names() {
         "リネーム後の snake_case 名は検出"
     );
 
-    // 新規追加: 過汎用名 (Confirm 単体) は警告。
     let mut extra = state.task("TapToStartPc").unwrap().clone();
     extra.name = "Confirm".to_string();
     state.add_task(extra);
@@ -418,7 +353,6 @@ fn loaded_pipeline_editing_warns_only_new_and_renamed_names() {
             .any(|i| matches!(i, anaden_studio::scenario_ui::ScenarioValidationError::TaskNaming { name, .. } if name == "Confirm")),
         "新規追加の過汎用名は検出"
     );
-    // PascalCase 新規名は命名警告されない (snake_case リネーム分は残存)。
     state.task_mut("Confirm").unwrap().name = "FieldConfirmOpenPc".to_string();
     assert!(
         !state.validation_issues().iter().any(|i| matches!(
@@ -430,8 +364,6 @@ fn loaded_pipeline_editing_warns_only_new_and_renamed_names() {
     );
 }
 
-/// エッジ 3: 削除・リネームしたタスクの旧 TaskDef ファイルは保存時に掃除され、
-/// 再 load で旧タスクが復活しない (残存タスクの元 stem ファイル保全との両立)。
 #[test]
 fn save_sweeps_removed_and_renamed_task_files() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -441,10 +373,6 @@ fn save_sweeps_removed_and_renamed_task_files() {
     let mut state = load_scenario_from_dir(&dir).expect("load");
     assert_eq!(state.task_names().len(), 3);
 
-    // 削除 (LoadGamePc) + リネーム (FieldHudTopPc → FieldArrivalSentinelPc)。
-    // 削除で TapToStartPc.next が dangling に、リネームで参照中の start_task
-    // (manifest の start_task = TapToStartPc) の遷移先が dangling になるため
-    // next を繋ぎ替え、start_task は明示的に新 sentinel へ設定する。
     assert!(state.remove_task("LoadGamePc"));
     state.task_mut("FieldHudTopPc").unwrap().name = "FieldArrivalSentinelPc".to_string();
     state.task_mut("TapToStartPc").unwrap().next = Some(vec!["FieldArrivalSentinelPc".to_string()]);
@@ -466,7 +394,6 @@ fn save_sweeps_removed_and_renamed_task_files() {
         !dir.join("field_hud_top.toml").exists(),
         "リネームタスクの旧 stem ファイルが掃除される"
     );
-    // 残存タスクは元 stem ファイルへ、リネームタスクは新 name ファイルへ。
     assert!(dir.join("tap_to_start.toml").exists());
     assert!(dir.join("FieldArrivalSentinelPc.toml").exists());
 }

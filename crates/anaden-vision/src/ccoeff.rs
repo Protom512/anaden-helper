@@ -396,7 +396,6 @@ mod tests {
     use crate::matcher::TemplateMatcher;
     use image::{DynamicImage, GrayImage, Luma};
 
-    /// `(x+y) mod 64` の勾配パターン（濃淡あり, denomT≠0 を保証）。
     fn gradient_needle(w: u32, h: u32) -> GrayImage {
         let mut img = GrayImage::new(w, h);
         for y in 0..h {
@@ -408,21 +407,17 @@ mod tests {
         img
     }
 
-    /// 照明不変性テスト用の高コントラストパターン。値域 0..=150 の広いダイナミックレンジで、
-    /// denomT≠0 を保ちつつ一律シフトが SSE に大きな絶対差として現れるようにする。
     fn contrast_needle(w: u32, h: u32) -> GrayImage {
         let mut img = GrayImage::new(w, h);
         for y in 0..h {
             for x in 0..w {
-                // (x*y) で変化する非一様パターンを 0..=150 に射影
-                let v = (((x * y) % 150) + 10) as u8; // 10..=159
+                let v = (((x * y) % 150) + 10) as u8;
                 img.put_pixel(x, y, Luma([v]));
             }
         }
         img
     }
 
-    /// haystack 中央 (ox, oy) に needle を埋め込んだ画像。
     fn embed(
         haystack_w: u32,
         haystack_h: u32,
@@ -441,7 +436,6 @@ mod tests {
         img
     }
 
-    /// 全画素に定数を足して clamp[0,255]。
     fn shift_brightness(img: &GrayImage, delta: i32) -> GrayImage {
         let mut out = GrayImage::new(img.width(), img.height());
         for (x, y, p) in img.enumerate_pixels() {
@@ -465,7 +459,6 @@ mod tests {
             .match_template(&luma_dyn(haystack), &luma_dyn(needle.clone()))
             .expect("should match");
 
-        // 完全一致位置で CCOEFF は理論上 1.0
         assert!(
             m.confidence.0 > 0.999,
             "exact match confidence should be ~1.0, got {}",
@@ -485,7 +478,6 @@ mod tests {
             .score_map(&luma_dyn(haystack), &luma_dyn(needle))
             .expect("score map should exist");
 
-        // threshold_only（ダウンスケール1）→ (100-20+1)^2
         assert_eq!(map.dimensions(), (81, 81));
     }
 
@@ -501,7 +493,6 @@ mod tests {
 
     #[test]
     fn ccoeff_uniform_template_returns_zero() {
-        // 一様テンプレート: denomT=0 → score_map 全 0
         let needle = GrayImage::from_pixel(20, 20, Luma([100]));
         let haystack = embed(80, 80, &needle, 30, 30, 200);
 
@@ -516,8 +507,6 @@ mod tests {
 
     #[test]
     fn ccoeff_nan_filtered() {
-        // 完全に一様な haystack（全窓が denomI=0）では score_map は全 0 になる。
-        // ゼロ割りや NaN/Inf が混入せず、安全に 0 に弾かれることを確認する。
         let needle = gradient_needle(8, 8);
         let haystack = GrayImage::from_pixel(60, 60, Luma([150]));
 
@@ -531,8 +520,6 @@ mod tests {
                 "uniform-window positions must yield 0, not NaN/Inf garbage"
             );
         }
-        // match_all も一様窓では空（閾値0でも r=0 は 0.0 >= 0.0 で受理されるが、
-        // CCOEFF は denomI=0 で 0 を返すので confidence=0。閾値0で受理される点を確認）。
         let all = engine.match_all(&luma_dyn(haystack), &luma_dyn(needle));
         for m in &all {
             assert_eq!(m.confidence.0, 0.0);
@@ -556,11 +543,6 @@ mod tests {
         );
     }
 
-    // ---- 05-template-cache: 前処理済みテンプレート経路の等価性 (F13) ----
-
-    /// 前処理済みテンプレート経路 ([`CcoeffVisionEngine::match_template_prepared`]) は
-    /// 通常の [`VisionEngine::match_template`] (毎回前処理) と同一の region/confidence を
-    /// 返すこと (キャッシュ経路がマッチ結果を変えないことの固定)。
     #[test]
     fn ccoeff_match_template_prepared_matches_unprepared_result() {
         let needle = gradient_needle(20, 20);
@@ -587,8 +569,6 @@ mod tests {
         );
     }
 
-    /// 前処理済み経路でも needle が haystack より大きい場合は None (downscale_images の
-    /// サイズガードと同一挙動。diagnose の skipped 表現が依存)。
     #[test]
     fn ccoeff_match_template_prepared_needle_too_large_returns_none() {
         let prepared = PreparedCcoeff::prepare(&luma_dyn(gradient_needle(20, 20)));
@@ -604,32 +584,25 @@ mod tests {
 
     #[test]
     fn ccoeff_robust_to_brightness_shift_sse_degrades() {
-        // 照明不変性テスト用の高コントラストパターン（0-150 の広いダイナミックレンジ）。
-        // 広いレンジにより、一律シフトが SSE に大きな絶対差として現れる。
         let needle_base = contrast_needle(30, 30);
-        // haystack 中央 (40,40) にベースを埋め込み。背景はベース平均に近くない値。
         let haystack = embed(120, 120, &needle_base, 40, 40, 10);
-        // 照明シフト版テンプレート（+80）。ベース最大値 150 + 80 = 230 < 255 で飽和なし。
         let needle_shift = shift_brightness(&needle_base, 80);
 
         let haystack_dyn = luma_dyn(haystack);
         let needle_shift_dyn = luma_dyn(needle_shift);
 
-        // SSE エンジンでシフト版テンプレを探す
         let sse = SseVisionEngine::new(TemplateMatcher::threshold_only(MatchConfidence(0.0)));
         let sse_res = sse
             .match_template(&haystack_dyn, &needle_shift_dyn)
             .expect("SSE position should resolve");
         let sse_conf = sse_res.confidence.0;
 
-        // CCOEFF エンジンで同じく
         let cc = CcoeffVisionEngine::threshold_only(MatchConfidence(0.0));
         let cc_res = cc
             .match_template(&haystack_dyn, &needle_shift_dyn)
             .expect("CCOEFF should match");
         let cc_conf = cc_res.confidence.0;
 
-        // 核心: SSE は大きく低下、CCOEFF は高いまま
         assert!(
             sse_conf < 0.6,
             "SSE should degrade under brightness shift, got {sse_conf}"
@@ -646,7 +619,6 @@ mod tests {
 
     #[test]
     fn ccoeff_location_matches_sse_on_exact_embed() {
-        // 完全一致の場合、CCOEFF と SSE は同じ位置を指す
         let needle = gradient_needle(20, 20);
         let haystack = embed(100, 100, &needle, 40, 40, 128);
         let haystack_dyn = luma_dyn(haystack);

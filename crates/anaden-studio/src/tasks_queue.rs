@@ -434,8 +434,6 @@ mod tests {
             .collect()
     }
 
-    // ---- 正常系: implemented タスクのキュー組み立て ----
-
     #[test]
     fn test_builds_queue_in_check_order() {
         let defs = parse_all(&[
@@ -443,11 +441,10 @@ mod tests {
             ("field_loop_pc.toml", FIELD_LOOP_TOML),
         ]);
         let mut queue = TaskQueue::new();
-        queue.toggle(&defs[0]).unwrap(); // launch (parse_all は入力順・ソート無し)
-        queue.toggle(&defs[1]).unwrap(); // field_loop_pc
+        queue.toggle(&defs[0]).unwrap();
+        queue.toggle(&defs[1]).unwrap();
         let built = queue.build(&defs).unwrap();
         let ids: Vec<&str> = built.iter().map(|d| d.id.as_str()).collect();
-        // チェック順 = 実行順序 (launch を先にチェック)
         assert_eq!(ids, vec!["launch", "field_loop_pc"]);
         assert_eq!(built[0].kind, TaskKind::LaunchSubcommand);
         assert_eq!(built[1].kind, TaskKind::PipelineRun);
@@ -462,12 +459,10 @@ mod tests {
         let mut queue = TaskQueue::new();
         queue.toggle(&defs[0]).unwrap();
         queue.toggle(&defs[1]).unwrap();
-        queue.toggle(&defs[0]).unwrap(); // launch 側を外す
+        queue.toggle(&defs[0]).unwrap();
         assert_eq!(queue.selected_ids(), &["field_loop_pc".to_string()]);
         assert_eq!(queue.build(&defs).unwrap().len(), 1);
     }
-
-    // ---- エッジケース: fail-closed ----
 
     #[test]
     fn test_not_implemented_task_cannot_be_toggled() {
@@ -487,38 +482,29 @@ mod tests {
         let defs = parse_all(&[("launch.toml", LAUNCH_TOML)]);
         let mut queue = TaskQueue::new();
         queue.toggle(&defs[0]).unwrap();
-        queue.selected.push("ghost".to_string()); // 不整合注入
+        queue.selected.push("ghost".to_string());
         let err = queue.build(&defs).unwrap_err();
         assert!(matches!(err, TaskError::UnknownTask(ref id) if id == "ghost"));
     }
-
-    // ---- Issue #144 Task 3: spawn_args (実行経路分岐の引数組み立て) ----
 
     #[test]
     fn test_spawn_args_launch_subcommand_windows_no_serial() {
         let def = TaskDefinition::parse_toml(LAUNCH_TOML, Path::new("launch.toml")).unwrap();
         let args = spawn_args(&def, "windows", Some("ignored"), Path::new("/root"));
-        // Issue #188: --target / serial は CLI から削除済み — launch のみ。
         assert_eq!(args, vec!["launch"]);
     }
 
-    /// start_task 宣言済みタスク: 宣言値をそのまま使う。
     #[test]
     fn test_spawn_args_pipeline_run_with_declared_start_task() {
         let def =
             TaskDefinition::parse_toml(FIELD_LOOP_TOML, Path::new("field_loop_pc.toml")).unwrap();
         let args = spawn_args(&def, "windows", None, Path::new("/root"));
-        // FIELD_LOOP_TOML は start_task = "start" を宣言 (実リポジトリ TOML の
-        // "TapBottomStablePc" ではなくテスト定義の宣言値が使われること)。
-        // Issue #188: --target / serial は CLI から削除済み — run <dir> <task> のみ。
         assert_eq!(
             args,
             vec!["run", "/root\\templates/pipelines/field_loop_pc", "start"]
         );
     }
 
-    /// start_task 未宣言タスク: resolve_start_task が pipeline_dir 内の
-    /// TaskDef TOML の辞書順最初の stem を解決する。
     #[test]
     fn test_resolve_start_task_picks_first_taskdef_stem() {
         let tmp = tempfile::tempdir().unwrap();
@@ -529,12 +515,6 @@ mod tests {
         assert_eq!(resolve_start_task(Path::new("nonexistent-xyz")), None);
     }
 
-    /// start_task 未宣言 + TaskDef TOML が実在する pipeline (リポジトリ実ファイル)
-    /// でも解決できることの結合検証 (nav_to_field_pc)。
-    ///
-    /// DEF-006: `anaden run` の CLI 契約は TaskDef **名** (`t.name == start_task`)
-    /// を要求するため、stem (辞書順最初 `field_hud_top`) でなく manifest の
-    /// `start_task = "TapToStartPc"` (name) を解決する。
     #[test]
     fn test_spawn_args_pipeline_run_resolves_start_task_from_dir() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
@@ -547,21 +527,15 @@ pipeline_dir = "templates/pipelines/nav_to_field_pc"
 "#;
         let def = TaskDefinition::parse_toml(src, Path::new("nav_to_field_pc.toml")).unwrap();
         let args = spawn_args(&def, "windows", None, &root);
-        // Issue #188: --target は CLI から削除済み — run <dir> <start> のみ。
         assert_eq!(args.len(), 3);
         assert_eq!(args[0], "run");
         assert!(
             args[1].ends_with("templates\\pipelines\\nav_to_field_pc")
                 || args[1].ends_with("templates/pipelines/nav_to_field_pc")
         );
-        // manifest の start_task (TaskDef name): TapToStartPc
-        // (stem 辞書順最初の field_hud_top でない — DEF-006)
         assert_eq!(args[2], "TapToStartPc");
     }
 
-    /// DEF-006: リポジトリ実 pipeline のうち manifest が存在するもの (login) は
-    /// manifest の start_task (TaskDef 名) が使われることの結合検証。
-    /// 旧挙動は stem `tap_title` を返し CLI の `t.name == start_task` 検証で失敗した。
     #[test]
     fn test_spawn_args_pipeline_run_login_manifest_start_task() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
@@ -580,11 +554,9 @@ pipeline_dir = "templates/pipelines/login"
             args[1].ends_with("templates\\pipelines\\login")
                 || args[1].ends_with("templates/pipelines/login")
         );
-        // login/pipeline.toml の start_task = "LoginTapTitlePc" (tap_title.toml の name)
         assert_eq!(args[2], "LoginTapTitlePc");
     }
 
-    /// DEF-006: manifest の start_task は stem 推測より優先される。
     #[test]
     fn test_spawn_args_pipeline_run_manifest_start_task_wins_over_stems() {
         let tmp = tempfile::tempdir().unwrap();
@@ -600,8 +572,6 @@ pipeline_dir = "templates/pipelines/login"
         );
     }
 
-    /// DEF-006: manifest 無し pipeline は「辞書順最初 stem のファイル」を読み、
-    /// その TaskDef `name` を返す (stem そのものではない — CLI は名前で検証する)。
     #[test]
     fn test_resolve_start_task_name_manifestless_uses_taskdef_name() {
         let tmp = tempfile::tempdir().unwrap();
@@ -621,8 +591,6 @@ pipeline_dir = "templates/pipelines/login"
         );
     }
 
-    /// DEF-006: name キーを持たない TOML は TaskDef として不正のため
-    /// 解決不能 (None = fail-closed)。stem で代替しない。
     #[test]
     fn test_resolve_start_task_name_manifestless_nameless_toml_is_none() {
         let tmp = tempfile::tempdir().unwrap();
@@ -630,9 +598,6 @@ pipeline_dir = "templates/pipelines/login"
         assert_eq!(resolve_start_task_name(tmp.path()), None);
     }
 
-    /// DEF-006: manifest が存在するのに parse 不能な場合は None (fail-closed)。
-    /// 壊れた manifest に黙って stem 推測で続けない
-    /// (scenario_load の「parse 不能ならエラー伝播」と同一方針)。
     #[test]
     fn test_resolve_start_task_name_broken_manifest_fails_closed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -641,7 +606,6 @@ pipeline_dir = "templates/pipelines/login"
         assert_eq!(resolve_start_task_name(tmp.path()), None);
     }
 
-    /// pipeline_dir が実在せず start_task も解決不能なら空 Vec (fail-closed)。
     #[test]
     fn test_spawn_args_pipeline_run_missing_dir_and_task_returns_empty() {
         let src = r#"
@@ -656,8 +620,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert!(spawn_args(&def, "windows", None, &root).is_empty());
     }
 
-    // ---- Issue #154 Shard 1 (T2): QueueExec チェック順逐次実行の純状態機械 ----
-
     fn queue_entry(label: &str, arg0: &str) -> QueueEntry {
         QueueEntry {
             label: label.to_string(),
@@ -665,7 +627,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         }
     }
 
-    /// 正常系: start はチェック順どおり最初のエントリを起動する。
     #[test]
     fn test_queue_start_returns_first_entry_in_check_order() {
         let mut q = QueueExec::new(vec![
@@ -682,7 +643,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert_eq!(q.total(), 2);
     }
 
-    /// 正常系: Exit(0) 観測で次タスクを起動する。
     #[test]
     fn test_queue_exit_zero_starts_next_task() {
         let mut q = QueueExec::new(vec![queue_entry("A", "launch"), queue_entry("B", "run")]);
@@ -694,7 +654,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert!(matches!(q.state(), QueueState::Running { current: 1 }));
     }
 
-    /// 正常系: 最終タスクの Exit(0) でキュー完了に到達する。
     #[test]
     fn test_queue_exit_zero_on_last_completes_queue() {
         let mut q = QueueExec::new(vec![queue_entry("A", "launch"), queue_entry("B", "run")]);
@@ -704,12 +663,11 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert!(matches!(q.state(), QueueState::Completed));
     }
 
-    /// 正常系: 失敗停止からの明示 resume は次タスクを起動する。
     #[test]
     fn test_queue_resume_after_failure_starts_next() {
         let mut q = QueueExec::new(vec![queue_entry("A", "launch"), queue_entry("B", "run")]);
         let _ = q.start();
-        let _ = q.on_exit(Some(1)); // A 失敗 → 停止
+        let _ = q.on_exit(Some(1));
         let QueueAction::Start(spec) = q.resume() else {
             panic!("resume must return Start");
         };
@@ -717,7 +675,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert!(matches!(q.state(), QueueState::Running { current: 1 }));
     }
 
-    /// 正常系: 最終タスクの失敗での resume は残り無しと判断して完了する。
     #[test]
     fn test_queue_resume_on_last_failure_completes_queue() {
         let mut q = QueueExec::new(vec![queue_entry("A", "launch")]);
@@ -727,7 +684,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert!(matches!(q.state(), QueueState::Completed));
     }
 
-    /// 正常系 (UC-4 表示): summary は i/N 進行とラベルを含む。
     #[test]
     fn test_queue_summary_shows_progress() {
         let mut q = QueueExec::new(vec![
@@ -746,7 +702,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert_eq!(q.summary(), "完了 2/2");
     }
 
-    /// 正常系 (UC-4 表示): エントリ行マーカは完了/実行中/待機/失敗を区別する。
     #[test]
     fn test_queue_entry_marker_progression() {
         let mut q = QueueExec::new(vec![queue_entry("A", "a"), queue_entry("B", "b")]);
@@ -764,7 +719,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert_eq!(q.entry_marker(1), "完了");
     }
 
-    /// エッジケース: 空キューの開始は拒否され状態は Pending のまま。
     #[test]
     fn test_queue_start_empty_is_rejected() {
         let mut q = QueueExec::new(Vec::new());
@@ -773,21 +727,18 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert_eq!(q.total(), 0);
     }
 
-    /// エッジケース: 実行中 (Pending 以外) での再開始は拒否される。
     #[test]
     fn test_queue_start_while_running_is_rejected() {
         let mut q = QueueExec::new(vec![queue_entry("A", "a")]);
         let _ = q.start();
         assert!(matches!(q.start(), QueueAction::Noop));
         assert!(matches!(q.state(), QueueState::Running { current: 0 }));
-        // 失敗停止中・完了後も同様に拒否。
         let _ = q.on_exit(Some(1));
         assert!(matches!(q.start(), QueueAction::Noop));
         let _ = q.resume();
         assert!(matches!(q.start(), QueueAction::Noop));
     }
 
-    /// エッジケース: 非零 exit は失敗停止 (Start を返さない = 自動継続禁止)。
     #[test]
     fn test_queue_failure_pauses_without_auto_continue() {
         let mut q = QueueExec::new(vec![queue_entry("A", "a"), queue_entry("B", "b")]);
@@ -802,7 +753,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         ));
     }
 
-    /// エッジケース: exit code 不明 (None) も失敗停止扱い。
     #[test]
     fn test_queue_exit_none_code_pauses() {
         let mut q = QueueExec::new(vec![queue_entry("A", "a")]);
@@ -817,7 +767,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         ));
     }
 
-    /// エッジケース: 二重 Exit 観測 (失敗停止中の on_exit) は Noop。
     #[test]
     fn test_queue_on_exit_paused_is_noop() {
         let mut q = QueueExec::new(vec![queue_entry("A", "a")]);
@@ -827,10 +776,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert!(matches!(q.state(), QueueState::PausedAfterFailure { .. }));
     }
 
-    // ---- 04-studio-maxiters-outcome: 成否分類による継続 policy 分岐 (F6) ----
-
-    /// BudgetExhausted (exit 0 でも成果ゼロの打ち切り) は自動継続しない —
-    /// 予算切れ停止へ遷移し明示 resume を待つ (現状は exit 0 一律で継続)。
     #[test]
     fn test_queue_budget_exhausted_pauses_without_auto_continue() {
         let mut q = QueueExec::new(vec![queue_entry("A", "a"), queue_entry("B", "b")]);
@@ -843,7 +788,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
             q.state(),
             QueueState::PausedAfterBudgetExhausted { current: 0 }
         ));
-        // 明示 resume なら次タスクへ進めることはできる。
         let QueueAction::Start(spec) = q.resume() else {
             panic!("resume must return Start");
         };
@@ -851,7 +795,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert!(matches!(q.state(), QueueState::Running { current: 1 }));
     }
 
-    /// 分類経路でも成果あり Success は自動継続する (policy 分岐の対偶)。
     #[test]
     fn test_queue_classified_success_auto_continues() {
         let mut q = QueueExec::new(vec![queue_entry("A", "a"), queue_entry("B", "b")]);
@@ -864,7 +807,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert_eq!(spec.args[0], "b");
     }
 
-    /// 分類経路の Failed は従来どおり失敗停止 (exit code を保持する)。
     #[test]
     fn test_queue_classified_failed_pauses_with_exit_code() {
         let mut q = QueueExec::new(vec![queue_entry("A", "a")]);
@@ -882,7 +824,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         ));
     }
 
-    /// 予算切れ停止の summary / entry marker は失敗停止と区別される。
     #[test]
     fn test_queue_budget_exhausted_summary_and_marker() {
         let mut q = QueueExec::new(vec![queue_entry("周回", "run"), queue_entry("次", "x")]);
@@ -895,7 +836,6 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert_eq!(q.entry_marker(1), "待機");
     }
 
-    /// エッジケース: abort は任意状態から全破棄する (子の停止は呼び出し側)。
     #[test]
     fn test_queue_abort_discards_from_any_state() {
         let mut q = QueueExec::new(vec![queue_entry("A", "a"), queue_entry("B", "b")]);
@@ -905,13 +845,11 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert!(q.entries().is_empty());
         assert!(q.is_aborted());
         assert_eq!(q.summary(), "中止");
-        // Pending からの abort も終端化。
         let mut p = QueueExec::new(vec![queue_entry("A", "a")]);
         p.abort();
         assert!(matches!(p.state(), QueueState::Completed));
     }
 
-    /// 正常系: TaskListState::queue_entries はチェック順にラベル付きで組む。
     #[test]
     fn test_task_list_state_builds_queue_entries_in_check_order() {
         let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");

@@ -61,7 +61,6 @@ mod tests {
     use anaden_vision::{SseVisionEngine, TemplateMatcher};
     use image::{DynamicImage, GrayImage, Luma};
 
-    /// 白背景に中央付近(30,40)-(50,60)に黒四角のある画面。
     fn screen_with_square() -> DynamicImage {
         let mut img = GrayImage::from_pixel(100, 100, Luma([255]));
         for y in 40..60 {
@@ -72,18 +71,15 @@ mod tests {
         DynamicImage::ImageLuma8(img)
     }
 
-    /// 完全に白い画面（別状態）。
     fn white_screen() -> DynamicImage {
         DynamicImage::ImageLuma8(GrayImage::from_pixel(100, 100, Luma([255])))
     }
 
-    /// 20x20 の黒塗りテンプレート候補。
     fn black_roi() -> DynamicImage {
         DynamicImage::ImageLuma8(GrayImage::from_pixel(20, 20, Luma([0])))
     }
 
     fn test_engine() -> SseVisionEngine {
-        // 閾値0: 常に最良スコアを返す
         SseVisionEngine::new(TemplateMatcher::threshold_only(MatchConfidence::new(0.0)))
     }
 
@@ -109,7 +105,6 @@ mod tests {
     fn margin_is_negative_when_pattern_present_in_both() {
         let engine = test_engine();
         let roi = black_roi();
-        // 正例も負例も黒四角を含む → 識別不可（マージン小）
         let positives = vec![Arc::new(screen_with_square())];
         let negatives = vec![Arc::new(screen_with_square())];
 
@@ -126,7 +121,6 @@ mod tests {
         let engine = test_engine();
         let roi = black_roi();
         let d = discrimination(&engine, &roi, &[], &[]);
-        // 正例なし → own_min は f32::MAX、負例なし → other_max は 0.0
         assert_eq!(d.own_min, f32::MAX);
         assert_eq!(d.other_max, 0.0);
     }

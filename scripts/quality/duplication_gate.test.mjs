@@ -1,6 +1,3 @@
-// Unit + integration tests for scripts/quality/duplication_gate.mjs
-// Contract source: approved plan Phase 0 item 3 (Issue #214, T2).
-// Run: node --test scripts/quality/duplication_gate.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
@@ -33,18 +30,15 @@ const SAMPLE_OUTPUT = [
 ].join('\r\n');
 
 const PROD_SOURCE = [
-  'pub fn alpha() {}', // 1
-  '', // 2
-  '#[cfg(test)]', // 3
-  'mod tests {', // 4 <- test region starts
-  '    fn helper_a() {}', // 5
-  '    fn helper_b() {}', // 6
-  '}', // 7 <- test region ends
+  'pub fn alpha() {}',
+  '',
+  '#[cfg(test)]',
+  'mod tests {',
+  '    fn helper_a() {}',
+  '    fn helper_b() {}',
+  '}',
 ].join('\n');
 
-// ---------------------------------------------------------------------------
-// parseSimilarityOutput
-// ---------------------------------------------------------------------------
 
 test('parseSimilarityOutput: parses pairs with ranges, kinds and similarity; ignores headers and Classes lines', () => {
   const pairs = parseSimilarityOutput(SAMPLE_OUTPUT);
@@ -71,9 +65,6 @@ test('parseSimilarityOutput: normalizes windows path separators', () => {
   assert.equal(pairs[0].a.file, 'crates/demo/src/lib.rs');
 });
 
-// ---------------------------------------------------------------------------
-// allowlist matching
-// ---------------------------------------------------------------------------
 
 const ALLOWLIST = {
   entries: [
@@ -117,9 +108,6 @@ test('isAllowlisted: same functions but different file -> null', () => {
   assert.equal(isAllowlisted(pair, ALLOWLIST.entries), null);
 });
 
-// ---------------------------------------------------------------------------
-// evaluateDuplication
-// ---------------------------------------------------------------------------
 
 function mkPair(fileA, nameA, startA, endA, nameB, startB, endB, similarity, fileB = fileA) {
   return {
@@ -145,7 +133,6 @@ test('evaluateDuplication: both-production pair at/above 0.85 violates; below is
 });
 
 test('evaluateDuplication: pair with a side inside a test region is excluded from production scope', () => {
-  // helper_a (line 5) and helper_b (line 6) sit inside the cfg(test) region [4,7]
   const result = evaluateDuplication({
     pairs: [
       mkPair('crates/demo/src/lib.rs', 'helper_a', 5, 5, 'helper_b', 6, 6, 0.95),
@@ -197,9 +184,6 @@ test('evaluateDuplication: missing source for a scanned pair file throws (fail-c
   );
 });
 
-// ---------------------------------------------------------------------------
-// CLI integration (main) with tmpdir fixtures — similarity-rs is NOT executed
-// ---------------------------------------------------------------------------
 
 function makeTmpRoot() {
   return fs.mkdtempSync(path.join(os.tmpdir(), 'dup-gate-'));

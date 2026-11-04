@@ -1,4 +1,495 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "crates/anaden-cli/src/contract.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-cli/src/e2e.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-cli/src/main.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-cli/src/plan_data.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-cli/src/routine.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-cli/src/run_report.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-cli/tests/ensure_open_cli.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-cli/tests/ensure_open_readiness_cli.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-cli/tests/pipeline_control_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-cli/tests/plan_tool_cli.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-core/src/goal.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-core/src/lib.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-device/src/win32_input.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-device/src/win32_launch.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-device/tests/readiness_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-device/tests/win32_readiness_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-device/tests/win32_terminate_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-engine/src/diagnostics.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-engine/src/jitter.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-engine/src/pipeline_dir.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-engine/src/pipeline_driver.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-engine/src/pipeline_runner.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-engine/src/routine.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-engine/src/routine_runner.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-strategies/src/catalog.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-strategies/src/registry.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/app.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_state_connection.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_state_pipeline_task.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_body.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_live.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_tasks.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/authoring_coords.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/batch.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/childproc.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/cli.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/history.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/history_ui.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/library.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/log_buffer.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/log_process.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/log_status.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/main.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/proposals.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/routine_ui.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/runner_exec.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/runner_ui.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/scenario_load.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/scenario_panel.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/scenario_save.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/scenario_state.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/scenario_task_link.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/scenario_validate.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/scoring.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/settings.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/shell.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/shell_nav.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/source.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/strategy_ui.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/tasks_def.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/tasks_queue.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/src/tasks_view.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/authoring_offline_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/authoring_section_smoke_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/authoring_session_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/authoring_ui_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/e2e_evidence_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/pipeline_error_paths_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/scenario_editor_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/scenario_task_link_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/scenario_uc4_roundtrip_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-studio/tests/task_queue_e2e_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/ccoeff.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/collector.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/diagnose.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/engine.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/letterbox.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/matcher.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/pipeline.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/scale.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/scene_detector.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/template_quality.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/src/template_store.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/tests/aspect_ratio_degradation.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/tests/diagnose_report_format.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/tests/geometry_drift_regression.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/tests/menu_pc_live_regression.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/tests/neko_nikki_live_regression.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/tests/template_bank_audit.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/tests/ticket_digest_live_regression.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/tests/ticket_nav_anchor_live_regression.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "crates/anaden-vision/tests/title_live_regression.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "scripts/review_gate_eval/src/lib.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "scripts/review_gate_eval/tests/golden_dataset_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "scripts/review_gate_eval/tests/issue96_pr82_dataset_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "scripts/review_gate_eval/tests/metrics_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "scripts/review_gate_eval/tests/results_json_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    },
+    {
+      "file": "scripts/review_gate_eval/tests/reviewer_template_tests.rs",
+      "reason": "comment-only deletion in test region (operator directive 2026-11-04: no code comments); token-stream fingerprint equality verified per file (.omc/logs/2026-11-05-comment-sweep/)",
+      "ref": "branch refactor/strip-comments-tests-scripts"
+    }
+  ]
 }

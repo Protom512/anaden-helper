@@ -1,11 +1,3 @@
-//! Issue #96 Task 3: PR #82 (review-gate スキーマ変更) の評価入力検証。
-//!
-//! data/input.json に PR #82 セクション (golden / findings / consensus+split_info)
-//! が存在し、集計が承認条件を満たすことを機械的に検証する:
-//! - golden: issue #80 から抽出した PR #82 が修正した既知問題 3 件
-//! - findings: 再現 staged diff 上の構造検証で 3 件とも matched
-//! - consensus: split_info (majority/critical-veto/command-fail スキーマ) を含む
-//! - aggregate: PR #82 の recall = 1.0、混同行列に反映される
 
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]
@@ -100,7 +92,6 @@ mod tests {
         assert_eq!(pr82.total_golden, 3);
         assert_eq!(pr82.detected_golden, 3);
         assert!((pr82.recall() - 1.0).abs() < 1e-9);
-        // GO かつ post-merge 問題なし → tn に 1 加算されている
         assert!(metrics.consensus.tn >= 1);
     }
 }

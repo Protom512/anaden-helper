@@ -108,7 +108,6 @@ impl Jitter {
 mod tests {
     use super::*;
 
-    /// 同一シード → 同一系列 (完全決定論)。
     #[test]
     fn same_seed_produces_identical_sequence() {
         let mut a = Jitter::new(42);
@@ -118,7 +117,6 @@ mod tests {
         }
     }
 
-    /// 異シード → (ほぼ確実に) 異系列。100 点連続一致は非現実的なので弁別できる。
     #[test]
     fn different_seed_produces_different_sequence() {
         let mut a = Jitter::new(1);
@@ -127,7 +125,6 @@ mod tests {
         assert!(!same, "different seeds must not produce identical sequence");
     }
 
-    /// ジッタ後の座標は常に半径内かつ 0 以上。
     #[test]
     fn jittered_points_stay_in_radius_and_nonnegative() {
         let mut j = Jitter::new(7);
@@ -139,14 +136,12 @@ mod tests {
             assert!(dx <= 3, "x drift {dx} exceeds radius");
             assert!(dy <= 3, "y drift {dy} exceeds radius");
         }
-        // 境界: 原点でも負にならない (負オフセットは 0 に飽和、正オフセットはそのまま)。
         for _ in 0..200 {
             let (x, y) = j.jitter_point(0, 0);
             assert!(x <= 3 && y <= 3, "origin jitter must stay in [0, radius]");
         }
     }
 
-    /// radius 0 は座標を変えない (無効化スイッチ)。
     #[test]
     fn zero_radius_is_identity() {
         let mut j = Jitter::with_config(
@@ -159,8 +154,6 @@ mod tests {
         assert_eq!(j.jitter_point(100, 200), (100, 200));
     }
 
-    /// interval ジッタは比率内に収まる。長い系列で上下限を少なくとも一度は踏む
-    /// (一様性の緩い健全性チェック) ことも確認。
     #[test]
     fn interval_jitter_stays_within_ratio() {
         let mut j = Jitter::new(123);
@@ -183,7 +176,6 @@ mod tests {
         );
     }
 
-    /// ratio 0 は interval を変えない (無効化スイッチ)。
     #[test]
     fn zero_ratio_interval_is_identity() {
         let mut j = Jitter::with_config(
@@ -199,7 +191,6 @@ mod tests {
         );
     }
 
-    /// 1ms 未満の base でも最低 1ms にクランプされる (ゼロ割・負防止)。
     #[test]
     fn tiny_interval_clamps_to_at_least_one_ms() {
         let mut j = Jitter::new(55);
@@ -208,7 +199,6 @@ mod tests {
         }
     }
 
-    /// jitter_command は Tap/Swipe 両バリアントを処理する。
     #[test]
     fn jitter_command_covers_tap_and_swipe() {
         let mut j = Jitter::new(3);
@@ -228,7 +218,6 @@ mod tests {
         }
     }
 
-    /// seed() は構築シードを返す (report.json 記録との一致)。
     #[test]
     fn seed_accessor_returns_construction_seed() {
         assert_eq!(Jitter::new(987_654_321).seed(), 987_654_321);

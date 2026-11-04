@@ -1,28 +1,10 @@
 #!/usr/bin/env bash
-# cargo-mutants 長時間ランの自動復旧ランナー (Issue #228 / #221 / #242)。
-#
-# 実測された障害: 3201 mutants のワークスペースランが数時間ごとに nextest
-# クラッシュ (exit -1073741205 = 0xC0000409、メモリ/コミット上限系) で中断し、
-# --in-place の変異ソースが crates/ 全体に残留する (3 回観測)。
-#
-# 本ランナーは:
-#   1. cargo mutants --workspace --in-place --jobserver-tasks 4 --iterate を実行
-#      (--iterate は前回 caught 済み mutant をスキップ → クラッシュ再開で前進保証)
-#   2. 異常終了 (rc>1) 時は変異ソース・テスト残骸を復元してリトライ (上限 RETRY_MAX)
-#   3. 正常終了 (rc 0=全 caught / 1=生存あり) で mutants_gate check と
-#      mutants_reconcile を実行して完了
-#   4. 終了コードは gate/reconcile の結果を伝播 (Issue #242 — 従来常に exit 0)
-#
-# 使い方 (無人実行):
-#   nohup ./scripts/quality/mutants-run.sh <baseline.json> > mutants-run.log 2>&1 &
 set -u
 cd "$(git rev-parse --show-toplevel 2>/dev/null || echo .)" || exit 1
 export CARGO_BUILD_JOBS="${CARGO_BUILD_JOBS:-4}"
 RETRY_MAX="${RETRY_MAX:-20}"
 BASELINE="${1:-target/quality/mutants-baseline.json}"
 
-# Issue #233: クラッシュ復旧の cleanup_tree が git checkout -- crates で
-# 正当な未コミット変更を破壊しないよう、開始時に crates/ が clean であることを要求。
 if [ -n "$(git status --porcelain crates 2>/dev/null)" ]; then
   echo "ERROR: crates/ has uncommitted changes — commit or stash before running." >&2
   git status --porcelain crates | head -5 >&2
@@ -30,9 +12,6 @@ if [ -n "$(git status --porcelain crates 2>/dev/null)" ]; then
 fi
 
 cleanup_tree() {
-  # --in-place 変異ソース残留の復元 + テスト残骸 (engine テストが書く PNG) の削除。
-  # Issue #242: git checkout の失敗を検知してリトライを中止 (変異ソースの上から
-  # 再開するのを防ぐ)。AV / index.lock / Windows ファイルロックで失敗し得る。
   if ! git checkout -- crates 2>&1; then
     echo "ERROR: git checkout -- crates failed — mutated sources may remain. Aborting." >&2
     exit 1
@@ -65,10 +44,8 @@ while true; do
   sleep 30
 done
 
-# Issue #242: 終了コードを正しく伝播する。
 final_rc=0
 
-# ゲート判定 (baseline が必要なのは check のみ)。
 if [ -f "$BASELINE" ]; then
   mkdir -p target/quality
   if ! cp "$BASELINE" target/quality/mutants-baseline.json; then

@@ -314,8 +314,6 @@ mod tests {
         }
     }
 
-    // ---- summary_exit_code (終了コード契約) ----
-
     #[test]
     fn exit_code_zero_when_all_completed() {
         let s = summary_of(vec![
@@ -346,8 +344,6 @@ mod tests {
         assert_eq!(summary_exit_code(&skipped), 2);
     }
 
-    // ---- command_line ----
-
     #[test]
     fn command_line_includes_path_and_dry_run_flag() {
         assert_eq!(
@@ -357,7 +353,6 @@ mod tests {
         assert!(command_line(Path::new("a.toml"), true, None).ends_with("--dry-run"));
     }
 
-    /// `--report-file` 指定時はコマンド全文にも残る (生コマンド出力規約)。
     #[test]
     fn command_line_includes_report_file_flag() {
         assert_eq!(
@@ -370,10 +365,6 @@ mod tests {
         );
     }
 
-    // ---- write_routine_report (report.json 書込の機械可読契約) ----
-
-    /// 書込んだ report.json は `serde_json::from_reader::<RoutineSummary>` で
-    /// 読める (studio 消費契約)。親ディレクトリは自動作成。
     #[test]
     fn write_routine_report_roundtrips_routine_summary() {
         let dir = tempfile::tempdir().unwrap();
@@ -388,8 +379,6 @@ mod tests {
         assert_eq!(back, s);
         assert_eq!(back.failed, 1, "no_fire step must survive roundtrip");
     }
-
-    // ---- write_routine_evidence (永続化形式) ----
 
     #[test]
     fn evidence_files_contain_command_summary_and_metadata() {
@@ -430,8 +419,6 @@ mod tests {
         }
     }
 
-    // ---- dry-run 経路 (実機非依存・実 routine ファイル検証) ----
-
     fn workspace_root() -> PathBuf {
         crate::cli_workspace_root()
     }
@@ -466,7 +453,6 @@ mod tests {
         assert!(text.contains("start=TapToStartPc"), "{text}");
     }
 
-    /// 不正 routine (不明 start_task) は dry-run でも fail-closed に Err。
     #[test]
     fn dry_run_rejects_unknown_start_task_fail_closed() {
         let tmp = tempfile::tempdir().unwrap();
@@ -486,8 +472,6 @@ mod tests {
         assert!(format!("{err}").contains("GhostTask"), "{err}");
     }
 
-    /// `run_routine_command` の dry-run 経路が exit 0 で完了する (実機に触れない)。
-    /// レポート書込先が解決されていても dry-run は実行しないため書かない。
     #[tokio::test]
     async fn run_routine_command_dry_run_exits_zero() {
         let path = workspace_root()
@@ -507,7 +491,6 @@ mod tests {
         assert!(!report.exists(), "dry-run must not write report.json");
     }
 
-    /// 不正 routine の実行経路はハードエラー (Err) で抜ける。
     #[tokio::test]
     async fn run_routine_command_missing_file_is_err() {
         let result = run_routine_command(

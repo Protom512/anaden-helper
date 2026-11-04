@@ -83,7 +83,6 @@ mod tests {
         DynamicImage::ImageLuma8(img)
     }
 
-    /// 単色画像 (stddev = 0) は無構造。
     #[test]
     fn flat_image_is_not_structured() {
         let flat = dyn_img(GrayImage::from_pixel(64, 32, Luma([255u8])));
@@ -91,14 +90,11 @@ mod tests {
         assert!(!template_is_structured(&flat));
     }
 
-    /// 低コントラスト画像 (stddev 約 1.2 — Issue #182 の旧テンプレート 3.76 相当の
-    /// 「ほぼ単色」) も無構造。全面同色でなくても分散が閾値未満なら恒久 NoMatch。
     #[test]
     fn near_flat_low_contrast_image_is_not_structured() {
         let mut img = GrayImage::new(64, 32);
         for y in 0..32 {
             for x in 0..64 {
-                // 値域 100..=104 → stddev 約 1.2 (一様分布の √(var)).
                 let v = 100 + ((x + y) % 5) as u8;
                 img.put_pixel(x, y, Luma([v]));
             }
@@ -112,8 +108,6 @@ mod tests {
         assert!(!template_is_structured(&img));
     }
 
-    /// 実構造テンプレート相当 (0..=199 の勾配 → stddev 約 57.7。Issue #182 再生成品
-    /// の実測 53.1 と同水準) は構造ありと判定される (偽陽性ゼロの受入基準)。
     #[test]
     fn structured_gradient_image_is_structured() {
         let mut gray = GrayImage::new(64, 32);
@@ -132,7 +126,6 @@ mod tests {
         assert!(template_is_structured(&img));
     }
 
-    /// RGBA 画像でも luma 変換後に判定される (GUI crop は RGBA を返しうる)。
     #[test]
     fn rgba_image_is_judged_after_luma_conversion() {
         let img = DynamicImage::ImageRgba8(image::RgbaImage::from_pixel(
@@ -143,7 +136,6 @@ mod tests {
         assert!(!template_is_structured(&img));
     }
 
-    /// 0x0 画像は 0.0 を返しパニックしない (エッジケース)。
     #[test]
     fn empty_image_returns_zero_stddev() {
         let empty = dyn_img(GrayImage::new(0, 0));
@@ -151,15 +143,9 @@ mod tests {
         assert!(!template_is_structured(&empty));
     }
 
-    /// 閾値定数は Issue #182 の実測値 (無構造 3.76 / 実構造 53.1) の中間に
-    /// 厳密に位置すること。const block によるコンパイル時検証 (条件が定数のため
-    /// clippy::assertions_on_constants の推奨形式) — 定数を実測値の外へ動かすと
-    /// ビルドが壊れ、doc comment の根拠との乖離を検出できる。
     #[test]
     fn template_min_luma_stddev_sits_strictly_between_measured_values() {
-        /// Issue #182 旧 version_label.png (ほぼ白一色) の実測 stddev。
         const ISSUE_182_UNSTRUCTURED_MEASURED: f32 = 3.76;
-        /// Issue #182 再生成版 version_label.png (ID 表示帯 138x20) の実測 stddev。
         const ISSUE_182_STRUCTURED_MEASURED: f32 = 53.1;
         const _: () = assert!(
             ISSUE_182_UNSTRUCTURED_MEASURED < TEMPLATE_MIN_LUMA_STDDEV
@@ -169,7 +155,6 @@ mod tests {
         );
     }
 
-    /// loader 向けパス判定: 無構造 PNG ファイルは Some (警告文に stddev と閾値を含む)。
     #[test]
     fn unstructured_warning_for_path_flags_flat_png() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -189,7 +174,6 @@ mod tests {
         );
     }
 
-    /// loader 向けパス判定: 構造あり PNG ファイルは None (偽陽性ゼロ)。
     #[test]
     fn unstructured_warning_for_path_passes_structured_png() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -205,8 +189,6 @@ mod tests {
         assert!(unstructured_warning_for_path(&path).is_none());
     }
 
-    /// loader 向けパス判定: ファイル不在・デコード不能は None
-    /// (load を失敗させない — 存在検証は detect の責務)。
     #[test]
     fn unstructured_warning_for_path_tolerates_missing_and_invalid_files() {
         let missing = unstructured_warning_for_path(Path::new("/nonexistent/no-such.png"));
@@ -221,41 +203,27 @@ mod tests {
         );
     }
 
-    // ---- Issue #187: needle/roi 幅検証 ----
-
-    /// needle ≤ roi は収まる。等辺 (needle 寸法 == roi 寸法) も収まる。
     #[test]
     fn needle_fits_roi_when_dims_do_not_exceed_roi() {
-        // needle が roi より小さい。
         assert!(needle_fits_roi((80, 40), Some([820, 470, 200, 90])));
-        // 等辺 (crop == roi から作った needle の典型形)。
         assert!(needle_fits_roi((100, 50), Some([10, 20, 100, 50])));
-        // 幅だけ等しい・高さだけ等しい。
         assert!(needle_fits_roi((100, 40), Some([10, 20, 100, 50])));
         assert!(needle_fits_roi((90, 50), Some([10, 20, 100, 50])));
     }
 
-    /// roi None = 全面走査 → どんな needle でも収まる。
     #[test]
     fn needle_fits_roi_none_means_fullscreen() {
         assert!(needle_fits_roi((4000, 2000), None));
         assert!(needle_fits_roi((0, 0), None));
     }
 
-    /// needle 幅 or 高さが roi を超えると収まらない (恒久 NoMatch)。
-    /// Issue #182 の実例 (再生成テンプレ 138x20 vs 旧 roi [8,2,121,35]) を pin。
     #[test]
     fn needle_exceeding_roi_does_not_fit() {
-        // 幅超過 (Issue #182 の 138 > 121)。
         assert!(!needle_fits_roi((138, 20), Some([8, 2, 121, 35])));
-        // 高さ超過。
         assert!(!needle_fits_roi((80, 91), Some([820, 470, 200, 90])));
-        // 幅・高さとも超過。
         assert!(!needle_fits_roi((300, 200), Some([820, 470, 200, 90])));
     }
 
-    /// roi の幅/高さ 0 は [`crate::pipeline::TaskDef::roi_to_region`] と同じく
-    /// 全面扱い (true) — 検出側の正規化挙動と揃える。
     #[test]
     fn needle_fits_roi_treats_zero_wh_as_fullscreen() {
         assert!(needle_fits_roi((100, 50), Some([10, 20, 0, 90])));
@@ -263,13 +231,10 @@ mod tests {
         assert!(needle_fits_roi((100, 50), Some([10, 20, 0, 0])));
     }
 
-    /// loader 向けパス判定: needle 寸法 > roi 寸法の PNG は Some
-    /// (警告文に両寸法を含む)。
     #[test]
     fn needle_exceeds_roi_warning_for_path_flags_oversized_png() {
         let tmp = tempfile::tempdir().expect("tempdir");
         let path = tmp.path().join("big.png");
-        // 138x20 の構造あり PNG (stddev warn には掛からないサイズ検証のみの対象)。
         dyn_img(GrayImage::new(138, 20))
             .save(&path)
             .expect("save png");
@@ -286,8 +251,6 @@ mod tests {
         );
     }
 
-    /// loader 向けパス判定: 収まる needle・roi None・ファイル不在は None
-    /// (偽陽性ゼロ・load を失敗させない)。
     #[test]
     fn needle_exceeds_roi_warning_for_path_passes_fitting_cases() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -296,12 +259,9 @@ mod tests {
             .save(&path)
             .expect("save png");
 
-        // 収まる (等辺含む)。
         assert!(needle_exceeds_roi_warning_for_path(&path, Some([10, 20, 100, 50])).is_none());
         assert!(needle_exceeds_roi_warning_for_path(&path, Some([10, 20, 200, 90])).is_none());
-        // roi None = 全面。
         assert!(needle_exceeds_roi_warning_for_path(&path, None).is_none());
-        // ファイル不在。
         assert!(
             needle_exceeds_roi_warning_for_path(
                 Path::new("/nonexistent/no-such.png"),

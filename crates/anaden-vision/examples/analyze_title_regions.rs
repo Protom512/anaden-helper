@@ -1,22 +1,3 @@
-//! 一時解析ヘルパ: title シーンの固定テクスチャ領域(点滅アニメ非依存)を決定論的に検出する。
-//!
-//! T3 (title_pc 小テンプレ化) のための導出ツール。`analyze_menu_bar.rs` の
-//! 決定論的列分散手法を title コールドスタート画面へ再利用する。
-//!
-//! ユースケース:
-//! - title 画面は "Tap to Start" (正規化 (930,488) 周辺) の点滅アニメーションで
-//!   フレーム非安定。テンプレ認識は点滅に巻き込まれない固定テクスチャ部分
-//!   (version/copyright 表示帯, title ロゴ角) で行う必要がある。
-//! - 本ツールは与えた title キャプチャ上で列分散(縦縞エッジ強度)を計算し、
-//!   「描画あり連続 run」= 固定テクスチャ領域候補を列挙する。人間がその中から
-//!   アニメ非依存な ROI を選んで小テンプレ PNG を自己クロップする。
-//!
-//! usage: analyze_title_regions <input.png> <y0,y1> [x_min x_max]
-//!   y0,y1 : 安定帯として解析する縦方向範囲(例: version 帯 660..708)
-//!   x_min,x_max : 解析する横方向範囲(省略時 0..width)
-//!
-//! 出力: 各 run の [x_start,x_end, w] と中心 x を stdout へ。PNG は出さない
-//! (ROI 確定後は crop_region.rs で自己クロップする)。
 use image::GenericImageView;
 
 fn main() {
@@ -53,7 +34,6 @@ fn main() {
 
     let band_h = (y1 - y0) as usize;
 
-    // 列分散: 縦縞エッジ(文字ストローク等の描画)を持つ列を高分散として検出。
     let mut col_var: Vec<u64> = Vec::with_capacity((xe - xs) as usize);
     for x in xs..xe {
         let mut vals: Vec<u8> = Vec::with_capacity(band_h);
@@ -71,7 +51,6 @@ fn main() {
         col_var.push(var);
     }
     let max_var = *col_var.iter().max().unwrap_or(&1) as f64;
-    // 3-tap smoothing で微細ノイズを抑える(analyze_menu_bar.rs と同じ手法)。
     let sm: Vec<f64> = (0..col_var.len())
         .map(|i| {
             let a = col_var[i.saturating_sub(1)];
@@ -81,7 +60,6 @@ fn main() {
         })
         .collect();
 
-    // 描画あり連続 run(閾値 max*0.10)。
     let thr = max_var * 0.10;
     let mut runs: Vec<(usize, usize)> = Vec::new();
     let mut i = 0;
@@ -96,7 +74,6 @@ fn main() {
             i += 1;
         }
     }
-    // 小テンプレ基準: 幅 30..=120 程度の安定 run を候補とする(点滅領域のような大領域は除外しないが明示)。
     println!("image: {w}x{h} band=y{y0}..y{y1} x={xs}..{xe} max_var={max_var:.0} thr={thr:.0}");
     println!("runs (描画あり連続区間):");
     for (s, e) in &runs {

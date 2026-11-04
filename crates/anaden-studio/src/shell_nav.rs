@@ -98,28 +98,21 @@ pub fn active_pane(mode: UnifiedMode, section: ToolsSection) -> UnifiedPane {
 mod tests {
     use super::*;
 
-    // ---- 正常系: 2 タブ構成・既定ホーム (Issue #157) ----
-
     #[test]
     fn test_default_mode_is_home() {
-        // Issue #157: 既定モードはホーム (タスク一覧が主役)。
         assert_eq!(UnifiedMode::default(), UnifiedMode::Home);
         assert_ne!(UnifiedMode::default(), UnifiedMode::Tools);
     }
 
     #[test]
     fn test_modebar_has_exactly_two_tabs() {
-        // Issue #157: modebar は ホーム + ツール の 2 タブのみ。
         assert_eq!(UnifiedMode::ALL.len(), 2);
         assert_eq!(UnifiedMode::ALL, [UnifiedMode::Home, UnifiedMode::Tools]);
     }
 
     #[test]
     fn test_tools_sections_cover_all_legacy_panes() {
-        // Issue #157 機能喪失なし保証: 旧 6 タブ相当 + 実演オーサリング
-        // (Issue #190) が全てツールから到達可能。
         assert_eq!(ToolsSection::ALL.len(), 7);
-        // 作成/実演オーサリング/バッチ評価 → Studio ペイン。
         for section in [
             ToolsSection::Authoring,
             ToolsSection::LiveAuthoring,
@@ -130,7 +123,6 @@ mod tests {
                 UnifiedPane::Studio
             );
         }
-        // 戦略/実行/履歴/設定 → Runner ペイン。
         for section in [
             ToolsSection::Strategy,
             ToolsSection::Run,
@@ -142,7 +134,6 @@ mod tests {
                 UnifiedPane::Runner
             );
         }
-        // ホームはセクションに依らず常にタスク一覧。
         for section in ToolsSection::ALL {
             assert_eq!(active_pane(UnifiedMode::Home, section), UnifiedPane::Tasks);
         }
@@ -150,8 +141,6 @@ mod tests {
 
     #[test]
     fn test_runner_backed_sections_reach_dedicated_panes() {
-        // gate 指摘 (Issue #125) 回帰防止: 戦略・設定・履歴が Run へ
-        // フォールスルーして専用ビューに到達しない欠陥の再発を防ぐ。
         assert_eq!(ToolsSection::Run.runner_pane(), RunnerPane::Run);
         assert_eq!(ToolsSection::History.runner_pane(), RunnerPane::History);
         assert_eq!(ToolsSection::Strategy.runner_pane(), RunnerPane::Strategy);

@@ -73,12 +73,10 @@ mod tests {
         }
     }
 
-    /// (a) NoMatch フレームでダンプ + レポート両方が指定 dir に生成される。
     #[test]
     fn save_diagnose_report_writes_png_and_md_pair() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        // 埋込 needle 用テンプレート（高 conf エントリを1つ作る）。
         let mut needle = GrayImage::new(24, 24);
         for y in 0..24 {
             for x in 0..24 {
@@ -88,7 +86,6 @@ mod tests {
         let tpl = tmp.path().join("n.png");
         needle.save(&tpl).expect("save tpl");
 
-        // フレーム: needle を埋め込んだ 1258x708 画像（NoMatch 相当の生フレーム）。
         let mut frame = GrayImage::from_pixel(1258, 708, Luma([128]));
         for y in 0..24 {
             for x in 0..24 {
@@ -111,12 +108,10 @@ mod tests {
         assert!(body.contains("T"), "report must contain task row");
     }
 
-    /// (c) 空テンプレ/needle 過大でも skipped 行を出し panic しない。
     #[test]
     fn save_diagnose_report_skips_broken_templates_without_panic() {
         let tmp = tempfile::tempdir().expect("tempdir");
 
-        // 空テンプレート（image::open 失敗 → skipped）。
         let empty = tmp.path().join("empty.png");
         std::fs::write(&empty, b"").expect("write empty");
 
@@ -133,8 +128,6 @@ mod tests {
         );
     }
 
-    /// 二重保存回避: dump_frame=false では MD のみ生成され PNG は作られない
-    /// （ANADEN_SNAPSHOT_DIR 設定時は save_snapshot が PNG を保存済みのため）。
     #[test]
     fn save_diagnose_report_without_frame_dump_skips_png() {
         let tmp = tempfile::tempdir().expect("tempdir");
@@ -155,7 +148,6 @@ mod tests {
         );
     }
 
-    /// env ゲーティング: 両方未設定なら None。
     #[test]
     fn diag_report_dir_none_when_env_unset() {
         unsafe {
@@ -165,7 +157,6 @@ mod tests {
         assert!(diag_report_dir().is_none());
     }
 
-    /// env ゲーティング: ANADEN_DIAG_REPORT=1 単独でカレントディレクトリが返る。
     #[test]
     fn diag_report_dir_cwd_when_diag_report_enabled() {
         unsafe {
@@ -184,8 +175,6 @@ mod tests {
         assert!(diag_report_dir().is_some());
     }
 
-    /// env ゲーティング: ANADEN_SNAPSHOT_DIR 設定時はそれが優先される
-    /// （スナップショット PNG との対応付けのため同一 dir へ出力）。
     #[test]
     fn diag_report_dir_prefers_snapshot_dir() {
         let tmp = tempfile::tempdir().expect("tempdir");

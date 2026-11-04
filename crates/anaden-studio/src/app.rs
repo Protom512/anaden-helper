@@ -472,9 +472,6 @@ mod tests {
     use crate::scoring::Discrimination;
     use image::{GrayImage, Luma};
 
-    /// 非一様・非周期な needle。CCOEFF は一様パッチ（denomT=0）で全位置 0 を返すため、
-    /// build_engine の構築健全性検証には内部分散を持つ一意パターンが必要。
-    /// 値 = ((x*x + 3*y) % 200) + 20 で 20..=219 の非周期パターンを作る。
     fn textured_needle(w: u32, h: u32) -> GrayImage {
         let mut img = GrayImage::new(w, h);
         for y in 0..h {
@@ -486,7 +483,6 @@ mod tests {
         img
     }
 
-    /// 単色背景 (ox, oy) に needle を埋め込んだ画像。
     fn embed_on_bg(
         haystack_w: u32,
         haystack_h: u32,
@@ -511,12 +507,10 @@ mod tests {
 
     #[test]
     fn build_engine_produces_ccoeff_by_default() {
-        // デフォルトエンジンは CCOEFF。構築できること（panic しない）が最小保証。
         let _engine = StudioApp::build_engine(EngineKind::default());
         let _sse = StudioApp::build_engine(EngineKind::Sse);
     }
 
-    /// set_mode でモードが切り替わり、mode() で観測できること（公開 API 振る舞い）。
     #[test]
     fn set_mode_switches_between_authoring_and_batch() {
         let mut app = StudioApp::default();
@@ -526,13 +520,9 @@ mod tests {
         assert_eq!(app.mode(), AppMode::Authoring);
     }
 
-    /// build_engine が downscale=2・閾値0 で健全に構築されていることを、
-    /// 両エンジンで同一画像のマッチを返すことでエンドツーエンド検証する。
-    /// 黒四角 on 白背景は一意パターンで、downscale=2 でも位置が ±2px で確定する。
     #[test]
     fn build_engine_both_engines_locate_embedded_needle() {
         let needle = textured_needle(20, 20);
-        // 中間グレー背景に埋め込み（needle は非周期・非一意）。
         let haystack = embed_on_bg(100, 100, &needle, 40, 40, 128);
         let haystack_dyn = luma_dyn(haystack);
         let needle_dyn = luma_dyn(needle.clone());
@@ -547,7 +537,6 @@ mod tests {
             .match_template(&haystack_dyn, &needle_dyn)
             .expect("CCOEFF engine should find embedded needle");
 
-        // 非周期 needle on 単色背景は一意。downscale=2 → 位置は (40..=42) に一致。
         for (got, axis) in [(sse_m.region.x, "sse.x"), (cc_m.region.x, "cc.x")] {
             assert!(
                 (40..=42).contains(&got),
@@ -565,15 +554,12 @@ mod tests {
     #[test]
     fn run_connection_check_updates_state() {
         let mut app = StudioApp::default();
-        // PC 既定 (target=Windows) + exe 未入力 → チェック後に Disconnected (未入力理由)。
         app.win_exe.clear();
         app.run_connection_check();
         assert_eq!(app.connection().state, ConnectionState::Disconnected);
         assert!(app.connection().reason_line().contains("理由"));
     }
 
-    /// StudioApp の pipeline task 保存: ROI/スクショ未確定時はステータスに理由を
-    /// 残して何も書かない (fail-closed)。
     #[test]
     fn save_current_pipeline_task_without_roi_reports_status() {
         let dir = tempfile::tempdir().unwrap();
@@ -587,9 +573,6 @@ mod tests {
         assert!(dir.path().read_dir().unwrap().next().is_none());
     }
 
-    /// StudioApp の pipeline task 保存: ROI + スクショ + 識別力が揃った状態で
-    /// 保存すると task_dir に TOML+PNG が書かれ、load_pipeline で読める。
-    /// 閾値は discrimination から導出される (正例/負例の中間)。
     #[test]
     fn save_current_pipeline_task_writes_loadable_toml() {
         let dir = tempfile::tempdir().unwrap();
@@ -602,7 +585,7 @@ mod tests {
             image::GrayImage::from_pixel(200, 100, Luma([255])),
         )));
         app.roi.anchor = Some((10, 10));
-        app.roi.current = Some((110, 60)); // 100x50
+        app.roi.current = Some((110, 60));
         app.discrimination = Some(Discrimination {
             own_min: 0.9,
             other_max: 0.8,
@@ -617,12 +600,10 @@ mod tests {
         assert_eq!(tasks.len(), 1);
         assert_eq!(tasks[0].name, "created_task");
         assert_eq!(tasks[0].roi, Some([10, 10, 100, 50]));
-        // threshold = (0.9 + 0.8) / 2 = 0.85
         assert!((tasks[0].threshold - 0.85).abs() < 1e-4);
         assert_eq!(tasks[0].action, Some(anaden_vision::Action::ClickSelf));
     }
 
-    /// 識別力なしで保存した場合の閾値は既定 0.9。
     #[test]
     fn save_current_pipeline_task_threshold_defaults_without_discrimination() {
         let dir = tempfile::tempdir().unwrap();
@@ -640,15 +621,6 @@ mod tests {
         assert!((tasks[0].threshold - 0.9).abs() < 1e-4);
     }
 
-    // ---- Issue #184: 無構造テンプレート保存時の fail-visible 警告 (3 保存経路) ----
-    //
-    // 保存経路 1 (テンプレ保存)・2 (pipeline task 保存) の検証。警告は status へ
-    // 出るが保存自体はブロックしない (ユーザーが意図的に単色テンプレを保存する
-    // ケースを拒否しない)。判定は anaden-vision の単一実装経由
-    // (library::template_structure_warning → anaden_vision::template_is_structured)。
-
-    /// 経路 1 (テンプレ保存): 無構造 (ほぼ単色) crop を保存すると警告が出て、
-    /// かつ PNG + sidecar TOML は書かれる (ブロックしない)。
     #[test]
     fn save_current_template_flat_crop_warns_but_saves() {
         let dir = tempfile::tempdir().unwrap();
@@ -670,12 +642,10 @@ mod tests {
             "無構造テンプレート警告 (認識不能の恐れ) が出ること: {}",
             app.status
         );
-        // 保存はブロックしない → 実体が書かれている。
         assert!(dir.path().join("title").join("flat_tpl.png").exists());
         assert!(dir.path().join("title").join("flat_tpl.toml").exists());
     }
 
-    /// 経路 1 (テンプレ保存): 構造あり crop は警告なしで保存できる (偽陽性ゼロ)。
     #[test]
     fn save_current_template_textured_crop_saves_without_warning() {
         let dir = tempfile::tempdir().unwrap();
@@ -698,8 +668,6 @@ mod tests {
         assert!(dir.path().join("title").join("ok_tpl.png").exists());
     }
 
-    /// 経路 2 (pipeline task 保存): 無構造 crop を保存すると警告が出て、かつ
-    /// TOML + PNG は書かれて load_pipeline で読める (ブロックしない)。
     #[test]
     fn save_current_pipeline_task_flat_crop_warns_but_saves() {
         let dir = tempfile::tempdir().unwrap();
@@ -720,12 +688,10 @@ mod tests {
             "無構造テンプレート警告 (認識不能の恐れ) が出ること: {}",
             app.status
         );
-        // 保存はブロックしない → load_pipeline で読める。
         let tasks = anaden_vision::load_pipeline(dir.path()).unwrap();
         assert_eq!(tasks.len(), 1, "TOML+PNG が書かれている: {}", app.status);
     }
 
-    /// 経路 2 (pipeline task 保存): 構造あり crop は警告なし (偽陽性ゼロ)。
     #[test]
     fn save_current_pipeline_task_textured_crop_saves_without_warning() {
         let dir = tempfile::tempdir().unwrap();
@@ -748,9 +714,6 @@ mod tests {
         assert!(dir.path().join("ok_task.png").exists());
     }
 
-    /// minor-7 (Issue #180): 既定候補名 (tpl_name の初期値・空欄時フォールバック)
-    /// はパイプラインノード命名規約 (task_name_issue: PascalCase・連番禁止) に
-    /// 適合し、tpl_name 空欄時に scenario_candidate がその名前を採用する。
     #[test]
     fn scenario_candidate_default_name_follows_naming_convention() {
         assert!(
@@ -765,14 +728,12 @@ mod tests {
             image::GrayImage::from_pixel(200, 100, Luma([255])),
         )));
         app.roi.anchor = Some((10, 10));
-        app.roi.current = Some((110, 60)); // 100x50
+        app.roi.current = Some((110, 60));
 
         let (spec, _crop) = app.scenario_candidate().expect("candidate");
 
         assert_eq!(spec.name, DEFAULT_TEMPLATE_NAME);
     }
-
-    // ---- Issue #144 Task 3 / Issue #154 Shard 1: タスクキュー実行配線 ----
 
     fn tasks_dir() -> PathBuf {
         Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -782,7 +743,6 @@ mod tests {
             .join("tasks")
     }
 
-    /// 指定 exit code で即終了する子の SpawnSpec (Windows: cmd / Linux: sh)。
     fn exit_spec(code: i32) -> SpawnSpec {
         if cfg!(windows) {
             SpawnSpec::new(
@@ -794,7 +754,6 @@ mod tests {
         }
     }
 
-    /// 1 行出力して exit 0 で終了する子の SpawnSpec。
     fn echo_spec() -> SpawnSpec {
         if cfg!(windows) {
             SpawnSpec::new("cmd", ["/C".to_string(), "echo task-log-line".to_string()])
@@ -803,7 +762,6 @@ mod tests {
         }
     }
 
-    /// 長時間 (約30秒) 生きる子の SpawnSpec (ping は両 OS に存在)。
     fn long_spec() -> SpawnSpec {
         if cfg!(windows) {
             SpawnSpec::new(
@@ -825,7 +783,6 @@ mod tests {
         }
     }
 
-    /// キューが指定状態になるまで drain を回す (実子プロセスの Exit 待ち)。
     fn pump_until(
         app: &mut StudioApp,
         timeout_ms: u64,
@@ -849,7 +806,6 @@ mod tests {
         }
     }
 
-    /// ログ中のタスク境界セパレータ行 ([studio] === task: X ===) を数える。
     fn task_separator_count(app: &StudioApp) -> usize {
         app.task_log_snapshot
             .iter()
@@ -857,10 +813,6 @@ mod tests {
             .count()
     }
 
-    // ---- 正常系 ----
-
-    /// UC-2: チェック順どおり逐次実行され全タスク完了に到達する。
-    /// セパレータ行はタスク境界ごとに 1 行ずつ (UC-4)。
     #[test]
     fn task_queue_runs_entries_sequentially_in_check_order() {
         let mut app = StudioApp::default();
@@ -892,9 +844,6 @@ mod tests {
         assert!(lines.iter().any(|l| l.contains("キュー完了")));
     }
 
-    /// 実リポジトリ TOML から組み立てたキューはチェック順を維持する。
-    /// program に存在しないバイナリを指定すると初回起動が失敗停止する
-    /// (fail-closed: 起動失敗は当該タスクの失敗扱い)。
     #[test]
     fn task_list_selection_starts_queue_in_check_order() {
         let mut app = StudioApp::default();
@@ -903,7 +852,6 @@ mod tests {
         app.toggle_task("launch");
         app.set_anaden_program("anaden-nonexistent-bin-xyz");
         app.start_task_queue();
-        // 初回 spawn 失敗 → 同期的に失敗停止へ遷移するため drain 不要。
         let queue = app.task_queue().unwrap();
         assert!(matches!(
             queue.state(),
@@ -917,7 +865,6 @@ mod tests {
         assert!(app.status.contains("起動に失敗"), "status: {}", app.status);
     }
 
-    /// UC-4: 実行中は i/N 進行サマリとログがリアルタイム参照できる。
     #[test]
     fn task_queue_progress_summary_during_run() {
         let mut app = StudioApp::default();
@@ -934,7 +881,6 @@ mod tests {
             "summary: {}",
             queue.summary()
         );
-        // セパレータ行は起動直後に出ている。
         app.drain_task_logs();
         assert!(
             app.task_log_snapshot
@@ -944,7 +890,6 @@ mod tests {
         app.abort_task_queue();
     }
 
-    /// UC-4: 子プロセスの stdout がログスナップショットへ届く。
     #[test]
     fn task_queue_log_view_renders_child_output() {
         let mut app = StudioApp::default();
@@ -970,14 +915,9 @@ mod tests {
         );
     }
 
-    /// UC-5 (Issue #160): 差分更新スナップショット (revision-gated) でも
-    /// 行が欠けず、新着行のないフレームを連続してもスナップショット内容が
-    /// 冪等に保たれる (60 フレーム相当 = 1 秒 @60fps のアイドル drain)。
     #[test]
     fn task_log_snapshot_idempotent_across_idle_drains_and_keeps_lines() {
         let mut app = StudioApp::default();
-        // 起動即失敗 (存在しない program を持つ spec) → セパレータ + 起動失敗行
-        // を記録して失敗停止。以降はキュー滞留のまま毎フレーム drain が回る状態。
         let bogus = SpawnSpec::new("anaden-nonexistent-bin-xyz", Vec::new());
         app.start_task_entries(vec![queue_entry("失敗", bogus)]);
         pump_until(
@@ -1007,9 +947,6 @@ mod tests {
         assert_eq!(before, after);
     }
 
-    /// UC-3 (Shard 4): タスク登録・有効化イベントでホーム一覧が再読込され、
-    /// 有効化タスクが選択可能になる。既存のチェック選択は保持される。
-    /// (実リポジトリ templates/tasks は読み取り専用に使用 — 書き込み無し)
     #[test]
     fn scenario_task_enabled_event_reloads_home_list_preserving_selection() {
         let mut app = StudioApp::default();
@@ -1035,9 +972,6 @@ mod tests {
         assert_eq!(app.status, "タスク登録・有効化: テスト");
     }
 
-    // ---- エッジケース ----
-
-    /// UC-4: タスク失敗で自動継続せず停止し、明示「継続」で次が走る。
     #[test]
     fn task_queue_failure_pauses_and_resume_continues() {
         let mut app = StudioApp::default();
@@ -1051,7 +985,6 @@ mod tests {
             |s| matches!(s, QueueState::PausedAfterFailure { .. }),
             "failure pause",
         );
-        // 自動継続禁止: 2 番目はまだ起動していない。
         assert_eq!(task_separator_count(&app), 1);
         assert!(app.status.contains("失敗"), "status: {}", app.status);
         app.resume_task_queue();
@@ -1065,7 +998,6 @@ mod tests {
         assert_eq!(app.task_queue().unwrap().summary(), "完了 2/2");
     }
 
-    /// UC-4: 中止は実行中の子を停止し残りタスクを起動しない。
     #[test]
     fn task_queue_abort_discards_remaining() {
         let mut app = StudioApp::default();
@@ -1078,7 +1010,6 @@ mod tests {
         assert!(matches!(queue.state(), QueueState::Completed));
         assert!(queue.is_aborted());
         assert_eq!(queue.summary(), "中止");
-        // kill された子の Exit イベントが後段に届いても状態は崩れない。
         pump_until(
             &mut app,
             30_000,
@@ -1089,14 +1020,13 @@ mod tests {
         assert!(app.status.contains("中止"), "status: {}", app.status);
     }
 
-    /// 実行中の再開始は拒否され、キューは変更されない。
     #[test]
     fn task_queue_rejects_restart_while_active() {
         let mut app = StudioApp::default();
         app.load_task_list(&tasks_dir());
         app.toggle_task("launch");
         app.start_task_entries(vec![queue_entry("長時間", long_spec())]);
-        app.start_task_queue(); // 実行中の再開始試行
+        app.start_task_queue();
         assert!(
             app.status.contains("開始できません"),
             "status: {}",
@@ -1106,7 +1036,6 @@ mod tests {
         app.abort_task_queue();
     }
 
-    /// 未読込・未選択・空エントリでの開始は status に理由を残しキュー不変。
     #[test]
     fn start_without_selection_reports_status() {
         let mut app = StudioApp::default();
@@ -1120,10 +1049,8 @@ mod tests {
         app.toggle_task("launch");
         app.set_anaden_program("anaden-nonexistent-bin-xyz");
         app.start_task_queue();
-        // 起動失敗でもキュー自体は作成される (失敗停止として観測可能)。
         assert!(app.task_queue().is_some());
         app.abort_task_queue();
-        // 空エントリの直接注入も拒否。
         app.start_task_entries(Vec::new());
         assert!(
             app.status.contains("チェックされたタスクがありません"),

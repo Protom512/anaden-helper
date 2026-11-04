@@ -1,13 +1,6 @@
-//! Throwaway analysis (Issue #12 / DEFER option b): scan the operator-dragged
-//! logo band [164,63,932,405] on the 1258x708-resized title_pc_probe.png for
-//! the highest-variance small window (<=120px each side). The winning window
-//! becomes the new title_logo_corner sub-template (stable small feature that
-//! clears the <=130px small-template ceiling).
 use image::GrayImage;
 use image::imageops::FilterType;
 
-/// ウィンドウ内の隣接ピクセル絶対差の総和 (テクスチャエネルギー)。
-/// 水平隣接 (xx, xx+1) と垂直隣接 (yy, yy+1) の両方を足す。
 fn window_energy(p: &GrayImage, x: u32, y: u32, win: u32) -> u64 {
     let mut energy: u64 = 0;
     for yy in y..y + win {
@@ -34,7 +27,6 @@ fn main() {
         .resize_exact(1258, 708, FilterType::Triangle)
         .to_luma8();
 
-    // Operator band: x=164..1096, y=63..468.
     let (bx0, by0, bx1, by1) = (164u32, 63u32, 1096u32, 468u32);
     let win = 120u32;
 

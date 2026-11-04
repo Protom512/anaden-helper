@@ -115,17 +115,11 @@ mod tests {
         assert!(found.is_none());
     }
 
-    // ---- verify_after_fire wiring 前提: Default trait impl ----
-    // 戦略レジストリは Orchestrator::new で StrategyRegistry::new() 経由で構築されるが、
-    // 汎用コンテキスト(Default::default() や derive 先での利用)のため Default を実装する。
-    // new() と等価(空のレジストリ)でなければならない。これが崩れると Orchestrator の
-    // デフォルト構築経路が空ではなくなり、戦略未登録でも find_for_* が hit する偽陽性に繋がる。
     #[test]
     fn default_is_empty_and_equivalent_to_new() {
         let via_default = StrategyRegistry::default();
         let via_new = StrategyRegistry::new();
 
-        // Default 経由でも空(戦略0件)。new() と同じ初期状態。
         assert!(via_default.is_empty());
         assert_eq!(via_default.len(), 0);
         assert_eq!(via_new.len(), via_default.len());
@@ -133,7 +127,6 @@ mod tests {
 
     #[test]
     fn default_then_register_finds_strategy() {
-        // Default で作ったレジストリにも通常通り register 可能(振る舞いが new() と同一)。
         let mut registry = StrategyRegistry::default();
         registry.register(Box::new(DummyFishingStrategy));
 

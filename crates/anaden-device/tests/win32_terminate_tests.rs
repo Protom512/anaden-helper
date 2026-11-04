@@ -1,14 +1,3 @@
-//! `terminate_child_staged` の段階的終了の振る舞い検証 (Issue #266)。
-//!
-//! 実ゲームは使わない。ダミー子プロセス (`CARGO_BIN_EXE_graceful_child` を固有名へ
-//! コピーしたもの) で検証する。判定の原理:
-//!
-//! - stage 2 の `TerminateProcess` は exit code **1** で殺す。
-//! - ダミー子 (`mode = close`) は WM_CLOSE への応答として自ら exit **0** する。
-//!
-//! よって子の終了コードが、graceful 経路 (0) と強制終了経路 (1) を一意に識別する。
-//! `graceful_child` は WM_CLOSE 以外の理由で終了しない (メッセージループが無限に
-//! 続く) ため、終了コード 0 は即「WM_CLOSE が届いて処理された」ことの証明になる。
 #![cfg(windows)]
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::panic)]
@@ -21,12 +10,8 @@ use std::time::{Duration, Instant};
 
 use anaden_device::{TerminateStages, terminate_child_staged};
 
-/// std Command の creation_flags 用。コンソール信号の親への伝播を切る
-/// (win32_launch の spawn_launcher と同じ分離)。
 const CREATE_NEW_PROCESS_GROUP: u32 = 0x0000_0200;
 
-/// テストごとのダミー子の固有構成。コピー先 exe 名はプロセス名照合の対象なので
-/// 並列実行や残存プロセスと衝突しない固有名にする。
 struct DummyChild {
     _dir: tempfile::TempDir,
     exe: PathBuf,
@@ -49,9 +34,6 @@ fn dummy_child(tag: &str) -> DummyChild {
     }
 }
 
-/// `mode` / `close_delay_ms` を付けたダミー子を起動し、ウィンドウ作成完了
-/// (ready ファイル出現) まで待つ。WM_CLOSE を送る前にウィンドウが存在しないと
-/// graceful 経路の検証にならないため、準備完了を必ず待つ。
 fn spawn_ready(dummy: &DummyChild, mode: &str, close_delay_ms: u64) -> std::process::Child {
     let mut child = Command::new(&dummy.exe)
         .args([
@@ -80,8 +62,6 @@ fn spawn_ready(dummy: &DummyChild, mode: &str, close_delay_ms: u64) -> std::proc
     child
 }
 
-/// (a) WM_CLOSE に素直に退出する子: stage 1 で終わる。TerminateProcess 未到達の証明は
-/// 終了コード 0 (強制終了なら 1)。
 #[test]
 fn graceful_exit_never_reaches_terminate_process() {
     let dummy = dummy_child("graceful");
@@ -104,9 +84,6 @@ fn graceful_exit_never_reaches_terminate_process() {
     );
 }
 
-/// (b) WM_CLOSE を無視する子 (= フリーズゲーム代役): close_wait の猶予の後にのみ
-/// stage 2 へ達する。終了コード 1 = TerminateProcess 到達、かつ猶予より早く
-/// 強制終了していないことを経過時間で保証する。
 #[test]
 fn wm_close_ignored_escalates_to_terminate_process_after_grace() {
     let dummy = dummy_child("ignore");
@@ -136,8 +113,6 @@ fn wm_close_ignored_escalates_to_terminate_process_after_grace() {
     );
 }
 
-/// (c) WM_CLOSE 受領後に退出まで時間がかかる子: stage 1 のポーリング待ちが途中の
-/// 退出を取りこぼさず、猶予内なら強制終了に昇級しない。
 #[test]
 fn delayed_exit_during_grace_wait_is_detected_without_escalation() {
     let dummy = dummy_child("delayed");
@@ -167,7 +142,6 @@ fn delayed_exit_during_grace_wait_is_detected_without_escalation() {
     );
 }
 
-/// 子が存在しなければ何もせず Ok (冪等)。kill 不要の再起動経路の前提。
 #[test]
 fn no_existing_child_returns_ok_immediately() {
     let absent = format!("anaden_t266_absent_{}.exe", std::process::id());

@@ -214,7 +214,6 @@ mod tests {
     use super::*;
     use std::path::PathBuf;
 
-    /// この crate から見た workspace ルート (main.rs `cli_workspace_root` と同式)。
     fn workspace_root() -> PathBuf {
         PathBuf::from(env!("CARGO_MANIFEST_DIR"))
             .join("..")
@@ -230,8 +229,6 @@ mod tests {
             .join("data")
             .join("ticket_digest_plan.toml")
     }
-
-    // ---- コミット済み実データのパース (wiki 同期契約) ----
 
     #[test]
     fn loads_committed_tenmei_data() {
@@ -270,8 +267,6 @@ mod tests {
         );
     }
 
-    // ---- fail-closed パース ----
-
     #[test]
     fn plan_rejects_unknown_field() {
         let err = toml::from_str::<PlanDoc>(
@@ -304,8 +299,6 @@ mod tests {
         assert!(format!("{err}").contains("スキーマ版"), "{err}");
     }
 
-    // ---- 生成 TOML の round-trip ----
-
     #[test]
     fn rendered_plan_roundtrips_through_toml_parse() {
         let plan = PlanDoc {
@@ -328,8 +321,6 @@ mod tests {
         assert_eq!(back, plan);
     }
 
-    /// `key = {}` (秘境) と `alignment = { VH = ... }` (H 欠落) の実在形状を
-    /// 受け付ける (上流データ トト・シアターワールドの形)。
     #[test]
     fn tenmei_accepts_empty_key_and_partial_alignment() {
         let doc: TenmeiDoc = toml::from_str(

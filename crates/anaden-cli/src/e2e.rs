@@ -220,8 +220,6 @@ mod tests {
     use super::*;
     use anaden_engine::Capture as _;
 
-    // ---- e2e_run_dir (fail-closed パス検証) ----
-
     #[test]
     fn e2e_run_dir_joins_run_id() {
         let got = e2e_run_dir(Path::new(".omc/logs"), "run-e2e-123").unwrap();
@@ -240,8 +238,6 @@ mod tests {
         assert!(e2e_run_dir(Path::new(".omc/logs"), "a\\b").is_none());
     }
 
-    // ---- iso8601_utc (既知値検証) ----
-
     #[test]
     fn iso8601_known_epoch() {
         assert_eq!(iso8601_utc(0), "1970-01-01T00:00:00Z");
@@ -249,19 +245,14 @@ mod tests {
 
     #[test]
     fn iso8601_known_2026() {
-        // 2026-09-01T00:00:00Z = 1788220800 (実測: python datetime UTC)
         assert_eq!(iso8601_utc(1788220800), "2026-09-01T00:00:00Z");
     }
 
     #[test]
     fn iso8601_leap_day_boundary() {
-        // 2024-02-29T23:59:59Z = 1709251199
         assert_eq!(iso8601_utc(1_709_251_199), "2024-02-29T23:59:59Z");
-        // 2024-03-01T00:00:00Z = 1709251200
         assert_eq!(iso8601_utc(1_709_251_200), "2024-03-01T00:00:00Z");
     }
-
-    // ---- fnv1a64 (テストベクトル) ----
 
     #[test]
     fn fnv1a_empty_is_offset_basis() {
@@ -270,11 +261,8 @@ mod tests {
 
     #[test]
     fn fnv1a_known_vector() {
-        // FNV-1a 64: "a" = 0xaf63dc4c8601ec8c
         assert_eq!(fnv1a64(b"a"), 0xaf63_dc4c_8601_ec8c);
     }
-
-    // ---- append_evidence_line / save_screenshot / count (統合) ----
 
     #[test]
     fn evidence_roundtrip_log_screenshot_count() {
@@ -308,8 +296,6 @@ mod tests {
         let content = std::fs::read_to_string(dir.path().join(EVIDENCE_LOG_FILE)).unwrap();
         assert!(content.contains("line1") && content.contains("line2"));
     }
-
-    // ---- write_metadata ----
 
     #[test]
     fn metadata_contains_required_fields() {
@@ -355,8 +341,6 @@ mod tests {
         assert!(content.contains("say \\\"hi\\\" \\\\ back"), "{content}");
     }
 
-    // ---- tree_hash_of_pipeline ----
-
     #[test]
     fn tree_hash_is_deterministic_and_content_sensitive() {
         let dir = tempfile::tempdir().unwrap();
@@ -367,12 +351,10 @@ mod tests {
         assert_eq!(h1, h2);
         assert!(h1.starts_with("fnv-1a64:"), "{h1}");
 
-        // 内容変更で hash が変わる。
         std::fs::write(dir.path().join("a.toml"), b"task_A_CHANGED").unwrap();
         let h3 = tree_hash_of_pipeline(dir.path());
         assert_ne!(h1, h3);
 
-        // 非 toml は対象外。
         std::fs::write(dir.path().join("ignore.txt"), b"x").unwrap();
         assert_eq!(h3, tree_hash_of_pipeline(dir.path()));
     }
@@ -385,7 +367,6 @@ mod tests {
         );
     }
 
-    /// 常に 2x2 の RGB 画像を返す fake Capture (デバイス非依存テスト用)。
     struct FakeCapture;
 
     #[async_trait]
@@ -405,7 +386,6 @@ mod tests {
         let img2 = deco.capture().await.unwrap();
         assert_eq!((img2.width(), img2.height()), (2, 2));
 
-        // 2 サイクル = 2 スクショ + 2 ログ行。
         assert_eq!(deco.cycle_count(), 2);
         assert_eq!(count_screenshots(dir.path()), 2);
         let log = std::fs::read_to_string(dir.path().join(EVIDENCE_LOG_FILE)).unwrap();
@@ -421,15 +401,12 @@ mod tests {
 
     #[tokio::test]
     async fn evidence_capture_survives_save_failure() {
-        // evidence ディレクトリとして「ファイル」を指す → save_screenshot は失敗するが
-        // capture 自体は成功する (evidence 採取が本番実行を壊さない)。
         let dir = tempfile::tempdir().unwrap();
         let file_path = dir.path().join("not-a-dir");
         std::fs::write(&file_path, b"x").unwrap();
         let deco = EvidenceCapture::new(FakeCapture, file_path);
         let img = deco.capture().await.unwrap();
         assert_eq!(img.width(), 2);
-        // cycle は消費されている (呼び出し回数カウント)。
         assert_eq!(deco.cycle_count(), 1);
     }
 }

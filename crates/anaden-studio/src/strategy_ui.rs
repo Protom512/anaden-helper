@@ -199,7 +199,6 @@ mod tests {
     fn new_panel_has_defaults_and_no_strategy() {
         let panel = StrategyPanel::default();
         assert_eq!(panel.selection().strategy, None);
-        // 実在 2 パイプラインは ON/OFF オプションを持たないため空。
         assert!(panel.selection().options.is_empty());
     }
 
@@ -223,7 +222,6 @@ mod tests {
     fn toggle_option_without_strategy_is_ignored() {
         let mut panel = StrategyPanel::default();
         panel.toggle_option("skip_animation", true);
-        // 戦略未選択では何も変わらない。
         assert!(!panel.selection().options.contains_key("skip_animation"));
     }
 
@@ -240,7 +238,6 @@ mod tests {
         );
     }
 
-    /// Issue #139 T1: 実在しない fishing はカタログ外のため選択できない。
     #[test]
     fn select_nonexistent_fishing_is_ignored() {
         let mut panel = StrategyPanel::default();
@@ -279,7 +276,6 @@ mod tests {
     fn summary_selected_lists_enabled_options() {
         let mut panel = StrategyPanel::default();
         panel.select_strategy("nav_to_field_pc");
-        // 実在 2 パイプラインは ON/OFF オプションを持たない。
         assert_eq!(panel.summary(), "strategy=nav_to_field_pc (オプションなし)");
     }
 
@@ -295,8 +291,6 @@ mod tests {
         let mut panel = StrategyPanel::default();
         assert!(panel.load_toml("not = valid = toml").is_err());
     }
-
-    // ---- Issue #125 shard 3 タスク3: 独立タブ向け純関数 ----
 
     #[test]
     fn tab_heading_is_strategy_selection() {

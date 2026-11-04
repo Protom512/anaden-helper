@@ -632,7 +632,6 @@ impl Drop for PipelineRunnerApp {
 mod tests {
     use super::*;
 
-    /// 実行可能なダミープログラムの名前(ping は Windows/Linux 両方にある)。
     fn dummy_program() -> &'static str {
         "ping"
     }
@@ -655,7 +654,6 @@ mod tests {
         }
     }
 
-    /// tempdir 直下に `target/<profile>/anaden[.exe]` を作る。
     fn make_target_binary(root: &Path, profile: &str) -> PathBuf {
         let dir = root.join("target").join(profile);
         std::fs::create_dir_all(&dir).unwrap();
@@ -713,7 +711,6 @@ mod tests {
         assert!(got.is_err());
     }
 
-    /// UC-2: 解決失敗時にエラーが last_error に入り GUI がハングしない。
     #[test]
     fn test_unresolved_program_records_error_and_stays_stopped() {
         let mut app = PipelineRunnerApp::unresolved("anaden バイナリ解決失敗(テスト)");
@@ -748,7 +745,6 @@ mod tests {
         assert_eq!(app.status(), RunnerStatus::Stopped);
     }
 
-    /// UC-3: 起動失敗時にエラー行がログに表示される。
     #[test]
     fn test_spawn_failure_shows_error_line_in_log() {
         let mut app = PipelineRunnerApp::new("definitely-not-a-real-exe-xyz");
@@ -769,7 +765,6 @@ mod tests {
         assert_eq!(last.level, LogLevel::Error);
     }
 
-    /// UC-3（解決失敗系）: 解決エラーもログへ ERROR 行として表示される。
     #[test]
     fn test_resolution_failure_shows_error_line_in_log() {
         let mut app = PipelineRunnerApp::unresolved("テスト用解決失敗");
@@ -780,13 +775,11 @@ mod tests {
         assert!(last.line.contains("バイナリ解決失敗"));
     }
 
-    /// 実行中の子の stdout が drain でログスナップショットに届く。
     #[test]
     fn test_running_child_stdout_appears_in_log_after_drain() {
         let mut app = PipelineRunnerApp::new(dummy_program());
         app.start_pipeline(&long_args());
         if app.status() == RunnerStatus::Running {
-            // ping は即 stdout へ行を出す。数回 drain して届くまで待つ。
             for _ in 0..50 {
                 app.drain_logs();
                 if !app.log_snapshot().is_empty() {
@@ -798,10 +791,8 @@ mod tests {
             assert!(!snap.is_empty(), "stdout lines should be drained");
             app.stop_pipeline();
         }
-        // ping が環境に無い場合は start が失敗するためスキップ相当。
     }
 
-    /// クリアボタンのハンドラがログを空にする。
     #[test]
     fn test_clear_logs_empties_snapshot_and_buffer() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -813,9 +804,6 @@ mod tests {
         assert!(buf_empty);
     }
 
-    /// UC-5 (Issue #160): 差分更新スナップショットであっても行が欠けず、
-    /// 新着行のないフレームを連続してもスナップショット内容が冪等に保たれる
-    /// (60 フレーム相当 = 1 秒 @60fps のアイドル drain)。
     #[test]
     fn test_log_snapshot_idempotent_across_idle_drains() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -842,15 +830,12 @@ mod tests {
         );
     }
 
-    /// run_status_summary: 未実行時は「未実行」。
     #[test]
     fn test_run_status_summary_initially_not_run() {
         let app = PipelineRunnerApp::new(dummy_program());
         assert_eq!(app.run_status_summary(), "未実行");
     }
 
-    /// run_status_summary: 開始行観測後は goal 付き実行中表示
-    /// （RunStatus.observe の出力契約: `run_loop 開始:` 行）。
     #[test]
     fn test_run_status_summary_reflects_start_line() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -858,8 +843,6 @@ mod tests {
         assert_eq!(app.run_status_summary(), "実行中 goal=farm50 iterations=?");
     }
 
-    /// run_status_summary: 結果行観測後は停止理由とサイクル数表示
-    /// （`サイクル数:` / `停止理由:` 行）。
     #[test]
     fn test_run_status_summary_reflects_result_lines() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -872,7 +855,6 @@ mod tests {
         );
     }
 
-    /// run_status_summary: ログクリアで未実行へ戻る。
     #[test]
     fn test_run_status_summary_resets_on_clear() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -881,20 +863,15 @@ mod tests {
         assert_eq!(app.run_status_summary(), "未実行");
     }
 
-    /// run_status_summary: drain 経由（チャネル→drain_logs）でも反映される。
     #[test]
     fn test_run_status_summary_updates_via_drain_logs() {
         use crate::log_view::LogEvent;
         let mut app = PipelineRunnerApp::new(dummy_program());
-        // drain は受信側チャネルから読むため、start 経由ではなく直接検証は困難。
-        // ここでは drain 後も summary が崩れないこと（空 drain で状態維持）を確認。
         app.push_log_line("run_loop 開始: goal=g2");
         app.drain_logs();
         assert_eq!(app.run_status_summary(), "実行中 goal=g2 iterations=?");
         let _ = LogEvent::Line(String::new());
     }
-
-    // ---- build_run_args（Issue #88 タスク1・UC-1/UC-4）----
 
     fn pipeline_selection(id: &str) -> anaden_strategies::StrategySelection {
         let mut panel = crate::strategy_ui::StrategyPanel::default();
@@ -902,13 +879,11 @@ mod tests {
         panel.selection().clone()
     }
 
-    /// UC-1 正常系: 実在パイプライン選択で run サブコマンド + --algorithm + 位置引数が組まれる。
     #[test]
     fn test_build_run_args_field_loop_pc_builds_run_subcommand() {
         let args = build_run_args(&pipeline_selection("field_loop_pc")).unwrap();
         assert_eq!(args[0], "run");
         assert!(args.contains(&"--algorithm".to_string()));
-        // --algorithm の値は sse|ccoeff のみ受理される値であること。
         let algo = args
             .iter()
             .position(|a| a == "--algorithm")
@@ -920,12 +895,9 @@ mod tests {
         );
     }
 
-    /// UC-1 正常系: pipeline_dir / start_task 位置引数が含まれる。
     #[test]
     fn test_build_run_args_field_loop_pc_includes_positional_args() {
         let args = build_run_args(&pipeline_selection("field_loop_pc")).unwrap();
-        // run の位置引数（フラグとその値を除く非フラグトークン）は pipeline_dir と
-        // start_task (--max-iters の値 "10000" はフラグ値のため除外)。
         let positional: Vec<&String> = args
             .iter()
             .enumerate()
@@ -937,7 +909,6 @@ mod tests {
         assert_eq!(positional[1], "TapBottomStablePc");
     }
 
-    /// Issue #188: CLI から --target フラグは削除済み (Win32 固定) — 引数列に含まれない。
     #[test]
     fn test_build_run_args_pc_pipeline_emits_no_target_flag() {
         let args = build_run_args(&pipeline_selection("nav_to_field_pc")).unwrap();
@@ -947,7 +918,6 @@ mod tests {
         assert!(args.contains(&"TapToStartPc".to_string()));
     }
 
-    /// Issue #139 T1: 実在 PC 版 2 パイプラインすべてがカタログ経由で引数組み立て可能。
     #[test]
     fn test_build_run_args_supports_all_two_real_pc_pipelines() {
         for id in ["field_loop_pc", "nav_to_field_pc"] {
@@ -961,15 +931,11 @@ mod tests {
         }
     }
 
-    /// Issue #139 T1: fishing（実在しない pipeline）はカタログ外として拒否される
-    /// （select_strategy はカタログ外 id を無視するため strategy は None のまま）。
     #[test]
     fn test_build_run_args_fishing_is_rejected_as_nonexistent_pipeline() {
-        // パネル経由: カタログ外のため選択自体が無視される → 未選択エラー。
         let sel = pipeline_selection("fishing");
         assert_eq!(sel.strategy, None);
 
-        // 混入経路 (load_toml 等) を想定し strategy へ直接 fishing を入れた場合。
         let injected = anaden_strategies::StrategySelection {
             strategy: Some("fishing".to_string()),
             ..Default::default()
@@ -978,7 +944,6 @@ mod tests {
         assert!(err.contains("fishing"), "unexpected: {err}");
     }
 
-    /// UC-4 エッジケース: 戦略未選択は Err（子プロセス起動拒否の事前検証）。
     #[test]
     fn test_build_run_args_no_strategy_is_err() {
         let selection = anaden_strategies::StrategySelection::default();
@@ -989,7 +954,6 @@ mod tests {
         );
     }
 
-    /// UC-4 エッジケース: 未知の戦略 id（不正選択）は Err。
     #[test]
     fn test_build_run_args_unknown_strategy_is_err() {
         let selection = anaden_strategies::StrategySelection {
@@ -1000,8 +964,6 @@ mod tests {
         assert!(err.contains("bogus-strategy"), "unexpected: {err}");
     }
 
-    /// --goal / --goal-file の排他制約（parse_goal_flag）を破らないこと:
-    /// build_run_args はいずれも出力しない。
     #[test]
     fn test_build_run_args_never_outputs_goal_flags() {
         let args = build_run_args(&pipeline_selection("field_loop_pc")).unwrap();
@@ -1009,16 +971,12 @@ mod tests {
         assert!(!args.contains(&"--goal-file".to_string()));
     }
 
-    // ---- Issue #139 T2: pipeline ディレクトリ決定的解決 ----
-
-    /// tempdir に `templates/pipelines/<name>` ディレクトリを作るヘルパ。
     fn make_pipeline_dir(root: &Path, name: &str) -> PathBuf {
         let dir = root.join("templates").join("pipelines").join(name);
         std::fs::create_dir_all(&dir).unwrap();
         dir
     }
 
-    /// 相対 pipeline_dir が workspace ルート基準の絶対パスへ置換される。
     #[test]
     fn test_resolve_pipeline_arg_rewrites_relative_template_path() {
         let root = tempfile::tempdir().unwrap();
@@ -1032,13 +990,11 @@ mod tests {
         ];
         let got = resolve_pipeline_arg(&args, root.path());
         assert_eq!(PathBuf::from(&got[3]), dir);
-        // その他のトークンは不変。
         assert_eq!(got[0], "run");
         assert_eq!(got[2], "ccoeff");
         assert_eq!(got[4], "TapBottomStable");
     }
 
-    /// 非実在 pipeline_dir は元の値を維持（CLI 側 fail-closed に委譲）。
     #[test]
     fn test_resolve_pipeline_arg_keeps_nonexistent_dir_as_is() {
         let root = tempfile::tempdir().unwrap();
@@ -1051,7 +1007,6 @@ mod tests {
         assert_eq!(got[1], "templates/pipelines/ghost");
     }
 
-    /// bare name（カタログ id）も templates/pipelines 基準で解決される。
     #[test]
     fn test_resolve_pipeline_arg_resolves_bare_pipeline_name() {
         let root = tempfile::tempdir().unwrap();
@@ -1065,7 +1020,6 @@ mod tests {
         assert_eq!(PathBuf::from(&got[1]), dir);
     }
 
-    /// 絶対パス指定は変更されない（冪等・二重解決なし）。
     #[test]
     fn test_resolve_pipeline_arg_keeps_absolute_path_unchanged() {
         let root = tempfile::tempdir().unwrap();
@@ -1079,11 +1033,9 @@ mod tests {
         assert_eq!(PathBuf::from(&got[1]), abs);
     }
 
-    /// --target の値（位置引数風の "windows"）は bare name 解決の対象外。
     #[test]
     fn test_resolve_pipeline_arg_does_not_touch_flag_values() {
         let root = tempfile::tempdir().unwrap();
-        // windows という名の pipeline が存在しても --target の値は置換しない。
         let _ = make_pipeline_dir(root.path(), "windows");
         let args = vec![
             "run".to_string(),
@@ -1096,8 +1048,6 @@ mod tests {
         assert_eq!(got[2], "windows");
     }
 
-    /// 実機workspace ルートでカタログ 2 パイプラインがすべて絶対解決される
-    /// （T1 カタログ定義からの引数経路が実ディレクトリに到達することの保証）。
     #[test]
     fn test_resolve_pipeline_arg_supports_all_two_real_pipelines_on_real_root() {
         let root = workspace_root();
@@ -1123,11 +1073,9 @@ mod tests {
         }
     }
 
-    /// UC-4: 戦略未選択のまま開始すると拒否され、子プロセスは起動しない。
     #[test]
     fn test_start_with_no_strategy_is_rejected() {
         let mut app = PipelineRunnerApp::new(dummy_program());
-        // 初期状態は戦略未選択。
         assert_eq!(app.strategy_summary(), "戦略未選択");
         app.start_pipeline_with_selection();
         assert_eq!(app.status(), RunnerStatus::Stopped);
@@ -1141,7 +1089,6 @@ mod tests {
         assert_eq!(last.level, LogLevel::Error);
     }
 
-    /// UC-4: カタログ外戦略（load_toml 等で混入）でも validate が拒否する。
     #[test]
     fn test_start_with_unknown_strategy_is_rejected_by_validate() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1154,8 +1101,6 @@ mod tests {
         assert!(err.contains("戦略選択が無効です"), "unexpected: {err}");
     }
 
-    /// 選択済みなら validate → build_run_args → start の経路で起動する
-    /// （ping があれば Running。無ければスキップ相当）。
     #[test]
     fn test_start_with_selected_strategy_starts_child() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1164,30 +1109,22 @@ mod tests {
         if app.status() == RunnerStatus::Running {
             app.stop_pipeline();
         }
-        // 引数組み立て自体は pipeline_selection のテストで検証済み。
     }
 
-    /// on_strategy_changed: changed=true でのみサマリが再計算される。
     #[test]
     fn test_on_strategy_changed_refreshes_summary() {
         let mut app = PipelineRunnerApp::new(dummy_program());
         assert_eq!(app.strategy_summary(), "戦略未選択");
         app.strategy_panel.select_strategy("field_loop_pc");
-        // changed=false（同一フレーム内の無操作）では更新されない。
         app.on_strategy_changed(false);
         assert_eq!(app.strategy_summary(), "戦略未選択");
-        // changed=true で更新される。
         app.on_strategy_changed(true);
-        // 実在 2 パイプラインは ON/OFF オプションを持たないため「オプションなし」。
         assert_eq!(
             app.strategy_summary(),
             "strategy=field_loop_pc (オプションなし)"
         );
     }
 
-    // ---- Issue #125 shard 3 タスク2: Strategy / Settings ペイン ----
-
-    /// RunnerPane に Strategy / Settings バリアントが存在し全ペイン種別が区別される。
     #[test]
     fn test_runner_pane_has_six_distinct_variants() {
         use RunnerPane::{History, Run, Settings, Strategy};
@@ -1198,7 +1135,6 @@ mod tests {
         assert_ne!(Strategy, Settings);
     }
 
-    /// 設定ビューの保存: 選択中戦略が settings.toml へ保存され status が Ok になる。
     #[test]
     fn test_save_settings_from_runner_writes_file_and_records_ok() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1214,7 +1150,6 @@ mod tests {
         ));
     }
 
-    /// 設定ビューの読込: 保存済み設定が戦略パネルへ復元されサマリも更新される。
     #[test]
     fn test_load_settings_restores_strategy_selection_and_summary() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1232,7 +1167,6 @@ mod tests {
         assert!(app2.strategy_summary().contains("field_loop_pc"));
     }
 
-    /// 読込: ファイル不在 (初回起動) はエラー扱いにしない (UC-2)。
     #[test]
     fn test_load_settings_missing_file_is_ok_status() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1245,8 +1179,6 @@ mod tests {
         ));
     }
 
-    /// 履歴ペインの SaveSettings アクションは設定ビューと同一ロジックへ委譲される
-    /// （二重実装ではなく単一の save_settings_to_path を通る）。
     #[test]
     fn test_history_save_settings_action_delegates_to_shared_logic() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1271,13 +1203,8 @@ mod tests {
             assert!(err.contains("既に実行中"), "unexpected error: {err}");
             app.stop_pipeline();
         }
-        // ping が環境に無い場合は start が失敗するためスキップ相当。
     }
 
-    // ---- routine 実行の evidence 採取 (Issue #202 UC-1) ----
-
-    /// 終了 (Exit イベント) が drain されるまで待つヘルパ
-    /// (integration tests の wait_for_exit_and_drain と同パターン)。
     fn wait_stopped_and_drained(app: &mut PipelineRunnerApp) {
         for _ in 0..300 {
             if app.status() == RunnerStatus::Stopped {
@@ -1304,8 +1231,6 @@ mod tests {
         }
     }
 
-    /// 履歴ストアを tempdir へ差し替える (実環境の history.jsonl を汚さない)。
-    /// 戻り値の TempDir はスコープ終了まで保持すること (自動削除は drop 時)。
     fn isolate_history(app: &mut PipelineRunnerApp) -> tempfile::TempDir {
         let dir = tempfile::tempdir().unwrap();
         app.history = crate::history::RunHistory::open(
@@ -1315,8 +1240,6 @@ mod tests {
         dir
     }
 
-    /// routine 実行 (evidence 既定 ON) の履歴レコードに evidence run-id と
-    /// `routine:<name>` ラベルが記録される (ping 引数違いの即時終了を利用)。
     #[test]
     fn routine_run_records_evidence_run_id_in_history() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1325,7 +1248,6 @@ mod tests {
         assert!(app.routine_panel.evidence_enabled(), "default must be ON");
         app.start_routine();
         if app.status() != RunnerStatus::Running {
-            // ping が環境に無い場合は start が失敗するためスキップ相当。
             return;
         }
         wait_stopped_and_drained(&mut app);
@@ -1340,7 +1262,6 @@ mod tests {
         assert!(run_id.starts_with("routine-"), "{run_id}");
     }
 
-    /// evidence チェック OFF では run-id が記録されない (None)。
     #[test]
     fn routine_run_without_evidence_records_no_run_id() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1359,19 +1280,12 @@ mod tests {
         assert_eq!(record.evidence_run_id, None);
     }
 
-    // ---- Issue #204: routine 再実行の evidence run-id 再生成 + 清算 ----
-
-    /// テスト用の決定的 run-id 生成器 (呼出ごとに異なる id を返す。
-    /// `evidence_run_id` へのタイムスタンプ注入で実運用と同一形式)。
     fn injected_run_id() -> String {
         static SEQ: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
         let n = SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
         crate::routine_ui::evidence_run_id(&format!("20260914-0130{n:02}"))
     }
 
-    /// 履歴レコードが `want` 件になるまで drain を続けるヘルパ (Issue #204:
-    /// 再実行テストではログに前回実行の「プロセス終了」行も残るため、
-    /// 終了行ではなく履歴件数で待つ)。
     fn wait_history_len(app: &mut PipelineRunnerApp, want: usize) {
         let deadline = std::time::Instant::now() + std::time::Duration::from_secs(30);
         loop {
@@ -1388,10 +1302,6 @@ mod tests {
         }
     }
 
-    /// AC-1/AC-2: routine 再実行で新しい evidence run-id が発行され、
-    /// 再実行分の履歴レコードにもその run-id が記録される
-    /// (旧実装は run-id 込み SpawnSpec の再利用で同一 `.omc/logs/<run-id>/`
-    /// への上書き + 再実行分履歴の run-id 未記録)。
     #[test]
     fn routine_rerun_issues_fresh_evidence_run_id_and_records_it() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1400,7 +1310,6 @@ mod tests {
         app.routine_panel.select("daily");
         app.start_routine();
         if app.status() != RunnerStatus::Running {
-            // ping が環境に無い場合は start が失敗するためスキップ相当。
             return;
         }
         wait_history_len(&mut app, 1);
@@ -1422,14 +1331,11 @@ mod tests {
             .expect("rerun must record its own run-id");
         assert_ne!(rerun_id, &first, "rerun must issue a fresh run-id");
         assert!(rerun_id.starts_with("routine-"), "{rerun_id}");
-        // 両レコードとも routine ラベル・初回レコードの run-id は不変。
         assert_eq!(records[0].strategy, "routine:daily");
         assert_eq!(records[1].strategy, "routine:daily");
         assert_eq!(records[1].evidence_run_id.as_deref(), Some(first.as_str()));
     }
 
-    /// AC-3: strategy 実行の再実行で stale な pending run-id が履歴へ
-    /// 付与されない (旧実装の rerun は start_pipeline の清算点をバイパス)。
     #[test]
     fn strategy_rerun_does_not_attach_stale_evidence_run_id() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1442,8 +1348,6 @@ mod tests {
         wait_history_len(&mut app, 1);
         assert_eq!(app.history.records()[0].evidence_run_id, None);
 
-        // 旧実装で spawn 失敗時に残存し得た stale pending を直接注入し、
-        // 再実行経由でも履歴へ付与されないことを検証する。
         app.pending_evidence_run_id = Some("routine-stale".to_string());
         app.rerun_pipeline();
         if app.status() != RunnerStatus::Running {
@@ -1457,8 +1361,6 @@ mod tests {
         );
     }
 
-    /// AC-3 (routine 経路): 再実行時に pending に残っていた stale run-id は
-    /// 履歴へ付与されず、新規発行の run-id に置き換えられる。
     #[test]
     fn routine_rerun_replaces_stale_pending_run_id_with_fresh_one() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1485,8 +1387,6 @@ mod tests {
         assert!(rerun_id.starts_with("routine-"), "{rerun_id}");
     }
 
-    /// evidence OFF で開始した routine の再実行も run-id なしで再現される
-    /// (起動時スナップショットの再現・run-id が勝手に付与されない)。
     #[test]
     fn routine_rerun_respects_evidence_disabled_snapshot() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1512,9 +1412,6 @@ mod tests {
         );
     }
 
-    // ---- 03-report-channel: strategy spawn の --report-file 付与 ----
-
-    /// with_report_file_arg: 引数列末尾に `--report-file <path>` が付く。
     #[test]
     fn report_file_arg_appended_to_strategy_args() {
         let args = vec![
@@ -1529,8 +1426,6 @@ mod tests {
         assert_eq!(&got[..args.len()], &args[..]);
     }
 
-    /// RunRequest::Strategy の spawn spec に --report-file が含まれ、
-    /// 発行された report パスと一致する (label/run-id は None・種別は Run)。
     #[test]
     fn strategy_build_spawn_emits_report_file() {
         let req = RunRequest::Strategy {
@@ -1550,8 +1445,6 @@ mod tests {
         assert_eq!(run_id, None);
     }
 
-    /// routine 実行も --report-file を付与し、種別は Routine
-    /// (03-report-channel follow-up: studio が routine レポートを読める)。
     #[test]
     fn routine_build_spawn_emits_report_file_of_routine_kind() {
         let dir = tempfile::tempdir().unwrap();
@@ -1575,9 +1468,6 @@ mod tests {
         assert_eq!(run_id, None);
     }
 
-    /// Exit イベント観測時、pending の report.json が第一ソースとして
-    /// 履歴レコード (停止理由・発火回数) と LogStatus へ反映される
-    /// (stdout 日本語行マッチはフォールバック)。
     #[test]
     fn exit_drain_reads_report_into_status_and_history() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1592,7 +1482,6 @@ mod tests {
         app.pending_report_path = Some(report_path);
         app.run_started_at = Some(1);
         app.run_strategy = Some("field_loop_pc".to_string());
-        // Exit イベント (exit code 0) を直接注入して drain。
         app.log_tx
             .send(crate::log_view::LogEvent::Exit(Some(0)))
             .unwrap();
@@ -1605,17 +1494,13 @@ mod tests {
             Some("宣言的ゴール到達(正常)")
         );
         assert_eq!(record.fired_count, Some(7));
-        // LogStatus (ステータスバー) も report 由来の値へ更新される。
         assert_eq!(
             app.run_status_summary(),
             "停止 reason=宣言的ゴール到達(正常) iterations=42"
         );
-        // 読込済み report は再消費されない (take 済み)。
         assert_eq!(app.pending_report_path, None);
     }
 
-    /// report が無い (古い anaden バイナリ・書込失敗) 場合は従来経路
-    /// (stdout 解析 + report フィールド None) で履歴が作られる。
     #[test]
     fn exit_drain_without_report_falls_back_to_stdout() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1634,10 +1519,6 @@ mod tests {
         assert_eq!(app.run_status_summary(), "未実行");
     }
 
-    // ---- 04-studio-maxiters-outcome: MaxIterations/Success の成否分類 (F6) ----
-
-    /// exit 0 でも report が MaxIterations + fired=0 (成果ゼロ打ち切り) の場合、
-    /// 履歴は BudgetExhausted として記録される (従来は Success = 誤成功)。
     #[test]
     fn exit_drain_classifies_budget_exhausted_run() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1664,7 +1545,6 @@ mod tests {
         assert_eq!(record.fired_count, Some(0));
     }
 
-    /// fired>0 の MaxIterations は成果あり扱い — 従来通り Success で記録される。
     #[test]
     fn exit_drain_max_iterations_with_fired_is_success() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1689,11 +1569,6 @@ mod tests {
         assert_eq!(record.fired_count, Some(7));
     }
 
-    // ---- routine レポート読込 (03-report-channel follow-up) ----
-
-    /// routine 実行の Exit ドレイン: RoutineSummary 形式の report.json を
-    /// 種別 (PendingReportKind::Routine) に従って読み、履歴 (全体成否ラベル・
-    /// 合計発火数) と LogStatus (合計サイクル数・成否ラベル) へ反映する。
     #[test]
     fn exit_drain_reads_routine_report_into_status_and_history() {
         let mut app = PipelineRunnerApp::new(dummy_program());
@@ -1723,7 +1598,6 @@ mod tests {
         app.pending_report_kind = PendingReportKind::Routine;
         app.run_started_at = Some(1);
         app.run_strategy = Some("routine:daily".to_string());
-        // Exit イベント (exit code 0 = all_ok) を直接注入して drain。
         app.log_tx
             .send(crate::log_view::LogEvent::Exit(Some(0)))
             .unwrap();
@@ -1734,16 +1608,13 @@ mod tests {
         assert_eq!(record.outcome, RunOutcome::Success);
         assert_eq!(record.stop_reason.as_deref(), Some("routine 完了 (2/2)"));
         assert_eq!(record.fired_count, Some(4));
-        // LogStatus (ステータスバー) も routine レポート由来の値へ更新される。
         assert_eq!(
             app.run_status_summary(),
             "停止 reason=routine 完了 (2/2) iterations=15"
         );
-        // 読込済み report は再消費されない (take 済み)。
         assert_eq!(app.pending_report_path, None);
     }
 
-    /// routine 失敗 (exit 2) のレポートも読み込まれ、失敗ラベルが履歴へ残る。
     #[test]
     fn exit_drain_routine_failure_report_labels_history() {
         let mut app = PipelineRunnerApp::new(dummy_program());

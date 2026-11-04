@@ -1,39 +1,26 @@
-// Unit + integration tests for scripts/quality/assert_tests_untouched.mjs
-// Contract source: approved plan Phase 0 item 4 (Issue #214, T3) —
-// "テスト不改変" structural guarantee: no git-diff hunk may touch a test
-// module region, a #[cfg(test)] item, or a tests/ directory file.
-// Run: node --test scripts/quality/assert_tests_untouched.test.mjs
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { main } from './assert_tests_untouched.mjs';
 
 const OLD_SRC = [
-  'pub fn prod_a() {}', // 1
-  'pub fn prod_b() {}', // 2
-  '', // 3
-  '#[cfg(test)]', // 4
-  'mod tests {', // 5
-  '    #[test]', // 6
-  '    fn t1() { assert!(true); }', // 7
-  '}', // 8
+  'pub fn prod_a() {}',
+  'pub fn prod_b() {}',
+  '',
+  '#[cfg(test)]',
+  'mod tests {',
+  '    #[test]',
+  '    fn t1() { assert!(true); }',
+  '}',
 ].join('\n');
 
-// A refactor that only changes production lines (lines 1-2) in the new version.
 const NEW_SRC_PROD_ONLY = OLD_SRC.replace('pub fn prod_a() {}', 'pub fn prod_a() -> u32 { 1 }');
 
-// New version where a production fn was deleted entirely (test region intact).
 const NEW_SRC_DELETED_PROD = ['pub fn prod_b() {}', '', '#[cfg(test)]', 'mod tests {', '    #[test]', '    fn t1() { assert!(true); }', '}'].join('\n');
 
-// Hermetic main() runner: injects an empty allowlist so the repo's real
-// assert-tests-untouched-allowlist.json cannot make these tests stale.
 const call = (opts) => main([], { allowlist: [], ...opts });
 
-// ---------------------------------------------------------------------------
-// Core scenarios
-// ---------------------------------------------------------------------------
 
 test('added line inside a new-side test region is a violation (exit 1)', () => {
-  // Modify line 7 (inside region [4..8] incl. attr) of crates/x/src/lib.rs.
   const diff = [
     'diff --git a/crates/x/src/lib.rs b/crates/x/src/lib.rs',
     '--- a/crates/x/src/lib.rs',
@@ -60,7 +47,7 @@ test('deleted line that was inside an old-side test region is a violation', () =
     '-    fn t1() { assert!(true); }',
     ' }',
   ].join('\n');
-  const newSrc = ['#cfg', ''].join('\n'); // placeholder, new side won't hit region
+  const newSrc = ['#cfg', ''].join('\n');
   const code = call({
     diffText: diff,
     oldSources: { 'crates/x/src/lib.rs': OLD_SRC },
@@ -87,7 +74,6 @@ test('production-only modifications on both sides pass (exit 0)', () => {
 });
 
 test('deleting production lines (test region untouched) passes', () => {
-  // prod_a removed: old lines 1 (production) deleted, new side shifts the rest.
   const diff = [
     'diff --git a/crates/x/src/lib.rs b/crates/x/src/lib.rs',
     '--- a/crates/x/src/lib.rs',

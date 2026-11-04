@@ -285,8 +285,6 @@ mod tests {
     fn resolve_config_dir_respects_env_override_not_cwd() {
         let dir = tempfile::tempdir().unwrap();
         let dir2 = tempfile::tempdir().unwrap();
-        // edition 2024 では set_var が unsafe なため、上書き値注入版で検証する。
-        // CWD ではなく指定 dir 側へ解決されることを検証。
         let resolved = resolve_config_dir_with_override(Some(dir.path().as_os_str()));
         let resolved2 = resolve_config_dir_with_override(Some(dir2.path().as_os_str()));
         assert_eq!(resolved, dir.path().join("anaden-studio"));
@@ -297,8 +295,6 @@ mod tests {
     #[test]
     fn env_override_empty_is_ignored() {
         let resolved = resolve_config_dir_with_override(Some(std::ffi::OsStr::new("")));
-        // 空文字上書きは無視されプラットフォーム解決へフォールバック。
-        // テスト環境 (Windows CI 含む) では絶対パスになることを確認。
         assert!(resolved.is_absolute() || cfg!(not(any(windows, unix))));
     }
 
@@ -311,10 +307,6 @@ mod tests {
         assert_eq!(path, dir.path().join("anaden-studio").join(SETTINGS_FILE));
     }
 
-    // ---- T4: 実在 PC 版 2 パイプラインの選択戦略 TOML roundtrip ----
-
-    /// 実在 PC 版 2 パイプラインのそれぞれで save → load が戦略 id を保存すること
-    /// (Issue #188 で android 版 4 戦略を削除)。
     #[test]
     fn roundtrip_preserves_each_of_two_real_pc_pipeline_strategies() {
         for id in ["field_loop_pc", "nav_to_field_pc"] {
@@ -336,7 +328,6 @@ mod tests {
         }
     }
 
-    /// TOML 本文に選択戦略 id が現れる（人間可読・デバッグ容易性）。
     #[test]
     fn saved_toml_contains_selected_pipeline_id() {
         let dir = tempfile::tempdir().unwrap();
@@ -352,7 +343,6 @@ mod tests {
         assert!(text.contains(r#"strategy = "nav_to_field_pc""#), "{text}");
     }
 
-    /// 選択戦略がカタログの実在 PC 版 2 パイプラインのいずれかと整合する。
     #[test]
     fn loaded_selection_validates_against_builtin_catalog() {
         let catalog = anaden_strategies::StrategyCatalog::builtin();
@@ -365,8 +355,6 @@ mod tests {
         }
     }
 
-    /// 旧形式（fishing 等・実在しない戦略）の設定もフォールバックせず
-    /// 読み込める（フォワード互換。検証は UI 側で行う）。
     #[test]
     fn roundtrip_of_legacy_unknown_strategy_still_loads() {
         let dir = tempfile::tempdir().unwrap();
