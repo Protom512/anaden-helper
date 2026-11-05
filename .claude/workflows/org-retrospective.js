@@ -8,7 +8,6 @@ export const meta = {
   ],
 };
 
-// ── Phase 1: Collect ──
 phase('Collect');
 const feedbackAnalysis = await agent(
   `You are the Organization Analyst. Read the agent feedback log and categorize all entries.
@@ -64,7 +63,6 @@ if (feedbackAnalysis.total_entries === 0) {
   return { status: 'no-feedback', message: 'No feedback entries found. Pipeline is running smoothly.' };
 }
 
-// ── Phase 2: Analyze ──
 phase('Analyze');
 const analysis = await agent(
   `You are the Organization Architect. Based on feedback analysis, propose concrete structural changes.
@@ -133,7 +131,6 @@ Provide at most 5 proposals, ranked by impact/effort ratio.`,
 );
 log(`Generated ${analysis.proposals.length} structural change proposals`);
 
-// ── Phase 3: Propose ──
 phase('Propose');
 
 for (const p of analysis.proposals) {

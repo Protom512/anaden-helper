@@ -187,16 +187,15 @@ test('ps1: fingerprint ignores comments and whitespace', () => {
   assert.equal(codeFingerprint(withComments, 'ps1'), codeFingerprint(bare, 'ps1'));
 });
 
-test('js: pure drift-guard marker comments are exempt, marker-with-prose is not', () => {
+test('js: drift-guard marker comments are flagged', () => {
   const src = 'const a = 1;' + NL + '// [done-evidence-begin]' + NL + 'const b = 2;' + NL + '// run-metadata-lookup-end' + NL + '// [x-begin] prose here' + NL + 'const c = 3;';
   const comments = findComments(src, 'js');
-  assert.equal(comments.length, 1);
-  assert.ok(src.slice(comments[0].start, comments[0].end).includes('prose here'));
+  assert.equal(comments.length, 3);
 });
 
-test('stripComments keeps pure drift-guard marker lines', () => {
+test('stripComments removes drift-guard marker lines', () => {
   const src = 'const a = 1;' + NL + '// [done-evidence-begin]' + NL + 'const b = 2;';
-  assert.equal(stripComments(src, 'js'), src);
+  assert.equal(stripComments(src, 'js'), 'const a = 1;' + NL + 'const b = 2;');
 });
 
 test('scopeFiles covers crates/scripts code plus repo toml and config yml', () => {

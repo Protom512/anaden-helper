@@ -26,9 +26,6 @@ ROOT_W="$(cygpath -w "$ROOT")"
 echo "bench: CLI = $CLI_W"
 
 cat > "$OUT/routine-bench.toml" <<'EOF'
-# RSS bench 用 routine (Issue #214 T5 — 決定的ワークロード)。
-# 実パイプラインテンプレート (templates/pipelines/*) を参照する検証のみ
-# ワークロード (--dry-run はデバイスに触れない)。
 name = "bench-daily"
 
 [[steps]]

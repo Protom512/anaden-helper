@@ -263,7 +263,6 @@ export const meta = {
   ],
 };
 
-// Phase 1: Analyze changes
 phase('Analyze');
 const changes = await agent(
   `Analyze the current git changes for review scope.
@@ -344,7 +343,6 @@ const REVIEW_DIFF_RAW = gateDiff.mode === 'intent-to-add'
 const REVIEW_DIFF_SECTION = buildDiffSection(REVIEW_DIFF_RAW);
 log(`Review Gate: injected diff context (${REVIEW_DIFF_SECTION.length} chars, mode=${gateDiff.mode}, basis=${gateDiff.basis}${gateDiff.rangeVariant ? ` variant=${gateDiff.rangeVariant}` : ''}${gateDiff.mode === 'intent-to-add' ? ` files=${gateDiff.untrackedFiles.length}` : ''}) into all reviewers (Issue #78 R8 / Issue #102 T4)`);
 
-// Phase 2: Parallel reviews
 phase('Review');
 const reviewers = [];
 
@@ -491,7 +489,6 @@ log(`Findings after dedup: ${mergedFindings.length} (Issue #79)`);
 
 log(`Reviews completed: ${validReviews.length} reviewers`);
 
-// Phase 3: QC Manager judges
 phase('Judge');
 const judgment = await agent(
   `You are the QC Manager. Synthesize these review results and make a final GO/NO-GO judgment.

@@ -33,7 +33,6 @@ const V_SCHEMA = {
   required: ['verdict', 'dimension', 'findings', 'summary']
 }
 
-// ── Phase 1: Non-Functional Review ──
 phase('Non-Functional Review')
 
 const reviews = await parallel([
@@ -263,7 +262,6 @@ Provide evidence for each point.`,
   ),
 ])
 
-// ── Phase 2: Consensus ──
 phase('Consensus')
 
 const consensus = await agent(
