@@ -14,7 +14,6 @@ export const meta = {
   ],
 };
 
-// [run-metadata-begin]
 const PIPELINE_PHASES = ['Coordinate', 'Request', 'Estimate', 'Approve', 'Implement', 'Commit Gate', 'Release', 'Release Review', 'Merge & Close', 'Self-Improve'];
 const argsObj = (typeof args !== 'undefined' && args && typeof args === 'object') ? args : {};
 const runTimestamp = argsObj.runTimestamp || 'unknown';
@@ -54,9 +53,7 @@ function buildRunMetadata(input) {
     errors: [],
   };
 }
-// [run-metadata-end]
 
-// ── Phase 0: Coordinate ──
 phase('Coordinate');
 const coordinatorArgs = (typeof args === 'string' ? args.trim() : '') || '';
 const isBacklogPick = !coordinatorArgs || /^next$/i.test(coordinatorArgs);
@@ -193,7 +190,6 @@ const changedFilesList = (scopeResult && scopeResult.changedFiles) ? scopeResult
 log(`Scope resolved (git SoT): ${changedFilesList.slice(0, 120)}`);
 
 const changedFilesArr = (scopeResult && scopeResult.changedFiles) ? scopeResult.changedFiles : [];
-// run-metadata-lookup-begin
 const RUN_TIMESTAMP_UNKNOWN = 'unknown';
 function buildRunTimestampIndex(entries) {
   const index = new Map();
@@ -218,8 +214,6 @@ function matchRunByTimestamp(index, runTimestamp) {
   }
   return null;
 }
-// run-metadata-lookup-end
-// gate-diff-kind-begin
 const DOCS_DIR_PREFIXES = ['docs/', 'doc/'];
 const DOCS_ROOT_PREFIXES = ['.claude/rules/', 'CLAUDE.d/'];
 function isDocsPath(path) {
@@ -262,7 +256,6 @@ function classifyDiffKind(changedFiles) {
   }
   return sawDocs ? 'mixed' : 'code';
 }
-// gate-diff-kind-end
 const DOCS_ONLY_SKIP_KEYS = ['reliability', 'performance', 'extensibility'];
 function GATE_DIFF_KIND_LANES() {
   const lanes = GATE_DIMENSIONS.filter(
@@ -279,9 +272,7 @@ function integrationSliceCheckText() {
     : `スライスは crate を触っていない(docs/data/assets のみ、または test-only)。per-slice コード層は N/A → GO(public API 影響は Step3 で確認)。`;
 }
 
-// ── Phase 1: Request ──
 phase('Request');
-// [pm-ticket-files-begin]
 const ticket = await agent(
   `You are the Product Manager. Create a structured feature ticket based on this request:
 
@@ -351,7 +342,6 @@ GitHub Issue using: gh issue create`,
   }}
 );
 log(`Ticket created: ${ticket.title} (Priority: ${ticket.priority})`);
-// [pm-ticket-files-end]
 
 const runMeta = buildRunMetadata({
   runTimestamp,
@@ -372,7 +362,6 @@ ${JSON.stringify(runMeta.value, null, 2)}
   log(`Run metadata (Issue #97 UC-1): FAIL-CLOSED, not persisted — ${runMeta.errors.join('; ')}`);
 }
 
-// [ticket-precheck-wiring-begin]
 function normalizePath(path) {
   if (typeof path !== 'string') {
     return null;
@@ -639,7 +628,6 @@ if (ticketPrecheck.verdict !== 'PASS') {
 }
 log(`Ticket precheck PASS (Issue #99): declared ${ticketPrecheck.declared.length} file(s) match changed files; slice metadata crates=[${changedCratesList || 'none'}] diffKind=${diffKind} (precheck-derived)`);
 
-// [issue-premise-wiring-begin]
 const issueNumberForPremise = ticket.issueNumber;
 const premiseEvidence = issueNumberForPremise ? await agent(
   `ISSUE-PREMISE PROBE (Issue #109)。issue #${issueNumberForPremise} の前提検証 evidence を以下のコマンドで収集せよ:
@@ -700,10 +688,7 @@ if (issuePremise.verdict !== 'PASS') {
   };
 }
 log(`Issue premise precheck PASS (Issue #109): issue #${issueNumberForPremise} is not stale/duplicate — ${issuePremise.reason}`);
-// [issue-premise-wiring-end]
-// [ticket-precheck-wiring-end]
 
-// ── Phase 2: Estimate ──
 phase('Estimate');
 const estimate = await agent(
   `You are the Tech Lead. Review this feature request and create a technical estimate:
@@ -816,7 +801,6 @@ if (approval.decision === 'DEFER') {
   };
 }
 
-// [implement-lane-begin]
 const IMPLEMENT_LANE_INVESTIGATION = new Set(['release', 'merge']);
 const IMPLEMENT_LANE_TDD = 'tdd';
 const resolveImplementLane = (task) => {
@@ -879,9 +863,7 @@ append a single line to .claude/org-feedback.md:
 [YYYY-MM-DD] [engineer] [category: workflow|role-ambiguity|bottleneck|suggestion] specific constructive feedback
 Only append if you have genuine feedback. Be specific.`;
 };
-// [implement-lane-end]
 
-// [file-ownership-begin]
 const normalizeOwnedPath = (p) =>
   (typeof p === 'string') ? p.replace(/\\/g, '/') : null;
 const taskDeclaredFiles = (task) => {
@@ -1032,9 +1014,7 @@ const buildOwnershipSerializationRationale = (tasks, treeHash, rid, rts) => {
     classifier: 'feature-pipeline.js resolveDispatchGroups (marker block, drift-guarded by tests/ownership-serialization.test.mjs)',
   };
 };
-// [file-ownership-end]
 
-// [dependency-readiness-begin]
 const taskDeclaredDeps = (task) => {
   const t = (task && typeof task === 'object') ? task : null;
   if (!t || !Array.isArray(t.dependencies)) return [];
@@ -1188,10 +1168,7 @@ const normalizeDependencyCollectorOutput = (result) => {
   }
   return Object.keys(records).length > 0 ? records : null;
 };
-// [dependency-readiness-end]
 
-// ── Phase 3: Implement ──
-// [ownership-serialization-wiring-begin]
 phase('Implement');
 const ownershipPlan = resolveDispatchGroups(ownershipRelevantTasks(estimate.tasks));
 if (ownershipPlan.status !== 'ok') {
@@ -1248,7 +1225,6 @@ const runImplementTask = async (task) => {
         reason: `${laneResult.reason} — estimate task に metadata.lane ('release'|'merge'|'tdd') が未宣言か不正。TDD テンプレートへの黙墜ち防止 (Issue #99)。`,
       };
     }
-    // [dependency-readiness-wiring-begin]
     const _declaredDeps = taskDeclaredDeps(task);
     if (_declaredDeps.length > 0) {
       const _depTargets = _declaredDeps.map((depId) => {
@@ -1298,7 +1274,6 @@ ${JSON.stringify(depRationale, null, 2)}
       }
       log(`[dependency-gate] task ${task.id}: deps [${_declaredDeps.join(', ')}] verified ready — dispatching`);
     }
-    // [dependency-readiness-wiring-end]
     return agent(
       buildEngineerPrompt(laneResult, task, ticket, approval),
       { label: `engineer:${task.id}`, phase: 'Implement', model: 'sonnet' }
@@ -1322,7 +1297,6 @@ for (const group of ownershipPlan.groups) {
   }
 }
 log(`Implementation: ${implResults.filter(Boolean).length}/${estimate.tasks.length} tasks completed`);
-// [ownership-serialization-wiring-end]
 
 const _slug = ((ticket && ticket.title) || 'feature')
   .toLowerCase()
@@ -1344,10 +1318,8 @@ Final line MUST be exactly: SNAPSHOT_BRANCH=${snapshotBranch}`,
   log(`R7 snapshot: skipped (non-fatal, workflow continues): ${e}`);
 }
 
-// ── Phase 4: Commit Gate (6-dimension non-functional review) ──
 phase('Commit Gate');
 
-// [done-evidence-begin]
 const DONE_EVIDENCE_MAX_TAIL = 2000;
 const isNonNegInt = (v) => Number.isInteger(v) && v >= 0;
 const evaluateDoneEvidence = (input) => {
@@ -1401,9 +1373,7 @@ passed=${String(evidence.passed)}, failed=${String(evidence.failed)}, skipped=${
 checkoutClean=${String(evidence.checkoutClean)}, collectedAt=${String(evidence.collectedAt)}
 runTimestamp=${(typeof evidence.runTimestamp === 'string' && evidence.runTimestamp.length > 0) ? evidence.runTimestamp : 'unknown'} (pipeline run start time — Issue #97 UC-3; collectedAt は採取時刻, runTimestamp は run 開始時刻)${tail}`;
 };
-// [done-evidence-end]
 
-// [gate-evidence-begin]
 const GATE_EVIDENCE_STATUS_FAILED = 'evidence-failed';
 const GATE_DIFF_EMPTY_STATUS = 'diff-empty-failed';
 const GATE_EVIDENCE_SCHEMA = {
@@ -1455,7 +1425,6 @@ const normalizeGateEvidence = (result) => {
     outputTail: typeof obj.outputTail === 'string' ? obj.outputTail : '',
   };
 };
-// [gate-evidence-end]
 
 const gateEvidenceRaw = await agent(
   `EVIDENCE COLLECTOR (S2, Issue #68). Commit Gate 用に fresh-checkout で build と test を1回ずつ実行し、構造化 evidence を返す。**dirty な working tree では実行しないこと** — 必ず新規 worktree を作る:
@@ -1487,13 +1456,11 @@ if (evidenceShortCircuit) {
 }
 const GATE_EVIDENCE = formatEvidenceForReviewers(gateEvidence, runTimestamp);
 
-// [run-metadata-prompt-check-begin]
 const RUN_TS_CHECK = `【runTimestamp 照合 (Issue #97)】.omc/logs/${runId}/run-metadata.json の runTimestamp を読み、
 evidence の recordedAt (採取時刻) と照合せよ。runTimestamp = run 開始時刻、recordedAt = 採取時刻であり
 両者は役割が異なる (二重管理ではない)。run-metadata.json が無い・JSON が破損している・runTimestamp
 フィールドが無い場合は unknown として扱い、その evidence は検証不足 (fail-closed) として GO 判定の
 根拠にしないこと。メタデータ欠損ディレクトリへの遡及補填はしない (Issue #97 の非スコープ)。`;
-// [run-metadata-prompt-check-end]
 
 function extractDiffSection(raw, name) {
   if (typeof raw !== 'string' || raw === '') return '';
@@ -2019,7 +1986,6 @@ if (diffKind === 'docs-only') {
   log(`Diff-kind (P-008): ${diffKind} diff — full ${GATE_DIMENSIONS.length}-lane gate.`);
 }
 
-// [gate-team-begin]
 const GATE_TEAM_VERDICT_ENUM = ['GO', 'NO-GO', 'CONDITIONAL'];
 const GATE_TEAM_COERCE = (raw) => {
   if (typeof raw !== 'string') return null;
@@ -2086,7 +2052,6 @@ const aggregateGateReviews = (reviews, expectedDimensions = 6) => {
   }
   return { preVerdict: 'CONDITIONAL', complete: true, blocking: [], missing: [], goCount, noGoCount: 0 };
 };
-// [gate-team-end]
 
 const gateTeamPrimitivesAvailable = () =>
   typeof TeamCreate === 'function' &&
@@ -2286,9 +2251,7 @@ if (consensus.final_verdict === 'NO-GO') {
   };
 }
 
-// ── Phase 5: Release — mechanical empty-release precheck (Issue #66) ──
 
-// [release-precheck-begin]
 const RELEASE_EXCLUDE_PATTERNS = [
   /^\.claude\//, /^\.claude\.old\//, /^\.omc\//, /^\.understand-anything\//,
   /\.local$/i, /\.lnk$/i,
@@ -2355,7 +2318,6 @@ const evaluateReleasePrecheck = (input) => {
   }
   return { abort: false, reason: null, staged, excluded, untrackedCount };
 };
-// [release-precheck-end]
 
 phase('Release');
 const releaseScope = await agent(
@@ -2377,7 +2339,6 @@ const precheck = evaluateReleasePrecheck({
   porcelainLines: releaseScope && releaseScope.porcelainLines,
   hasSnapshotCommit: releaseScope && releaseScope.hasSnapshotCommit === true,
 });
-// [release-abort-status-begin]
 const RELEASE_ABORT_STATUS = 'empty-release-aborted';
 const ABORT_TOKEN_RE = /\bABORTED\b/;
 const resolveReleaseAbort = (input) => {
@@ -2390,14 +2351,12 @@ const resolveReleaseAbort = (input) => {
   }
   return { aborted: false, reason: null };
 };
-// [release-abort-status-end]
 let precheckAbort = null;
 if (precheck.abort) {
   precheckAbort = precheck;
   log(`Release PRECHECK ABORT (${precheck.reason}): tracked staged=0, excluded=[${precheck.excluded.join(', ')}], untracked=${precheck.untrackedCount} — empty release prevented (Issue #66)`);
 }
 log(`Release precheck (Issue #66): staged=${precheck.staged.length} excluded=${precheck.excluded.length} — proceeding to Release agent`);
-// [release-prompt-begin]
 const gateVerdictLabel = (raw) => {
   if (typeof raw !== 'string' || raw.length === 0) return 'MISSING';
   const upper = raw.toUpperCase();
@@ -2521,7 +2480,6 @@ Execute:
    ${JSON.stringify(ticket.acceptanceCriteria || [])}
 報告: branch名, PR URL, PR番号。**最終行に必ず \`PR_NUMBER=<番号>\` を記載**（後続ステップが抽出する）。`;
 };
-// [release-prompt-end]
 const releaseResult = precheckAbort
   ? `ABORTED (precheck: ${precheckAbort.reason}) — Release agent skipped (issue #66 Task 3)`
   : await agent(
@@ -2540,10 +2498,8 @@ let prReviewsPosted = 0;
 let persistedLogOk = false;
 
 if (releaseAbort.aborted) {
-  // Phase 8 Self-Improve (defect-class feedback must still be collected).
   log(`Release ABORTED (${releaseAbort.reason}): skipping Phase 6-7 (Release Review / Merge) → Self-Improve (Issue #66)`);
 } else {
-// ── Phase 6: Release Review (3レビュアー GO/NO-GO 並列) ──
 phase('Release Review');
 const REVIEW_SCHEMA = {
   type: 'object',
@@ -2563,7 +2519,6 @@ const releaseLaneLabel = (i) => {
   const head = typeof lens === 'string' ? lens.split(':')[0].trim() : '';
   return `${i + 1}: ${head || `lane-${i + 1}`}`;
 };
-// [team-verdict-begin]
 const TEAM_VERDICT_RE = /\bVERDICT\s*[:=]\s*(NO-GO|NOGO|GO)\b/gi;
 const ANY_NOGO_RE = /\b(NO-GO|NOGO)\b/i;
 const parseTeamVerdict = (text) => {
@@ -2581,9 +2536,7 @@ const mergeReleaseVerdicts = (verdicts, expectedTotal = 3) => {
   const allGo = list.length === expectedTotal && goCount === expectedTotal && missingCount === 0;
   return { goCount, missingCount, expectedTotal, allGo, releaseBlocked: !allGo };
 };
-// [team-verdict-end]
 
-// [release-verdict-persistence-begin]
 
 const normalizeReleaseLaneEntry = (entry, lane, reviewer) => {
   if (!(entry && typeof entry === 'object')) return null;
@@ -2688,7 +2641,6 @@ const buildReleaseVerdictsMd = (runId, runTimestamp, prNumber, collected, releas
     '',
   ].join('\n');
 };
-// [release-verdict-persistence-end]
 
 const runReleaseReviewViaTeam = async () => {
   const has =
@@ -2869,7 +2821,6 @@ ${verdictsMd}
   persistedLogOk = false;
 }
 
-// ── Phase 7: Merge & Close ──
 phase('Merge & Close');
 if (allGo) {
   mergeResult = await agent(
@@ -2889,7 +2840,6 @@ Execute:
 }
 }
 
-// ── Phase 8: Self-Improve（局所最適化を避け、すべての問題の構造的根源を改善）──
 phase('Self-Improve');
 const selfImprove = await agent(
   `自己改善レビュアー。feature-pipeline の**局所最適化を避け**、すべての問題の**構造的根源**を改善する。

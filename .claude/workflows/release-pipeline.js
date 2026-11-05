@@ -13,7 +13,6 @@ export const meta = {
 const branchName = typeof args === 'string' ? args : 'current-branch';
 const skipReview = typeof args === 'object' && args?.skipReview === true;
 
-// Phase 1: Pre-release check
 phase('Pre-check');
 const precheck = await agent(
   `Run pre-release checks on the current branch.
@@ -47,7 +46,6 @@ if (!precheck.allPassed) {
   return { status: 'precheck-failed', precheck };
 }
 
-// Phase 2: Release Review (unless skipped)
 if (!skipReview) {
   phase('Release Review');
   const releaseReview = await agent(
@@ -90,7 +88,6 @@ Decision: GO or NO-GO for release.`,
     return { status: 'release-review-failed', precheck, releaseReview };
   }
 
-  // Phase 3: CTO Release Gate
   phase('Release Gate');
   const gateApproval = await agent(
     `You are the CTO. This is the RELEASE GATE decision.
@@ -124,7 +121,6 @@ Decision: APPROVE or REJECT release.`,
   }
 }
 
-// Phase 4: Commit
 phase('Commit');
 const commitResult = await agent(
   `You are the Release Manager. Execute the release commit.
@@ -148,7 +144,6 @@ Execute the commit now.`,
 );
 log('Commit executed');
 
-// Phase 5: Post-release verify
 phase('Verify');
 const verify = await agent(
   `Post-release verification.

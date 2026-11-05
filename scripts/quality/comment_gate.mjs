@@ -459,11 +459,6 @@ export function lexYaml(src) {
 
 const LEXERS = { rust: lexRust, js: lexJs, shell: lexShell, ps1: lexPs1, toml: lexToml, yaml: lexYaml };
 
-const DRIFT_GUARD_MARKER = /^\/\/\s*(?:\[[a-z0-9-]+-(?:begin|end)\]|[a-z][a-z0-9-]*-(?:begin|end))$/;
-const PHASE_HEADER = /^\/\/\s*(?:──\s*)?Phase \d+\b/;
-
-const isStructuralComment = (text) => DRIFT_GUARD_MARKER.test(text) || PHASE_HEADER.test(text);
-
 export function findComments(src, lang) {
   const lex = LEXERS[lang];
   if (!lex) throw new Error(`comment-gate: unknown lang ${lang}`);
@@ -471,7 +466,6 @@ export function findComments(src, lang) {
   const out = [];
   for (const s of segs) {
     if (lang === 'shell' && s.start === 0) continue;
-    if (lang === 'js' && isStructuralComment(src.slice(s.start, s.end).trim())) continue;
     out.push(s);
   }
   return out;
