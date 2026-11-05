@@ -6,8 +6,8 @@
   <meta name="generator" content="archify 2.16.0-dev.0">
   <title>Sense → Think → Act 実行シーケンス Diagram</title>
   <script>
-    // Resolve the theme before first paint so light-preference users don't
-    // see a dark flash. The toolbar script below re-applies with UI state.
+    
+    
     (function () {
       try {
         var theme = null;
@@ -31,8 +31,7 @@
       } catch (_) {}
     })();
   </script>
-  <!-- Async font load: a blackholed network must not block first paint.
-       The body font stack falls back to system monospace until it lands. -->
+  
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
   <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap"
         rel="stylesheet" media="print" onload="this.media='all'">
@@ -40,9 +39,7 @@
     <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&display=swap" rel="stylesheet">
   </noscript>
   <style>
-    /* ==========================================================
-       THEME VARIABLES — switch by toggling [data-theme] on <html>
-       ========================================================== */
+    
     :root,
     [data-theme="dark"] {
       --bg: #020617;
@@ -50,7 +47,7 @@
       --text: #ffffff;
       --text-muted: #94a3b8;
       --text-dim: #475569;
-      /* UI chrome and menu hints need more contrast than SVG .t-dim accents */
+      
       --text-faint: #7d8da1;
 
       --panel: rgba(15, 23, 42, 0.5);
@@ -61,8 +58,7 @@
       --arrow: #64748b;
       --arrow-emphasis: #34d399;
 
-      /* Opaque mask color used behind semi-transparent component fills
-         so the arrows drawn underneath are properly hidden. */
+      
       --mask: #0f172a;
 
       --frontend-fill:    rgba(8, 51, 68, 0.4);
@@ -127,11 +123,7 @@
       --toolbar-menu-bg:  #ffffff;
     }
 
-    /* ==========================================================
-       SIGNAL FLOW — an opt-in, motion-forward visual preset.
-       The variables also target a standalone exported SVG, whose
-       root carries data-preset and data-theme directly.
-       ========================================================== */
+    
     [data-preset="signal-flow"][data-theme="dark"] {
       --bg: #030711;
       --grid: #15233a;
@@ -195,12 +187,7 @@
       --arrow-emphasis: #0d9488;
     }
 
-    /* ==========================================================
-       BLUEPRINT — a review-first drafting preset for deployment,
-       infrastructure, and technical design documentation. It keeps
-       the same semantic palette and geometry while trading glow for
-       precise grid contrast, squared materials, and drafting marks.
-       ========================================================== */
+    
     [data-preset="blueprint"][data-theme="dark"] {
       --bg: #06131f;
       --grid: #17425a;
@@ -271,13 +258,7 @@
       --toolbar-menu-bg: #f9fdff;
     }
 
-    /* ==========================================================
-       EDITORIAL — a warm, publication-minded preset for design
-       reviews, launch notes, and documentation. The diagram keeps
-       the same semantic palette and exact geometry, but trades
-       software chrome for paper, ink, ruled structure, and one
-       restrained vermilion accent.
-       ========================================================== */
+    
     [data-preset="editorial"][data-theme="dark"] {
       --bg: #181611;
       --grid: #39342a;
@@ -385,8 +366,7 @@
       background-attachment: fixed;
     }
 
-    /* Gallery/embed mode keeps the generated artifact as the source of truth
-       while presenting only its diagram surface inside a proof card. */
+    
     html[data-embed="true"] body {
       min-height: 0;
       padding: 0;
@@ -414,9 +394,7 @@
     }
     html[data-embed="true"] .diagram-container svg { min-width: 0; }
 
-    /* Share Chapter Cue lives in the HTML viewer layer, not inside the SVG.
-       It gives one-shot embeds a title, authored note, truthful stop order,
-       and lifecycle state while canonical diagram geometry stays untouched. */
+    
     .share-chapter-cue { display: none; }
     html[data-embed="true"][data-share-playback="true"] .share-chapter-cue:not([hidden]),
     html[data-embed="true"][data-share-moment="true"] .share-chapter-cue:not([hidden]) {
@@ -546,9 +524,7 @@
       transform-origin: left center;
     }
 
-    /* Presentation Stage is a viewer-only layer: it gives the live diagram
-       the viewport while keeping guided views, theme, focus, and exports real.
-       Embed mode wins when both query parameters are present. */
+    
     html[data-present="true"]:not([data-embed="true"]) body {
       height: 100dvh;
       min-height: 0;
@@ -599,10 +575,7 @@
       color: var(--frontend-stroke);
     }
 
-    /* The reader owns only the outer scale. Wide diagrams keep one authored
-       SVG/viewBox while the runtime chooses a desktop width from the actual
-       vertical budget. This avoids device-specific files and breakpoint
-       jumps between a laptop and a tall monitor. */
+    
     .container {
       width: 100%;
       max-width: var(--archify-reader-width, 1440px);
@@ -807,10 +780,7 @@
       animation: archify-signal-scan 4.8s ease-in-out 1 both;
     }
 
-    /* Motion Governor gives the reader a real static state and gives the
-       strongest semantic action the only motion budget. Atmosphere resets to
-       its authored base instead of freezing mid-cycle. Static artifacts never
-       start a decorative pulse or scan. */
+    
     html:not([data-motion-capable="true"]) svg[data-animation="trace"] [data-animate] {
       animation: none !important;
     }
@@ -1048,10 +1018,7 @@
       background: var(--toolbar-hover);
     }
 
-    /* Semantic Radar is a deliberately simplified, viewer-only overview. It
-       uses authored node bounds and the live camera viewport rather than
-       cloning the canonical SVG, so IDs, filters, animation, and export state
-       stay singular and deterministic. */
+    
     .overview-map {
       position: absolute;
       right: 1rem;
@@ -1294,9 +1261,7 @@
       background: var(--toolbar-hover);
     }
 
-    /* Semantic Lens turns the compiled node-kind palette into an analytical
-       legend. One kind reveals its real traffic; two kinds compare only their
-       direct authored relationships. Geometry and the canonical SVG stay put. */
+    
     .semantic-lens {
       position: absolute;
       right: 1rem;
@@ -1469,9 +1434,7 @@
       to { opacity: 1; transform: translateY(0) scale(1); }
     }
 
-    /* Route Probe answers a reader question over the compiled semantic graph:
-       choose two stable nodes and reveal the shortest authored directed route.
-       The receipt and signal live entirely in the viewer layer. */
+    
     .route-probe {
       position: absolute;
       left: 1rem;
@@ -1994,10 +1957,7 @@
       text-align: center;
     }
 
-    /* Diagram Guide keeps the artifact's growing reader vocabulary
-       discoverable without widening the permanent control bar. It derives
-       honest counts at runtime and delegates every action to an existing
-       production interaction instead of creating a second command system. */
+    
     .diagram-guide {
       position: absolute;
       top: 1rem;
@@ -2809,10 +2769,7 @@
     html[data-preset="blueprint"] .guided-view-chapter,
     html[data-preset="blueprint"] .guided-view-chapter-index { border-radius: 0.12rem !important; }
 
-    /* Story Shelf — keep every authored chapter and the Play action visible,
-       but do not spend a second row on unavailable director controls before
-       the reader enters a chapter. Existing data-active-view state expands
-       the full guided surface without a new toggle or stored preference. */
+    
     .guided-views[data-active-view="all"] {
       grid-template-columns: minmax(11rem, .72fr) auto minmax(0, 2fr);
       align-items: center;
@@ -2869,9 +2826,7 @@
       box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.82), 0 12px 32px rgba(45, 78, 99, 0.08);
     }
 
-    /* Preserve the one-screen guarantee on ordinary laptop displays. The
-       high-screen expansion above must not trade a fuller canvas for page
-       scrolling at 900–1080px heights. */
+    
     @media (min-width: 768px) and (max-height: 1100px) {
       .header { margin-bottom: 1rem; }
       .diagram-container {
@@ -2950,18 +2905,11 @@
 
     .card li { margin-bottom: 0.375rem; }
 
-    /* ==========================================================
-       Print stylesheet — hide interactive controls, force light,
-       drop the grid so the diagram doesn't waste ink, use landscape
-       so wide diagrams fit, pack summary cards into 2 columns to
-       avoid an orphan card on a trailing page.
-       ========================================================== */
+    
     @page { size: landscape; margin: 1.5cm; }
 
     @media print {
-      /* Force the FULL light palette — including component fills/strokes and
-         lane/arrow colors — so printing from dark theme doesn't put neon
-         strokes and translucent dark fills on white paper. */
+      
       :root, [data-theme="dark"], [data-theme="light"] {
         --bg: #ffffff;
         --grid: transparent;
@@ -3003,7 +2951,7 @@
       html[data-preset="signal-flow"] .diagram-container,
       html[data-preset="signal-flow"] .card { background: #ffffff; }
       .cards { grid-template-columns: 1fr 1fr; }
-      /* Ensure elements break sensibly across pages */
+      
       .card { break-inside: avoid; page-break-inside: avoid; }
       .diagram-container { break-inside: avoid; page-break-inside: avoid; }
       .diagram-container svg [data-detail] {
@@ -3040,9 +2988,7 @@
       h1, .subtitle { color: #0f172a; }
     }
 
-    /* ==========================================================
-       TOOLBAR (theme toggle + export menu)
-       ========================================================== */
+    
     .toolbar {
       position: fixed;
       top: 1rem;
@@ -3537,7 +3483,7 @@
       font-size: 0.55rem;
     }
 
-    /* Toast — brief feedback for actions like "copied" */
+    
     .archify-toast {
       position: fixed;
       top: 1rem;
@@ -3680,9 +3626,7 @@
       .relationship-lens-actions #btn-focus-relations { display: block; color: var(--database-stroke); }
       .focus-chip:not([data-relations-expanded="true"]) .relationship-lens-head { border-bottom-color: transparent; }
       .focus-chip:not([data-relations-expanded="true"]) .relationship-lens-list { display: none; }
-      /* While a mobile reader previews one relationship, turn the full Lens
-         into a compact peek card. This keeps the exact source and target on
-         canvas instead of covering them with a long, scrollable list. */
+      
       .focus-chip[data-relationship-previewing="true"] .relationship-lens-list {
         max-height: none;
         padding: 0.35rem;
@@ -3925,9 +3869,7 @@
       .guided-view-handoff { max-width: 6.5rem; }
     }
 
-    /* ==========================================================
-       SVG SEMANTIC CLASSES — use these instead of inline fill/stroke
-       ========================================================== */
+    
     .c-grid       { stroke: var(--grid); fill: none; }
     .c-mask       { fill: var(--mask); stroke: none; }
 
@@ -3939,7 +3881,7 @@
     .c-messagebus { fill: var(--messagebus-fill); stroke: var(--messagebus-stroke); }
     .c-external   { fill: var(--external-fill);   stroke: var(--external-stroke); }
 
-    /* Text helpers */
+    
     .t-primary { fill: var(--text); }
     .t-muted   { fill: var(--text-muted); }
     .t-dim     { fill: var(--text-dim); }
@@ -3951,9 +3893,7 @@
     .t-messagebus { fill: var(--messagebus-stroke); }
     .t-external   { fill: var(--external-stroke); }
 
-    /* Semantic Sigils are small authored role stamps, not icons from a brand
-       pack and not viewer controls. Prefix selectors with svg so the canonical
-       export's SVG-only stylesheet collector keeps them automatically. */
+    
     svg .semantic-sigil {
       fill: none;
       stroke: currentColor;
@@ -3973,9 +3913,7 @@
     svg .s-messagebus { color: var(--messagebus-stroke); }
     svg .s-external   { color: var(--external-stroke); }
 
-    /* Brand Marks are authored identity badges. Their color is contained
-       inside one neutral plate so vendor color never replaces Archify's
-       semantic node and relationship vocabulary. */
+    
     svg .brand-mark { pointer-events: none; }
     svg .brand-mark-badge { fill: #fff; stroke: none; }
     svg .brand-mark-frame {
@@ -3994,10 +3932,7 @@
     svg[data-preset="blueprint"] .brand-mark-badge,
     svg[data-preset="blueprint"] .brand-mark-frame { rx: 1px; }
 
-    /* Reading Depth is a viewer-only level-of-detail layer. MAP preserves the
-       authored structure and primary labels, READ restores relationship labels
-       and node context, and FULL restores tags and fine annotations. Semantic
-       intent can reveal the relevant detail without moving any geometry. */
+    
     svg [data-detail] { transition: opacity 160ms ease; }
     svg [data-detail-anchor] {
       transform-box: fill-box;
@@ -4014,8 +3949,7 @@
       transform: translateY(8px);
     }
 
-    /* Focus, lens, preview, route, and story states are stronger reader intent than
-       the global zoom level. Reveal only their exact semantic matches. */
+    
     svg[data-focus-active] [data-focus-match][data-detail],
     svg[data-focus-active] [data-focus-match] [data-detail],
     svg[data-reach-active] [data-reach-match][data-detail],
@@ -4047,19 +3981,19 @@
     svg [data-node-id]:hover [data-detail-anchor],
     svg [data-node-id]:focus-visible [data-detail-anchor] { transform: none; }
 
-    /* Arrows */
+    
     .a-default   { stroke: var(--arrow); fill: none; }
     .a-emphasis  { stroke: var(--arrow-emphasis); fill: none; }
     .a-security  { stroke: var(--security-stroke); fill: none; stroke-dasharray: 5,5; }
     .a-dashed    { stroke: var(--database-stroke); fill: none; stroke-dasharray: 4,4; }
 
-    /* Arrowhead markers reference these */
+    
     .m-default   { fill: var(--arrow); }
     .m-emphasis  { fill: var(--arrow-emphasis); }
     .m-security  { fill: var(--security-stroke); }
     .m-dashed    { fill: var(--database-stroke); }
 
-    /* Stable semantic exploration hooks emitted by every renderer. */
+    
     svg [data-node-id] {
       cursor: pointer;
       transition: opacity 0.18s ease, filter 0.18s ease;
@@ -4070,11 +4004,7 @@
       filter: drop-shadow(0 0 7px var(--frontend-stroke));
       outline: none;
     }
-    /* Verified Source Beacons are installed at runtime only for nodes whose
-       repository evidence passed the local revision/blob/line checks. They
-       live inside the owning node so every focus, route, story, and guided
-       view keeps one coherent opacity state. Export serialization removes
-       them before producing the canonical SVG or any derived visual. */
+    
     .source-evidence-beacon {
       pointer-events: none;
       opacity: 0.76;
@@ -4220,10 +4150,7 @@
       filter: drop-shadow(0 0 10px var(--frontend-stroke));
     }
 
-    /* Authored Reachability is a bounded graph query over the relationships
-       already present in the artifact. Upstream walks incoming edges;
-       downstream walks outgoing edges. It never claims runtime causality and
-       changes only viewer emphasis, not canonical geometry or export bytes. */
+    
     svg[data-reach-active] [data-node-id],
     svg[data-reach-active] [data-edge-from] { opacity: 0.09; }
     svg[data-reach-active] [data-reach-match] { opacity: 1; }
@@ -4244,10 +4171,7 @@
       filter: none;
     }
 
-    /* Direct Relationship Explorer makes authored paths a real input surface
-       without changing their visible stroke or canonical SVG. A transparent
-       runtime rail supplies forgiving pointer geometry; the exact authored
-       path and endpoints continue to carry every visible state. */
+    
     .relationship-hit-overlay { pointer-events: none; }
     .relationship-hit-target { outline: none; }
     .relationship-hit-rail {
@@ -4293,9 +4217,7 @@
       .relationship-hit-rail { stroke-width: 24; }
     }
 
-    /* Relationship Preview is temporary exploration state layered on top of
-       neighborhood focus. It changes emphasis only; exported geometry and the
-       relationship's original solid/dashed visual language stay untouched. */
+    
     svg[data-relationship-preview-active] [data-focus-match] { opacity: 0.18; }
     svg[data-relationship-preview-active] [data-relationship-preview],
     svg[data-relationship-preview-active] [data-relationship-preview-node] { opacity: 1; }
@@ -4389,9 +4311,7 @@
     svg[data-preset="editorial"] .semantic-flow-token { filter: none; }
     html[data-embed="true"] .relationship-pulse-overlay { display: none; }
 
-    /* Intent Trace is a temporary, pre-click exploration layer. Related
-       topology stays readable while a short viewer-only signal runs over
-       cloned edge geometry; the authored edge remains untouched underneath. */
+    
     svg[data-intent-trace-active] [data-node-id],
     svg[data-intent-trace-active] [data-edge-from] { opacity: 0.2; }
     svg[data-intent-trace-active] [data-intent-trace-match] { opacity: 1; }
@@ -4409,9 +4329,7 @@
       opacity: 0.94;
       animation: archify-intent-trace-flow 1.15s linear 1 both;
     }
-    /* Direction names describe each edge relative to the focused node only.
-       The cloned geometry already runs from the authored source to target, so
-       incoming and outgoing signals must share the same playback direction. */
+    
     .intent-trace-flow[data-direction="out"] {
       stroke: var(--frontend-stroke);
       filter: drop-shadow(0 0 4px var(--frontend-stroke));
@@ -4445,9 +4363,7 @@
       border: 0;
     }
 
-    /* Route Probe separates a durable two-point query from selection and
-       one-hop hover. Only the chosen shortest directed path stays prominent;
-       the traveling signal is cloned viewer geometry and never authored SVG. */
+    
     svg[data-route-picking="target"] [data-node-id] { opacity: 0.24; }
     svg[data-route-picking="target"] [data-route-candidate],
     svg[data-route-picking="target"] [data-route-start] { opacity: 1; }
@@ -4561,9 +4477,7 @@
       filter: drop-shadow(0 0 3px var(--frontend-stroke));
     }
 
-    /* Story Trail is a viewer-only overlay derived from the ordered focus IDs
-       of the active guided view. The authored edge stays underneath with its
-       original color, dash pattern, marker, and geometry intact. */
+    
     .story-trail-overlay { pointer-events: none; }
     .story-carrier-overlay { pointer-events: none; }
     .story-trail-flow {
@@ -4624,9 +4538,7 @@
       filter: drop-shadow(0 2px 2px color-mix(in srgb, var(--text) 16%, transparent));
     }
 
-    /* Chapter Delta Preview is a static, pre-commit comparison between two
-       chapter focus sets. Symbols in the rail carry the meaning without color;
-       these SVG rules only make exact stable-ID membership easier to scan. */
+    
     svg[data-chapter-preview] [data-node-id],
     svg[data-chapter-preview] [data-edge-from] {
       opacity: 0.1 !important;
@@ -4648,15 +4560,12 @@
     }
     svg[data-preset="blueprint"][data-chapter-preview] [data-node-id] { filter: none !important; }
 
-    /* Dashed boundary variants */
+    
     .c-security-group { fill: transparent; stroke: var(--security-stroke); stroke-dasharray: 4,4; }
     .c-region         { fill: rgba(251, 191, 36, 0.05); stroke: var(--cloud-stroke); stroke-dasharray: 8,4; }
     .c-lane           { fill: var(--lane-fill); stroke: var(--lane-stroke); stroke-dasharray: 6,6; }
 
-    /* Optional trace animation, enabled only by meta.animation = "trace".
-       The ordinary viewer performs one ambient pass and then restores the
-       authored solid/security/async line language. WebM samples the same
-       authored geometry into an explicit canvas timeline. */
+    
     html[data-ambient-motion="running"] svg[data-animation="trace"] [data-animate="edge"] {
       animation: archify-edge-flow 2.4s linear 1;
       animation-delay: calc(var(--step, 0) * 160ms);
@@ -4692,9 +4601,7 @@
       animation-name: archify-editorial-node-pulse;
       animation-duration: 3.5s;
     }
-    /* Embedded proofs are static until a named Story Trail chapter is played.
-       This keeps proof grids calm and ensures ?play=1 stops all viewer motion
-       after one 3.2 second chapter instead of leaving ambient trace loops on. */
+    
     html[data-embed="true"] svg[data-animation="trace"] [data-animate],
     html[data-share-playback="true"] svg[data-animation="trace"] [data-animate] {
       animation: none !important;
@@ -4842,9 +4749,7 @@
   </style>
 </head>
 <body>
-  <!-- Toolbar: theme, live visual style, trace motion, presentation stage, and export.
-       Motion appears only for trace-enabled artifacts and has no shortcut;
-       Keyboard: T toggles theme, S cycles style, F toggles the stage, E opens export. -->
+  
   <div class="toolbar" role="toolbar" aria-label="Diagram actions">
     <button id="btn-theme" type="button"
             title="Toggle theme (T)"
@@ -4941,7 +4846,7 @@
   </div>
 
   <div class="container">
-    <!-- Header -->
+    
     <div class="header">
       <div class="header-row"
            data-preset-badge-signal-flow="SIGNAL FLOW"
@@ -4994,13 +4899,13 @@
       </nav>
     </div>
 
-    <!-- Main Diagram -->
+    
     <div class="diagram-container" data-detail-level="read"
          data-preset-badge-editorial-plate="ARCHIFY / PLATE 04">
       <svg viewBox="0 0 920 520" role="img" lang="en" aria-labelledby="archify-diagram-title archify-diagram-description" data-preset="classic" data-quality-profile="showcase">
         <title id="archify-diagram-title">Sense → Think → Act 実行シーケンス</title>
         <desc id="archify-diagram-description">A sequence diagram generated by Archify.</desc>
-        <!-- Definitions -->
+        
         <defs>
           <marker id="arrowhead" markerWidth="10" markerHeight="7" refX="9" refY="3.5" orient="auto">
             <polygon points="0 0, 10 3.5, 0 7" class="m-default" />
@@ -5019,13 +4924,13 @@
           </pattern>
         </defs>
 
-        <!-- Background Grid -->
+        
         <rect width="100%" height="100%" fill="url(#grid)" />
 
-        <!-- Time Segments -->
+        
 
 
-        <!-- Lifelines -->
+        
         <path d="M 116.5 142 L 116.5 455" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
         <path d="M 258.3 142 L 258.3 455" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
         <path d="M 400.1 142 L 400.1 455" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
@@ -5033,10 +4938,10 @@
         <path d="M 683.7 142 L 683.7 455" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
         <path d="M 825.5 142 L 825.5 455" class="a-default" stroke-width="0.8" stroke-dasharray="3,7"/>
 
-        <!-- Activations -->
+        
 
 
-        <!-- Messages -->
+        
         <g data-edge-from="cli" data-edge-to="driver" data-edge-label="run_pipeline(task)" data-edge-key="0" data-edge-id="m1">
           <path data-composition-edge-from="cli" data-composition-edge-to="driver" data-composition-edge-id="m1" data-composition-points="123.5,160;251.3,160" d="M 123.5 160 L 251.3 160" class="a-emphasis" stroke-width="1.8" marker-end="url(#arrowhead-emphasis)"/>
         <g data-detail="context">
@@ -5117,10 +5022,10 @@
         </g>
         </g>
 
-        <!-- Segment Labels -->
+        
 
 
-        <!-- Participants -->
+        
         <g id="node-cli" data-node-id="cli" data-node-label="CLI / GUI" tabindex="0" role="button" aria-label="Focus CLI / GUI, UI エントリ, Sequence participant" aria-pressed="false" data-node-kind="frontend" data-node-sublabel="UI エントリ" data-node-context="Sequence participant">
           <title>CLI / GUI · UI エントリ · Sequence participant</title>
           <rect x="62" y="72" width="109" height="54" rx="6" class="c-mask"/>
@@ -5191,7 +5096,7 @@
           <text data-detail="context" x="825.5" y="111" class="t-muted" font-size="7" text-anchor="middle">実機 / PC</text>
         </g>
 
-        <!-- Legend -->
+        
         <g data-legend="">
           <text x="40" y="446" class="t-primary" font-size="12" font-weight="650">Legend</text>
           <g data-legend-semantic-kind="emphasis" data-legend-x="40" data-legend-baseline="466" data-legend-width="78">
@@ -5395,7 +5300,7 @@
       </div>
     </div>
 
-    <!-- Info Cards -->
+    
     <div class="cards">
       <div class="card">
         <div class="card-header">
@@ -5485,12 +5390,7 @@
       });
     }
 
-    /* ============================================================
-       Visual style try-on — one topology, four bundled presets.
-       The reader's choice is intentionally session-only: it updates the
-       live page and canonical SVG together, but never rewrites the source,
-       URL, or a later diagram's authored default.
-       ============================================================ */
+    
     Archify.preset = (function () {
       var PRESETS = ['classic', 'signal-flow', 'blueprint', 'editorial'];
       var LABELS = {
@@ -5601,9 +5501,7 @@
       return { cycle: cycle, apply: apply, current: current, authored: authored, open: open, close: close, isOpen: isOpen };
     })();
 
-    /* ============================================================
-       Theme toggle — persists to localStorage, respects system pref
-       ============================================================ */
+    
 
     Archify.theme = (function () {
       var STORAGE_KEY = 'archify-theme';
@@ -5611,8 +5509,8 @@
       var btn = document.getElementById('btn-theme');
       var label = document.getElementById('theme-label');
 
-      // localStorage can throw (blocked cookies, sandboxed iframes); the whole
-      // script element dies on an uncaught error, so guard every access.
+      
+      
       function readStored() {
         try { return localStorage.getItem(STORAGE_KEY); } catch (_) { return null; }
       }
@@ -5620,7 +5518,7 @@
         try { localStorage.setItem(STORAGE_KEY, value); } catch (_) {}
       }
       function urlOverride() {
-        // URL param wins (useful for deterministic screenshots / share links)
+        
         try {
           var param = new URLSearchParams(window.location.search).get('theme');
           if (param === 'light' || param === 'dark') return param;
@@ -5651,7 +5549,7 @@
       apply(resolveInitial());
       btn.addEventListener('click', toggle);
 
-      // Follow live OS theme changes while the user has no explicit preference.
+      
       try {
         var media = window.matchMedia('(prefers-color-scheme: light)');
         var onChange = function (e) {
@@ -5666,18 +5564,7 @@
       return { toggle: toggle };
     })();
 
-    /* ============================================================
-       Export — Share Card / PNG / JPEG / WebP / SVG / WebM and clipboard
-
-       Raster exports are always rendered at 4x source resolution for
-       maximum sharpness. The trick: we set the serialized SVG's
-       `width`/`height` to viewBox * 4 so the browser rasterizes the
-       vectors at that resolution natively. drawImage then draws at
-       the image's natural size (no upscaling = no blur).
-
-       JPEG/WebP paint the current theme's background explicitly since
-       those formats have no alpha channel.
-       ============================================================ */
+    
     (function () {
       var RASTER_SCALE = 4;
       var MOTION_DURATION = 6000;
@@ -5713,20 +5600,7 @@
         return getComputedStyle(document.body).backgroundColor || '#ffffff';
       }
 
-      /**
-       * Serialize the main SVG into a standalone document.
-       *
-       * Two modes:
-       * - Default (opts.autoTheme=false) — locks the serialized SVG to the
-       *   viewer's current theme. Used by the raster pipeline
-       *   (PNG/JPEG/WebP/clipboard) because canvas rasterization needs
-       *   deterministic colors; a raster cannot react to
-       *   prefers-color-scheme after encoding.
-       * - autoTheme=true — emits BOTH dark and light variable sets plus a
-       *   `@media (prefers-color-scheme)` rule so the resulting SVG
-       *   self-themes when embedded in GitHub READMEs or other hosts that
-       *   expose a color scheme. Used for "Download SVG".
-       */
+      
       function applyRouteSnapshot(clone, snapshot) {
         if (!snapshot || !Array.isArray(snapshot.nodeIds) || !Array.isArray(snapshot.edges) ||
             snapshot.nodeIds.length < 2 || snapshot.edges.length !== snapshot.nodeIds.length - 1 ||
@@ -5890,16 +5764,16 @@
       }
 
       function serializeSvg(scale, opts) {
-        // scale: integer multiplier for intrinsic SVG pixel dimensions used by
-        // the raster path. Defaults to 1 (natural size) for SVG download.
+        
+        
         scale = scale || 1;
         opts = opts || {};
         var autoTheme = opts.autoTheme === true;
         var svg = document.querySelector('.diagram-container svg');
         var clone = svg.cloneNode(true);
 
-        // View transforms and neighborhood focus are HTML exploration state,
-        // never part of a downloaded full-diagram artifact.
+        
+        
         clone.style.removeProperty('transform');
         clone.removeAttribute('data-view-scale');
         clone.removeAttribute('data-focus-active');
@@ -6086,29 +5960,29 @@
         var reachStateClean = opts.reachSnapshot
           ? canonicalStateClean && finiteSvgDimensions && !opts.routeSnapshot && applyReachSnapshot(clone, opts.reachSnapshot)
           : null;
-        // Scale width/height so the browser rasterizes the vectors at target
-        // resolution directly. viewBox stays unchanged so coordinates don't
-        // shift. This is the key to sharp rasters — do NOT scale later via
-        // canvas upscaling.
+        
+        
+        
+        
         clone.setAttribute('width', vb.width * scale);
         clone.setAttribute('height', vb.height * scale);
         clone.setAttribute('xmlns', 'http://www.w3.org/2000/svg');
 
-        // Only the SVG-relevant rules: semantic classes, markers, and the
-        // theme variable blocks. Toolbar/cards/print CSS can never apply
-        // inside a standalone SVG and would only bloat the export.
+        
+        
+        
         var hostStyle = (function () {
           var out = [];
           Array.prototype.forEach.call(document.styleSheets, function (sheet) {
             var rules;
-            try { rules = sheet.cssRules; } catch (_) { return; } // cross-origin
+            try { rules = sheet.cssRules; } catch (_) { return; } 
             if (!rules) return;
             Array.prototype.forEach.call(rules, function (rule) {
               if (rule.type === 7 && /^archify-/.test(rule.name || '')) {
                 out.push(rule.cssText);
                 return;
               }
-              if (rule.type !== 1) return; // plain style rules only
+              if (rule.type !== 1) return; 
               var sel = rule.selectorText || '';
               if (/(^|,)\s*(svg|:root|\[data-theme|\[data-preset|\.c-|\.t-|\.a-|\.m-)/.test(sel)) {
                 out.push(rule.cssText);
@@ -6118,9 +5992,9 @@
           return out.join('\n');
         })();
 
-        // Derive the variable list from the stylesheet so newly added theme
-        // variables can never be missed by the export pipeline again
-        // (--lane-fill/--lane-stroke once were).
+        
+        
+        
         var varNames = (function () {
           var seen = {};
           var names = [];
@@ -6130,8 +6004,8 @@
           return names;
         })();
 
-        // Resolve the full variable set for a given data-theme via an
-        // off-DOM probe, independent of what the viewer is currently set to.
+        
+        
         function resolveVars(themeAttr) {
           var probe = document.createElement('div');
           probe.setAttribute('data-theme', themeAttr);
@@ -6148,12 +6022,12 @@
           }
         }
 
-        // Prepend a local()-only @font-face block for each weight so that the
-        // sandboxed image-rendering context used during PNG/JPEG/WebP export
-        // can find JetBrains Mono if the user has it installed locally, and
-        // falls through cleanly to the monospace stack otherwise. The usual
-        // Google-Fonts <link> in the host document is unreachable from the
-        // serialized SVG, so url()-sourced faces would just hang.
+        
+        
+        
+        
+        
+        
         var fontFallback = [400, 500, 600, 700].map(function (w) {
           return "@font-face { font-family: 'JetBrains Mono'; font-weight: " + w +
                  "; src: local('JetBrains Mono'), local('JetBrainsMono-Regular'); }";
@@ -6165,10 +6039,10 @@
         bgRect.setAttribute('height', '100%');
 
         if (autoTheme) {
-          // Dual-theme SVG. Dark is the default (so hosts without
-          // prefers-color-scheme still render), light swaps in via media
-          // query, and svg[data-theme="..."] still lets downstream
-          // consumers force a specific theme.
+          
+          
+          
+          
           var darkVars = resolveVars('dark');
           var lightVars = resolveVars('light');
 
@@ -6182,13 +6056,13 @@
             "svg[data-theme=\"dark\"] { " + darkVars + " }\n" +
             "rect.c-bg-rect { fill: var(--bg); }\n";
 
-          // Don't lock the serialized SVG to the viewer's current theme.
+          
           clone.removeAttribute('data-theme');
-          // Background follows the CSS variable, not a fixed color, so it
-          // swaps with the media query.
+          
+          
           bgRect.setAttribute('class', 'c-bg-rect');
         } else {
-          // Raster path: lock to the viewer's current theme.
+          
           var theme = document.documentElement.getAttribute('data-theme') || 'dark';
           var themeHost = document.querySelector('[data-theme="' + theme + '"]') || document.documentElement;
           var computed = getComputedStyle(themeHost);
@@ -6196,10 +6070,10 @@
             return n + ': ' + computed.getPropertyValue(n).trim() + ';';
           }).join(' ');
 
-          // IMPORTANT: inject the resolved variables AFTER hostStyle,
-          // otherwise hostStyle's ":root, [data-theme=\"dark\"] { ... }" rule
-          // overrides our chosen theme via later-in-cascade equal-specificity.
-          // Keep this order.
+          
+          
+          
+          
           style.textContent =
             fontFallback + "\n" +
             "svg { font-family: 'JetBrains Mono', ui-monospace, SFMono-Regular, Menlo, Consolas, 'DejaVu Sans Mono', 'Liberation Mono', 'Noto Sans Mono CJK SC', 'PingFang SC', 'Hiragino Sans GB', 'Microsoft YaHei', monospace; }\n" +
@@ -6249,11 +6123,11 @@
         setTimeout(function () { URL.revokeObjectURL(url); }, 1000);
       }
 
-      // Conservative upper bound on total canvas pixels. Older Safari on iOS
-      // silently produces a blank canvas above ~16 Mpx; Chrome / Firefox /
-      // desktop Safari are far higher but start failing on memory-constrained
-      // devices. We pick the largest integer scale in {4,3,2,1} whose target
-      // pixel count fits under this cap.
+      
+      
+      
+      
+      
       var MAX_CANVAS_PIXELS = 16 * 1024 * 1024;
 
       function pickSafeScale(vbW, vbH) {
@@ -6264,10 +6138,10 @@
       }
 
       function rasterize(format) {
-        // Serialize at a safe scale (RASTER_SCALE=4 by default, reduced if the
-        // resulting canvas would exceed MAX_CANVAS_PIXELS). The SVG itself is
-        // rasterized at target resolution natively; drawImage draws at natural
-        // size — no upsampling blur.
+        
+        
+        
+        
         var svg = document.querySelector('.diagram-container svg');
         var vb = svg.viewBox.baseVal;
         var scale = pickSafeScale(vb.width, vb.height);
@@ -6287,7 +6161,7 @@
                 ctx.fillStyle = currentBg();
                 ctx.fillRect(0, 0, canvas.width, canvas.height);
               }
-              // Draw at natural size — SVG was already rasterized at target res.
+              
               ctx.drawImage(img, 0, 0);
               URL.revokeObjectURL(svgUrl);
               var mime = format === 'jpeg' ? 'image/jpeg' :
@@ -6496,12 +6370,12 @@
           typeof HTMLCanvasElement.prototype.captureStream === 'function');
       }
 
-      // Record the live CSS animation without Puppeteer, ffmpeg, or a network
-      // dependency. SVG files loaded through Image are commonly rasterized as
-      // one cached bitmap, so repeatedly drawing that Image does not reliably
-      // advance its CSS animation. Keep one crisp static SVG background, then
-      // render an explicit time-varying signal scene over the real authored
-      // relationship geometry on every captured canvas frame.
+      
+      
+      
+      
+      
+      
       function recordWebm(options) {
         options = options || {};
         if (!canRecordMotion()) {
@@ -6717,10 +6591,10 @@
             raf = requestAnimationFrame(draw);
             setTimeout(function () {
               if (recorder.state === 'inactive') return;
-              // Chromium normally emits the final chunk during stop(), but
-              // some embedded browser shells need an explicit encoder flush
-              // first. Keep the short grace window bounded and harmless for
-              // browsers that already delivered timeslice chunks.
+              
+              
+              
+              
               try { recorder.requestData(); } catch (_) {}
               setTimeout(function () {
                 if (recorder.state !== 'inactive') recorder.stop();
@@ -6761,16 +6635,16 @@
         return snapshot;
       }
 
-      // ---- Clipboard support ----------------------------------------------
+      
       function canCopyImage() {
         return typeof ClipboardItem !== 'undefined' &&
                navigator.clipboard &&
                typeof navigator.clipboard.write === 'function';
       }
 
-      // ---- Raster format detection ----------------------------------------
-      // canvas.toBlob('image/webp') silently returns a PNG on browsers without
-      // WebP encoding (older Safari), so detect explicitly.
+      
+      
+      
       function supports(format) {
         if (format === 'share-card') return true;
         if (format === 'svg' || format === 'png') return true;
@@ -6783,7 +6657,7 @@
         } catch (_) { return false; }
       }
 
-      // Gray out unsupported items.
+      
       items().forEach(function (it) {
         if (it.dataset.format && !supports(it.dataset.format)) {
           it.disabled = true;
@@ -6795,9 +6669,9 @@
         }
       });
 
-      // ---- Toast ----------------------------------------------------------
-      // A live region only announces CHANGES to an existing node, so the toast
-      // element is created once up front and updated in place.
+      
+      
+      
       var toastEl = document.createElement('div');
       toastEl.className = 'archify-toast';
       toastEl.setAttribute('role', 'status');
@@ -6838,7 +6712,7 @@
         if (isOpen()) close(false);
         else open();
       });
-      // APG menu-button pattern: ArrowDown/ArrowUp on the trigger opens the menu.
+      
       btn.addEventListener('keydown', function (e) {
         if (e.key === 'ArrowDown' || e.key === 'ArrowUp') {
           e.preventDefault();
@@ -6849,9 +6723,9 @@
         if (!menu.contains(e.target) && e.target !== btn) close(false);
       });
 
-      // Keyboard navigation inside the menu.
-      //   Menu items: Up/Down, Home/End.
-      //   Esc closes + returns focus to trigger; Tab closes.
+      
+      
+      
       menu.addEventListener('keydown', function (e) {
         if (e.key === 'Escape') { e.preventDefault(); close(true); return; }
         if (e.key === 'Tab')    { close(false); return; }
@@ -6972,9 +6846,9 @@
         });
       }
 
-      // A compact, machine-readable receipt for local QA and generated proof
-      // galleries. It exposes no diagram contents, only the completed format,
-      // byte count, and whether temporary viewer state was excluded.
+      
+      
+      
       function recordExportReceipt(format, blob, canonical, dimensions, variant, routeStateClean, reachStateClean) {
         document.documentElement.setAttribute('data-last-export-format', format);
         document.documentElement.setAttribute('data-last-export-bytes', String(blob.size));
@@ -7017,9 +6891,9 @@
       }
 
       function writePngToClipboard(blobPromise) {
-        // WebKit requires ClipboardItem to be constructed synchronously inside
-        // the user gesture. Chromium accepts the same pending Promise<Blob>;
-        // engines that reject promise values fall back to an awaited Blob.
+        
+        
+        
         try {
           return navigator.clipboard.write([new ClipboardItem({ 'image/png': blobPromise })]);
         } catch (_) {
@@ -7101,10 +6975,10 @@
         copyShareCard: runCopyShareCard
       };
 
-      // Auto-open on page load for demo/screenshot purposes: ?openExport=1
-      // Wait for fonts (so the menu doesn't flash before typography lands)
-      // and paint before opening. Fallback timeout for browsers without the
-      // Font Loading API.
+      
+      
+      
+      
       try {
         if (new URLSearchParams(window.location.search).get('openExport') === '1') {
           var openWhenReady = function () {
@@ -7119,11 +6993,7 @@
       } catch (_) {}
     })();
 
-    /* ============================================================
-       Motion Governor — one reader switch and one motion budget. Ambient
-       trace yields to the strongest semantic owner; Still also parks bounded
-       viewer signals without discarding their static meaning.
-       ============================================================ */
+    
     Archify.motionGovernor = (function () {
       var STORAGE_KEY = 'archify-motion';
       var html = document.documentElement;
@@ -7384,10 +7254,7 @@
       };
     })();
 
-    /* Verified repository evidence is emitted only after the renderer checks
-       the authored GitHub revision, source blobs, and optional line ranges
-       against the explicit --repo-root. It remains outside the SVG so every
-       canonical visual export stays free of repository paths. */
+    
     Archify.sourceEvidence = (function () {
       var element = document.getElementById('archify-source-evidence-data');
       var payload = null;
@@ -7455,11 +7322,7 @@
     })();
     Archify.sourceEvidence.installBeacons();
 
-    /* ============================================================
-       Explore — stable-ID neighborhood focus + dependency-free pan/zoom.
-       Renderer IDs become deep-linkable semantic hooks without turning the
-       standalone artifact into a canvas editor.
-       ============================================================ */
+    
     Archify.focus = (function () {
       var html = document.documentElement;
       var container = document.querySelector('.diagram-container');
@@ -8892,11 +8755,7 @@
       };
     })();
 
-    /* ============================================================
-       Intent Trace — temporary one-hop topology before durable focus.
-       Fine-pointer hover and keyboard focus share the same stable-ID preview;
-       touch continues directly to the existing click-to-focus contract.
-       ============================================================ */
+    
     Archify.intentTrace = (function () {
       var html = document.documentElement;
       var container = document.querySelector('.diagram-container');
@@ -9183,9 +9042,9 @@
           return true;
         });
       });
-      // Establish the compact cold state before exposing the panel so the
-      // full Director cannot flash during first paint. Hash restoration runs
-      // in the same task and replaces this state before paint when valid.
+      
+      
+      
       panel.setAttribute('data-active-view', 'all');
       panel.hidden = false;
       panel.setAttribute('data-view-interval-ms', String(VIEW_INTERVAL_MS));
@@ -10664,8 +10523,8 @@
         focusChapterButton(target);
       });
 
-      // A direct node exploration supersedes the curated view. Capture phase
-      // releases the view before the focus explorer writes its own deep link.
+      
+      
       function releaseForNode(event) {
         if (activeIndex >= 0 && event.target.closest('[data-node-id]')) {
           pausePlayback();
@@ -10819,14 +10678,7 @@
       };
     })();
 
-    /* ============================================================
-       Adaptive Reader Shell — one diagram across laptop and monitor.
-       The canonical SVG and viewBox never change. On ordinary desktop pages,
-       wide diagrams receive only enough outer width to use the available
-       height without pushing summary cards below the viewport. Mobile,
-       embed, presentation, print, and non-wide diagrams retain their own
-       established layout contracts.
-       ============================================================ */
+    
     Archify.waitForStableLayout = function (options) {
       options = options || {};
       var maximumFrames = Math.max(1, Number(options.maximumFrames) || 240);
@@ -11036,12 +10888,7 @@
       };
     })();
 
-    /* ============================================================
-       Viewer Chrome Layout — keep HTML controls clear of the canonical SVG
-       legend without changing authored geometry. The dock keeps its existing
-       position unless its zero-reserve position would cover the legend; only
-       then does a small bottom safe rail become part of the reader budget.
-       ============================================================ */
+    
     Archify.viewerChromeLayout = (function () {
       var html = document.documentElement;
       var container = document.querySelector('.diagram-container');
@@ -11136,10 +10983,7 @@
             if (writeReserve(Math.max(0, svgRect.bottom + SAFE_GAP - navRect.top))) return null;
           }
         } else if (collisionLatched && reserve > 0 && actualIntersectionArea > 0) {
-          /* Once zero-reserve geometry proves a collision, keep that decision
-             latched while Adaptive Reader incorporates the rail. If the first
-             rail is not quite tall enough (notably in Presentation flex
-             layout), grow only by the remaining vertical overlap. */
+          
           var remaining = Math.max(1, legendRect.bottom + SAFE_GAP - navRect.top);
           if (writeReserve(reserve + remaining)) return null;
         }
@@ -11734,11 +11578,7 @@
       };
     })();
 
-    /* ============================================================
-       Semantic Radar — simplified semantic bounds + live viewport.
-       The radar is built at runtime so the checked artifact still contains
-       one canonical SVG block, and export serialization remains untouched.
-       ============================================================ */
+    
     Archify.radar = (function () {
       var container = document.querySelector('.diagram-container');
       var diagram = container.querySelector(':scope > svg');
@@ -12362,12 +12202,7 @@
       };
     })();
 
-    /* ============================================================
-       Presentation Stage — a shareable, viewport-filling live view.
-       It changes only HTML layout and URL state; SVG semantics and export
-       serialization remain untouched. Escape first clears an active guided
-       view/focus, then exits the stage.
-       ============================================================ */
+    
     Archify.presentation = (function () {
       var html = document.documentElement;
       var btn = document.getElementById('btn-present');
@@ -12436,11 +12271,7 @@
       };
     })();
 
-    /* ============================================================
-       Node Finder — stable-ID search over the existing semantic SVG.
-       Search never changes the IR or SVG geometry: selecting a result resets
-       the viewport, releases a guided view, and delegates to semantic focus.
-       ============================================================ */
+    
     Archify.finder = (function () {
       var html = document.documentElement;
       var container = document.querySelector('.diagram-container');
@@ -12702,12 +12533,7 @@
       };
     })();
 
-    /* ============================================================
-       Route Probe — shortest directed path over compiled semantics.
-       The graph is read from renderer-owned stable IDs and relationship
-       endpoints. BFS order follows authored DOM edge order, so equal-length
-       choices are deterministic without adding weights or a graph runtime.
-       ============================================================ */
+    
     Archify.routeProbe = (function () {
       var html = document.documentElement;
       var container = document.querySelector('.diagram-container');
@@ -13306,9 +13132,9 @@
             return;
           }
           applyJourneyState(journeyIndex + 1, { pulse: true, reveal: true });
-          // Camera and motion-owner handoff are allowed to synchronously
-          // settle the previous step. The new step always starts with a fresh
-          // dwell; never carry cleanup time into the next scheduler lease.
+          
+          
+          
           journeyElapsedMs = 0;
           journeyStartedAt = 0;
           scheduleJourney();
@@ -13737,12 +13563,7 @@
       };
     })();
 
-    /* ============================================================
-       Semantic Lens — a counted, viewer-only legend over data-node-kind.
-       One selected kind reveals every authored relationship touching it.
-       Two selected kinds compare only direct cross-kind relationships while
-       preserving the full diagram as a dimmed spatial reference.
-       ============================================================ */
+    
     Archify.semanticLens = (function () {
       var html = document.documentElement;
       var container = document.querySelector('.diagram-container');
@@ -14413,12 +14234,7 @@
       };
     })();
 
-    /* ============================================================
-       Diagram Guide — a factual command deck over existing interactions.
-       Counts come from compiled semantics; actions delegate to Finder, Route
-       Probe, Semantic Radar, Semantic Lens, Story Trail, Presentation, theme, export, and
-       camera without adding a second command implementation or SVG state.
-       ============================================================ */
+    
     Archify.guide = (function () {
       var html = document.documentElement;
       var container = document.querySelector('.diagram-container');
@@ -14600,21 +14416,7 @@
       };
     })();
 
-    /* ============================================================
-       Global keyboard shortcuts
-       ? -> open Diagram Guide
-       T -> toggle theme
-       S -> cycle visual style
-       E -> open export menu
-         F -> toggle presentation stage
-         M -> toggle Semantic Radar
-         L -> toggle Semantic Lens
-         R -> start/clear Route Probe
-         / -> open node finder or the active route endpoint picker
-         + / - -> zoom, 0 -> reset view
-         Escape -> clear temporary trace/focus/view first, then exit presentation
-       Ignored when focus is inside an input/textarea/contenteditable.
-       ============================================================ */
+    
     document.addEventListener('keydown', function (e) {
       if (e.metaKey || e.ctrlKey || e.altKey) return;
       if (e.defaultPrevented) return;
