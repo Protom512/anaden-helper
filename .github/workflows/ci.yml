@@ -1,0 +1,151 @@
+name: CI
+
+# Server-side gate for anaden-helper, tiered by cost.
+#
+# Why tiered: with agent-driven development the number of pushes/PRs is
+# high and test suites only grow. Running the full suite on a Windows
+# runner for every push burns the private-repo Actions allowance fast
+# (Windows minutes count 2x against the included minutes).
+# So: cheap checks on Linux for every push, the expensive Windows test
+# run only where it decides something, heavy metrics on a schedule.
+#
+# Required status checks (Settings -> Branches -> Branch protection):
+#   check, quality-gates, test-windows
+# Without that, this workflow is a report, not a gate.
+
+on:
+  pull_request:
+  push:
+    branches: [main, master]
+
+permissions:
+  contents: read
+
+# A new push to the same branch/PR cancels the run in progress.
+# Only the newest commit's result matters; don't pay for stale ones.
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  check:
+    name: check (fmt / clippy, Linux, windows target check-only)
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      # rust-toolchain.toml in the repo root pins the toolchain;
+      # rustup on the runner honors it.
+      - name: Install toolchain + windows target
+        run: |
+          rustup component add rustfmt clippy
+          rustup target add x86_64-pc-windows-msvc
+
+      - uses: Swatinem/rust-cache@v2
+        with:
+          key: windows-target
+
+      - name: Format
+        run: cargo fmt --all -- --check
+
+      # Check-only cross build: clippy for the Windows target on a Linux
+      # runner costs 1x minutes instead of 2x, and catches the same
+      # compile/lint errors. It cannot *run* Windows binaries - that is
+      # what test-windows below is for.
+      - name: Clippy (windows target)
+        run: cargo clippy --workspace --all-targets --target x86_64-pc-windows-msvc -- -D warnings
+
+  test-windows:
+    name: test-windows (cargo test on Windows)
+    runs-on: windows-latest
+    timeout-minutes: 45
+    # The expensive job: only for pull requests (where the merge decision
+    # is made) and pushes to the default branch. Feature-branch pushes
+    # get the Linux checks above only.
+    if: github.event_name == 'pull_request' || github.ref == 'refs/heads/master' || github.ref == 'refs/heads/main'
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install toolchain components
+        shell: pwsh
+        run: rustup component add rustfmt clippy
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Test
+        run: cargo test --workspace
+
+  quality-gates:
+    name: quality-gates (test tampering / gate self-tests)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # assert_tests_untouched diffs against the PR base commit,
+          # so full history is required.
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      # The gate scripts themselves are code: run their unit tests first,
+      # so a broken gate cannot silently pass everything.
+      - name: Gate script self-tests
+        run: node --test scripts/quality/
+
+      # Fails the job if the PR diff touches existing test code
+      # (allowlist: scripts/quality/assert-tests-untouched-allowlist.json).
+      - name: Assert tests untouched (pull request)
+        if: github.event_name == 'pull_request'
+        run: node scripts/quality/assert_tests_untouched.mjs "${{ github.event.pull_request.base.sha }}"
+
+      - name: Assert tests untouched (push)
+        if: github.event_name == 'push' && github.event.before != '0000000000000000000000000000000000000000'
+        run: node scripts/quality/assert_tests_untouched.mjs "${{ github.event.before }}"
+
+  metrics-gates:
+    name: metrics-gates (complexity / duplication) - advisory for now
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    # Advisory until the binary provisioning below is confirmed working:
+    # complexity_gate.mjs shells out to `cccc-rs`, duplication_gate.mjs to
+    # `similarity-rs`. Once both installs are verified, remove
+    # continue-on-error and add this job to the required checks.
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+
+      - name: Install similarity-rs
+        run: cargo install --locked similarity
+
+      # TODO: confirm the distribution source of the `cccc-rs` binary
+      # (crates.io package name / release artifact) and pin it here.
+      - name: Complexity gate
+        run: node scripts/quality/complexity_gate.mjs
+
+      - name: Duplication gate
+        run: node scripts/quality/duplication_gate.mjs
+
+# Deliberately NOT in this workflow:
+# - cargo-mutants (scripts/quality/mutants-run.sh): too slow for a PR gate.
+#   Run it as a scheduled (weekly) workflow instead and treat regressions
+#   in the kill rate as a ratchet, not a per-PR blocker. The same weekly
+#   run is where redundant tests (tests that kill no mutants and add no
+#   coverage) get pruned - test count is not the goal, kill power per
+#   CI minute is.
+# - The full 3-OS matrix (like tsqlremaker's): release/nightly material,
+#   not a per-PR gate.
+# - ast-grep (sgconfig.yml): wire as a separate small job once rule
+#   coverage grows beyond the current single rule.
+#
+# CI time budget (ratchet): if the PR gate (check + quality-gates +
+# test-windows) regularly exceeds ~30 billed minutes per PR, treat that
+# as a defect: split slow tests out of the PR path or prune them.
+# Do not respond by weakening the gate.
