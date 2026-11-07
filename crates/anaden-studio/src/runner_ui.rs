@@ -28,25 +28,38 @@ impl PipelineRunnerApp {
             }
             ui.checkbox(&mut self.auto_scroll, "自動スクロール");
         });
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .stick_to_bottom(self.auto_scroll)
-            .show(ui, |ui| {
-                if self.log_snapshot.is_empty() {
-                    ui.weak("（ログなし）");
-                }
-                for entry in &self.log_snapshot {
-                    ui.monospace(
-                        egui::RichText::new(&entry.line)
-                            .monospace()
-                            .color(level_color(entry.level)),
-                    );
-                }
-            });
+        if self.log_snapshot.is_empty() {
+            ui.weak("（ログなし）");
+        } else {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(self.auto_scroll)
+                .show_rows(
+                    ui,
+                    ui.text_style_height(&egui::TextStyle::Monospace),
+                    self.log_snapshot.len(),
+                    |ui, rows| {
+                        for i in rows {
+                            let entry = &self.log_snapshot[i];
+                            ui.monospace(
+                                egui::RichText::new(&entry.line)
+                                    .monospace()
+                                    .color(level_color(entry.level)),
+                            );
+                        }
+                    },
+                );
+        }
     }
 }
 
 impl eframe::App for PipelineRunnerApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.has_active_process() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.render_body(ui, RunnerPane::Run);

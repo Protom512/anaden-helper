@@ -10,7 +10,7 @@ use anaden_vision::{CcoeffVisionEngine, SseVisionEngine, TemplateMatcher, Vision
 use crate::canvas::RoiEdit;
 use crate::childproc::SpawnSpec;
 use crate::library::{self, TemplateSpec};
-use crate::log_view::{AutoScrollFollow, LogBuffer, LogEntry};
+use crate::log_view::{AutoScrollFollow, DEFAULT_MAX_LINES, LogBuffer, LogEntry};
 use crate::proposals::{self, Proposal};
 use crate::tasks::{self, QueueAction, QueueEntry, QueueExec, QueueState};
 
@@ -236,9 +236,8 @@ impl StudioApp {
     }
 
     pub(crate) fn refresh_task_log_snapshot(&mut self) {
-        if let Some((rev, entries)) = self.task_log.changed_entries(self.task_log_revision) {
-            self.task_log_revision = rev;
-            self.task_log_snapshot = entries;
+        if let Some(update) = self.task_log.take_update() {
+            update.apply_to(&mut self.task_log_snapshot, DEFAULT_MAX_LINES);
         }
     }
 

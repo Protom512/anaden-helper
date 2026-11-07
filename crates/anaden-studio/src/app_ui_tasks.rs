@@ -181,21 +181,28 @@ impl StudioApp {
             }
         });
         let stick = self.task_scroll.should_stick_to_bottom();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .stick_to_bottom(stick)
-            .show(ui, |ui| {
-                if self.task_log_snapshot.is_empty() {
-                    ui.weak("（ログなし）");
-                }
-                for entry in &self.task_log_snapshot {
-                    ui.monospace(
-                        egui::RichText::new(&entry.line)
-                            .monospace()
-                            .color(crate::runner::level_color(entry.level)),
-                    );
-                }
-            });
+        if self.task_log_snapshot.is_empty() {
+            ui.weak("（ログなし）");
+        } else {
+            egui::ScrollArea::vertical()
+                .auto_shrink([false, false])
+                .stick_to_bottom(stick)
+                .show_rows(
+                    ui,
+                    ui.text_style_height(&egui::TextStyle::Monospace),
+                    self.task_log_snapshot.len(),
+                    |ui, rows| {
+                        for i in rows {
+                            let entry = &self.task_log_snapshot[i];
+                            ui.monospace(
+                                egui::RichText::new(&entry.line)
+                                    .monospace()
+                                    .color(crate::runner::level_color(entry.level)),
+                            );
+                        }
+                    },
+                );
+        }
         if stick {
             self.task_scroll.on_scrolled_to_bottom();
         }
