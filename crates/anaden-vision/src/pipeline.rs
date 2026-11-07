@@ -323,7 +323,7 @@ fn mtime_unchanged(path: &Path, cached: Option<SystemTime>) -> bool {
     match (file_mtime(path), cached) {
         (Some(current), Some(cached)) => current == cached,
         (None, _) => true,
-        (Some(_), None) => true,
+        (Some(_), None) => false,
     }
 }
 
@@ -4111,5 +4111,28 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn cache_serves_vanished_file_and_reloads_when_cached_mtime_unknown() {
+        let missing = Path::new("z-anaden-missing-template-probe.png");
+        assert!(
+            mtime_unchanged(missing, None),
+            "vanished file must keep serving the cached template (pinned by detect_template_loaded_once_for_repeated_detects)"
+        );
+        assert!(
+            mtime_unchanged(missing, Some(SystemTime::UNIX_EPOCH)),
+            "vanished file stays served regardless of the cached mtime"
+        );
+        let dir = tempfile::tempdir().unwrap();
+        let existing = dir.path().join("probe.png");
+        fs::write(&existing, b"probe").unwrap();
+        let mtime = file_mtime(&existing).expect("mtime of written probe file");
+        assert!(mtime_unchanged(&existing, Some(mtime)));
+        assert!(!mtime_unchanged(&existing, Some(SystemTime::UNIX_EPOCH)));
+        assert!(
+            !mtime_unchanged(&existing, None),
+            "existing file with unknown cached mtime must reload to recover verifiability"
+        );
     }
 }
