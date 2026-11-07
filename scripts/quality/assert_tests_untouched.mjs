@@ -218,6 +218,69 @@ export function evaluateUntouched({ files, oldSources = {}, newSources = {} }) {
 }
 
 
+function parseCatFileBatch(stdout, requests, base) {
+  const out = [];
+  let pos = 0;
+  for (const req of requests) {
+    const nl = stdout.indexOf(0x0a, pos);
+    if (nl === -1) {
+      throw new Error(`git cat-file --batch: truncated response for ${req.oldPath}`);
+    }
+    const header = stdout.subarray(pos, nl).toString('utf8');
+    pos = nl + 1;
+    if (header.endsWith(' MISSING')) {
+      throw new Error(`cannot read old version of ${req.oldPath} at ${base}`);
+    }
+    const sizeMatch = / (\d+)$/.exec(header);
+    if (!sizeMatch) {
+      throw new Error(`git cat-file --batch: malformed header for ${req.oldPath}: ${header}`);
+    }
+    const size = Number(sizeMatch[1]);
+    const content = stdout.subarray(pos, pos + size).toString('utf8');
+    pos += size;
+    if (stdout[pos] === 0x0a) pos += 1;
+    out.push({ file: req.file, content });
+  }
+  return out;
+}
+
+function readOldBlobs(root, base, requests) {
+  if (requests.length === 0) return [];
+  const batch = spawnSync('git', ['-C', root, 'cat-file', '--batch'], {
+    input: requests.map((r) => `${base}:${r.oldPath}`).join('\n') + '\n',
+    maxBuffer: 256 * 1024 * 1024,
+  });
+  if (batch.error || batch.status !== 0) {
+    const stderr = (batch.stderr ?? Buffer.alloc(0)).toString('utf8').trim();
+    throw new Error(`git cat-file --batch ${base} failed (status=${batch.status}) ${stderr}`);
+  }
+  return parseCatFileBatch(batch.stdout, requests, base);
+}
+
+function collectSourcesFromGit(root, base, files) {
+  const oldSources = {};
+  const newSources = {};
+  const oldRequests = [];
+  for (const file of files) {
+    if (!file.path.endsWith('.rs')) continue;
+    if (file.hunks.some((h) => h.oldLines.length > 0)) {
+      const oldPath = file.oldPath && file.oldPath !== file.path ? file.oldPath : file.path;
+      oldRequests.push({ file: file.path, oldPath });
+    }
+    if (file.hunks.some((h) => h.newLines.length > 0)) {
+      try {
+        newSources[file.path] = fs.readFileSync(path.join(root, ...file.path.split('/')), 'utf8');
+      } catch (error) {
+        throw new Error(`cannot read ${file.path}: ${error.message}`);
+      }
+    }
+  }
+  for (const { file, content } of readOldBlobs(root, base, oldRequests)) {
+    oldSources[file] = content;
+  }
+  return { oldSources, newSources };
+}
+
 export function main(argv = [], opts = {}) {
   const root = opts.root ?? path.resolve(scriptDir, '..', '..');
   const base = opts.base ?? argv[0] ?? 'HEAD';
@@ -240,9 +303,8 @@ export function main(argv = [], opts = {}) {
     }
   }
 
+  const usesGitSources = opts.diffText === undefined;
   let diffText = opts.diffText;
-  let oldSources = opts.oldSources;
-  let newSources = opts.newSources;
   if (diffText === undefined) {
     const diffRun = spawnSync('git', ['-C', root, 'diff', '--unified=0', base, '--'], {
       encoding: 'utf8',
@@ -253,35 +315,25 @@ export function main(argv = [], opts = {}) {
       return 2;
     }
     diffText = diffRun.stdout ?? '';
-    oldSources = {};
-    newSources = {};
-    for (const file of parseDiff(diffText)) {
-      if (!file.path.endsWith('.rs')) continue;
-      if (file.hunks.some((h) => h.oldLines.length > 0)) {
-        const oldPath = file.oldPath && file.oldPath !== file.path ? file.oldPath : file.path;
-        const show = spawnSync('git', ['-C', root, 'show', `${base}:${oldPath}`], { encoding: 'utf8' });
-        if (show.error || show.status !== 0) {
-          console.error(`tests-untouched: cannot read old version of ${oldPath} at ${base}`);
-          return 2;
-        }
-        oldSources[file.path] = show.stdout ?? '';
-      }
-      if (file.hunks.some((h) => h.newLines.length > 0)) {
-        try {
-          newSources[file.path] = fs.readFileSync(path.join(root, ...file.path.split('/')), 'utf8');
-        } catch (error) {
-          console.error(`tests-untouched: cannot read ${file.path}: ${error.message}`);
-          return 2;
-        }
-      }
-    }
   }
 
-  let files;
   let result;
   try {
-    files = parseDiff(diffText);
-    result = evaluateUntouched({ files, oldSources, newSources });
+    const files = parseDiff(diffText);
+    if (!usesGitSources) {
+      result = evaluateUntouched({
+        files,
+        oldSources: opts.oldSources ?? {},
+        newSources: opts.newSources ?? {},
+      });
+    } else {
+      const sources = collectSourcesFromGit(root, base, files);
+      result = evaluateUntouched({
+        files,
+        oldSources: sources.oldSources,
+        newSources: sources.newSources,
+      });
+    }
   } catch (error) {
     console.error(`tests-untouched: evaluation failed: ${error.message}`);
     return 2;
