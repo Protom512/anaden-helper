@@ -29,3 +29,7 @@ version_label_orig.png
 snapshots/
 .agents/
 skills-lock.json
+
+# pipeline run artifacts / audit outputs (machine-generated evidence)
+.anaden-run/
+.audit/
