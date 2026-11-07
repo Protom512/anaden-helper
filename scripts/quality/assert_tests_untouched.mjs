@@ -228,7 +228,7 @@ function parseCatFileBatch(stdout, requests, base) {
     }
     const header = stdout.subarray(pos, nl).toString('utf8');
     pos = nl + 1;
-    if (header.endsWith(' MISSING')) {
+    if (header.endsWith(' missing')) {
       throw new Error(`cannot read old version of ${req.oldPath} at ${base}`);
     }
     const sizeMatch = / (\d+)$/.exec(header);
