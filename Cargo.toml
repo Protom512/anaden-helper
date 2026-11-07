@@ -23,7 +23,7 @@ anaden-engine = { path = "crates/anaden-engine" }
 anaden-strategies = { path = "crates/anaden-strategies" }
 
 image = { version = "0.25", default-features = false, features = ["png", "bmp", "jpeg", "rayon"] }
-imageproc = "0.25"
+imageproc = { version = "0.25", default-features = false, features = ["rayon"] }
 
 tokio = { version = "1", features = ["full"] }
 tokio-util = { version = "0.7" }
