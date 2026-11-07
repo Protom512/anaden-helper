@@ -122,12 +122,18 @@ impl TaskListState {
         built
             .iter()
             .map(|def| {
-                let args = spawn_args(def, target, serial, root);
+                let mut args = spawn_args(def, target, serial, root);
                 if args.is_empty() {
                     return Err(TaskError::UnknownTask(format!(
                         "タスク {} の実行引数を解決できません (pipeline_dir/start_task 不明)",
                         def.id
                     )));
+                }
+                if matches!(def.kind, TaskKind::PipelineRun) {
+                    args = crate::runner_exec::with_report_file_arg(
+                        &args,
+                        &crate::history::new_report_path(),
+                    );
                 }
                 Ok(QueueEntry {
                     label: def.title.clone(),
@@ -864,5 +870,45 @@ pipeline_dir = "templates/pipelines/nonexistent-xyz"
         assert_eq!(entries[0].spec.args[0], "run");
         assert_eq!(entries[1].label, "ゲーム起動");
         assert_eq!(entries[1].spec.args[0], "launch");
+    }
+
+    #[test]
+    fn test_queue_entries_pipeline_run_carries_report_file_launch_does_not() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            dir.path().join("a_run.toml"),
+            "id = \"r\"\ntitle = \"R\"\nkind = \"pipeline_run\"\nimplemented = true\npipeline_dir = \"templates/pipelines/missing-xyz\"\nstart_task = \"start\"\n",
+        )
+        .unwrap();
+        std::fs::write(
+            dir.path().join("b_launch.toml"),
+            "id = \"l\"\ntitle = \"L\"\nkind = \"launch_subcommand\"\nimplemented = true\n",
+        )
+        .unwrap();
+        let mut list = TaskListState::load(dir.path()).unwrap();
+        list.toggle("r").unwrap();
+        list.toggle("l").unwrap();
+        let root = Path::new(env!("CARGO_MANIFEST_DIR")).join("..").join("..");
+        let entries = list
+            .queue_entries("anaden", "windows", None, &root)
+            .unwrap();
+        assert_eq!(entries.len(), 2);
+        let run = entries.iter().find(|e| e.label == "R").unwrap();
+        let flag_at = run.spec.args.iter().position(|t| t == "--report-file");
+        assert!(
+            flag_at.is_some(),
+            "pipeline_run args must carry --report-file: {:?}",
+            run.spec.args
+        );
+        assert!(
+            run.spec
+                .args
+                .get(flag_at.unwrap() + 1)
+                .is_some_and(|p| !p.is_empty()),
+            "report path must follow the flag: {:?}",
+            run.spec.args
+        );
+        let launch = entries.iter().find(|e| e.label == "L").unwrap();
+        assert_eq!(launch.spec.args, vec!["launch".to_string()]);
     }
 }
