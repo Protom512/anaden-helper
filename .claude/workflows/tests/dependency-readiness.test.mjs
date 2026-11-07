@@ -7,21 +7,21 @@ import assert from 'node:assert/strict';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [dependency-readiness-begin]';
-const END = '// [dependency-readiness-end]';
+const BEGIN = 'const taskDeclaredDeps';
+const END = "phase('Implement');";
 
 const loadApi = () => {
   const begin = src.indexOf(BEGIN);
-  const end = src.indexOf(END);
-  assert.ok(begin >= 0, 'missing dependency-readiness-begin marker');
-  assert.ok(end > begin, 'missing dependency-readiness-end marker');
-  const block = src.slice(begin + BEGIN.length, end);
+  const end = src.indexOf(END, begin);
+  assert.ok(begin >= 0, 'dependency-readiness block start not found');
+  assert.ok(end > begin, 'dependency-readiness block end not found');
+  const block = src.slice(begin, end);
   return new Function(
     `${block}; return { taskDeclaredDeps, evaluateDependencyReadiness, buildDependencyReadinessRationale };`
   )();
 };
 
-test('markers exist and pure block evaluates', () => {
+test('dependency-readiness pure block evaluates', () => {
   const api = loadApi();
   assert.equal(typeof api.taskDeclaredDeps, 'function');
   assert.equal(typeof api.evaluateDependencyReadiness, 'function');
@@ -355,40 +355,39 @@ test('rationale: mixed ready/blocked tasks aggregate fail-closed', () => {
   assert.equal(t3.verdict, 'unknown-evidence');
 });
 
-const WIRING_BEGIN = '// [dependency-readiness-wiring-begin]';
-const WIRING_END = '// [dependency-readiness-wiring-end]';
+const WIRING_BEGIN = 'const _declaredDeps = taskDeclaredDeps(task);';
+const WIRING_END = 'buildEngineerPrompt(laneResult, task, ticket, approval)';
 
 const wiringBlock = () => {
   const begin = src.indexOf(WIRING_BEGIN);
-  const end = src.indexOf(WIRING_END);
-  assert.ok(begin >= 0, 'missing dependency-readiness-wiring-begin marker');
-  assert.ok(end > begin, 'missing dependency-readiness-wiring-end marker');
-  return src.slice(begin + WIRING_BEGIN.length, end);
+  const end = src.indexOf(WIRING_END, begin);
+  assert.ok(begin >= 0, 'dependency wiring block start not found');
+  assert.ok(end > begin, 'dependency wiring block end not found');
+  return src.slice(begin, end);
 };
 
 const loadWiringApi = () => {
   const begin = src.indexOf(BEGIN);
-  const end = src.indexOf(END);
-  assert.ok(begin >= 0 && end > begin, 'pure block markers present');
-  const block = src.slice(begin + BEGIN.length, end);
+  const end = src.indexOf(END, begin);
+  assert.ok(begin >= 0 && end > begin, 'pure block present');
+  const block = src.slice(begin, end);
   return new Function(
     `${block}; return { normalizeDependencyCollectorOutput, DEPENDENCY_COLLECTOR_SCHEMA };`
   )();
 };
 
-test('wiring: markers exist; block nested inside ownership-serialization wiring region', () => {
+test('wiring: block nested inside ownership-serialization wiring region', () => {
   const wBegin = src.indexOf(WIRING_BEGIN);
-  const wEnd = src.indexOf(WIRING_END);
-  const oBegin = src.indexOf('[ownership-serialization-wiring-begin]');
-  const oEnd = src.indexOf('[ownership-serialization-wiring-end]');
-  assert.ok(oBegin > 0 && oEnd > oBegin, 'ownership wiring markers present');
+  const wEnd = src.indexOf(WIRING_END, wBegin);
+  const oBegin = src.indexOf("phase('Implement');");
+  const oEnd = src.indexOf('const _slug', oBegin);
+  assert.ok(oBegin > 0 && oEnd > oBegin, 'ownership wiring region present');
   assert.ok(wBegin > oBegin && wEnd < oEnd,
     'dependency wiring nested inside ownership wiring (runImplementTask region)');
 });
 
 test('wiring: sits after lane-gate fail-closed check, before engineer agent dispatch', () => {
   const wBegin = src.indexOf(WIRING_BEGIN);
-  const wEnd = src.indexOf(WIRING_END);
   const laneMissing = src.indexOf("status: 'lane-missing'");
   const humanGated = src.indexOf("status: 'human-gated'");
   const dispatch = src.indexOf('buildEngineerPrompt(laneResult, task, ticket, approval)');
@@ -396,7 +395,7 @@ test('wiring: sits after lane-gate fail-closed check, before engineer agent disp
   assert.ok(humanGated > 0, "operator-gated 'human-gated' status present");
   assert.ok(dispatch > 0, 'engineer dispatch call present');
   assert.ok(laneMissing < wBegin, 'lane-gate check precedes dependency wiring');
-  assert.ok(wEnd < dispatch, 'engineer dispatch follows dependency wiring');
+  assert.ok(dispatch > wBegin, 'engineer dispatch follows dependency wiring');
 });
 
 test('wiring: collector agent dispatched once per gated task (sonnet + StructuredOutput schema)', () => {
@@ -445,9 +444,9 @@ test('wiring: blocked return precedes wiring end (no dispatch on the blocked pat
 });
 
 test('wiring: ready or deps-empty → dispatch unchanged (engineer agent call preserved)', () => {
-  const wEnd = src.indexOf(WIRING_END);
-  const dispatch = src.indexOf('buildEngineerPrompt(laneResult, task, ticket, approval)');
-  assert.ok(dispatch > wEnd, 'engineer dispatch follows the wiring block');
+  const wBegin = src.indexOf(WIRING_BEGIN);
+  const dispatch = src.indexOf('buildEngineerPrompt(laneResult, task, ticket, approval)', wBegin);
+  assert.ok(dispatch > wBegin, 'engineer dispatch follows the wiring block');
   const dispatchCtx = src.slice(dispatch - 60, dispatch + 220);
   assert.match(dispatchCtx, /model: 'sonnet'/, 'engineer dispatch keeps sonnet');
   assert.match(dispatchCtx, /engineer:\$\{task\.id\}/, 'engineer label unchanged');
@@ -462,8 +461,8 @@ test('no regression: operator-gated skip and lane-gate fail-closed precede depen
 });
 
 test('no regression: ownership-serialization dispatch ordering intact (groups loop drives runImplementTask)', () => {
-  const oBegin = src.indexOf('[ownership-serialization-wiring-begin]');
-  const oEnd = src.indexOf('[ownership-serialization-wiring-end]');
+  const oBegin = src.indexOf("phase('Implement');");
+  const oEnd = src.indexOf('const _slug', oBegin);
   const region = src.slice(oBegin, oEnd);
   assert.match(region, /ownershipPlan\.groups/, 'groups loop present');
   assert.match(region, /runImplementTask\(task\)/, 'dispatch loop still calls runImplementTask');

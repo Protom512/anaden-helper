@@ -11,12 +11,12 @@ import {
 const wfDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fpSrc = readFileSync(join(wfDir, 'feature-pipeline.js'), 'utf8');
 
-test('wiring position: precheck block sits between pm-ticket-files-end and phase(Estimate)', () => {
-  const pmEnd = fpSrc.indexOf('[pm-ticket-files-end]');
-  const precheckBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
+test('wiring position: precheck block sits between the PM ticket block and phase(Estimate)', () => {
+  const pmEnd = fpSrc.indexOf('const runMeta = buildRunMetadata');
+  const precheckBegin = fpSrc.indexOf('function normalizePath');
   const estimatePhase = fpSrc.indexOf("phase('Estimate')");
-  assert.ok(pmEnd > 0, 'pm-ticket-files-end marker exists');
-  assert.ok(precheckBegin > 0, 'ticket-precheck-wiring-begin marker exists');
+  assert.ok(pmEnd > 0, 'PM ticket block boundary (runMetadata persister) exists');
+  assert.ok(precheckBegin > 0, 'ticket-precheck wiring region (normalizePath) exists');
   assert.ok(estimatePhase > 0, "phase('Estimate') exists");
   assert.ok(
     pmEnd < precheckBegin && precheckBegin < estimatePhase,
@@ -25,9 +25,9 @@ test('wiring position: precheck block sits between pm-ticket-files-end and phase
 });
 
 test('wiring: evaluateTicketPrecheck is defined inline and invoked', () => {
-  const blockBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
-  const blockEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
-  assert.ok(blockBegin > 0 && blockEnd > blockBegin, 'wiring marker block present');
+  const blockBegin = fpSrc.indexOf('function normalizePath');
+  const blockEnd = fpSrc.indexOf("phase('Estimate')");
+  assert.ok(blockBegin > 0 && blockEnd > blockBegin, 'wiring block present');
   const block = fpSrc.slice(blockBegin, blockEnd);
   assert.ok(/function evaluateTicketPrecheckInline|const evaluateTicketPrecheck/.test(block),
     'evaluateTicketPrecheck defined inside the wiring block');
@@ -35,8 +35,8 @@ test('wiring: evaluateTicketPrecheck is defined inline and invoked', () => {
 });
 
 test('wiring: deriveSliceMetadata defined inline and used to derive crates/diffKind', () => {
-  const blockBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
-  const blockEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
+  const blockBegin = fpSrc.indexOf('function normalizePath');
+  const blockEnd = fpSrc.indexOf("phase('Estimate')");
   const block = fpSrc.slice(blockBegin, blockEnd);
   assert.match(block, /deriveSliceMetadata/, 'deriveSliceMetadata referenced in wiring block');
   assert.match(block, /changedCrates/, 'changedCrates derived from metadata');
@@ -44,7 +44,7 @@ test('wiring: deriveSliceMetadata defined inline and used to derive crates/diffK
 });
 
 test('FAIL short-circuit: status precheck-failed returned before Estimate', () => {
-  const precheckBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
+  const precheckBegin = fpSrc.indexOf('function normalizePath');
   const estimatePhase = fpSrc.indexOf("phase('Estimate')");
   const block = fpSrc.slice(precheckBegin, estimatePhase);
   assert.ok(block.length > 0 && estimatePhase > precheckBegin, 'precheck precedes Estimate');
@@ -54,7 +54,7 @@ test('FAIL short-circuit: status precheck-failed returned before Estimate', () =
 });
 
 test('FAIL short-circuit is a return (resumable status, resolveReleaseAbort と同型)', () => {
-  const precheckBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
+  const precheckBegin = fpSrc.indexOf('function normalizePath');
   const estimatePhase = fpSrc.indexOf("phase('Estimate')");
   const block = fpSrc.slice(precheckBegin, estimatePhase);
   const failIdx = block.lastIndexOf("'precheck-failed'");
@@ -88,11 +88,9 @@ test('PASS injection: precheck-derived changedCrates feeds gate lanes (manual de
 });
 
 test('drift guard: inline evaluateTicketPrecheck matches canonical module', () => {
-  const beginMarker = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
-  const begin = fpSrc.indexOf('\n', beginMarker) + 1;
-  const endMarker = fpSrc.indexOf('[ticket-precheck-wiring-end]');
-  const end = fpSrc.lastIndexOf('\n', endMarker);
-  assert.ok(begin > 0 && end > begin, 'wiring block markers present');
+  const begin = fpSrc.indexOf('function normalizePath');
+  const end = fpSrc.indexOf("phase('Estimate')");
+  assert.ok(begin > 0 && end > begin, 'wiring block present');
   const inlineSrc = fpSrc
     .slice(begin, end)
     .replace(/^\s*\/\/.*$/gm, '');
@@ -105,8 +103,8 @@ test('drift guard: inline evaluateTicketPrecheck matches canonical module', () =
 });
 
 test('behavior: FAIL verdict produced for undeclared changed files (canonical semantics exercised via inline call shape)', () => {
-  const blockBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
-  const blockEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
+  const blockBegin = fpSrc.indexOf('function normalizePath');
+  const blockEnd = fpSrc.indexOf("phase('Estimate')");
   const block = fpSrc.slice(blockBegin, blockEnd).replace(/^\s*\/\/.*$/gm, '');
   const call = block.match(/evaluateTicketPrecheck(?:Inline)?\(\s*([^,)]+),\s*([^)]+)\)/);
   assert.ok(call, 'evaluateTicketPrecheck call site found');
@@ -128,8 +126,8 @@ test('evidence: precheck verdict persisted to .omc/logs/{run-id}/ticket-precheck
 });
 
 test('UC-3: precheck scope resolver includes commit-range fallback for clean working tree', () => {
-  const blockBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
-  const blockEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
+  const blockBegin = fpSrc.indexOf('function normalizePath');
+  const blockEnd = fpSrc.indexOf("phase('Estimate')");
   const block = fpSrc.slice(blockBegin, blockEnd);
   assert.match(block, /HEAD~1\.\.HEAD|commit-range|merge-base/,
     'commit-range fallback (HEAD~1..HEAD / merge-base) collected by precheck scope resolver');
@@ -145,8 +143,8 @@ test('canonical: UC-2 fail-closed semantics unchanged (undeclared file FAILs)', 
 });
 
 test('evidence: treeHash recorded in persisted ticket-precheck.json (vacuous-PASS detection)', () => {
-  const blockBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
-  const blockEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
+  const blockBegin = fpSrc.indexOf('function normalizePath');
+  const blockEnd = fpSrc.indexOf("phase('Estimate')");
   const block = fpSrc.slice(blockBegin, blockEnd);
   assert.ok(blockBegin > 0 && blockEnd > blockBegin, 'wiring block present');
   assert.match(block, /git write-tree/, 'scope resolver collects git write-tree output');
@@ -155,21 +153,20 @@ test('evidence: treeHash recorded in persisted ticket-precheck.json (vacuous-PAS
   assert.ok(guard, 'missing treeHash falls back to explicit unknown (fail-closed)');
 });
 
-test('issuePremise wiring: marker block sits inside ticket-precheck wiring, before Estimate', () => {
-  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
-  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
-  const precheckBegin = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
-  const precheckEnd = fpSrc.indexOf('[ticket-precheck-wiring-end]');
+test('issuePremise wiring: block sits inside ticket-precheck wiring, before Estimate', () => {
+  const begin = fpSrc.indexOf('const issueNumberForPremise');
+  const end = fpSrc.indexOf('log(`Issue premise precheck PASS');
+  const precheckBegin = fpSrc.indexOf('function normalizePath');
   const estimatePhase = fpSrc.indexOf("phase('Estimate')");
-  assert.ok(begin > 0 && end > begin, 'issue-premise wiring markers present');
-  assert.ok(precheckBegin < begin && end < precheckEnd,
+  assert.ok(begin > 0 && end > begin, 'issue-premise wiring block present');
+  assert.ok(precheckBegin < begin && end < estimatePhase,
     'issue-premise block nested inside ticket-precheck wiring block');
   assert.ok(end < estimatePhase, 'issue-premise block precedes Estimate');
 });
 
 test('issuePremise wiring: inline pure fn evaluates gh/git/PR evidence', () => {
-  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
-  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const begin = fpSrc.indexOf('const issueNumberForPremise');
+  const end = fpSrc.indexOf('log(`Issue premise precheck PASS');
   const block = fpSrc.slice(begin, end);
   assert.match(fpSrc, /const evaluateIssuePremise/, 'evaluateIssuePremise defined inline (unified block)');
   assert.match(block, /evaluateIssuePremise\(\{/, 'evaluateIssuePremise invoked with object evidence');
@@ -180,7 +177,7 @@ test('issuePremise wiring: inline pure fn evaluates gh/git/PR evidence', () => {
 });
 
 test('issuePremise wiring: FAIL short-circuits to precheck-failed before Estimate', () => {
-  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
+  const begin = fpSrc.indexOf('const issueNumberForPremise');
   const estimatePhase = fpSrc.indexOf("phase('Estimate')");
   const block = fpSrc.slice(begin, estimatePhase);
   assert.match(block, /issuePremise\.verdict !== 'PASS'/, 'FAIL branch checks verdict');
@@ -192,8 +189,8 @@ test('issuePremise wiring: FAIL short-circuits to precheck-failed before Estimat
 });
 
 test('issuePremise evidence: verdict persisted to .omc/logs/{runId}/issue-premise-precheck.json', () => {
-  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
-  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const begin = fpSrc.indexOf('const issueNumberForPremise');
+  const end = fpSrc.indexOf('log(`Issue premise precheck PASS');
   const block = fpSrc.slice(begin, end);
   const persistIdx = block.indexOf('issue-premise-precheck.json');
   assert.ok(persistIdx > 0, 'dedicated persistence file name present in issue-premise block');
@@ -204,8 +201,8 @@ test('issuePremise evidence: verdict persisted to .omc/logs/{runId}/issue-premis
 });
 
 test('issuePremise wiring: fail-closed — gh failure surfaces as FAIL via malformed evidence', () => {
-  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
-  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const begin = fpSrc.indexOf('const issueNumberForPremise');
+  const end = fpSrc.indexOf('log(`Issue premise precheck PASS');
   const block = fpSrc.slice(begin, end);
   assert.match(block, /issueState/, 'issueState field mapped from gh evidence');
   assert.match(block, /linkedBranchesContainIssue/, 'linkedBranchesContainIssue field mapped');
@@ -215,8 +212,8 @@ test('issuePremise wiring: fail-closed — gh failure surfaces as FAIL via malfo
 });
 
 test('issuePremise wiring (#150): call site passes ticket.ticketKind and ticket.subjectPrNumber', () => {
-  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
-  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const begin = fpSrc.indexOf('const issueNumberForPremise');
+  const end = fpSrc.indexOf('log(`Issue premise precheck PASS');
   const block = fpSrc.slice(begin, end);
   const call = block.match(/evaluateIssuePremise\(\{[\s\S]*?\}\)/);
   assert.ok(call, 'evaluateIssuePremise({...}) call site found');
@@ -227,8 +224,8 @@ test('issuePremise wiring (#150): call site passes ticket.ticketKind and ticket.
 });
 
 test('issuePremise wiring (#150): schema-null subjectPrNumber normalized to undefined at wiring boundary', () => {
-  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
-  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const begin = fpSrc.indexOf('const issueNumberForPremise');
+  const end = fpSrc.indexOf('log(`Issue premise precheck PASS');
   const block = fpSrc.slice(begin, end);
   const call = block.match(/evaluateIssuePremise\(\{[\s\S]*?\}\)/);
   assert.ok(call, 'call site found');
@@ -240,8 +237,8 @@ test('issuePremise wiring (#150): schema-null subjectPrNumber normalized to unde
 });
 
 test('PM schema (#150): optional subjectPrNumber declared, required array unchanged', () => {
-  const begin = fpSrc.indexOf('// [pm-ticket-files-begin]');
-  const end = fpSrc.indexOf('// [pm-ticket-files-end]');
+  const begin = fpSrc.indexOf('const ticket = await agent(');
+  const end = fpSrc.indexOf('const runMeta = buildRunMetadata', begin);
   assert.ok(begin >= 0 && end > begin, 'pm-ticket-files block present');
   const block = fpSrc.slice(begin, end);
   assert.match(
@@ -259,8 +256,8 @@ test('PM schema (#150): optional subjectPrNumber declared, required array unchan
 });
 
 test('PM prompt (#150): continuation branch instructs returning subject open PR number', () => {
-  const begin = fpSrc.indexOf('// [pm-ticket-files-begin]');
-  const end = fpSrc.indexOf('// [pm-ticket-files-end]');
+  const begin = fpSrc.indexOf('const ticket = await agent(');
+  const end = fpSrc.indexOf('const runMeta = buildRunMetadata', begin);
   const block = fpSrc.slice(begin, end);
   const branchAt = block.indexOf('${isBacklogPick');
   assert.ok(branchAt > 0, 'continuation branch found in PM prompt');
@@ -271,8 +268,8 @@ test('PM prompt (#150): continuation branch instructs returning subject open PR 
 });
 
 test('issuePremise evidence (#150): persisted JSON records ticketKind and subjectPrNumber', () => {
-  const begin = fpSrc.indexOf('[issue-premise-wiring-begin]');
-  const end = fpSrc.indexOf('[issue-premise-wiring-end]');
+  const begin = fpSrc.indexOf('const issueNumberForPremise');
+  const end = fpSrc.indexOf('log(`Issue premise precheck PASS');
   const block = fpSrc.slice(begin, end);
   const persistIdx = block.indexOf('issue-premise-precheck.json');
   assert.ok(persistIdx > 0, 'persistence file present in issue-premise block');

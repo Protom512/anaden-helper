@@ -5,10 +5,10 @@ import { dirname, join } from 'node:path';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [release-abort-status-begin]';
-const END = '// [release-abort-status-end]';
+const BEGIN = 'const RELEASE_ABORT_STATUS';
+const END = 'let precheckAbort';
 const begin = src.indexOf(BEGIN);
-const end = src.indexOf(END);
+const end = src.indexOf(END, begin);
 
 let failures = 0;
 function assert(cond, msg) {
@@ -20,11 +20,11 @@ function assert(cond, msg) {
   }
 }
 
-assert(begin >= 0, 'feature-pipeline.js contains release-abort-status-begin marker');
-assert(end > begin, 'feature-pipeline.js contains release-abort-status-end marker after begin');
+assert(begin >= 0, 'feature-pipeline.js contains RELEASE_ABORT_STATUS declaration');
+assert(end > begin, 'feature-pipeline.js contains let precheckAbort after the span');
 
 if (begin >= 0 && end > begin) {
-  const block = src.slice(begin + BEGIN.length, end);
+  const block = src.slice(begin, end);
   const api = new Function(`${block}; return { resolveReleaseAbort, RELEASE_ABORT_STATUS };`)();
 
   let r = api.resolveReleaseAbort({ precheck: { abort: true, reason: 'no-tracked-changes' }, releaseResult: '' });
@@ -68,9 +68,9 @@ assert(src.includes("'empty-release-aborted'"), "workflow source contains 'empty
 const statusLine = src.match(/status: releaseAbort\.aborted \? RELEASE_ABORT_STATUS : \(allGo \? 'released' : 'review-rejected'\)/);
 assert(statusLine !== null, 'return status branches: abort → empty-release-aborted, else released/review-rejected');
 
-const phase6 = src.indexOf('// ── Phase 6: Release Review');
-const phase7 = src.indexOf('// ── Phase 7: Merge & Close');
-const phase8 = src.indexOf('// ── Phase 8: Self-Improve');
+const phase6 = src.indexOf("phase('Release Review')");
+const phase7 = src.indexOf("phase('Merge & Close')");
+const phase8 = src.indexOf("phase('Self-Improve')");
 const abortDecl = src.indexOf('const releaseAbort = resolveReleaseAbort(');
 assert(abortDecl > 0 && phase6 > abortDecl, 'releaseAbort resolved before Phase 6');
 assert(phase6 > 0 && phase7 > phase6 && phase8 > phase7, 'phase ordering intact (6 → 7 → 8)');
@@ -81,7 +81,7 @@ assert(/Merge skipped/.test(src), 'merge-skip log retained');
 
 const abortReturn = src.match(/releaseAbort\.aborted \? \{[\s\S]{0,600}snapshotBranch/);
 assert(abortReturn !== null, 'abort return includes snapshotBranch (implementation is NOT lost — resumable)');
-assert(/issue #66/.test(src.slice(abortDecl - 2000, abortDecl)) || /Issue #66/.test(src.slice(begin - 2000, begin)), 'JS comment references org-feedback.md issue #66 entries');
+assert(/issue #66/.test(src.slice(abortDecl - 2000, abortDecl)) || /Issue #66/.test(src.slice(begin - 2000, begin)), 'issue #66 reference retained near the abort block (origin trail)');
 
 if (failures > 0) {
   console.error(`\n${failures} test(s) FAILED`);

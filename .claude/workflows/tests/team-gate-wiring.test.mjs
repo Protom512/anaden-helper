@@ -7,14 +7,14 @@ import { dirname, join } from 'node:path';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [gate-team-begin]';
-const END = '// [gate-team-end]';
+const BEGIN = 'const GATE_TEAM_VERDICT_ENUM';
+const END = 'const gateTeamPrimitivesAvailable';
 const begin = src.indexOf(BEGIN);
-const end = src.indexOf(END);
-assert.ok(begin >= 0, 'feature-pipeline.js contains gate-team-begin marker');
-assert.ok(end > begin, 'feature-pipeline.js contains gate-team-end marker after begin');
+const end = src.indexOf(END, begin);
+assert.ok(begin >= 0, 'feature-pipeline.js contains gate-team block start');
+assert.ok(end > begin, 'feature-pipeline.js contains gate-team block end');
 
-const block = src.slice(begin + BEGIN.length, end);
+const block = src.slice(begin, end);
 const api = new Function(`${block}; return { normalizeGateReview, aggregateGateReviews };`)();
 
 test('normalizeGateReview: structured object passes through (first path)', () => {

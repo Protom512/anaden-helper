@@ -7,14 +7,12 @@ import { dirname, join } from 'node:path';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [release-prompt-begin]';
-const END = '// [release-prompt-end]';
-const begin = src.indexOf(BEGIN);
-const end = src.indexOf(END);
-assert.ok(begin >= 0, 'feature-pipeline.js contains release-prompt-begin marker');
-assert.ok(end > begin, 'feature-pipeline.js contains release-prompt-end marker after begin');
+const begin = src.indexOf('const gateVerdictLabel');
+const end = src.indexOf('const releaseResult = precheckAbort', begin);
+assert.ok(begin >= 0, 'feature-pipeline.js contains the release prompt helpers (gateVerdictLabel)');
+assert.ok(end > begin, 'release prompt span extends to the releaseResult declaration');
 
-const block = src.slice(begin + BEGIN.length, end);
+const block = src.slice(begin, end);
 const api = new Function(`${block}; return { buildReleasePrompt, buildGateVerdictSection };`)();
 
 const ALL_SIX_KEYS = [
@@ -202,7 +200,7 @@ test('buildGateVerdictSection: empty/undefined inputs fail closed without throwi
 
 const rpPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'release-pipeline.js');
 const rpSrc = readFileSync(rpPath, 'utf8');
-const phase4 = rpSrc.slice(rpSrc.indexOf('// Phase 4: Commit'), rpSrc.indexOf('// Phase 5'));
+const phase4 = rpSrc.slice(rpSrc.indexOf("phase('Commit')"), rpSrc.indexOf("phase('Verify')"));
 
 test('release-pipeline.js Phase 4 commit prompt instructs original message verbatim (scope edit only)', () => {
   assert.ok(phase4.length > 0, 'Phase 4 block exists in release-pipeline.js');

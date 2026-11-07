@@ -5,10 +5,10 @@ import { dirname, join } from 'node:path';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [release-precheck-begin]';
-const END = '// [release-precheck-end]';
+const BEGIN = 'const RELEASE_EXCLUDE_PATTERNS';
+const END = "phase('Release')";
 const begin = src.indexOf(BEGIN);
-const end = src.indexOf(END);
+const end = src.indexOf(END, begin);
 
 let failures = 0;
 function assert(cond, msg) {
@@ -20,11 +20,11 @@ function assert(cond, msg) {
   }
 }
 
-assert(begin >= 0, 'feature-pipeline.js contains release-precheck-begin marker');
-assert(end > begin, 'feature-pipeline.js contains release-precheck-end marker after begin');
+assert(begin >= 0, 'feature-pipeline.js contains RELEASE_EXCLUDE_PATTERNS declaration');
+assert(end > begin, "feature-pipeline.js contains phase('Release') call after the span");
 
 if (begin >= 0 && end > begin) {
-  const block = src.slice(begin + BEGIN.length, end);
+  const block = src.slice(begin, end);
   const api = new Function(`${block}; return { evaluateReleasePrecheck, RELEASE_EXCLUDE_PATTERNS };`)();
 
   const T = (diff, porcelain, snap) => api.evaluateReleasePrecheck({

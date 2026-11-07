@@ -8,20 +8,18 @@ import { classifyDiffKind, isDocsPath } from '../gate-diff-kind.js';
 const wfDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fpSrc = readFileSync(join(wfDir, 'feature-pipeline.js'), 'utf8');
 
-test('drift guard: feature-pipeline contains an inline gate-diff-kind marker block', () => {
+test('drift guard: feature-pipeline references the inlined gate-diff-kind classifier', () => {
   assert.ok(
     fpSrc.includes('gate-diff-kind'),
-    'feature-pipeline.js must reference gate-diff-kind (inline copy + drift-guard marker)'
+    'feature-pipeline.js must reference gate-diff-kind (inline copy)'
   );
 });
 
 test('drift guard: inlined isDocsPath/classifyDiffKind match canonical behavior', () => {
-  const beginMarker = fpSrc.indexOf('gate-diff-kind-begin');
-  const end = fpSrc.indexOf('gate-diff-kind-end');
-  const begin = fpSrc.indexOf('\n', beginMarker) + 1;
-  const endCut = fpSrc.lastIndexOf('\n', end);
-  assert.ok(begin > 0 && end > begin, 'inline gate-diff-kind block markers present');
-  const inlineSrc = fpSrc.slice(begin, endCut);
+  const begin = fpSrc.indexOf('const DOCS_DIR_PREFIXES');
+  const end = fpSrc.indexOf('const DOCS_ONLY_SKIP_KEYS', begin);
+  assert.ok(begin > 0 && end > begin, 'inline gate-diff-kind block present');
+  const inlineSrc = fpSrc.slice(begin, end);
   const inline = new Function(
     `${inlineSrc.replace(/^\s*\/\/.*$/gm, '')}\nreturn { isDocsPath, classifyDiffKind };`
   )();
@@ -96,7 +94,7 @@ test('short-circuit: expected lane count resolved dynamically, not hard-coded GA
 
 test('short-circuit: aggregate treats only truly-run lanes as expected (behavioral, canonical aggregateGateReviews contract)', () => {
   const begin = fpSrc.indexOf('const normalizeGateReview');
-  const end = fpSrc.indexOf('[gate-team-end]');
+  const end = fpSrc.indexOf('const gateTeamPrimitivesAvailable', begin);
   assert.ok(begin > 0 && end > begin, 'aggregateGateReviews inline block found');
   const block = fpSrc.slice(begin, end).replace(/^\s*\/\/.*$/gm, '');
   const closing = '};\n';

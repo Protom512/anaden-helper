@@ -55,9 +55,9 @@ test('continuation branch is distinct from new-feature template (no mechanical t
 });
 
 test('pm:create-ticket schema requires ticketKind enum (Issue #104)', () => {
-  const begin = src.indexOf('// [pm-ticket-files-begin]');
-  const end = src.indexOf('// [pm-ticket-files-end]');
-  assert.ok(begin >= 0 && end > begin);
+  const begin = src.indexOf('const ticket = await agent(');
+  const end = src.indexOf('const runMeta = buildRunMetadata', begin);
+  assert.ok(begin >= 0 && end > begin, 'PM ticket block present');
   const block = src.slice(begin, end);
   assert.match(block, /ticketKind:\s*\{\s*type:\s*'string',\s*enum:\s*\['new-implementation',\s*'continuation'\]/,
     'schema has ticketKind enum');
@@ -75,8 +75,8 @@ test('commit-range fallback gated to continuation tickets only (Issue #104)', ()
 });
 
 test('PM prompt explains ticketKind semantics (Issue #104)', () => {
-  const begin = src.indexOf('// [pm-ticket-files-begin]');
-  const end = src.indexOf('// [pm-ticket-files-end]');
+  const begin = src.indexOf('const ticket = await agent(');
+  const end = src.indexOf('const runMeta = buildRunMetadata', begin);
   const block = src.slice(begin, end);
   assert.match(block, /"continuation":\s*未マージブランチ\/open PR の残作業/, 'continuation explained');
   assert.match(block, /"new-implementation":\s*ゼロから新規実装/, 'new-implementation explained');

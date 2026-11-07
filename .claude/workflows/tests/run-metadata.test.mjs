@@ -9,21 +9,14 @@ const repoRoot = join(wfDir, '..', '..');
 const fpSrc = readFileSync(join(wfDir, 'feature-pipeline.js'), 'utf8');
 
 function loadInlineHelper() {
-  const beginMarker = fpSrc.indexOf('run-metadata-lookup-begin');
-  const end = fpSrc.indexOf('run-metadata-lookup-end');
-  assert.ok(beginMarker > 0 && end > beginMarker, 'inline run-metadata-lookup block markers present');
-  const begin = fpSrc.indexOf('\n', beginMarker) + 1;
-  const endCut = fpSrc.lastIndexOf('\n', end);
-  const inlineSrc = fpSrc.slice(begin, endCut);
+  const begin = fpSrc.indexOf('const RUN_TIMESTAMP_UNKNOWN');
+  const end = fpSrc.indexOf('const DOCS_DIR_PREFIXES', begin);
+  assert.ok(begin > -1 && end > begin, 'inline run-metadata-lookup block present');
+  const inlineSrc = fpSrc.slice(begin, end);
   return new Function(
     `${inlineSrc.replace(/^\s*\/\/.*$/gm, '')}\nreturn { RUN_TIMESTAMP_UNKNOWN, buildRunTimestampIndex, matchRunByTimestamp };`
   )();
 }
-
-test('drift guard: feature-pipeline contains inline run-metadata-lookup marker block', () => {
-  assert.ok(fpSrc.includes('run-metadata-lookup-begin'));
-  assert.ok(fpSrc.includes('run-metadata-lookup-end'));
-});
 
 test('buildRunTimestampIndex indexes runTimestamp from run-metadata entries', () => {
   const { buildRunTimestampIndex } = loadInlineHelper();
@@ -123,11 +116,6 @@ test('UC-1 wiring: runTimestamp/runId generated before phase(Coordinate)', () =>
   assert.ok(idIdx > -1 && idIdx < coordIdx, 'runId must be declared before Coordinate phase');
 });
 
-test('UC-1 wiring: run-metadata helper marker block present', () => {
-  assert.ok(fpSrc.includes('[run-metadata-begin]'), 'begin marker present');
-  assert.ok(fpSrc.includes('[run-metadata-end]'), 'end marker present');
-});
-
 test('UC-1 wiring: persister writes .omc/logs/{runId}/run-metadata.json', () => {
   assert.ok(
     fpSrc.includes('.omc/logs/${runId}/run-metadata.json'),
@@ -140,12 +128,10 @@ test('UC-1 wiring: persister writes .omc/logs/{runId}/run-metadata.json', () => 
 });
 
 function loadRunMetadataHelpers() {
-  const beginMarker = fpSrc.indexOf('[run-metadata-begin]');
-  const end = fpSrc.indexOf('[run-metadata-end]');
-  assert.ok(beginMarker > -1 && end > beginMarker, 'inline run-metadata block markers present');
-  const begin = fpSrc.indexOf('\n', beginMarker) + 1;
-  const endCut = fpSrc.lastIndexOf('\n', end);
-  const inlineSrc = fpSrc.slice(begin, endCut);
+  const begin = fpSrc.indexOf('const PIPELINE_PHASES');
+  const end = fpSrc.indexOf("phase('Coordinate')", begin);
+  assert.ok(begin > -1 && end > begin, 'inline run-metadata block present');
+  const inlineSrc = fpSrc.slice(begin, end);
   return new Function(
     `${inlineSrc.replace(/^\s*\/\/.*$/gm, '')}\nreturn { isIso8601WithTimezone, buildRunMetadata };`
   )();

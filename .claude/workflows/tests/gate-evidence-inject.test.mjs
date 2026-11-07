@@ -7,11 +7,6 @@ import assert from 'node:assert/strict';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-test('markers present in feature-pipeline.js', () => {
-  assert.ok(src.includes('// [gate-evidence-inject-begin]'));
-  assert.ok(src.includes('// [gate-evidence-inject-end]'));
-});
-
 test('GATE_EVIDENCE blob is declared before FEEDBACK_INSTRUCTION (no TDZ at runtime)', () => {
   const evAt = src.indexOf('const GATE_EVIDENCE = formatEvidenceForReviewers(');
   const fiAt = src.indexOf('const FEEDBACK_INSTRUCTION');
@@ -35,17 +30,14 @@ test('both gate paths consume d.prompt (so the injection reaches team AND fallba
 });
 
 test('injected instruction makes evidence citation mandatory for Done/完了 claims', () => {
-  const begin = src.indexOf('// [gate-evidence-inject-begin]');
-  const end = src.indexOf('// [gate-evidence-inject-end]');
-  assert.ok(begin >= 0 && end > begin);
-  const block = src.slice(begin, end);
-  assert.match(block, /Done/i, 'instruction mentions Done');
-  assert.match(block, /evidence を引用|evidence.*必須/, 'evidence citation is mandatory');
-  assert.match(block, /fail-closed/, 'fail-closed semantics stated');
   const fiAt = src.indexOf('const FEEDBACK_INSTRUCTION');
   const fiEnd = src.indexOf('GATE_DIMENSIONS', fiAt);
+  const fi = src.slice(fiAt, fiEnd);
+  assert.match(fi, /Done/i, 'instruction mentions Done');
+  assert.match(fi, /evidence を引用|evidence.*必須/, 'evidence citation is mandatory');
+  assert.match(fi, /NO-GO 扱い/, 'evidence-contradicting completion claims fail closed (treated as NO-GO)');
   assert.ok(
-    src.slice(fiAt, fiEnd).includes('${GATE_EVIDENCE}\n// [gate-evidence-inject-begin]'),
-    'blob interpolated directly above the mandatory-citation block within FEEDBACK_INSTRUCTION'
+    fi.includes('${GATE_EVIDENCE}\n【Done/完了 判定は evidence 引用必須'),
+    'blob interpolated directly above the mandatory-citation instruction within FEEDBACK_INSTRUCTION'
   );
 });
