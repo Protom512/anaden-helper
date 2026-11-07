@@ -20,7 +20,11 @@ anaden-engine.workspace = true
 anaden-strategies.workspace = true
 anaden-vision.workspace = true
 anyhow.workspace = true
-eframe = "0.34.3"
+eframe = { version = "0.34.3", default-features = false, features = [
+    "accesskit",
+    "default_fonts",
+    "glow",
+] }
 egui = "0.34"
 image.workspace = true
 rfd = "0.17.2"
