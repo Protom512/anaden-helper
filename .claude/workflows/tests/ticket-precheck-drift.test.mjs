@@ -14,15 +14,10 @@ const wfDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fpSrc = readFileSync(join(wfDir, 'feature-pipeline.js'), 'utf8');
 
 function extractInlinePureFns() {
-  const beginMarker = fpSrc.indexOf('[ticket-precheck-wiring-begin]');
-  const endMarker = fpSrc.indexOf('[ticket-precheck-wiring-end]');
-  assert.ok(beginMarker > 0 && endMarker > beginMarker, 'wiring markers present');
-  const begin = fpSrc.indexOf('\n', beginMarker) + 1;
-  const end = fpSrc.lastIndexOf('\n', endMarker);
-  let blk = fpSrc.slice(begin, end).replace(/^\s*\/\/.*$/gm, '');
-  const cut = blk.indexOf('const precheckScope');
-  assert.ok(cut > 0, 'pure region boundary (precheckScope) found');
-  blk = blk.slice(0, cut);
+  const begin = fpSrc.indexOf('function normalizePath');
+  const end = fpSrc.indexOf('const precheckScope', begin);
+  assert.ok(begin > 0 && end > begin, 'wiring region present (normalizePath through precheckScope)');
+  const blk = fpSrc.slice(begin, end).replace(/^\s*\/\/.*$/gm, '');
   const factory = new Function(
     'classifyDiffKind',
     `${blk}\nreturn { evaluateTicketPrecheck, evaluateIssuePremise, deriveSliceMetadata };`

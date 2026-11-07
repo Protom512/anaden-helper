@@ -273,7 +273,7 @@ test('wiring (Issue #102): fail-closed short-circuit precedes all reviewer fan-o
   const failAt = fpSrc.indexOf("gateDiffInput.mode === 'fail-closed'");
   assert.ok(failAt > 0, 'fail-closed branch present');
   const persistAt = fpSrc.indexOf('gate:persist-diff-kind-rationale');
-  const teamGateAt = fpSrc.indexOf('[gate-team-begin]');
+  const teamGateAt = fpSrc.indexOf('const GATE_TEAM_VERDICT_ENUM');
   const instrAt = fpSrc.indexOf('FEEDBACK_INSTRUCTION');
   assert.ok(failAt < instrAt, 'fail-closed precedes FEEDBACK_INSTRUCTION build');
   assert.ok(failAt < persistAt, 'fail-closed precedes any persistence/fan-out agent');
@@ -293,8 +293,6 @@ test('wiring (Issue #102): TDZ ordering — GATE_DIFF_SNAPSHOT builder executed 
   assert.ok(builderCallAt > 0, 'buildGateDiffEvidence builder invoked');
   assert.ok(builderCallAt > dimsAt,
     `builder invocation (offset ${builderCallAt}) must come after ACTIVE_GATE_DIMENSIONS (offset ${dimsAt}) — TDZ guard`);
-  const persistApply = fpSrc.indexOf('[gate-diff-kind-persist-apply]');
-  assert.ok(builderCallAt > persistApply, 'invocation lives in the persist-apply (post-TDZ) region');
 });
 
 test('wiring (Issue #102): shared snapshot injected into every reviewer lane (single source)', () => {

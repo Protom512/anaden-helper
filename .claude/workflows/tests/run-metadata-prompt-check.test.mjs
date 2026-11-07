@@ -7,23 +7,19 @@ import assert from 'node:assert/strict';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const RUN_TS_CHECK_BEGIN = 'run-metadata-prompt-check-begin';
-const RUN_TS_CHECK_END = 'run-metadata-prompt-check-end';
+const RUN_TS_CHECK_BEGIN = 'const RUN_TS_CHECK';
+const RUN_TS_CHECK_END = 'function extractDiffSection';
 
-function markerBlock() {
+function runTsCheckBlock() {
   const begin = src.indexOf(RUN_TS_CHECK_BEGIN);
-  const end = src.indexOf(RUN_TS_CHECK_END);
-  assert.ok(begin > -1, 'prompt-check marker begin present');
-  assert.ok(end > begin, 'prompt-check marker end present');
+  const end = src.indexOf(RUN_TS_CHECK_END, begin);
+  assert.ok(begin > -1, 'RUN_TS_CHECK declaration present');
+  assert.ok(end > begin, 'extractDiffSection follows RUN_TS_CHECK');
   return src.slice(begin, end);
 }
 
-test('drift guard: run-metadata-prompt-check marker block present', () => {
-  markerBlock();
-});
-
-test('marker block states the runTimestamp cross-check semantics (read run-metadata.json, compare with recordedAt, unknown fail-closed, no backfill)', () => {
-  const block = markerBlock();
+test('RUN_TS_CHECK states the runTimestamp cross-check semantics (read run-metadata.json, compare with recordedAt, unknown fail-closed, no backfill)', () => {
+  const block = runTsCheckBlock();
   assert.match(block, /run-metadata\.json/, 'mentions run-metadata.json');
   assert.match(block, /runTimestamp/, 'mentions runTimestamp');
   assert.match(block, /recordedAt/, 'mentions recordedAt');
@@ -34,7 +30,6 @@ test('marker block states the runTimestamp cross-check semantics (read run-metad
 });
 
 test('Commit Gate reviewer prompts embed the runTimestamp check instruction', () => {
-  const block = markerBlock();
   const fiAt = src.indexOf('const FEEDBACK_INSTRUCTION');
   assert.ok(fiAt > -1, 'FEEDBACK_INSTRUCTION exists');
   const fiEnd = src.indexOf('GATE_DIMENSIONS', fiAt);

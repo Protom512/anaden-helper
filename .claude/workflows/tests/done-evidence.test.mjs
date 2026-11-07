@@ -6,17 +6,12 @@ import { test } from 'node:test';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [done-evidence-begin]';
-const END = '// [done-evidence-end]';
+const BEGIN = 'const DONE_EVIDENCE_MAX_TAIL';
+const END = 'const GATE_EVIDENCE_STATUS_FAILED';
 const begin = src.indexOf(BEGIN);
-const end = src.indexOf(END);
+const end = src.indexOf(END, begin);
 
 let api = null;
-test('markers present in feature-pipeline.js', () => {
-  if (begin < 0 || end <= begin) return;
-  const block = src.slice(begin + BEGIN.length, end);
-  api = new Function(`${block}; return { evaluateDoneEvidence, formatEvidenceForReviewers };`)();
-});
 
 const GOOD = {
   buildExitCode: 0, nextestExitCode: 0,
@@ -26,13 +21,13 @@ const GOOD = {
 };
 
 const run = () => {
-  const block = src.slice(src.indexOf(BEGIN) + BEGIN.length, src.indexOf(END));
+  const block = src.slice(src.indexOf(BEGIN), src.indexOf(END));
   return new Function(`${block}; return { evaluateDoneEvidence, formatEvidenceForReviewers };`)();
 };
 
-test('markers exist and block evaluates', () => {
-  if (begin < 0) throw new Error('missing done-evidence-begin marker');
-  if (end <= begin) throw new Error('missing done-evidence-end marker');
+test('anchors exist and block evaluates', () => {
+  if (begin < 0) throw new Error('missing DONE_EVIDENCE_MAX_TAIL anchor');
+  if (end <= begin) throw new Error('missing GATE_EVIDENCE_STATUS_FAILED end anchor');
   api = run();
 });
 

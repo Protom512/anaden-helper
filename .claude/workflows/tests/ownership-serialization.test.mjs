@@ -7,21 +7,21 @@ import assert from 'node:assert/strict';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [file-ownership-begin]';
-const END = '// [file-ownership-end]';
+const BEGIN = 'const normalizeOwnedPath';
+const END = 'const taskDeclaredDeps';
 
 const loadApi = () => {
   const begin = src.indexOf(BEGIN);
-  const end = src.indexOf(END);
-  assert.ok(begin >= 0, 'missing file-ownership-begin marker');
-  assert.ok(end > begin, 'missing file-ownership-end marker');
-  const block = src.slice(begin + BEGIN.length, end);
+  const end = src.indexOf(END, begin);
+  assert.ok(begin >= 0, 'file-ownership block start not found');
+  assert.ok(end > begin, 'file-ownership block end not found');
+  const block = src.slice(begin, end);
   return new Function(
     `${block}; return { computeFileOwnership, findFileConflicts, resolveDispatchGroups, buildOwnershipSerializationRationale, ownershipRelevantTasks };`
   )();
 };
 
-test('markers exist and pure block evaluates', () => {
+test('file-ownership pure block evaluates', () => {
   const api = loadApi();
   assert.equal(typeof api.computeFileOwnership, 'function');
   assert.equal(typeof api.findFileConflicts, 'function');

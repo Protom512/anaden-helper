@@ -7,21 +7,21 @@ import assert from 'node:assert/strict';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [implement-lane-begin]';
-const END = '// [implement-lane-end]';
+const BEGIN = 'const IMPLEMENT_LANE_INVESTIGATION';
+const END = 'const normalizeOwnedPath';
 
 const loadApi = () => {
   const begin = src.indexOf(BEGIN);
-  const end = src.indexOf(END);
-  assert.ok(begin >= 0, 'missing implement-lane-begin marker');
-  assert.ok(end > begin, 'missing implement-lane-end marker');
-  const block = src.slice(begin + BEGIN.length, end);
+  const end = src.indexOf(END, begin);
+  assert.ok(begin >= 0, 'implement-lane block start not found');
+  assert.ok(end > begin, 'implement-lane block end not found');
+  const block = src.slice(begin, end);
   return new Function(
     `${block}; return { resolveImplementLane, buildEngineerPrompt };`
   )();
 };
 
-test('markers exist and pure block evaluates', () => {
+test('implement-lane pure block evaluates', () => {
   const api = loadApi();
   assert.equal(typeof api.resolveImplementLane, 'function');
   assert.equal(typeof api.buildEngineerPrompt, 'function');

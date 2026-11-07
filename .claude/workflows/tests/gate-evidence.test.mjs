@@ -7,14 +7,14 @@ import { dirname, join } from 'node:path';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [gate-evidence-begin]';
-const END = '// [gate-evidence-end]';
+const BEGIN = 'const GATE_EVIDENCE_STATUS_FAILED';
+const END = 'const gateEvidenceRaw';
 const begin = src.indexOf(BEGIN);
-const end = src.indexOf(END);
-assert.ok(begin >= 0, 'feature-pipeline.js contains gate-evidence-begin marker');
-assert.ok(end > begin, 'feature-pipeline.js contains gate-evidence-end marker after begin');
+const end = src.indexOf(END, begin);
+assert.ok(begin >= 0, 'feature-pipeline.js contains GATE_EVIDENCE_STATUS_FAILED declaration');
+assert.ok(end > begin, 'feature-pipeline.js contains gateEvidenceRaw declaration after the span');
 
-const block = src.slice(begin + BEGIN.length, end);
+const block = src.slice(begin, end);
 const api = new Function(`${block}; return { GATE_EVIDENCE_STATUS_FAILED, GATE_EVIDENCE_SCHEMA, normalizeGateEvidence };`)();
 
 test('normalize: structured object passes through with defaults', () => {
@@ -71,7 +71,7 @@ test('normalize: toolMissing preserved for disambiguation', () => {
 });
 
 test('evaluate (via done-evidence block): tool-missing reason is distinct from tests-failed', () => {
-  const db = src.slice(src.indexOf('// [done-evidence-begin]') + '// [done-evidence-begin]'.length, src.indexOf('// [done-evidence-end]'));
+  const db = src.slice(src.indexOf('const DONE_EVIDENCE_MAX_TAIL'), src.indexOf('const GATE_EVIDENCE_STATUS_FAILED'));
   const done = new Function(`${db}; return { evaluateDoneEvidence, formatEvidenceForReviewers };`)();
   const GOOD = { buildExitCode: 0, nextestExitCode: 0, passed: 10, failed: 0, checkoutClean: true, collectedAt: 't', runTimestamp: '2026-08-28T00:00:00Z' };
   const tests = done.evaluateDoneEvidence({ ...GOOD, nextestExitCode: 1, failed: 3 });

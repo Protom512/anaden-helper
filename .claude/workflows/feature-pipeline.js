@@ -1841,19 +1841,12 @@ ${GATE_DIFF}
 ${GATE_CONTRAST_REPORT}
 
 ${GATE_EVIDENCE}
-// [gate-evidence-inject-begin]
-// Task 4 (Issue #68 S2): 上記 evidence blob を全 reviewer レーン（team 経路の
-// teammate prompt・fall-back parallel() 経路の d.prompt、双方 FEEDBACK_INSTRUCTION 経由）
-// に注入し、Done/完了 判定は evidence 引用を必須とする旨を指示する。
-// evidence 欠落は fail-closed（evaluateDoneEvidence が gate 手前で短絡済み —
-// ここに到達する時点で evidence は有効）。
 【Done/完了 判定は evidence 引用必須（Issue #68 S2）】上記の fresh-checkout
 build/test evidence（exit code・pass 数）を確認せよ。「実装が完了している」「Done」
 等の完了系の主張・GO 判定は、この evidence を引用して根拠を示すことが必須である。
 evidence に反する完了主張（例: build 赤なのに Done と述べる）は検証不足として
 NO-GO 扱いにすること。evidence の数値が示す失敗が本スライス由来であれば findings に
 file:line 付きで記録せよ（baseline 起票ルールは既存の two-layer gate 準拠）。
-// [gate-evidence-inject-end]
 
 【Gate の評価対象（重要）】Commit Gate は working tree のコード変更（品質・正確性・副作用）を評価する。
 staging（git add）状態は Release フェーズの責務であり、Gate は Release 前に走るため

@@ -5,10 +5,10 @@ import { dirname, join } from 'node:path';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [team-verdict-begin]';
-const END = '// [team-verdict-end]';
+const BEGIN = 'const TEAM_VERDICT_RE';
+const END = 'const normalizeReleaseLaneEntry';
 const begin = src.indexOf(BEGIN);
-const end = src.indexOf(END);
+const end = src.indexOf(END, begin);
 
 let failures = 0;
 function assert(cond, msg) {
@@ -20,11 +20,11 @@ function assert(cond, msg) {
   }
 }
 
-assert(begin >= 0, 'feature-pipeline.js contains team-verdict-begin marker');
-assert(end > begin, 'feature-pipeline.js contains team-verdict-end marker after begin');
+assert(begin >= 0, 'feature-pipeline.js contains TEAM_VERDICT_RE declaration');
+assert(end > begin, 'feature-pipeline.js contains normalizeReleaseLaneEntry declaration after the span');
 
 if (begin >= 0 && end > begin) {
-  const block = src.slice(begin + BEGIN.length, end);
+  const block = src.slice(begin, end);
   const api = new Function(`${block}; return { parseTeamVerdict, mergeReleaseVerdicts };`)();
 
   assert(api.parseTeamVerdict('VERDICT: GO')?.verdict === 'GO', 'parseTeamVerdict accepts VERDICT: GO');

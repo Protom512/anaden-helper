@@ -7,26 +7,17 @@ import { dirname, join } from 'node:path';
 const wfPath = join(dirname(fileURLToPath(import.meta.url)), '..', 'feature-pipeline.js');
 const src = readFileSync(wfPath, 'utf8');
 
-const BEGIN = '// [release-verdict-persistence-begin]';
-const END = '// [release-verdict-persistence-end]';
-const begin = src.indexOf(BEGIN);
-const end = src.indexOf(END);
-
-test('feature-pipeline.js contains release-verdict-persistence markers', () => {
-  assert.ok(begin >= 0, 'release-verdict-persistence-begin marker present');
-  assert.ok(end > begin, 'release-verdict-persistence-end marker after begin');
-});
+const begin = src.indexOf('const normalizeReleaseLaneEntry');
+const end = src.indexOf('const runReleaseReviewViaTeam', begin);
 
 const api = begin >= 0 && end > begin
-  ? new Function(`${src.slice(begin + BEGIN.length, end)}; return { buildReleaseVerdictsMd, buildPrReviewComment, extractPrNumber, normalizeReleaseLaneEntry };`)()
+  ? new Function(`${src.slice(begin, end)}; return { buildReleaseVerdictsMd, buildPrReviewComment, extractPrNumber, normalizeReleaseLaneEntry };`)()
   : null;
 
-const TV_BEGIN = '// [team-verdict-begin]';
-const TV_END = '// [team-verdict-end]';
-const tvBegin = src.indexOf(TV_BEGIN);
-const tvEnd = src.indexOf(TV_END, tvBegin);
+const tvBegin = src.indexOf('const TEAM_VERDICT_RE');
+const tvEnd = src.indexOf('const normalizeReleaseLaneEntry', tvBegin);
 const parseTeamVerdict = tvBegin >= 0 && tvEnd > tvBegin
-  ? new Function(`${src.slice(tvBegin + TV_BEGIN.length, tvEnd)}; return { parseTeamVerdict };`)().parseTeamVerdict
+  ? new Function(`${src.slice(tvBegin, tvEnd)}; return { parseTeamVerdict };`)().parseTeamVerdict
   : null;
 
 test('parseTeamVerdict is importable from the team-verdict block (round-trip precondition)', () => {
