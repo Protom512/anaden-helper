@@ -1,6 +1,9 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { findComments, codeFingerprint, lexRust, lexJs, lexShell, lexToml, lexYaml, stripComments, scopeFiles } from './comment_gate.mjs';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
+import { applyFixes, check, findComments, codeFingerprint, lexRust, lexJs, lexShell, lexToml, lexYaml, stripComments, scopeFiles } from './comment_gate.mjs';
 
 const NL = '\n';
 
@@ -196,6 +199,49 @@ test('js: drift-guard marker comments are flagged', () => {
 test('stripComments removes drift-guard marker lines', () => {
   const src = 'const a = 1;' + NL + '// [done-evidence-begin]' + NL + 'const b = 2;';
   assert.equal(stripComments(src, 'js'), 'const a = 1;' + NL + 'const b = 2;');
+});
+
+test('check reports comment line numbers in source order', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'comment-gate-check-'));
+  try {
+    fs.writeFileSync(path.join(root, 'sample.toml'), 'a = 1' + NL + '# gone' + NL + 'b = 2' + NL + NL + '# also gone' + NL);
+    const result = check(root);
+    assert.equal(result.ok, false);
+    assert.deepEqual(result.findings.map((f) => f.line), [2, 5]);
+    assert.ok(result.findings.every((f) => path.basename(f.file) === 'sample.toml'));
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('applyFixes strips comments and check with its result verifies clean', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'comment-gate-fix-'));
+  try {
+    fs.writeFileSync(path.join(root, 'sample.toml'), '# top' + NL + 'a = 1 # one' + NL + 'b = 2' + NL);
+    const fix = applyFixes(root);
+    assert.equal(fix.filesChanged, 1);
+    assert.equal(fix.comments, 2);
+    const result = check(root, fix);
+    assert.equal(result.ok, true);
+    assert.equal(fs.readFileSync(path.join(root, 'sample.toml'), 'utf8'), 'a = 1' + NL + 'b = 2' + NL);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('check prefers precomputed sources over disk contents', () => {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'comment-gate-cache-'));
+  try {
+    fs.writeFileSync(path.join(root, 'clean.toml'), 'a = 1' + NL);
+    const files = scopeFiles(root);
+    const sources = new Map(files.map((f) => [f.path, 'x = 1' + NL + '# dirty' + NL]));
+    const result = check(root, { files, sources });
+    assert.equal(result.ok, false);
+    assert.equal(result.findings.length, 1);
+    assert.equal(result.findings[0].line, 2);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
 
 test('scopeFiles covers crates/scripts code plus repo toml and config yml', () => {

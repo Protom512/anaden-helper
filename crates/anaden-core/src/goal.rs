@@ -199,11 +199,9 @@ fn evaluate_composition(
         Composition::All => "All",
         Composition::Any => "Any",
     };
-    if matches!(mode, Composition::All) {
-        return evaluate_all_in_order(goal, ctx, elapsed_secs, conditions, label);
-    }
     let mut first_failure: Option<GoalReport> = None;
     let mut any_reached = false;
+    let mut any_not_yet = false;
     for c in conditions {
         match evaluate_child(c, goal, ctx, elapsed_secs) {
             GoalStatus::Failed(report) => {
@@ -212,7 +210,7 @@ fn evaluate_composition(
                 }
             }
             GoalStatus::Reached(_) => any_reached = true,
-            GoalStatus::NotYet => {}
+            GoalStatus::NotYet => any_not_yet = true,
         }
     }
     if let Some(report) = first_failure {
@@ -222,42 +220,25 @@ fn evaluate_composition(
             format!("{label}: child failed ({})", report.reason),
         ));
     }
-    if any_reached {
-        GoalStatus::Reached(make_report(goal, ctx, "Any: a child reached".to_string()))
-    } else {
-        GoalStatus::NotYet
-    }
-}
-
-fn evaluate_all_in_order(
-    goal: &Goal,
-    ctx: &GoalStatusContext,
-    elapsed_secs: u64,
-    conditions: &[StopCondition],
-    label: &str,
-) -> GoalStatus {
-    let mut failed: Option<GoalReport> = None;
-    for c in conditions {
-        match evaluate_child(c, goal, ctx, elapsed_secs) {
-            GoalStatus::NotYet => return GoalStatus::NotYet,
-            GoalStatus::Failed(report) => {
-                failed = Some(report);
-                break;
+    match mode {
+        Composition::All => {
+            if any_not_yet {
+                GoalStatus::NotYet
+            } else {
+                GoalStatus::Reached(make_report(
+                    goal,
+                    ctx,
+                    "All: all children reached".to_string(),
+                ))
             }
-            GoalStatus::Reached(_) => {}
         }
-    }
-    match failed {
-        Some(report) => GoalStatus::Failed(make_report(
-            goal,
-            ctx,
-            format!("{label}: child failed ({})", report.reason),
-        )),
-        None => GoalStatus::Reached(make_report(
-            goal,
-            ctx,
-            "All: all children reached".to_string(),
-        )),
+        Composition::Any => {
+            if any_reached {
+                GoalStatus::Reached(make_report(goal, ctx, "Any: a child reached".to_string()))
+            } else {
+                GoalStatus::NotYet
+            }
+        }
     }
 }
 
@@ -943,6 +924,27 @@ mod tests {
                 conditions: vec![
                     StopCondition::Timeout { secs: 60 },
                     StopCondition::LoopCount { target: 100 },
+                ],
+            },
+        };
+        let ctx = GoalStatusContext {
+            iterations: 1,
+            last_match: None,
+        };
+        match evaluate(&goal, &ctx, 70) {
+            GoalStatus::Failed(report) => assert!(report.reason.contains("child failed")),
+            other => panic!("expected Failed, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn evaluate_all_not_yet_before_failed_returns_failed() {
+        let goal = Goal {
+            name: "and".to_string(),
+            stop: StopCondition::All {
+                conditions: vec![
+                    StopCondition::LoopCount { target: 100 },
+                    StopCondition::Timeout { secs: 60 },
                 ],
             },
         };

@@ -210,18 +210,11 @@ mod tests {
         let catalog = StrategyCatalog::builtin();
         for s in catalog.strategies() {
             let dir = repo_root.join(&s.pipeline_dir);
-            let mut ok = dir.is_dir();
-            for _ in 0..3 {
-                if ok {
-                    break;
-                }
-                std::thread::sleep(std::time::Duration::from_millis(100));
-                ok = dir.is_dir();
-            }
             assert!(
-                ok,
+                dir.is_dir(),
                 "{}: pipeline_dir が実在しない: {}",
-                s.id, s.pipeline_dir
+                s.id,
+                s.pipeline_dir
             );
         }
     }
