@@ -21,7 +21,6 @@ anaden-core = { workspace = true }
 anaden-device = { workspace = true }
 anaden-vision = { workspace = true }
 anaden-engine = { workspace = true }
-anaden-strategies = { workspace = true }
 tokio = { workspace = true }
 tokio-util = { workspace = true }
 tracing = { workspace = true }

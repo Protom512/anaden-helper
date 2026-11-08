@@ -263,7 +263,7 @@ async fn run_pipeline_live(
     cancel_token: CancellationToken,
     evidence_dir: Option<&Path>,
     artifacts: &RunArtifacts,
-) -> Result<()> {
+) -> Result<anaden_engine::LoopStopReason> {
     spawn_ctrl_c_listener(cancel_token.clone());
 
     if let Some(g) = &goal {
@@ -316,7 +316,7 @@ async fn run_with_windows(
     cancel_token: CancellationToken,
     evidence_dir: Option<&Path>,
     artifacts: &RunArtifacts,
-) -> Result<()> {
+) -> Result<anaden_engine::LoopStopReason> {
     let mut tasks = anaden_vision::load_pipeline(pipeline_dir)
         .map_err(|e| anyhow::anyhow!("パイプライン読込失敗 {pipeline_dir:?}: {e}"))?;
     if tasks.is_empty() {
@@ -499,7 +499,7 @@ async fn run_with_windows(
     _cancel_token: CancellationToken,
     _evidence_dir: Option<&Path>,
     _artifacts: &RunArtifacts,
-) -> Result<()> {
+) -> Result<anaden_engine::LoopStopReason> {
     anyhow::bail!(
         "このバイナリは Windows 向けではないため PC 版 (Win32) バックエンドを使用できません"
     )
@@ -513,7 +513,7 @@ async fn run_driver<C, I>(
     recovery: Option<anaden_engine::RecoveryHook>,
     goal: Option<Goal>,
     artifacts: &RunArtifacts,
-) -> Result<()>
+) -> Result<anaden_engine::LoopStopReason>
 where
     C: anaden_engine::Capture,
     I: anaden_engine::Input,
@@ -559,7 +559,7 @@ where
             .map_err(|e| anyhow::anyhow!("run レポート書込失敗 {}: {e}", path.display()))?;
         info!("run レポート永続化: {}", path.display());
     }
-    Ok(())
+    Ok(outcome.reason)
 }
 
 async fn run_ensure_open_or_launch(
@@ -800,7 +800,7 @@ async fn main() -> Result<()> {
                         .unwrap_or(0)
                 })
             });
-            run_pipeline_live(
+            let reason = run_pipeline_live(
                 &pipeline_dir,
                 &start_task,
                 algorithm.as_deref(),
@@ -840,7 +840,12 @@ async fn main() -> Result<()> {
                     Err(e) => warn!("UC-2 E2E メタデータ書込失敗: {e}"),
                 }
             }
-            Ok(())
+            let code = anaden_cli_contract::run_exit_code(&reason);
+            info!(
+                "run 終了コード: {code} (停止理由: {})",
+                anaden_engine::stop_reason_label(reason.clone())
+            );
+            std::process::exit(code);
         }
         Commands::EnsureOpen {
             wait_secs,
