@@ -31,10 +31,32 @@ pub struct LogEntry {
     pub level: LogLevel,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum LogUpdate {
+    Append { lines: Vec<LogEntry> },
+    Resync { entries: Vec<LogEntry> },
+}
+
+impl LogUpdate {
+    pub fn apply_to(self, snapshot: &mut Vec<LogEntry>, cap: usize) {
+        match self {
+            Self::Append { lines } => {
+                snapshot.extend(lines);
+                let excess = snapshot.len().saturating_sub(cap);
+                if excess > 0 {
+                    snapshot.drain(0..excess);
+                }
+            }
+            Self::Resync { entries } => *snapshot = entries,
+        }
+    }
+}
+
 pub struct LogBuffer {
     entries: VecDeque<LogEntry>,
     max_lines: usize,
-    revision: u64,
+    delta: Vec<LogEntry>,
+    delta_overflow: bool,
     pub status: RunStatus,
 }
 
@@ -49,7 +71,8 @@ impl LogBuffer {
         Self {
             entries: VecDeque::with_capacity(max_lines.min(1024)),
             max_lines: max_lines.max(1),
-            revision: 0,
+            delta: Vec::new(),
+            delta_overflow: false,
             status: RunStatus::new(),
         }
     }
@@ -64,21 +87,20 @@ impl LogBuffer {
             line: line.to_string(),
             level,
         };
-        self.entries.push_back(entry);
+        self.entries.push_back(entry.clone());
+        self.delta.push(entry);
         while self.entries.len() > self.max_lines {
             self.entries.pop_front();
         }
+        if self.delta.len() > self.max_lines {
+            self.delta.clear();
+            self.delta_overflow = true;
+        }
         self.status.observe(line);
-        self.revision = self.revision.wrapping_add(1);
     }
 
     pub fn push_line_with_level(&mut self, line: &str, level: LogLevel) {
         self.push_entry(line, level);
-    }
-
-    #[must_use]
-    pub fn revision(&self) -> u64 {
-        self.revision
     }
 
     #[allow(dead_code)]
@@ -97,8 +119,9 @@ impl LogBuffer {
 
     pub fn clear(&mut self) {
         self.entries.clear();
+        self.delta.clear();
+        self.delta_overflow = true;
         self.status = RunStatus::new();
-        self.revision = self.revision.wrapping_add(1);
     }
 }
 
@@ -149,12 +172,21 @@ impl SharedLogBuffer {
     }
 
     #[must_use]
-    pub fn changed_entries(&self, cached_revision: u64) -> Option<(u64, Vec<LogEntry>)> {
-        let buf = self.inner.lock().ok()?;
-        if buf.revision == cached_revision {
+    pub fn take_update(&self) -> Option<LogUpdate> {
+        let mut buf = self.inner.lock().ok()?;
+        if !buf.delta_overflow && buf.delta.is_empty() {
             return None;
         }
-        Some((buf.revision, buf.entries().cloned().collect()))
+        Some(if buf.delta_overflow {
+            let entries = buf.entries.iter().cloned().collect();
+            buf.delta.clear();
+            buf.delta_overflow = false;
+            LogUpdate::Resync { entries }
+        } else {
+            LogUpdate::Append {
+                lines: std::mem::take(&mut buf.delta),
+            }
+        })
     }
 }
 
@@ -262,50 +294,101 @@ mod tests {
     }
 
     #[test]
-    fn changed_entries_returns_none_when_buffer_unchanged() {
+    fn take_update_returns_none_when_no_new_lines() {
         let shared = SharedLogBuffer::new(100);
+        assert!(shared.take_update().is_none());
         shared.with_buf(|b| b.push_line("line-1")).unwrap();
-        let (rev, snap) = shared.changed_entries(0).unwrap();
-        assert_eq!(snap.len(), 1);
-        assert_eq!(rev, shared.with_buf(|b| b.revision()).unwrap());
-        assert!(shared.changed_entries(rev).is_none());
+        let update = shared.take_update().unwrap();
+        let mut snapshot = Vec::new();
+        update.apply_to(&mut snapshot, 100);
+        assert_eq!(snapshot.len(), 1);
+        assert!(shared.take_update().is_none());
     }
 
     #[test]
-    fn changed_entries_returns_full_entries_after_push() {
+    fn take_update_appends_only_lines_not_yet_taken() {
         let shared = SharedLogBuffer::new(100);
         shared.with_buf(|b| b.push_line("line-1")).unwrap();
-        let (rev1, _) = shared.changed_entries(0).unwrap();
+        let Some(LogUpdate::Append { lines }) = shared.take_update() else {
+            panic!("expected append update");
+        };
+        assert_eq!(
+            lines.iter().map(|e| e.line.as_str()).collect::<Vec<_>>(),
+            vec!["line-1"]
+        );
         shared.with_buf(|b| b.push_line("line-2")).unwrap();
-        let (rev2, snap) = shared.changed_entries(rev1).unwrap();
-        assert_ne!(rev1, rev2);
-        let lines: Vec<&str> = snap.iter().map(|e| e.line.as_str()).collect();
-        assert_eq!(lines, vec!["line-1", "line-2"]);
+        let Some(LogUpdate::Append { lines }) = shared.take_update() else {
+            panic!("expected append update");
+        };
+        assert_eq!(
+            lines.iter().map(|e| e.line.as_str()).collect::<Vec<_>>(),
+            vec!["line-2"]
+        );
     }
 
     #[test]
-    fn changed_entries_detects_clear_as_change_to_empty() {
+    fn take_update_resyncs_after_clear() {
         let shared = SharedLogBuffer::new(100);
         shared.with_buf(|b| b.push_line("line-1")).unwrap();
-        let (rev1, _) = shared.changed_entries(0).unwrap();
+        assert!(shared.take_update().is_some());
         shared.with_buf(LogBuffer::clear);
-        let (rev2, snap) = shared.changed_entries(rev1).unwrap();
-        assert_ne!(rev1, rev2);
-        assert!(snap.is_empty());
-        assert!(shared.changed_entries(rev2).is_none());
+        let Some(LogUpdate::Resync { entries }) = shared.take_update() else {
+            panic!("expected resync update");
+        };
+        assert!(entries.is_empty());
+        assert!(shared.take_update().is_none());
     }
 
     #[test]
-    fn changed_entries_reflects_eviction_at_capacity() {
+    fn take_update_resyncs_when_pending_delta_exceeds_capacity() {
+        let shared = SharedLogBuffer::new(3);
+        for i in 0..5 {
+            shared.with_buf(|b| b.push_line(&format!("l{i}"))).unwrap();
+        }
+        let Some(LogUpdate::Resync { entries }) = shared.take_update() else {
+            panic!("expected resync update after burst beyond capacity");
+        };
+        let lines: Vec<&str> = entries.iter().map(|e| e.line.as_str()).collect();
+        assert_eq!(lines, vec!["l2", "l3", "l4"]);
+    }
+
+    #[test]
+    fn apply_to_appends_and_trims_snapshot_to_cap() {
+        let mut snapshot: Vec<LogEntry> = Vec::new();
+        let lines: Vec<LogEntry> = (0..3)
+            .map(|i| LogEntry {
+                line: format!("l{i}"),
+                level: LogLevel::Info,
+            })
+            .collect();
+        LogUpdate::Append { lines }.apply_to(&mut snapshot, 2);
+        let names: Vec<&str> = snapshot.iter().map(|e| e.line.as_str()).collect();
+        assert_eq!(names, vec!["l1", "l2"]);
+        LogUpdate::Resync {
+            entries: vec![LogEntry {
+                line: "fresh".into(),
+                level: LogLevel::Info,
+            }],
+        }
+        .apply_to(&mut snapshot, 2);
+        assert_eq!(snapshot.len(), 1);
+        assert_eq!(snapshot[0].line, "fresh");
+    }
+
+    #[test]
+    fn eviction_at_capacity_mirrors_into_consumer_snapshot() {
         let shared = SharedLogBuffer::new(3);
         for i in 0..3 {
             shared.with_buf(|b| b.push_line(&format!("l{i}"))).unwrap();
         }
-        let (rev1, snap1) = shared.changed_entries(0).unwrap();
-        assert_eq!(snap1.len(), 3);
+        let mut snapshot = Vec::new();
+        let update = shared.take_update().unwrap();
+        update.apply_to(&mut snapshot, 3);
+        assert_eq!(snapshot.len(), 3);
         shared.with_buf(|b| b.push_line("l3")).unwrap();
-        let (_rev2, snap2) = shared.changed_entries(rev1).unwrap();
-        let lines: Vec<&str> = snap2.iter().map(|e| e.line.as_str()).collect();
+        let update = shared.take_update().unwrap();
+        update.apply_to(&mut snapshot, 3);
+        let lines: Vec<&str> = snapshot.iter().map(|e| e.line.as_str()).collect();
         assert_eq!(lines, vec!["l1", "l2", "l3"]);
     }
 
