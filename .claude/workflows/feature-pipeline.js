@@ -252,7 +252,7 @@ function classifyDiffKind(changedFiles) {
   }
   return sawDocs ? 'mixed' : 'code';
 }
-const DOCS_ONLY_SKIP_KEYS = ['reliability', 'performance', 'extensibility'];
+const DOCS_ONLY_SKIP_KEYS = ['reliability', 'performance', 'extensibility', 'security'];
 function GATE_DIFF_KIND_LANES() {
   const lanes = GATE_DIMENSIONS.filter(
     (d) => !(precheckDiffKind === 'docs-only' && DOCS_ONLY_SKIP_KEYS.includes(d.key))
@@ -1724,7 +1724,7 @@ const buildDiffKindRationale = () => ({
   skippedLanes: diffKind === 'docs-only' ? DOCS_ONLY_SKIP_KEYS : [],
   basisFiles: changedFilesArr,
   treeHash: gateDiffInput.treeHash,
-  classifier: 'gate-diff-kind.js classifyDiffKind (inline copy, drift-guarded by tests/gate-diff-kind-wiring.test.mjs)',
+  classifier: 'gate-diff-kind.js classifyDiffKind + team-gate-protocol.js resolveGateLanes (behavioral drift guards: tests/gate-diff-kind-wiring.test.mjs)',
 });
 
 function extractChangedPaths(diff) {
