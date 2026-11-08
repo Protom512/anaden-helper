@@ -481,8 +481,7 @@ export function codeFingerprint(src, lang) {
   return out.replace(/\s+/g, '');
 }
 
-export function stripComments(src, lang) {
-  const comments = findComments(src, lang);
+function stripFoundComments(src, comments) {
   if (comments.length === 0) return src;
   const removed = new Uint8Array(src.length);
   for (const c of comments) {
@@ -509,21 +508,32 @@ export function stripComments(src, lang) {
   return parts.join('');
 }
 
+export function stripComments(src, lang) {
+  return stripFoundComments(src, findComments(src, lang));
+}
+
 const FIXABLE_LANGS = new Set(['toml', 'yaml', 'js', 'ps1']);
 
 export function applyFixes(root = ROOT) {
   let commentsStripped = 0;
   let filesChanged = 0;
-  for (const f of scopeFiles(root)) {
+  const files = scopeFiles(root);
+  const sources = new Map();
+  for (const f of files) {
     if (!FIXABLE_LANGS.has(f.lang)) continue;
     const src = fs.readFileSync(f.path, 'utf8');
-    const stripped = stripComments(src, f.lang);
-    if (stripped === src) continue;
+    const comments = findComments(src, f.lang);
+    if (comments.length === 0) {
+      sources.set(f.path, src);
+      continue;
+    }
+    const stripped = stripFoundComments(src, comments);
     fs.writeFileSync(f.path, stripped);
     filesChanged += 1;
-    commentsStripped += findComments(src, f.lang).length;
+    commentsStripped += comments.length;
+    sources.set(f.path, stripped);
   }
-  return { comments: commentsStripped, files: filesChanged };
+  return { files, sources, comments: commentsStripped, filesChanged };
 }
 
 function walkTree(dir, extLang, skipDir, out) {
@@ -553,14 +563,20 @@ export function scopeFiles(root = ROOT) {
   return out;
 }
 
-export function check(root = ROOT) {
+export function check(root = ROOT, precomputed = {}) {
+  const files = precomputed.files ?? scopeFiles(root);
+  const sources = precomputed.sources ?? new Map();
   const findings = [];
   let filesChecked = 0;
-  for (const f of scopeFiles(root)) {
+  for (const f of files) {
     filesChecked += 1;
-    const src = fs.readFileSync(f.path, 'utf8');
+    const src = sources.get(f.path) ?? fs.readFileSync(f.path, 'utf8');
+    let line = 1;
+    let cursor = 0;
     for (const c of findComments(src, f.lang)) {
-      const line = src.slice(0, c.start).split('\n').length;
+      for (; cursor < c.start; cursor += 1) {
+        if (src[cursor] === '\n') line += 1;
+      }
       findings.push({ file: f.path, line, start: c.start, end: c.end });
     }
   }
@@ -568,11 +584,14 @@ export function check(root = ROOT) {
 }
 
 export function main(argv = process.argv.slice(2)) {
+  let result;
   if (argv.includes('--fix')) {
     const fix = applyFixes();
-    console.log(`comment-gate: --fix stripped ${fix.comments} comment(s) from ${fix.files} file(s) (toml/yaml/js/ps1)`);
+    console.log(`comment-gate: --fix stripped ${fix.comments} comment(s) from ${fix.filesChanged} file(s) (toml/yaml/js/ps1)`);
+    result = check(ROOT, fix);
+  } else {
+    result = check();
   }
-  const result = check();
   if (!result.ok) {
     console.error(`comment-gate: ${result.findings.length} comment(s) in ${result.findings.length > 0 ? result.findings[0].file.split(path.sep).slice(0, 2).join(path.sep) : 'scope'} code (crates/ + scripts/ + .claude/workflows + docs/explainers + repo toml/yml):`);
     for (const f of result.findings.slice(0, 200)) {

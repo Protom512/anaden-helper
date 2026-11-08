@@ -1,5 +1,5 @@
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 
 use serde::{Deserialize, Serialize};
 
@@ -31,6 +31,13 @@ pub fn classify_outcome(
         return RunOutcome::BudgetExhausted;
     }
     RunOutcome::Success
+}
+
+#[must_use]
+pub fn load_run_report(path: &Path) -> Option<anaden_engine::ProgressReport> {
+    std::fs::File::open(path)
+        .ok()
+        .and_then(|file| serde_json::from_reader(file).ok())
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
