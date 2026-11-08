@@ -1,4 +1,10 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "scripts/review_gate_eval/tests/reviewer_template_tests.rs",
+      "reason": "reviewer agent 定義 (.claude/agents/review/*.md) の harness からの削除に伴うテストファイル削除。テンプレート構造の検証対象そのものが消滅したため、テストの弱体化ではなく対象消滅。",
+      "ref": "harness-lean program run 32 / docs/agent-verification-plan.md の全対象削除"
+    }
+  ]
 }
