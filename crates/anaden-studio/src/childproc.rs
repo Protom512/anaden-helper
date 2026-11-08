@@ -55,7 +55,7 @@ impl ChildProcess {
         }
     }
 
-    pub fn is_running(&mut self) -> bool {
+    pub fn is_running(&self) -> bool {
         match &self.child {
             None => false,
             Some(child) => child.is_running(),

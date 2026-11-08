@@ -3,7 +3,7 @@ target/
 templates/captures/
 *.log
 myeasylog.log
-references
+/references/
 
 # 作業スクラッチ・実行時成果物(プロジェクト本体ではない)
 .agent/
@@ -15,7 +15,8 @@ templates/fidelity/
 templates/anaden_screen*.png
 templates/test_capture.png
 capture_probe.png
-.claude/
+.claude/*
+!.claude/skills/
 .claude.old/
 
 # OMC 状態保持ディレクトリ(削除せず ignore のみ)
@@ -27,7 +28,8 @@ probe_live*.png
 capture_probe_live.png
 version_label_orig.png
 snapshots/
-.agents/
+.agents/*
+!.agents/skills/
 skills-lock.json
 
 # pipeline run artifacts / audit outputs (machine-generated evidence)

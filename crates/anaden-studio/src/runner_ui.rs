@@ -28,25 +28,41 @@ impl PipelineRunnerApp {
             }
             ui.checkbox(&mut self.auto_scroll, "自動スクロール");
         });
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .stick_to_bottom(self.auto_scroll)
-            .show(ui, |ui| {
-                if self.log_snapshot.is_empty() {
-                    ui.weak("（ログなし）");
-                }
-                for entry in &self.log_snapshot {
-                    ui.monospace(
-                        egui::RichText::new(&entry.line)
-                            .monospace()
-                            .color(level_color(entry.level)),
-                    );
-                }
-            });
+        if self.log_snapshot.is_empty() {
+            ui.weak("（ログなし）");
+        } else {
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .stick_to_bottom(self.auto_scroll)
+                .show_rows(
+                    ui,
+                    ui.text_style_height(&egui::TextStyle::Monospace),
+                    self.log_snapshot.len(),
+                    |ui, rows| {
+                        for i in rows {
+                            let entry = &self.log_snapshot[i];
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&entry.line)
+                                        .monospace()
+                                        .color(level_color(entry.level)),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                            );
+                        }
+                    },
+                );
+        }
     }
 }
 
 impl eframe::App for PipelineRunnerApp {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.has_active_process() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show_inside(ui, |ui| {
             self.render_body(ui, RunnerPane::Run);
@@ -186,6 +202,7 @@ impl PipelineRunnerApp {
 #[allow(clippy::expect_used)]
 mod tests {
     use super::*;
+    use crate::log_view::LogEntry;
 
     #[test]
     fn test_level_color_varies_by_level() {
@@ -198,5 +215,32 @@ mod tests {
     fn test_routine_status_line_reflects_running_state() {
         assert!(routine_status_line(true).contains("実行中"));
         assert_eq!(routine_status_line(false), "状態: 停止");
+    }
+
+    #[test]
+    fn log_view_with_overlong_line_renders_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = PipelineRunnerApp::new("anaden-test-stub");
+        app.log_snapshot = vec![
+            LogEntry {
+                line: format!("ERROR wide-line {}", "x".repeat(500)),
+                level: LogLevel::Error,
+            },
+            LogEntry {
+                line: "短い行".into(),
+                level: LogLevel::Info,
+            },
+        ];
+        let mut ui = egui::Ui::new(
+            ctx.clone(),
+            egui::Id::new("runner-log-test-area"),
+            egui::UiBuilder::new().max_rect(egui::Rect::from_min_size(
+                egui::Pos2::ZERO,
+                egui::vec2(300.0, 200.0),
+            )),
+        );
+        ctx.begin_pass(egui::RawInput::default());
+        app.log_view_ui(&mut ui);
+        let _ = ctx.end_pass();
     }
 }
