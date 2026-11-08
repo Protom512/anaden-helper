@@ -3,7 +3,7 @@ target/
 templates/captures/
 *.log
 myeasylog.log
-references
+/references/
 
 # 作業スクラッチ・実行時成果物(プロジェクト本体ではない)
 .agent/
