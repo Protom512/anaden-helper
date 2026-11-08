@@ -1,0 +1,19 @@
+id: no-absence-skip-test-result
+language: Rust
+severity: error
+rule:
+  kind: return_expression
+  regex: '^return Ok'
+  inside:
+    kind: function_item
+    follows:
+      kind: attribute_item
+      regex: '#\[(tokio::)?test\]'
+    stopBy: end
+message: 'absence-skip early `return Ok(())` を #[test]/#[tokio::test] に新規導入しないこと。不在時は fail-loud (panic) させること（no-absence-skip-test の Result 系 escape variant）。'
+note: |
+  `return Ok(())` 版の偽 green（Result を返すテストの guard skip）。
+  ループ完了など正当な `return Ok(())` がある場合は、no-absence-skip-test.yml の
+  not 節と同型の例外節を本ルールに追加し、根拠をコメントで明記すること。
+files:
+  - "crates/**/*.rs"

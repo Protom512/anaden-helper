@@ -8,7 +8,7 @@ rule:
     kind: function_item
     follows:
       kind: attribute_item
-      regex: '#\[test\]'
+      regex: '#\[(tokio::)?test\]'
     stopBy: end
     not:
       has:
@@ -23,5 +23,5 @@ note: |
     2. どうしても skip が必要な PNG 非依存 contract テストの場合は、当ルールの not 節
        (例外リスト) に関数名を追加し、その根拠をコメントで明記すること。
 files:
-  - "crates/anaden-vision/**/*.rs"
+  - "crates/**/*.rs"
   - "scripts/**/*.rs"

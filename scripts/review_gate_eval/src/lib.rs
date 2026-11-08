@@ -319,7 +319,11 @@ pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
     let detected_golden: u64 = recall_per_pr.iter().map(|r| r.detected_golden).sum();
 
     let total_findings = input.findings.len() as u64;
-    let false_positives = total_findings - detected_ids.len() as u64;
+    let false_positives = input
+        .findings
+        .iter()
+        .filter(|f| f.matched_golden.is_none())
+        .count() as u64;
 
     let mut cv = ConsensusValidity {
         tp: 0,

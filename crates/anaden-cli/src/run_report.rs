@@ -106,6 +106,15 @@ pub(crate) fn run_artifact_timestamp(unix_secs: u64) -> String {
     format!("{y:04}{m:02}{d:02}-{hh:02}{mm:02}{ss:02}")
 }
 
+#[must_use]
+pub(crate) fn run_artifact_timestamp_millis(unix_ms: u64) -> String {
+    format!(
+        "{}{:03}",
+        run_artifact_timestamp(unix_ms / 1000),
+        unix_ms % 1000
+    )
+}
+
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
 #[allow(clippy::panic)]
@@ -256,5 +265,19 @@ mod tests {
         assert_eq!(run_artifact_timestamp(0), "19700101-000000");
         assert_eq!(run_artifact_timestamp(1_788_220_800), "20260901-000000");
         assert!(!run_artifact_timestamp(3_600).contains(':'));
+    }
+
+    #[test]
+    fn run_artifact_timestamp_millis_extends_secs_fn_and_is_unique_per_ms() {
+        assert_eq!(run_artifact_timestamp_millis(0), "19700101-000000000");
+        assert_eq!(
+            run_artifact_timestamp_millis(1_788_220_800_123),
+            "20260901-000000123"
+        );
+        assert!(!run_artifact_timestamp_millis(3_600_000).contains(':'));
+        assert_ne!(
+            run_artifact_timestamp_millis(1_788_220_800_999),
+            run_artifact_timestamp_millis(1_788_220_800_998)
+        );
     }
 }

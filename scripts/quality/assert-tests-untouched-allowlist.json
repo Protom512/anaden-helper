@@ -2,9 +2,74 @@
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
   "entries": [
     {
+      "file": "crates/anaden-studio/src/log_buffer.rs",
+      "reason": "changed_entries → take_update (LogUpdate Append/Resync) への API 置換に伴うテスト書き換え。削除テストの振る舞いは差分プロトコルのテストとして再カバー",
+      "ref": "#302"
+    },
+    {
+      "file": "crates/anaden-studio/src/shell.rs",
+      "reason": "idle shell の has_active_process 追加テスト 1 本。既存テストの削除・弱化なし",
+      "ref": "#300"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_ui_tasks.rs",
+      "reason": "等高行契約 (show_rows + TextWrapMode::Extend) の過長行描画テスト 1 本追加。既存テストの削除・弱化なし",
+      "ref": "#302"
+    },
+    {
+      "file": "crates/anaden-studio/src/runner_ui.rs",
+      "reason": "過長行ログペイン描画テスト 1 本追加。既存テストの削除・弱化なし",
+      "ref": "#302"
+    },
+    {
+      "file": "crates/anaden-vision/src/collector.rs",
+      "reason": "dead module removal — collector.rs (group_captures/extract_stable_tiles/verify_templates/compute_similarity/collect_templates 等の全シンボル) は workspace 内 caller ゼロで lib.rs 再-export のみ。モジュールごと削除し、テスト意味は変更していない",
+      "ref": "#327"
+    },
+    {
+      "file": "crates/anaden-studio/src/log_process.rs",
+      "reason": "dead fn removal — spawn_stdout_reader (#[allow(dead_code)]・本番 caller なし) とそのテスト stdout_reader_streams_lines_and_exit を削除。挙動は output_readers_stream_both_stdout_and_stderr (stdout 行 + stderr 行 + Exit イベント) が既にカバー",
+      "ref": "#327"
+    },
+    {
+      "file": "crates/anaden-core/src/goal.rs",
+      "reason": "All 合成の failure-first 修正 (#318) に伴うテストモジュールへの鏡像テスト追記のみ。既存テストは無変更。",
+      "ref": "#318"
+    },
+    {
+      "file": "crates/anaden-vision/src/pipeline.rs",
+      "reason": "regression test 追加: cached 側 mtime 不明時に存在するファイルを再読込する修正 (#320) の検証テスト。既存テストの弱体化なし",
+      "ref": "#320"
+    },
+    {
+      "file": "crates/anaden-studio/src/tasks_queue.rs",
+      "reason": "regression test 追加: queue_entries が pipeline_run に --report-file を付与し launch_subcommand に付与しないことの検証 (#295)。既存テストの弱体化なし",
+      "ref": "#295"
+    },
+    {
+      "file": "scripts/review_gate_eval/tests/metrics_tests.rs",
+      "reason": "FP 定義修正 (#323) に伴う期待値更新。複数 reviewer の同一 golden 一致を幽霊 FP として計上するバグ固定テストを正しい意味へ修正",
+      "ref": "#323"
+    },
+    {
       "file": "scripts/review_gate_eval/tests/reviewer_template_tests.rs",
-      "reason": "ファイルごと削除。3 テストが未追跡の .claude/agents/review/reviewer-*.md (ハーネスから削除済み) を読むため fresh clone では常に失敗する。workspace 組み込みで nextest が初めてこの crate を実行し発覚した",
-      "ref": "#348。同一削除は PR #366 (先にマージされた側が残る)"
+      "reason": "reviewer agent 定義 (.claude/agents/review/*.md) の harness からの削除に伴うテストファイル削除。テンプレート構造の検証対象そのものが消滅したため、テストの弱体化ではなく対象消滅。",
+      "ref": "harness-lean program run 32 / docs/agent-verification-plan.md の全対象削除"
+    },
+    {
+      "file": "crates/anaden-cli/src/run_report.rs",
+      "reason": "新規テスト追加のみ（既存テストは無変更）— ミリ秒精度タイムスタンプ関数の契約テスト",
+      "ref": "#351"
+    },
+    {
+      "file": "crates/anaden-studio/src/history.rs",
+      "reason": "新規テスト追加のみ（既存テストは無変更）— レポート刈り込みの契約テスト",
+      "ref": "#350"
+    },
+    {
+      "file": "crates/anaden-studio/src/runner_exec.rs",
+      "reason": "履歴を触る 4 テストに isolate_history を追加（実 history.jsonl への書き込みを止める強化で、既存アサーションは無変更）",
+      "ref": "#350"
     }
   ]
 }

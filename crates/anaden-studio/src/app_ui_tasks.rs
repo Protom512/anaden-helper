@@ -181,21 +181,31 @@ impl StudioApp {
             }
         });
         let stick = self.task_scroll.should_stick_to_bottom();
-        egui::ScrollArea::vertical()
-            .auto_shrink([false, false])
-            .stick_to_bottom(stick)
-            .show(ui, |ui| {
-                if self.task_log_snapshot.is_empty() {
-                    ui.weak("（ログなし）");
-                }
-                for entry in &self.task_log_snapshot {
-                    ui.monospace(
-                        egui::RichText::new(&entry.line)
-                            .monospace()
-                            .color(crate::runner::level_color(entry.level)),
-                    );
-                }
-            });
+        if self.task_log_snapshot.is_empty() {
+            ui.weak("（ログなし）");
+        } else {
+            egui::ScrollArea::both()
+                .auto_shrink([false, false])
+                .stick_to_bottom(stick)
+                .show_rows(
+                    ui,
+                    ui.text_style_height(&egui::TextStyle::Monospace),
+                    self.task_log_snapshot.len(),
+                    |ui, rows| {
+                        for i in rows {
+                            let entry = &self.task_log_snapshot[i];
+                            ui.add(
+                                egui::Label::new(
+                                    egui::RichText::new(&entry.line)
+                                        .monospace()
+                                        .color(crate::runner::level_color(entry.level)),
+                                )
+                                .wrap_mode(egui::TextWrapMode::Extend),
+                            );
+                        }
+                    },
+                );
+        }
         if stick {
             self.task_scroll.on_scrolled_to_bottom();
         }
@@ -259,6 +269,19 @@ mod tests {
         ctx.begin_pass(egui::RawInput::default());
         app.render_task_list(&mut child_ui(&ctx));
         let _ = ctx.end_pass();
+    }
+
+    #[test]
+    fn embed_task_log_with_overlong_line_renders_without_panic() {
+        let ctx = egui::Context::default();
+        let mut app = StudioApp::default();
+        let wide = format!("ERROR wide-line {}", "x".repeat(500));
+        app.push_task_log(&wide);
+        app.push_task_log("短い行");
+        ctx.begin_pass(egui::RawInput::default());
+        app.render_task_list(&mut child_ui(&ctx));
+        let _ = ctx.end_pass();
+        assert_eq!(app.task_log_lines().len(), 2);
     }
 
     #[test]

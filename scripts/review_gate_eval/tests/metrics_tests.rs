@@ -142,11 +142,11 @@ mod tests {
     }
 
     #[test]
-    fn fp_rate_overall_with_n() {
+    fn fp_rate_counts_unmatched_findings() {
         let m = aggregate(&fixture()).unwrap();
         assert_eq!(m.fp_rate.total_findings, 8);
-        assert_eq!(m.fp_rate.false_positives, 5);
-        assert!((m.fp_rate.rate() - 5.0 / 8.0).abs() < 1e-9);
+        assert_eq!(m.fp_rate.false_positives, 4);
+        assert!((m.fp_rate.rate() - 4.0 / 8.0).abs() < 1e-9);
         assert!(m.fp_rate.n_included_in_report());
     }
 
