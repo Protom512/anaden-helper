@@ -1,5 +1,8 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import fs from 'node:fs';
+import os from 'node:os';
+import path from 'node:path';
 import { main } from './assert_tests_untouched.mjs';
 
 const OLD_SRC = [
@@ -18,6 +21,16 @@ const NEW_SRC_PROD_ONLY = OLD_SRC.replace('pub fn prod_a() {}', 'pub fn prod_a()
 const NEW_SRC_DELETED_PROD = ['pub fn prod_b() {}', '', '#[cfg(test)]', 'mod tests {', '    #[test]', '    fn t1() { assert!(true); }', '}'].join('\n');
 
 const call = (opts) => main([], { allowlist: [], ...opts });
+
+test('--root flag redirects the target repo (git fails outside a repo, exit 2)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tu-root-'));
+  try {
+    const code = main(['--root', tmp], { allowlist: [] });
+    assert.equal(code, 2);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 
 test('added line inside a new-side test region is a violation (exit 1)', () => {
