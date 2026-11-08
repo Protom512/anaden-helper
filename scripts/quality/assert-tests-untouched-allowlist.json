@@ -1,4 +1,15 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "crates/anaden-studio/src/history.rs",
+      "reason": "新規テスト追加のみ（既存テストは無変更）— レポート刈り込みの契約テスト",
+      "ref": "#350"
+    },
+    {
+      "file": "crates/anaden-studio/src/runner_exec.rs",
+      "reason": "履歴を触る 4 テストに isolate_history を追加（実 history.jsonl への書き込みを止める強化で、既存アサーションは無変更）",
+      "ref": "#350"
+    }
+  ]
 }
