@@ -113,10 +113,10 @@ jobs:
     name: metrics-gates (complexity / duplication) - advisory for now
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    # Advisory until the binary provisioning below is confirmed working:
-    # complexity_gate.mjs shells out to `cccc-rs`, duplication_gate.mjs to
-    # `similarity-rs`. Once both installs are verified, remove
-    # continue-on-error and add this job to the required checks.
+    # Advisory only until promotion to required checks is decided.
+    # Provisioning is confirmed: complexity_gate.mjs shells out to `cccc-rs`
+    # (published on crates.io as the cccc-rs-cli crate), duplication_gate.mjs
+    # to `similarity-rs`. Both gates pass on master with the real tools.
     continue-on-error: true
     steps:
       - uses: actions/checkout@v4
@@ -125,15 +125,11 @@ jobs:
         with:
           node-version: 20
 
-      - name: Install similarity-rs
-        # The `similarity` crate publishes no binary today (first runner run
-        # failed with "nothing to install"). Step-level best effort until
-        # provisioning is confirmed; the gate steps below report honestly.
-        continue-on-error: true
-        run: cargo install --locked similarity
+      - name: Install metrics tools
+        run: |
+          cargo install --locked cccc-rs-cli
+          cargo install --locked similarity-rs
 
-      # TODO: confirm the distribution source of the `cccc-rs` binary
-      # (crates.io package name / release artifact) and pin it here.
       - name: Complexity gate
         run: node scripts/quality/complexity_gate.mjs
 
