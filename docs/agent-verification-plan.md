@@ -1,5 +1,11 @@
 # エージェント実動作検証計画（Issue #69 / Task 1）
 
+> **状態 (2026-11-08): 本計画の検証対象エージェントは全て削除済み — 本ページは歴史記録。**
+> 行 1-5 (org family) と行 10 (release-manager) は 2026-11-08 harness-lean プログラムで削除 (usage telemetry 0 / wiring 0 を実測の上で削除)。
+> 行 6-9 (qc-manager + reviewer×3) は同プログラムで削除。テンプレート検証テスト reviewer_template_tests.rs も検証対象消滅により削除 (tests-untouched allowlist 登録済み)。
+> 行 11 (executor) は OMC plugin (oh-my-claudecode) 未インストールのため不在 (installed_plugins.json 実測)。
+> 以下の本文は 2026-08-24 実施分 VERIFICATION 1-4 の歴史記録をそのまま保持する。
+
 検証対象エージェント一覧と判定基準を固定する。本ページの一覧は以降のタスク（UC-1/UC-2/UC-3）で追加・変更しない。
 
 ## 1. 検証対象エージェント一覧（固定）
