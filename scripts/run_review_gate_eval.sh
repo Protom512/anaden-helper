@@ -76,7 +76,6 @@ setup_pr() {
 
   local wt
   wt="$(mktemp -d "${TMPDIR:-/tmp}/rg-eval-pr-${pr}.XXXXXX")"
-  rmdir "$wt"
 
   if ! git worktree add --quiet --detach "$wt" "$merge_oid"; then
     echo "ERROR: failed to create worktree at $wt" >&2

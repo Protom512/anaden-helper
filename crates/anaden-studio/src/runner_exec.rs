@@ -117,11 +117,17 @@ pub fn resolve_pipeline_arg(args: &[String], root: &Path) -> Vec<String> {
 }
 
 #[must_use]
-fn with_report_file_arg(args: &[String], report_path: &Path) -> Vec<String> {
+pub(crate) fn with_report_file_arg(args: &[String], report_path: &Path) -> Vec<String> {
     let mut out = args.to_vec();
     out.push("--report-file".to_string());
     out.push(report_path.to_string_lossy().into_owned());
     out
+}
+
+#[must_use]
+pub(crate) fn report_file_from_args(args: &[String]) -> Option<PathBuf> {
+    let pos = args.iter().position(|t| t == "--report-file")?;
+    args.get(pos + 1).map(|p| PathBuf::from(p.as_str()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -242,7 +248,6 @@ pub struct PipelineRunnerApp {
     log_rx: Receiver<LogEvent>,
     log: SharedLogBuffer,
     pub(crate) log_snapshot: Vec<LogEntry>,
-    log_revision: u64,
     pub(crate) auto_scroll: bool,
     pub(crate) strategy_panel: crate::strategy_ui::StrategyPanel,
     pub(crate) routine_panel: crate::routine_ui::RoutinePanel,
@@ -292,7 +297,6 @@ impl PipelineRunnerApp {
             log_rx,
             log: SharedLogBuffer::new(DEFAULT_MAX_LINES),
             log_snapshot: Vec::new(),
-            log_revision: 0,
             auto_scroll: true,
             strategy_panel: crate::strategy_ui::StrategyPanel::default(),
             routine_panel: crate::routine_ui::RoutinePanel::default(),
@@ -320,6 +324,10 @@ impl PipelineRunnerApp {
         } else {
             RunnerStatus::Stopped
         }
+    }
+
+    pub fn has_active_process(&self) -> bool {
+        self.child.is_running()
     }
 
     pub fn strategy_summary(&self) -> &str {
@@ -550,9 +558,8 @@ impl PipelineRunnerApp {
     }
 
     fn refresh_snapshot(&mut self) {
-        if let Some((rev, entries)) = self.log.changed_entries(self.log_revision) {
-            self.log_revision = rev;
-            self.log_snapshot = entries;
+        if let Some(update) = self.log.take_update() {
+            update.apply_to(&mut self.log_snapshot, DEFAULT_MAX_LINES);
         }
     }
 
