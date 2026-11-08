@@ -26,23 +26,20 @@ fn legacy_refresh_snapshot(log: &SharedLogBuffer) -> Vec<LogEntry> {
         .unwrap_or_default()
 }
 
-struct GatedSnapshot {
-    revision: u64,
+struct DeltaSnapshot {
     entries: Vec<LogEntry>,
 }
 
-impl GatedSnapshot {
+impl DeltaSnapshot {
     fn new() -> Self {
         Self {
-            revision: 0,
             entries: Vec::new(),
         }
     }
 
     fn refresh(&mut self, log: &SharedLogBuffer) {
-        if let Some((rev, entries)) = log.changed_entries(self.revision) {
-            self.revision = rev;
-            self.entries = entries;
+        if let Some(update) = log.take_update() {
+            update.apply_to(&mut self.entries, DEFAULT_MAX_LINES);
         }
     }
 }
@@ -78,12 +75,12 @@ fn bench_frame_burst10_before(c: &mut Criterion) {
     });
 }
 
-fn bench_frame_idle_after_gated(c: &mut Criterion) {
+fn bench_frame_idle_after_delta(c: &mut Criterion) {
     let log = filled_log(DEFAULT_MAX_LINES);
     let (_tx, rx) = sync_channel::<LogEvent>(1024);
-    let mut snap = GatedSnapshot::new();
+    let mut snap = DeltaSnapshot::new();
     snap.refresh(&log);
-    c.bench_function("frame_idle/after_gated", |b| {
+    c.bench_function("frame_idle/after_delta", |b| {
         b.iter(|| {
             let _ = drain_channel_into(black_box(&log), black_box(&rx));
             snap.refresh(black_box(&log));
@@ -92,11 +89,11 @@ fn bench_frame_idle_after_gated(c: &mut Criterion) {
     });
 }
 
-fn bench_frame_burst10_after_gated(c: &mut Criterion) {
+fn bench_frame_burst10_after_delta(c: &mut Criterion) {
     let log = filled_log(DEFAULT_MAX_LINES);
-    let mut snap = GatedSnapshot::new();
+    let mut snap = DeltaSnapshot::new();
     snap.refresh(&log);
-    c.bench_function("frame_burst10/after_gated", |b| {
+    c.bench_function("frame_burst10/after_delta", |b| {
         b.iter_batched(
             || {
                 let (tx, rx) = sync_channel::<LogEvent>(1024);
@@ -118,8 +115,8 @@ fn bench_frame_burst10_after_gated(c: &mut Criterion) {
 criterion_group!(
     benches,
     bench_frame_idle_before,
-    bench_frame_idle_after_gated,
+    bench_frame_idle_after_delta,
     bench_frame_burst10_before,
-    bench_frame_burst10_after_gated,
+    bench_frame_burst10_after_delta,
 );
 criterion_main!(benches);
