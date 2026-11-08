@@ -23,6 +23,16 @@ const NEW_SRC_DELETED_PROD = ['pub fn prod_b() {}', '', '#[cfg(test)]', 'mod tes
 
 const call = (opts) => main([], { allowlist: [], ...opts });
 
+test('--root flag redirects the target repo (git fails outside a repo, exit 2)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tu-root-'));
+  try {
+    const code = main(['--root', tmp], { allowlist: [] });
+    assert.equal(code, 2);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
 
 test('added line inside a new-side test region is a violation (exit 1)', () => {
   const diff = [

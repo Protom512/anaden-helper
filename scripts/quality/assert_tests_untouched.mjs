@@ -282,8 +282,12 @@ function collectSourcesFromGit(root, base, files) {
 }
 
 export function main(argv = [], opts = {}) {
-  const root = opts.root ?? path.resolve(scriptDir, '..', '..');
-  const base = opts.base ?? argv[0] ?? 'HEAD';
+  const args = [...argv];
+  const rootFlagIndex = args.indexOf('--root');
+  const flaggedRoot = rootFlagIndex !== -1 ? args[rootFlagIndex + 1] : undefined;
+  if (rootFlagIndex !== -1) args.splice(rootFlagIndex, 2);
+  const root = opts.root ?? flaggedRoot ?? path.resolve(scriptDir, '..', '..');
+  const base = opts.base ?? args[0] ?? 'HEAD';
 
   let allowlistEntries = opts.allowlist;
   if (allowlistEntries === undefined) {
