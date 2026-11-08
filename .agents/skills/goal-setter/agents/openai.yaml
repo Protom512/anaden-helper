@@ -1,0 +1,4 @@
+interface:
+  display_name: "Goal Setter"
+  short_description: "Shape rough work into Codex-ready goals"
+  default_prompt: "Use $goal-setter to clarify only what matters and draft a compact /goal with the result, evidence, boundaries, and stop rules. Delegate only work that can improve Done, reuse an agent for related follow-up, and create separate tasks only when I explicitly request them."

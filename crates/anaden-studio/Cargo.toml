@@ -19,7 +19,6 @@ anaden-device.workspace = true
 anaden-engine.workspace = true
 anaden-strategies.workspace = true
 anaden-vision.workspace = true
-anyhow.workspace = true
 eframe = "0.34.3"
 egui = "0.34"
 image.workspace = true
@@ -31,5 +30,6 @@ toml.workspace = true
 
 [dev-dependencies]
 ab_glyph = "0.2"
+anyhow.workspace = true
 criterion = "0.8.2"
 tempfile.workspace = true
