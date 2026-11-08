@@ -50,6 +50,11 @@
       "file": "scripts/review_gate_eval/tests/metrics_tests.rs",
       "reason": "FP 定義修正 (#323) に伴う期待値更新。複数 reviewer の同一 golden 一致を幽霊 FP として計上するバグ固定テストを正しい意味へ修正",
       "ref": "#323"
+    },
+    {
+      "file": "scripts/review_gate_eval/tests/reviewer_template_tests.rs",
+      "reason": "reviewer agent 定義 (.claude/agents/review/*.md) の harness からの削除に伴うテストファイル削除。テンプレート構造の検証対象そのものが消滅したため、テストの弱体化ではなく対象消滅。",
+      "ref": "harness-lean program run 32 / docs/agent-verification-plan.md の全対象削除"
     }
   ]
 }

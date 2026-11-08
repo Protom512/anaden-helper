@@ -295,7 +295,7 @@ ${isBacklogPick
   対象 open PR が存在しない (ブランチのみ継続等) 場合は宣言しなくてよい。
 
 未マージブランチも open PR も存在しない場合のみ、通常の新機能テンプレートにフォールバックする。`
-  : `Use the GitHub Issue template from .claude/agents/org/pm.md.
+  : `Use the following GitHub Issue template.
 Include: overview, persona, motivation, use cases (UC-1, UC-2, edge case), acceptance criteria, non-scope.`}
 
 Write the ticket in Japanese.

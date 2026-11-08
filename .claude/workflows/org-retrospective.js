@@ -72,7 +72,6 @@ ${JSON.stringify(feedbackAnalysis, null, 2)}
 
 Current Organization:
 Read .claude/CLAUDE.md for the current org structure and workflow descriptions.
-Read .claude/agents/org/coordinator.md, .claude/agents/org/pm.md, .claude/agents/org/cto.md for role definitions.
 Read .claude/workflows/feature-pipeline.js to understand the current pipeline.
 
 For each recurring theme:
