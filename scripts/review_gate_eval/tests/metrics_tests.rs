@@ -115,7 +115,6 @@ mod tests {
         }
     }
 
-
     #[test]
     fn recall_overall_counts_unique_golden_detected() {
         let m = aggregate(&fixture()).unwrap();
@@ -142,13 +141,12 @@ mod tests {
         assert!(m.recall.recall_opt().is_none());
     }
 
-
     #[test]
-    fn fp_rate_overall_with_n() {
+    fn fp_rate_counts_unmatched_findings() {
         let m = aggregate(&fixture()).unwrap();
         assert_eq!(m.fp_rate.total_findings, 8);
-        assert_eq!(m.fp_rate.false_positives, 5);
-        assert!((m.fp_rate.rate() - 5.0 / 8.0).abs() < 1e-9);
+        assert_eq!(m.fp_rate.false_positives, 4);
+        assert!((m.fp_rate.rate() - 4.0 / 8.0).abs() < 1e-9);
         assert!(m.fp_rate.n_included_in_report());
     }
 
@@ -203,7 +201,6 @@ mod tests {
         assert!(r.validate().is_err());
     }
 
-
     #[test]
     fn consensus_confusion_matrix() {
         let m = aggregate(&fixture()).unwrap();
@@ -235,7 +232,6 @@ mod tests {
         assert!(m.consensus.accuracy_opt().is_none());
     }
 
-
     #[test]
     fn metrics_serialize_to_json() {
         let m = aggregate(&fixture()).unwrap();
@@ -245,7 +241,6 @@ mod tests {
         assert!(js.contains("\"consensus\""));
         assert!(js.contains("\"n\":8"));
     }
-
 
     #[test]
     fn parse_input_from_json() {
@@ -279,7 +274,6 @@ mod tests {
         });
         assert!(aggregate(&f).is_err());
     }
-
 
     #[test]
     fn finding_parses_confidence_and_command_results() {
@@ -324,7 +318,6 @@ mod tests {
         };
         assert!(fail.any_fail());
     }
-
 
     fn judgment(reviewer: &str, verdict: Verdict, confidence: Option<f64>) -> ReviewerJudgment {
         ReviewerJudgment {

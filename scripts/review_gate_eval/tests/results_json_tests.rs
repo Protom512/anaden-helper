@@ -1,4 +1,3 @@
-
 #![allow(clippy::unwrap_used)]
 #![allow(clippy::panic)]
 #![allow(clippy::expect_used)]
@@ -83,7 +82,6 @@ fn methodology_documents_upper_bound_and_substitution() {
         "structural analysis must substitute unmeasured LLM layer"
     );
 }
-
 
 #[test]
 fn legacy_results_json_reaggregates_via_serde_defaults() {

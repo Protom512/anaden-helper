@@ -10,7 +10,7 @@ use anaden_vision::{CcoeffVisionEngine, SseVisionEngine, TemplateMatcher, Vision
 use crate::canvas::RoiEdit;
 use crate::childproc::SpawnSpec;
 use crate::library::{self, TemplateSpec};
-use crate::log_view::{AutoScrollFollow, LogBuffer, LogEntry};
+use crate::log_view::{AutoScrollFollow, DEFAULT_MAX_LINES, LogBuffer, LogEntry};
 use crate::proposals::{self, Proposal};
 use crate::tasks::{self, QueueAction, QueueEntry, QueueExec, QueueState};
 
@@ -72,17 +72,18 @@ impl StudioApp {
         match tasks::TaskListState::load(tasks_dir) {
             Ok(list) => {
                 self.status = format!("タスク定義: {} 件読込", list.definitions().len());
-                self.task_defs = Some(list);
+                self.task_defs = Some(std::sync::Arc::new(list));
             }
             Err(e) => self.status = format!("タスク定義読込失敗: {e}"),
         }
     }
 
     pub fn toggle_task(&mut self, id: &str) {
-        let Some(list) = &mut self.task_defs else {
+        let Some(list) = self.task_defs.as_mut() else {
             self.status = "タスク定義が未読込です".to_string();
             return;
         };
+        let list = std::sync::Arc::make_mut(list);
         match list.toggle(id) {
             Ok(()) => self.status = format!("選択: {} 件", list.selected_count()),
             Err(e) => self.status = e.to_string(),
@@ -101,7 +102,8 @@ impl StudioApp {
                     .map(|list| list.selected_ids().to_vec())
                     .unwrap_or_default();
                 self.load_task_list(&Self::workspace_root().join("templates/tasks"));
-                if let Some(list) = &mut self.task_defs {
+                if let Some(list) = self.task_defs.as_mut() {
+                    let list = std::sync::Arc::make_mut(list);
                     for id in selected {
                         if list.find(&id).is_some_and(|def| def.is_selectable()) {
                             let _ = list.toggle(&id);
@@ -200,6 +202,7 @@ impl StudioApp {
             None => "[studio] === task ===".to_string(),
         };
         self.push_task_log(&sep);
+        self.task_queue_report = crate::runner_exec::report_file_from_args(&spec.args);
         if let Err(e) = self.task_child.start(spec, self.task_log_tx.clone()) {
             self.push_task_log(&format!("[studio] 起動に失敗: {e}"));
             let action = match &mut self.task_queue {
@@ -220,25 +223,38 @@ impl StudioApp {
         if new_lines > 0 {
             self.task_scroll.observe_new_lines(new_lines);
         }
+        let mut report = None;
+        if exit_code.is_some() {
+            report = self.task_queue_report.take().and_then(|path| {
+                let parsed = crate::history::load_run_report(&path);
+                if parsed.is_none() {
+                    self.push_task_log(&format!(
+                        "WARN キュー run レポート読込失敗 (終了コードのみで分類): {}",
+                        path.display()
+                    ));
+                }
+                parsed
+            });
+        }
         if let Some(code) = exit_code
             && let Some(queue) = &mut self.task_queue
         {
-            let action = queue.on_exit(code);
+            let outcome = crate::history::classify_outcome(code, report.as_ref());
+            let action = queue.on_exit_classified(outcome, code);
             self.apply_task_action(action);
         }
         self.refresh_task_log_snapshot();
     }
 
-    fn push_task_log(&mut self, line: &str) {
+    pub(crate) fn push_task_log(&mut self, line: &str) {
         let line = line.to_string();
         self.task_log.with_buf(|b| b.push_line(&line));
         self.refresh_task_log_snapshot();
     }
 
     pub(crate) fn refresh_task_log_snapshot(&mut self) {
-        if let Some((rev, entries)) = self.task_log.changed_entries(self.task_log_revision) {
-            self.task_log_revision = rev;
-            self.task_log_snapshot = entries;
+        if let Some(update) = self.task_log.take_update() {
+            update.apply_to(&mut self.task_log_snapshot, DEFAULT_MAX_LINES);
         }
     }
 
@@ -337,7 +353,7 @@ impl StudioApp {
 
     fn current_template_spec(&self, roi: ScreenRegion, threshold: f32) -> TemplateSpec {
         TemplateSpec {
-            name: self.tpl_name.clone(),
+            name: self.tpl_name.trim().to_string(),
             state: STATE_OPTIONS[self.tpl_state_idx].to_string(),
             roi,
             threshold,

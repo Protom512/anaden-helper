@@ -1,4 +1,3 @@
-
 use serde::{Deserialize, Serialize};
 use std::collections::{HashMap, HashSet};
 
@@ -283,10 +282,11 @@ pub enum EvalError {
 pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
     let golden_ids: HashSet<&str> = input.golden_issues.iter().map(|g| g.id.as_str()).collect();
     for f in &input.findings {
-        if let Some(id) = &f.matched_golden {
-            if !golden_ids.is_empty() && !golden_ids.contains(id.as_str()) {
-                return Err(EvalError::UnknownGoldenId(id.clone()));
-            }
+        if let Some(id) = &f.matched_golden
+            && !golden_ids.is_empty()
+            && !golden_ids.contains(id.as_str())
+        {
+            return Err(EvalError::UnknownGoldenId(id.clone()));
         }
     }
 
@@ -319,7 +319,11 @@ pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
     let detected_golden: u64 = recall_per_pr.iter().map(|r| r.detected_golden).sum();
 
     let total_findings = input.findings.len() as u64;
-    let false_positives = total_findings - detected_ids.len() as u64;
+    let false_positives = input
+        .findings
+        .iter()
+        .filter(|f| f.matched_golden.is_none())
+        .count() as u64;
 
     let mut cv = ConsensusValidity {
         tp: 0,

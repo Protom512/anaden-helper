@@ -1,5 +1,11 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { spawnSync } from 'node:child_process';
+import fs from 'node:fs';
+import os from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
+import path from 'node:path';
 import { main } from './assert_tests_untouched.mjs';
 
 const OLD_SRC = [
@@ -18,6 +24,16 @@ const NEW_SRC_PROD_ONLY = OLD_SRC.replace('pub fn prod_a() {}', 'pub fn prod_a()
 const NEW_SRC_DELETED_PROD = ['pub fn prod_b() {}', '', '#[cfg(test)]', 'mod tests {', '    #[test]', '    fn t1() { assert!(true); }', '}'].join('\n');
 
 const call = (opts) => main([], { allowlist: [], ...opts });
+
+test('--root flag redirects the target repo (git fails outside a repo, exit 2)', () => {
+  const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'tu-root-'));
+  try {
+    const code = main(['--root', tmp], { allowlist: [] });
+    assert.equal(code, 2);
+  } finally {
+    fs.rmSync(tmp, { recursive: true, force: true });
+  }
+});
 
 
 test('added line inside a new-side test region is a violation (exit 1)', () => {
@@ -445,4 +461,68 @@ test('whole-file deletion of a production file is not flagged (Issue #231)', () 
     newSources: {},
   });
   assert.equal(code, 0);
+});
+
+test('whitespace-only deletion hunks in a tests/ file are exempt via normalize-skip (fixture repo)', () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'tu-fixture-'));
+  const git = (...args) => {
+    const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+    return r.stdout;
+  };
+  git('init', '-q');
+  git('config', 'user.email', 'gate-fixture@example.test');
+  git('config', 'user.name', 'gate-fixture');
+  git('config', 'core.autocrlf', 'false');
+  const rel = 'crates/x/tests/integ.rs';
+  const abs = path.join(repo, ...rel.split('/'));
+  mkdirSync(path.dirname(abs), { recursive: true });
+  const before = '#[test]\nfn t() {}\n\n#[test]\nfn u() {}\n';
+  writeFileSync(abs, before);
+  git('add', '.');
+  git('commit', '-q', '-m', 'init');
+  writeFileSync(abs, before.replace('}\n\n#[test]', '}\n#[test]'));
+  const code = main([], { allowlist: [], root: repo, base: 'HEAD' });
+  rmSync(repo, { recursive: true, force: true });
+  assert.equal(code, 0);
+});
+
+function initTempRepo(initialContent) {
+  const root = fs.mkdtempSync(path.join(os.tmpdir(), 'tests-untouched-git-'));
+  const git = (...args) => {
+    const run = spawnSync('git', ['-C', root, ...args], { encoding: 'utf8' });
+    if (run.error || run.status !== 0) {
+      throw new Error(`git ${args.join(' ')} failed: ${run.stderr}`);
+    }
+    return run.stdout;
+  };
+  git('init');
+  git('config', 'user.email', 'gate@example.test');
+  git('config', 'user.name', 'gate');
+  fs.writeFileSync(path.join(root, 'lib.rs'), initialContent);
+  git('add', '.');
+  git('commit', '-m', 'init');
+  return root;
+}
+
+test('git path: production-only change against HEAD passes via batched blob reads', () => {
+  const root = initTempRepo(OLD_SRC);
+  try {
+    fs.writeFileSync(path.join(root, 'lib.rs'), NEW_SRC_PROD_ONLY);
+    const code = call({ root });
+    assert.equal(code, 0);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test('git path: edited test line fails via batched blob reads', () => {
+  const root = initTempRepo(OLD_SRC);
+  try {
+    fs.writeFileSync(path.join(root, 'lib.rs'), OLD_SRC.replace('assert!(true)', 'assert!(false)'));
+    const code = call({ root });
+    assert.equal(code, 1);
+  } finally {
+    fs.rmSync(root, { recursive: true, force: true });
+  }
 });
