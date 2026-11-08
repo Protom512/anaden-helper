@@ -92,7 +92,6 @@ pub struct StudioApp {
     pub(crate) task_log_tx: SyncSender<LogEvent>,
     pub(crate) task_log_rx: Receiver<LogEvent>,
     pub(crate) task_log_snapshot: Vec<LogEntry>,
-    pub(crate) task_log_revision: u64,
     pub(crate) task_scroll: AutoScrollFollow,
     pub(crate) anaden_program: String,
 }
@@ -163,7 +162,6 @@ impl StudioApp {
             task_log_tx,
             task_log_rx,
             task_log_snapshot: Vec::new(),
-            task_log_revision: 0,
             task_scroll: AutoScrollFollow::default(),
             anaden_program: "anaden".to_string(),
         }
