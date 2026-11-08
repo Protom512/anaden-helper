@@ -42,10 +42,18 @@ public static class PeakRssInterop {
 }
 "@
 
+function ConvertTo-ArgumentLiteral([string]$Value) {
+  if ($Value -eq '') { return '""' }
+  if ($Value -notmatch '[\s"]') { return $Value }
+  $escaped = $Value -replace '(\\*)"', '$1$1\"'
+  $escaped = $escaped -replace '(\\+)$', '$1$1'
+  return '"' + $escaped + '"'
+}
+
 for ($i = 0; $i -lt $Repeat; $i++) {
   $psi = New-Object System.Diagnostics.ProcessStartInfo
   $psi.FileName = $Command
-  $psi.Arguments = ($Arguments -join ' ')
+  $psi.Arguments = (@($Arguments) | ForEach-Object { ConvertTo-ArgumentLiteral $_ }) -join ' '
   $psi.WorkingDirectory = $WorkingDirectory
   $psi.UseShellExecute = $false
   $psi.RedirectStandardOutput = $true

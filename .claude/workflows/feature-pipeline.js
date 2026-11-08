@@ -75,11 +75,7 @@ Run these commands to gather backlog data:
    Run: gh issue list --repo protom512/anaden-helper --state open --json number,title,labels
    If gh is not available, skip this source.
 
-2. Spec tasks (incomplete):
-   Read files matching .kiro/specs/*/tasks.md
-   Count incomplete tasks (lines starting with "- [ ]").
-
-3. Remaining items:
+2. Remaining items:
    Read the project memory at C:/Users/black/.claude/projects/C--Users-black-git-repo-anaden-helper/memory/MEMORY.md
    Look for "Remaining Items" section.
    Also read .claude/handover.md for "残タスク" section.
@@ -299,7 +295,7 @@ ${isBacklogPick
   対象 open PR が存在しない (ブランチのみ継続等) 場合は宣言しなくてよい。
 
 未マージブランチも open PR も存在しない場合のみ、通常の新機能テンプレートにフォールバックする。`
-  : `Use the GitHub Issue template from .claude/agents/org/pm.md.
+  : `Use the following GitHub Issue template.
 Include: overview, persona, motivation, use cases (UC-1, UC-2, edge case), acceptance criteria, non-scope.`}
 
 Write the ticket in Japanese.

@@ -27,6 +27,11 @@ valid:
     fn normal_assert_test() {
         assert!(defs.len() >= 3);
     }
+  - |-
+    #[tokio::test]
+    async fn normal_async_assert_test() {
+        assert!(queue_len() > 0);
+    }
 invalid:
   - |-
     #[test]
@@ -51,6 +56,13 @@ invalid:
     #[test]
     fn newly_added_e2e_test() {
         let probe = title_probe_path();
+        if probe.is_none() {
+            return;
+        }
+    }
+  - |-
+    #[tokio::test]
+    async fn newly_added_async_e2e_test() {
         if probe.is_none() {
             return;
         }
