@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import fs from 'node:fs';
 import os from 'node:os';
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { main } from './assert_tests_untouched.mjs';
 
@@ -458,6 +460,30 @@ test('whole-file deletion of a production file is not flagged (Issue #231)', () 
     oldSources: { 'crates/x/src/prod.rs': 'pub fn p() {}\n' },
     newSources: {},
   });
+  assert.equal(code, 0);
+});
+
+test('whitespace-only deletion hunks in a tests/ file are exempt via normalize-skip (fixture repo)', () => {
+  const repo = mkdtempSync(path.join(tmpdir(), 'tu-fixture-'));
+  const git = (...args) => {
+    const r = spawnSync('git', ['-C', repo, ...args], { encoding: 'utf8' });
+    assert.equal(r.status, 0, `git ${args.join(' ')} failed: ${r.stderr}`);
+    return r.stdout;
+  };
+  git('init', '-q');
+  git('config', 'user.email', 'gate-fixture@example.test');
+  git('config', 'user.name', 'gate-fixture');
+  git('config', 'core.autocrlf', 'false');
+  const rel = 'crates/x/tests/integ.rs';
+  const abs = path.join(repo, ...rel.split('/'));
+  mkdirSync(path.dirname(abs), { recursive: true });
+  const before = '#[test]\nfn t() {}\n\n#[test]\nfn u() {}\n';
+  writeFileSync(abs, before);
+  git('add', '.');
+  git('commit', '-q', '-m', 'init');
+  writeFileSync(abs, before.replace('}\n\n#[test]', '}\n#[test]'));
+  const code = main([], { allowlist: [], root: repo, base: 'HEAD' });
+  rmSync(repo, { recursive: true, force: true });
   assert.equal(code, 0);
 });
 

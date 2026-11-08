@@ -267,7 +267,7 @@ function collectSourcesFromGit(root, base, files) {
       const oldPath = file.oldPath && file.oldPath !== file.path ? file.oldPath : file.path;
       oldRequests.push({ file: file.path, oldPath });
     }
-    if (file.hunks.some((h) => h.newLines.length > 0)) {
+    if (fs.existsSync(path.join(root, ...file.path.split('/')))) {
       try {
         newSources[file.path] = fs.readFileSync(path.join(root, ...file.path.split('/')), 'utf8');
       } catch (error) {
