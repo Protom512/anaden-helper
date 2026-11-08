@@ -32,4 +32,5 @@ skills-lock.json
 
 # pipeline run artifacts / audit outputs (machine-generated evidence)
 .anaden-run/
+.anaden-routine/
 .audit/
