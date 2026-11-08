@@ -87,3 +87,28 @@ snapshots:
       style: secondary
       start: 8
       end: 144
+  ? |-
+    #[tokio::test]
+    async fn newly_added_async_e2e_test() {
+        if probe.is_none() {
+            return;
+        }
+    }
+  : labels:
+    - source: return
+      style: primary
+      start: 88
+      end: 94
+    - source: '#[tokio::test]'
+      style: secondary
+      start: 0
+      end: 14
+    - source: |-
+        async fn newly_added_async_e2e_test() {
+            if probe.is_none() {
+                return;
+            }
+        }
+      style: secondary
+      start: 15
+      end: 103
