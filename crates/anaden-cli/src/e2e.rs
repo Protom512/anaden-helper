@@ -24,9 +24,14 @@ pub fn e2e_run_dir(evidence_dir: &Path, run_id: &str) -> Option<PathBuf> {
 
 #[must_use]
 pub fn unix_now() -> u64 {
+    unix_now_millis() / 1000
+}
+
+#[must_use]
+pub fn unix_now_millis() -> u64 {
     std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .map(|d| d.as_secs())
+        .map(|d| u64::try_from(d.as_millis()).unwrap_or(u64::MAX))
         .unwrap_or(0)
 }
 

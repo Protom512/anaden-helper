@@ -709,7 +709,7 @@ async fn main() -> Result<()> {
                 &resolved_dir,
                 report_file.as_deref(),
                 *no_persist,
-                &run_report::run_artifact_timestamp(e2e::unix_now()),
+                &run_report::run_artifact_timestamp_millis(e2e::unix_now_millis()),
             );
             if let Err(e) = artifacts.prepare() {
                 eprintln!("run 成果物ディレクトリの事前作成に失敗 (永続化せず継続): {e}");
@@ -729,7 +729,7 @@ async fn main() -> Result<()> {
                 routine_artifacts_base_dir(routine_path),
                 report_file.as_deref(),
                 *no_persist,
-                &run_report::run_artifact_timestamp(e2e::unix_now()),
+                &run_report::run_artifact_timestamp_millis(e2e::unix_now_millis()),
             );
             if let Err(e) = artifacts.prepare() {
                 eprintln!("routine 成果物ディレクトリの事前作成に失敗 (永続化せず継続): {e}");

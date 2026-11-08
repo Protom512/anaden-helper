@@ -55,6 +55,11 @@
       "file": "scripts/review_gate_eval/tests/reviewer_template_tests.rs",
       "reason": "reviewer agent 定義 (.claude/agents/review/*.md) の harness からの削除に伴うテストファイル削除。テンプレート構造の検証対象そのものが消滅したため、テストの弱体化ではなく対象消滅。",
       "ref": "harness-lean program run 32 / docs/agent-verification-plan.md の全対象削除"
+    },
+    {
+      "file": "crates/anaden-cli/src/run_report.rs",
+      "reason": "新規テスト追加のみ（既存テストは無変更）— ミリ秒精度タイムスタンプ関数の契約テスト",
+      "ref": "#351"
     }
   ]
 }
