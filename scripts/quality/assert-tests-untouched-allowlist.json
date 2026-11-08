@@ -30,6 +30,11 @@
       "file": "crates/anaden-studio/src/log_process.rs",
       "reason": "dead fn removal — spawn_stdout_reader (#[allow(dead_code)]・本番 caller なし) とそのテスト stdout_reader_streams_lines_and_exit を削除。挙動は output_readers_stream_both_stdout_and_stderr (stdout 行 + stderr 行 + Exit イベント) が既にカバー",
       "ref": "#327"
+    },
+    {
+      "file": "crates/anaden-core/src/goal.rs",
+      "reason": "All 合成の failure-first 修正 (#318) に伴うテストモジュールへの鏡像テスト追記のみ。既存テストは無変更。",
+      "ref": "#318"
     }
   ]
 }
