@@ -1,0 +1,79 @@
+
+version = 1
+
+[[route]]
+id = "hub_dimension_rift"
+target = "次元の狭間"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "region", name = "次元の狭間" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "dimension_rift_hub" },
+]
+
+[[route]]
+id = "r46"
+target = "バルオキー (現代ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "modern" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "バルオキー" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+]
+
+[[route]]
+id = "r26"
+target = "月影の森 エリア2 (現代ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "modern" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "月影の森" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+]
+
+[[route]]
+id = "r29"
+target = "王都ユニガン (現代ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "modern" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "王都ユニガン" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+]
+
+[[route]]
+id = "r30"
+target = "火の村ラトル (古代ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "ancient" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "火の村ラトル" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+]
+
+[[route]]
+id = "r28"
+target = "曙光都市エルジオン ガンマ区画 (未来ミグレイナ)"
+status = "unverified"
+steps = [
+  { kind = "open_map" },
+  { kind = "era", tab = "future" },
+  { kind = "region", name = "ミグレイナ大陸" },
+  { kind = "area", name = "曙光都市エルジオン" },
+  { kind = "confirm" },
+  { kind = "wait_load", anchor = "field_hud" },
+]
+
