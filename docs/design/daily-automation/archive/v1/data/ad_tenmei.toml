@@ -1,0 +1,583 @@
+
+version = 1
+source = "https://altema.jp/anaden/anotherdungeon"
+
+
+[reward_slots]
+vh = [24, 60, 120]
+hard = [0, 24, 96]
+iseki_vh = [48, 120, 180]
+iseki_hard = [0, 60, 120]
+gallerea = [24, 60, 120, 240, 360]
+
+
+[[dungeon]]
+name = "月影の森"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "mei", VH = "mei" }
+
+[[dungeon]]
+name = "ナダラ火山"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "ten", VH = "ten" }
+
+[[dungeon]]
+name = "人喰い沼"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "mei", VH = "mei" }
+
+[[dungeon]]
+name = "ミグランス城"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "ten", VH = "ten" }
+
+[[dungeon]]
+name = "工業都市廃墟"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "ten", VH = "ten" }
+
+[[dungeon]]
+name = "ゼノ・ドメイン"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "ten", VH = "ten" }
+
+[[dungeon]]
+name = "次元戦艦"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "ten", VH = "ten" }
+
+[[dungeon]]
+name = "時の塔"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "mei", VH = "mei" }
+
+[[dungeon]]
+name = "星の塔"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "mei", VH = "mei" }
+
+[[dungeon]]
+name = "時層回廊"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "mei", VH = "mei" }
+
+[[dungeon]]
+name = "魔獣城"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "mei", VH = "mei" }
+
+[[dungeon]]
+name = "蛇肝ダマク"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "mei", VH = "mei" }
+
+[[dungeon]]
+name = "トト・ドリームランド"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "ten", VH = "ten" }
+
+[[dungeon]]
+name = "現代ガルレア大陸"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "古代ガルレア大陸"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "未来ガルレア大陸"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "冥峡界"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "オメガポリス"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "エントラーナ"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "ジスモンデ"
+category = "main"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "ミグランス地下迷宮"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "サキの夢意識"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "竜宮城"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "マユの夢意識"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "ドグマの塔"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "旧KMS本社"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "燃える魔獣城"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "クアドラ平原"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "ドラマク海洞"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "冥竜王の領域"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "プロトエデン"
+category = "side"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "古代ゼルベリヤ雷"
+category = "gaiten"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "古代ゼルベリヤ晶"
+category = "gaiten"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "古代ゼルベリヤ陰"
+category = "gaiten"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "異夢・時の塔"
+category = "cymbel"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "欲深き者の旅路"
+category = "cymbel"
+skip_target = true
+key = { H = "green", VH = "red" }
+alignment = { H = "both", VH = "both" }
+
+[[dungeon]]
+name = "異境・バルオキー地方"
+category = "iseki"
+skip_target = true
+key = { H = "green2", VH = "green2" }
+alignment = { H = "mei", VH = "mei" }
+
+[[dungeon]]
+name = "異境・ラトル地方"
+category = "iseki"
+skip_target = true
+key = { H = "green2", VH = "green2" }
+alignment = { H = "ten", VH = "ten" }
+
+[[dungeon]]
+name = "異境・エルジオン地方"
+category = "iseki"
+skip_target = true
+key = { H = "green2", VH = "green2" }
+alignment = { H = "ten", VH = "ten" }
+
+[[dungeon]]
+name = "トト・シアターワールド"
+category = "hiseki"
+skip_target = false
+key = {}
+alignment = { VH = "all_dist" }
+
+
+[[char]]
+name = "アルド"
+alignment = "ten"
+dungeons = ["ミグランス城", "蝕時ユニガン"]
+
+[[char]]
+name = "リィカ"
+alignment = "ten"
+dungeons = ["ゼノ・ドメイン"]
+
+[[char]]
+name = "エイミ"
+alignment = "ten"
+dungeons = ["工業都市廃墟"]
+
+[[char]]
+name = "サイラス"
+alignment = "ten"
+dungeons = ["人喰い沼"]
+
+[[char]]
+name = "シーラ"
+alignment = "ten"
+dungeons = ["竜宮城", "氷の海"]
+
+[[char]]
+name = "サキ(AS)"
+alignment = "ten"
+dungeons = ["マユの夢意識"]
+
+[[char]]
+name = "ノポウ族"
+alignment = "ten"
+dungeons = ["ドグマの塔"]
+
+[[char]]
+name = "アザミ"
+alignment = "ten"
+dungeons = ["現代ガルレア大陸"]
+
+[[char]]
+name = "シェリーヌ"
+alignment = "ten"
+dungeons = ["未来ガルレア大陸"]
+
+[[char]]
+name = "ヴァイオレット"
+alignment = "ten"
+dungeons = ["メメントス"]
+
+[[char]]
+name = "スカル"
+alignment = "ten"
+dungeons = ["メメントス"]
+
+[[char]]
+name = "クレス"
+alignment = "ten"
+dungeons = ["幻視の夢視る物語"]
+
+[[char]]
+name = "ミラ"
+alignment = "ten"
+dungeons = ["幻視の夢視る物語"]
+
+[[char]]
+name = "セルジュ"
+alignment = "ten"
+dungeons = ["異夢・時の塔"]
+
+[[char]]
+name = "キッド"
+alignment = "ten"
+dungeons = ["異夢・時の塔"]
+
+[[char]]
+name = "星の落し子"
+alignment = "ten"
+dungeons = ["異夢・時の塔"]
+
+[[char]]
+name = "グレン"
+alignment = "ten"
+dungeons = ["異夢・時の塔"]
+
+[[char]]
+name = "キュリオ"
+alignment = "ten"
+dungeons = ["常夜の霊長機関", "イスカリオテ"]
+
+[[char]]
+name = "マユ"
+alignment = "ten"
+dungeons = ["イスカリオテ"]
+
+[[char]]
+name = "アシュティア"
+alignment = "ten"
+dungeons = ["オメガポリス"]
+
+[[char]]
+name = "コレット"
+alignment = "ten"
+dungeons = ["夢幻の花咲く物語"]
+
+[[char]]
+name = "ロイド"
+alignment = "ten"
+dungeons = ["夢幻の花咲く物語"]
+
+[[char]]
+name = "パルテティオ"
+alignment = "ten"
+dungeons = ["欲深き者の旅路"]
+
+[[char]]
+name = "ティティ"
+alignment = "ten"
+dungeons = ["欲深き者の旅路"]
+
+[[char]]
+name = "リュゼ"
+alignment = "ten"
+dungeons = ["クアドラ平原", "ドラマク海洞", "冥竜王の領域"]
+
+[[char]]
+name = "草薙京"
+alignment = "ten"
+dungeons = ["邪悪巣くいし闘技場"]
+
+[[char]]
+name = "テリー・ボガード"
+alignment = "ten"
+dungeons = ["邪悪巣くいし闘技場"]
+
+[[char]]
+name = "不知火舞"
+alignment = "ten"
+dungeons = ["邪悪巣くいし闘技場"]
+
+[[char]]
+name = "クーラ・ダイアモンド"
+alignment = "ten"
+dungeons = ["邪悪巣くいし闘技場"]
+
+[[char]]
+name = "ライザ"
+alignment = "ten"
+dungeons = ["矛盾律の極圏"]
+
+[[char]]
+name = "クラウディア"
+alignment = "ten"
+dungeons = ["矛盾律の極圏"]
+
+[[char]]
+name = "ジタン"
+alignment = "ten"
+dungeons = ["次元戦艦アーク"]
+
+[[char]]
+name = "ガーネット"
+alignment = "ten"
+dungeons = ["次元戦艦アーク"]
+
+[[char]]
+name = "スタイナー"
+alignment = "ten"
+dungeons = ["次元戦艦アーク"]
+
+[[char]]
+name = "ユーチェリカ"
+alignment = "ten"
+dungeons = ["星の視た夢"]
+
+[[char]]
+name = "ヘレナ"
+alignment = "mei"
+dungeons = ["次元戦艦"]
+
+[[char]]
+name = "ディアドラ"
+alignment = "mei"
+dungeons = ["ミグランス地下迷宮", "燃える魔獣城"]
+
+[[char]]
+name = "ジェイド"
+alignment = "mei"
+dungeons = ["サキの夢意識"]
+
+[[char]]
+name = "ギルドナ"
+alignment = "mei"
+dungeons = ["蛇肝ダマク", "アストラ遺跡"]
+
+[[char]]
+name = "フィーネ"
+alignment = "mei"
+dungeons = ["魔獣城"]
+
+[[char]]
+name = "ガリユ"
+alignment = "mei"
+dungeons = ["古代ガルレア大陸"]
+
+[[char]]
+name = "クラルテ"
+alignment = "mei"
+dungeons = ["古代ゼルベリヤ雷", "古代ゼルベリヤ晶", "古代ゼルベリヤ陰", "失楽の都"]
+
+[[char]]
+name = "アルテナ"
+alignment = "mei"
+dungeons = ["冥峡界"]
+
+[[char]]
+name = "ジョーカー"
+alignment = "mei"
+dungeons = ["メメントス"]
+
+[[char]]
+name = "モルガナ"
+alignment = "mei"
+dungeons = ["メメントス"]
+
+[[char]]
+name = "ベルベット"
+alignment = "mei"
+dungeons = ["幻視の夢視る物語"]
+
+[[char]]
+name = "ユーリ"
+alignment = "mei"
+dungeons = ["幻視の夢視る物語"]
+
+[[char]]
+name = "ツクヨミ"
+alignment = "mei"
+dungeons = ["異夢・時の塔"]
+
+[[char]]
+name = "ノーナ"
+alignment = "mei"
+dungeons = ["歪なる大渦", "狂える螺旋コクレア"]
+
+[[char]]
+name = "シオン"
+alignment = "mei"
+dungeons = ["夢幻の花咲く物語"]
+
+[[char]]
+name = "アルフェン"
+alignment = "mei"
+dungeons = ["夢幻の花咲く物語"]
+
+[[char]]
+name = "カムラナージュ"
+alignment = "mei"
+dungeons = ["エントラーナ"]
+
+[[char]]
+name = "サイラス(冥側表記・要確認)"
+alignment = "mei"
+dungeons = ["欲深き者の旅路"]
+
+[[char]]
+name = "ガリアード"
+alignment = "mei"
+dungeons = ["旧KMS本社", "プロトエデン"]
+
+[[char]]
+name = "アンペル"
+alignment = "mei"
+dungeons = ["矛盾律の極圏"]
+
+[[char]]
+name = "センヤ"
+alignment = "mei"
+dungeons = ["燃えるクロサギ城", "冥獄"]
+
+[[char]]
+name = "ビビ"
+alignment = "mei"
+dungeons = ["次元戦艦アーク"]
+
+[[char]]
+name = "ルヴィ"
+alignment = "mei"
+dungeons = ["時層観測船カイロス"]
