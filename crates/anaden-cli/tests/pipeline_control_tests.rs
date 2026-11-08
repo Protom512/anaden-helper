@@ -155,7 +155,12 @@ async fn controller_stop_transitions_to_finished_with_interrupted_reason() {
     let jh = ctrl
         .try_start(opts.clone(), immediate_cancel_outcome)
         .unwrap();
-    tokio::time::sleep(Duration::from_millis(50)).await;
+    for _ in 0..50 {
+        if ctrl.state() == RunState::Running {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     assert_eq!(ctrl.state(), RunState::Running);
     ctrl.cancel().await;
     let outcome = jh.await.unwrap().unwrap();
