@@ -70,6 +70,16 @@
       "file": "crates/anaden-studio/src/runner_exec.rs",
       "reason": "履歴を触る 4 テストに isolate_history を追加（実 history.jsonl への書き込みを止める強化で、既存アサーションは無変更）",
       "ref": "#350"
+    },
+    {
+      "file": "crates/anaden-studio/src/library.rs",
+      "reason": "保存名バリデーション (#299) の is_err 経路テスト追加。path-escape / 空名・未 trim 名 / 不正 state / 衝突時の既存ファイル保全を検証する",
+      "ref": "#299"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_state_pipeline_task.rs",
+      "reason": "同上 (#299): save_pipeline_task の衝突拒否と path-escape 拒否のテスト追加",
+      "ref": "#299"
     }
   ]
 }

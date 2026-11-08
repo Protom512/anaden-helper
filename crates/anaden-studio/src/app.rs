@@ -351,7 +351,7 @@ impl StudioApp {
 
     fn current_template_spec(&self, roi: ScreenRegion, threshold: f32) -> TemplateSpec {
         TemplateSpec {
-            name: self.tpl_name.clone(),
+            name: self.tpl_name.trim().to_string(),
             state: STATE_OPTIONS[self.tpl_state_idx].to_string(),
             roi,
             threshold,

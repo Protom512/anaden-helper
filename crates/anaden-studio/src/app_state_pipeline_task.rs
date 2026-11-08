@@ -73,10 +73,24 @@ pub fn save_pipeline_task(
     spec: &anaden_vision::TaskDef,
     template: &DynamicImage,
 ) -> std::io::Result<PathBuf> {
-    std::fs::create_dir_all(dir)?;
+    if let Some(issue) = crate::library::save_name_issue(&spec.name) {
+        return Err(std::io::Error::other(format!(
+            "pipeline task name invalid ({issue}): {:?}",
+            spec.name
+        )));
+    }
     let png_path = dir.join(format!("{}.png", spec.name));
-    template.save(&png_path).map_err(std::io::Error::other)?;
     let toml_path = dir.join(format!("{}.toml", spec.name));
+    for target in [&png_path, &toml_path] {
+        if target.exists() {
+            return Err(std::io::Error::other(format!(
+                "pipeline task file collision: {} (既存タスクの無警告上書きは禁止。ロードして編集するか別名を指定してください)",
+                target.display()
+            )));
+        }
+    }
+    std::fs::create_dir_all(dir)?;
+    template.save(&png_path).map_err(std::io::Error::other)?;
     let toml_str = toml::to_string(spec).map_err(std::io::Error::other)?;
     std::fs::write(&toml_path, toml_str)?;
     Ok(toml_path)
@@ -174,5 +188,45 @@ mod tests {
             assert_eq!(PipelineActionKind::from_label(k.label()), Some(k));
         }
         assert_eq!(PipelineActionKind::from_label("bogus"), None);
+    }
+
+    #[test]
+    fn save_pipeline_task_refuses_overwrite_and_preserves_existing_toml() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = pipeline_task_spec(
+            "TapLogo",
+            "title",
+            "ccoeff",
+            ScreenRegion::new(10, 20, 100, 50),
+            0.82,
+            PipelineActionKind::ClickSelf,
+        )
+        .unwrap();
+        let img = DynamicImage::ImageLuma8(image::GrayImage::from_pixel(100, 50, Luma([128])));
+        save_pipeline_task(dir.path(), &spec, &img).unwrap();
+        let toml_path = dir.path().join("TapLogo.toml");
+        let before = std::fs::read(&toml_path).unwrap();
+
+        let err = save_pipeline_task(dir.path(), &spec, &img).unwrap_err();
+        assert!(err.to_string().contains("collision"), "err: {err}");
+        assert_eq!(std::fs::read(&toml_path).unwrap(), before);
+    }
+
+    #[test]
+    fn save_pipeline_task_rejects_path_escape_name() {
+        let dir = tempfile::tempdir().unwrap();
+        let spec = pipeline_task_spec(
+            "../escape",
+            "title",
+            "ccoeff",
+            ScreenRegion::new(10, 20, 100, 50),
+            0.82,
+            PipelineActionKind::ClickSelf,
+        )
+        .unwrap();
+        let img = DynamicImage::ImageLuma8(image::GrayImage::from_pixel(100, 50, Luma([128])));
+        let err = save_pipeline_task(dir.path(), &spec, &img).unwrap_err();
+        assert!(err.to_string().contains("invalid"), "err: {err}");
+        assert!(!dir.path().join("escape.png").exists());
     }
 }
