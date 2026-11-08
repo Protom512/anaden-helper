@@ -1258,9 +1258,6 @@ mod tests {
         app.routine_panel.select("daily");
         assert!(app.routine_panel.evidence_enabled(), "default must be ON");
         app.start_routine();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_stopped_and_drained(&mut app);
 
         let records = app.history.records();
@@ -1280,9 +1277,6 @@ mod tests {
         app.routine_panel.select("daily");
         app.routine_panel.set_evidence_enabled(false);
         app.start_routine();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_stopped_and_drained(&mut app);
 
         let records = app.history.records();
@@ -1320,9 +1314,6 @@ mod tests {
         app.run_id_gen = injected_run_id;
         app.routine_panel.select("daily");
         app.start_routine();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_history_len(&mut app, 1);
         let first = app.history.records()[0]
             .evidence_run_id
@@ -1331,9 +1322,6 @@ mod tests {
         assert!(first.starts_with("routine-"), "{first}");
 
         app.rerun_pipeline();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_history_len(&mut app, 2);
         let records = app.history.records();
         let rerun_id = records[0]
@@ -1353,17 +1341,11 @@ mod tests {
         let _history_dir = isolate_history(&mut app);
         app.strategy_panel.select_strategy("field_loop_pc");
         app.start_pipeline_with_selection();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_history_len(&mut app, 1);
         assert_eq!(app.history.records()[0].evidence_run_id, None);
 
         app.pending_evidence_run_id = Some("routine-stale".to_string());
         app.rerun_pipeline();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_history_len(&mut app, 2);
         assert_eq!(
             app.history.records()[0].evidence_run_id,
@@ -1379,16 +1361,10 @@ mod tests {
         app.run_id_gen = injected_run_id;
         app.routine_panel.select("daily");
         app.start_routine();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_history_len(&mut app, 1);
 
         app.pending_evidence_run_id = Some("routine-stale".to_string());
         app.rerun_pipeline();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_history_len(&mut app, 2);
         let rerun_id = app.history.records()[0]
             .evidence_run_id
@@ -1405,16 +1381,10 @@ mod tests {
         app.routine_panel.select("daily");
         app.routine_panel.set_evidence_enabled(false);
         app.start_routine();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_history_len(&mut app, 1);
         assert_eq!(app.history.records()[0].evidence_run_id, None);
 
         app.rerun_pipeline();
-        if app.status() != RunnerStatus::Running {
-            return;
-        }
         wait_history_len(&mut app, 2);
         assert_eq!(
             app.history.records()[0].evidence_run_id,

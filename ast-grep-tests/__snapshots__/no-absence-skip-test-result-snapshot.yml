@@ -1,0 +1,56 @@
+id: no-absence-skip-test-result
+snapshots:
+  ? |-
+    #[test]
+    fn result_test_absence_skip_guard() {
+        if !asset.exists() {
+            return Ok(());
+        }
+        Ok(())
+    }
+  : labels:
+    - source: return Ok(())
+      style: primary
+      start: 79
+      end: 92
+    - source: '#[test]'
+      style: secondary
+      start: 0
+      end: 7
+    - source: |-
+        fn result_test_absence_skip_guard() {
+            if !asset.exists() {
+                return Ok(());
+            }
+            Ok(())
+        }
+      style: secondary
+      start: 8
+      end: 112
+  ? |-
+    #[tokio::test]
+    async fn async_result_absence_skip_guard() {
+        if queue.is_empty() {
+            return Ok(());
+        }
+        Ok(())
+    }
+  : labels:
+    - source: return Ok(())
+      style: primary
+      start: 94
+      end: 107
+    - source: '#[tokio::test]'
+      style: secondary
+      start: 0
+      end: 14
+    - source: |-
+        async fn async_result_absence_skip_guard() {
+            if queue.is_empty() {
+                return Ok(());
+            }
+            Ok(())
+        }
+      style: secondary
+      start: 15
+      end: 127

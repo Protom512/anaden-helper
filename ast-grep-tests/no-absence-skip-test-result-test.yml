@@ -1,0 +1,34 @@
+id: no-absence-skip-test-result
+valid:
+  - |-
+    #[test]
+    fn result_test_returns_ok_tail() {
+        let n = count();
+        assert!(n > 0);
+        Ok(())
+    }
+  - |-
+    #[test]
+    fn result_test_err_branch() {
+        if bad() {
+            return Err(anyhow!("failed"));
+        }
+        Ok(())
+    }
+invalid:
+  - |-
+    #[test]
+    fn result_test_absence_skip_guard() {
+        if !asset.exists() {
+            return Ok(());
+        }
+        Ok(())
+    }
+  - |-
+    #[tokio::test]
+    async fn async_result_absence_skip_guard() {
+        if queue.is_empty() {
+            return Ok(());
+        }
+        Ok(())
+    }
