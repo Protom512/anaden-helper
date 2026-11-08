@@ -7,20 +7,6 @@ use std::thread::JoinHandle;
 
 use crate::log_buffer::LogEvent;
 
-#[allow(dead_code)]
-pub fn spawn_stdout_reader(
-    mut cmd: std::process::Command,
-    tx: SyncSender<LogEvent>,
-) -> std::io::Result<(SharedChild, JoinHandle<()>)> {
-    cmd.stdout(Stdio::piped());
-    cmd.stderr(Stdio::null());
-    let mut child = cmd.spawn()?;
-    let stdout = child.stdout.take();
-    let shared = SharedChild::new(child);
-    let reader = spawn_exit_reporting_reader(stdout, shared.clone(), tx);
-    Ok((shared, reader))
-}
-
 fn spawn_exit_reporting_reader(
     stdout: Option<std::process::ChildStdout>,
     child: SharedChild,
@@ -151,40 +137,6 @@ mod tests {
             lines.iter().any(|l| l.contains("err-line")),
             "lines={lines:?}"
         );
-        assert!(
-            matches!(events.last(), Some(LogEvent::Exit(Some(0)))),
-            "events={events:?}"
-        );
-    }
-
-    #[test]
-    fn stdout_reader_streams_lines_and_exit() {
-        let cmd = if cfg!(windows) {
-            let mut c = std::process::Command::new("cmd");
-            c.args(["/C", "echo one & echo two"]);
-            c
-        } else {
-            let mut c = std::process::Command::new("sh");
-            c.args(["-c", "echo one; echo two"]);
-            c
-        };
-        let (tx, rx) = std::sync::mpsc::sync_channel::<LogEvent>(256);
-        let (_child, handle) = spawn_stdout_reader(cmd, tx).expect("spawn failed");
-        handle.join().expect("reader thread panicked");
-        let mut events: Vec<LogEvent> = Vec::new();
-        while let Ok(ev) = rx.try_recv() {
-            events.push(ev);
-        }
-        let lines: Vec<&str> = events
-            .iter()
-            .filter_map(|e| match e {
-                LogEvent::Line(l) => Some(l.as_str()),
-                _ => None,
-            })
-            .map(str::trim)
-            .collect();
-        assert!(lines.contains(&"one"), "lines={lines:?}");
-        assert!(lines.contains(&"two"), "lines={lines:?}");
         assert!(
             matches!(events.last(), Some(LogEvent::Exit(Some(0)))),
             "events={events:?}"
