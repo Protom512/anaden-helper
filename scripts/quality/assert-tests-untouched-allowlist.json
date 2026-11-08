@@ -40,6 +40,11 @@
       "file": "crates/anaden-vision/src/pipeline.rs",
       "reason": "regression test 追加: cached 側 mtime 不明時に存在するファイルを再読込する修正 (#320) の検証テスト。既存テストの弱体化なし",
       "ref": "#320"
+    },
+    {
+      "file": "crates/anaden-studio/src/tasks_queue.rs",
+      "reason": "regression test 追加: queue_entries が pipeline_run に --report-file を付与し launch_subcommand に付与しないことの検証 (#295)。既存テストの弱体化なし",
+      "ref": "#295"
     }
   ]
 }

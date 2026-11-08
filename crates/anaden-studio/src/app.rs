@@ -200,6 +200,7 @@ impl StudioApp {
             None => "[studio] === task ===".to_string(),
         };
         self.push_task_log(&sep);
+        self.task_queue_report = crate::runner_exec::report_file_from_args(&spec.args);
         if let Err(e) = self.task_child.start(spec, self.task_log_tx.clone()) {
             self.push_task_log(&format!("[studio] 起動に失敗: {e}"));
             let action = match &mut self.task_queue {
@@ -220,10 +221,24 @@ impl StudioApp {
         if new_lines > 0 {
             self.task_scroll.observe_new_lines(new_lines);
         }
+        let mut report = None;
+        if exit_code.is_some() {
+            report = self.task_queue_report.take().and_then(|path| {
+                let parsed = crate::history::load_run_report(&path);
+                if parsed.is_none() {
+                    self.push_task_log(&format!(
+                        "WARN キュー run レポート読込失敗 (終了コードのみで分類): {}",
+                        path.display()
+                    ));
+                }
+                parsed
+            });
+        }
         if let Some(code) = exit_code
             && let Some(queue) = &mut self.task_queue
         {
-            let action = queue.on_exit(code);
+            let outcome = crate::history::classify_outcome(code, report.as_ref());
+            let action = queue.on_exit_classified(outcome, code);
             self.apply_task_action(action);
         }
         self.refresh_task_log_snapshot();

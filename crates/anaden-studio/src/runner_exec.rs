@@ -117,11 +117,17 @@ pub fn resolve_pipeline_arg(args: &[String], root: &Path) -> Vec<String> {
 }
 
 #[must_use]
-fn with_report_file_arg(args: &[String], report_path: &Path) -> Vec<String> {
+pub(crate) fn with_report_file_arg(args: &[String], report_path: &Path) -> Vec<String> {
     let mut out = args.to_vec();
     out.push("--report-file".to_string());
     out.push(report_path.to_string_lossy().into_owned());
     out
+}
+
+#[must_use]
+pub(crate) fn report_file_from_args(args: &[String]) -> Option<PathBuf> {
+    let pos = args.iter().position(|t| t == "--report-file")?;
+    args.get(pos + 1).map(|p| PathBuf::from(p.as_str()))
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
