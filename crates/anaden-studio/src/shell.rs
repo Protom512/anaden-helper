@@ -54,12 +54,24 @@ impl UnifiedShell {
 }
 
 impl eframe::App for UnifiedShell {
+    fn logic(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        if self.has_active_process() {
+            ctx.request_repaint_after(std::time::Duration::from_millis(100));
+        }
+    }
+
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         self.render_modebar(ui);
         if self.mode == UnifiedMode::Tools {
             self.render_tools_sectionbar(ui);
         }
         self.render_content(ui);
+    }
+}
+
+impl UnifiedShell {
+    pub fn has_active_process(&self) -> bool {
+        self.runner.has_active_process() || self.studio.task_queue_active()
     }
 }
 
@@ -117,6 +129,12 @@ mod tests {
         assert_eq!(shell.mode(), UnifiedMode::Home);
         assert_eq!(shell.pane(), UnifiedPane::Tasks);
         assert_eq!(shell.tools_section(), ToolsSection::Authoring);
+    }
+
+    #[test]
+    fn idle_shell_has_no_active_process() {
+        let shell = UnifiedShell::new(None);
+        assert!(!shell.has_active_process());
     }
 
     #[test]
