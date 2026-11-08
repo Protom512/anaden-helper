@@ -1,4 +1,15 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "crates/anaden-studio/src/library.rs",
+      "reason": "保存名バリデーション (#299) の is_err 経路テスト追加。path-escape / 空名・未 trim 名 / 不正 state / 衝突時の既存ファイル保全を検証する",
+      "ref": "#299"
+    },
+    {
+      "file": "crates/anaden-studio/src/app_state_pipeline_task.rs",
+      "reason": "同上 (#299): save_pipeline_task の衝突拒否と path-escape 拒否のテスト追加",
+      "ref": "#299"
+    }
+  ]
 }

@@ -14,16 +14,56 @@ pub struct TemplateSpec {
     pub method: String,
 }
 
+#[must_use]
+pub(crate) fn save_name_issue(name: &str) -> Option<&'static str> {
+    if name.trim().is_empty() {
+        return Some("name must not be empty");
+    }
+    if name != name.trim() {
+        return Some("name must not have leading/trailing whitespace");
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Some("name must not contain path separators");
+    }
+    if name.contains("..") {
+        return Some("name must not contain `..`");
+    }
+    if name.starts_with('.') {
+        return Some("name must not start with a dot");
+    }
+    None
+}
+
 pub fn save_template(
     base_dir: &Path,
     spec: &TemplateSpec,
     image: &DynamicImage,
 ) -> std::io::Result<PathBuf> {
+    if let Some(issue) = save_name_issue(&spec.name) {
+        return Err(std::io::Error::other(format!(
+            "template name invalid ({issue}): {:?}",
+            spec.name
+        )));
+    }
+    if let Some(issue) = save_name_issue(&spec.state) {
+        return Err(std::io::Error::other(format!(
+            "template state invalid ({issue}): {:?}",
+            spec.state
+        )));
+    }
     let dir = base_dir.join(&spec.state);
-    std::fs::create_dir_all(&dir)?;
     let png_path = dir.join(format!("{}.png", spec.name));
-    image.save(&png_path).map_err(std::io::Error::other)?;
     let toml_path = dir.join(format!("{}.toml", spec.name));
+    for target in [&png_path, &toml_path] {
+        if target.exists() {
+            return Err(std::io::Error::other(format!(
+                "template file collision: {} (既存テンプレートの無警告上書きは禁止。ロードして編集するか別名を指定してください)",
+                target.display()
+            )));
+        }
+    }
+    std::fs::create_dir_all(&dir)?;
+    image.save(&png_path).map_err(std::io::Error::other)?;
     let toml_str = toml::to_string(spec).map_err(std::io::Error::other)?;
     std::fs::write(&toml_path, toml_str)?;
     Ok(png_path)
@@ -135,5 +175,48 @@ mod tests {
         assert!(content.contains("name = \"logo\""));
         assert!(content.contains("state = \"title\""));
         assert!(content.contains("threshold ="));
+    }
+
+    #[test]
+    fn save_template_rejects_path_escape_name() {
+        let dir = tempdir().unwrap();
+        let img = DynamicImage::ImageLuma8(image::GrayImage::new(10, 10));
+        let err = save_template(dir.path(), &spec("../escape", "title"), &img).unwrap_err();
+        assert!(err.to_string().contains("invalid"), "err: {err}");
+        assert!(!dir.path().join("escape.png").exists());
+    }
+
+    #[test]
+    fn save_template_rejects_empty_and_untrimmed_names() {
+        let dir = tempdir().unwrap();
+        let img = DynamicImage::ImageLuma8(image::GrayImage::new(10, 10));
+        assert!(save_template(dir.path(), &spec("   ", "title"), &img).is_err());
+        assert!(save_template(dir.path(), &spec(" logo ", "title"), &img).is_err());
+        assert_eq!(load_library(dir.path()).len(), 0);
+    }
+
+    #[test]
+    fn save_template_rejects_invalid_state() {
+        let dir = tempdir().unwrap();
+        let img = DynamicImage::ImageLuma8(image::GrayImage::new(10, 10));
+        assert!(save_template(dir.path(), &spec("logo", "../evil"), &img).is_err());
+    }
+
+    #[test]
+    fn save_template_refuses_overwrite_and_preserves_existing_files() {
+        let dir = tempdir().unwrap();
+        let img = DynamicImage::ImageLuma8(image::GrayImage::new(100, 50));
+        let s = spec("logo", "title");
+        save_template(dir.path(), &s, &img).unwrap();
+        let toml_path = dir.path().join("title").join("logo.toml");
+        let png_path = dir.path().join("title").join("logo.png");
+        let toml_before = std::fs::read(&toml_path).unwrap();
+        let png_before = std::fs::read(&png_path).unwrap();
+
+        let other = DynamicImage::ImageLuma8(image::GrayImage::new(20, 20));
+        let err = save_template(dir.path(), &s, &other).unwrap_err();
+        assert!(err.to_string().contains("collision"), "err: {err}");
+        assert_eq!(std::fs::read(&toml_path).unwrap(), toml_before);
+        assert_eq!(std::fs::read(&png_path).unwrap(), png_before);
     }
 }
