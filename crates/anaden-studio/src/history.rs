@@ -1,5 +1,6 @@
 use std::io;
 use std::path::{Path, PathBuf};
+use std::time::UNIX_EPOCH;
 
 use serde::{Deserialize, Serialize};
 
@@ -131,7 +132,28 @@ impl RunHistory {
     pub fn append(&mut self, record: RunRecord) -> io::Result<()> {
         self.records.insert(0, record);
         truncate_oldest(&mut self.records, self.max_records);
-        self.persist()
+        self.persist()?;
+        self.prune_report_files();
+        Ok(())
+    }
+
+    fn prune_report_files(&self) {
+        let Some(dir) = self.path.parent() else {
+            return;
+        };
+        let entries = match std::fs::read_dir(dir.join("reports")) {
+            Ok(entries) => entries,
+            Err(_) => return,
+        };
+        let files: Vec<(u64, PathBuf)> = entries
+            .flatten()
+            .map(|e| e.path())
+            .filter(|p| p.extension().is_some_and(|x| x == "json"))
+            .map(|p| (report_mtime_rank(&p), p))
+            .collect();
+        for path in report_paths_to_prune(files, self.max_records) {
+            let _ = std::fs::remove_file(path);
+        }
     }
 
     pub fn records(&self) -> &[RunRecord] {
@@ -219,6 +241,22 @@ fn truncate_oldest(records: &mut Vec<RunRecord>, max_records: usize) {
     if records.len() > max_records {
         records.truncate(max_records);
     }
+}
+
+#[must_use]
+fn report_mtime_rank(path: &Path) -> u64 {
+    std::fs::metadata(path)
+        .and_then(|m| m.modified())
+        .ok()
+        .and_then(|t| t.duration_since(UNIX_EPOCH).ok())
+        .map(|d| d.as_secs())
+        .unwrap_or(u64::MAX)
+}
+
+#[must_use]
+fn report_paths_to_prune(mut files: Vec<(u64, PathBuf)>, keep: usize) -> Vec<PathBuf> {
+    files.sort_by(|a, b| b.cmp(a));
+    files.into_iter().skip(keep).map(|(_, p)| p).collect()
 }
 
 #[cfg(test)]
@@ -478,5 +516,43 @@ mod tests {
         let path = dir.path().join("nonexistent.jsonl");
         let h = RunHistory::open(&path, DEFAULT_MAX_RECORDS);
         assert!(h.records().is_empty());
+    }
+
+    #[test]
+    fn report_paths_to_prune_keeps_newest_and_never_drops_unknown_mtime() {
+        let mk = PathBuf::from;
+        let files = vec![
+            (1_000, mk("1000.json")),
+            (3_000, mk("3000.json")),
+            (2_000, mk("2000.json")),
+        ];
+        assert_eq!(
+            report_paths_to_prune(files, 2),
+            vec![PathBuf::from("1000.json")]
+        );
+        let files = vec![(u64::MAX, mk("unknown.json")), (1_000, mk("1000.json"))];
+        assert_eq!(
+            report_paths_to_prune(files, 1),
+            vec![PathBuf::from("1000.json")]
+        );
+    }
+
+    #[test]
+    fn append_prunes_report_files_beyond_history_cap() {
+        let dir = tempfile::tempdir().unwrap();
+        let reports = dir.path().join("reports");
+        std::fs::create_dir_all(&reports).unwrap();
+        for name in ["1.json", "2.json", "3.json", "4.json", "5.json"] {
+            std::fs::write(reports.join(name), b"{}").unwrap();
+        }
+        let mut h = RunHistory::open(dir.path().join("history.jsonl"), 2);
+        h.append(sample_record("s", 1)).unwrap();
+        let mut remaining: Vec<String> = std::fs::read_dir(&reports)
+            .unwrap()
+            .flatten()
+            .map(|e| e.file_name().to_string_lossy().to_string())
+            .collect();
+        remaining.sort();
+        assert_eq!(remaining, vec!["4.json", "5.json"]);
     }
 }

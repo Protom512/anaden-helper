@@ -60,6 +60,16 @@
       "file": "crates/anaden-cli/src/run_report.rs",
       "reason": "新規テスト追加のみ（既存テストは無変更）— ミリ秒精度タイムスタンプ関数の契約テスト",
       "ref": "#351"
+    },
+    {
+      "file": "crates/anaden-studio/src/history.rs",
+      "reason": "新規テスト追加のみ（既存テストは無変更）— レポート刈り込みの契約テスト",
+      "ref": "#350"
+    },
+    {
+      "file": "crates/anaden-studio/src/runner_exec.rs",
+      "reason": "履歴を触る 4 テストに isolate_history を追加（実 history.jsonl への書き込みを止める強化で、既存アサーションは無変更）",
+      "ref": "#350"
     }
   ]
 }

@@ -746,6 +746,7 @@ mod tests {
     #[test]
     fn test_start_moves_to_running_and_stop_returns_to_stopped() {
         let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
         app.start_pipeline(&long_args());
         assert_eq!(app.status(), RunnerStatus::Running);
         app.stop_pipeline();
@@ -785,6 +786,7 @@ mod tests {
     #[test]
     fn test_running_child_stdout_appears_in_log_after_drain() {
         let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
         app.start_pipeline(&long_args());
         if app.status() == RunnerStatus::Running {
             for _ in 0..50 {
@@ -1111,6 +1113,7 @@ mod tests {
     #[test]
     fn test_start_with_selected_strategy_starts_child() {
         let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
         app.strategy_panel.select_strategy("field_loop_pc");
         app.start_pipeline_with_selection();
         if app.status() == RunnerStatus::Running {
@@ -1202,6 +1205,7 @@ mod tests {
     #[test]
     fn test_double_start_records_already_running_error() {
         let mut app = PipelineRunnerApp::new(dummy_program());
+        let _history_dir = isolate_history(&mut app);
         app.start_pipeline(&long_args());
         let running = app.status() == RunnerStatus::Running;
         if running {
