@@ -40,17 +40,23 @@ start_task = "FishingStartPc"
 EOF
 ROUTINE_W="$(cygpath -w "$ROOT/$OUT/routine-bench.toml")"
 
+psq() {
+  local s="$1"
+  s="${s//\'/\'\'}"
+  printf "'%s'" "$s"
+}
+
 run_rss() {
   local label="$1"; shift
   local json="$OUT/rss-$label.json"
   local runner="$OUT/.rss-runner-$label.ps1"
   local argLiterals=()
   local a
-  for a in "$@"; do argLiterals+=("'$a'"); done
+  for a in "$@"; do argLiterals+=("$(psq "$a")"); done
   local argsArray
   argsArray="$(IFS=,; echo "${argLiterals[*]}")"
   cat > "$runner" <<EOF
-& '$(cygpath -w "$ROOT/scripts/quality/rss_bench.ps1")' -Command '$CLI_W' -Arguments @($argsArray) -WorkingDirectory '$ROOT_W' -Repeat $REPEAT -Label '$label' -JsonOut '$(cygpath -w "$ROOT/$json")'
+& $(psq "$(cygpath -w "$ROOT/scripts/quality/rss_bench.ps1")") -Command $(psq "$CLI_W") -Arguments @($argsArray) -WorkingDirectory $(psq "$ROOT_W") -Repeat $REPEAT -Label $(psq "$label") -JsonOut $(psq "$(cygpath -w "$ROOT/$json")")
 EOF
   echo "bench: rss workload '$label' x$REPEAT"
   powershell -NoProfile -ExecutionPolicy Bypass -File "$(cygpath -w "$runner")"
