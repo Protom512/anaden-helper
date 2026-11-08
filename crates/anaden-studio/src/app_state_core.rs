@@ -85,7 +85,7 @@ pub struct StudioApp {
     pub(crate) task_action: PipelineActionKind,
     pub(crate) scenario: crate::scenario_ui::ScenarioPanel,
     pub(crate) live_authoring: crate::authoring_ui::AuthoringPanel,
-    pub(crate) task_defs: Option<crate::tasks::TaskListState>,
+    pub(crate) task_defs: Option<std::sync::Arc<crate::tasks::TaskListState>>,
     pub(crate) task_queue: Option<QueueExec>,
     pub(crate) task_child: ChildProcess,
     pub(crate) task_log: SharedLogBuffer,

@@ -72,17 +72,18 @@ impl StudioApp {
         match tasks::TaskListState::load(tasks_dir) {
             Ok(list) => {
                 self.status = format!("タスク定義: {} 件読込", list.definitions().len());
-                self.task_defs = Some(list);
+                self.task_defs = Some(std::sync::Arc::new(list));
             }
             Err(e) => self.status = format!("タスク定義読込失敗: {e}"),
         }
     }
 
     pub fn toggle_task(&mut self, id: &str) {
-        let Some(list) = &mut self.task_defs else {
+        let Some(list) = self.task_defs.as_mut() else {
             self.status = "タスク定義が未読込です".to_string();
             return;
         };
+        let list = std::sync::Arc::make_mut(list);
         match list.toggle(id) {
             Ok(()) => self.status = format!("選択: {} 件", list.selected_count()),
             Err(e) => self.status = e.to_string(),
@@ -101,7 +102,8 @@ impl StudioApp {
                     .map(|list| list.selected_ids().to_vec())
                     .unwrap_or_default();
                 self.load_task_list(&Self::workspace_root().join("templates/tasks"));
-                if let Some(list) = &mut self.task_defs {
+                if let Some(list) = self.task_defs.as_mut() {
+                    let list = std::sync::Arc::make_mut(list);
                     for id in selected {
                         if list.find(&id).is_some_and(|def| def.is_selectable()) {
                             let _ = list.toggle(&id);

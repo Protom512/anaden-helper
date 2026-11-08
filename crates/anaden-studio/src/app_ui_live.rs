@@ -16,10 +16,10 @@ impl StudioApp {
         {
             let client_dims = (frame.width(), frame.height());
             let normalized = self.scaler.normalize(&frame);
-            self.screenshot = Some(Arc::new(normalized.clone()));
-            self.screenshot_tex = None;
             self.live_authoring
                 .push_frame(&normalized, Some(client_dims));
+            self.screenshot = Some(Arc::new(normalized));
+            self.screenshot_tex = None;
         }
 
         egui::Panel::left("live_authoring_controls")
