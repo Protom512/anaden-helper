@@ -35,6 +35,11 @@
       "file": "crates/anaden-core/src/goal.rs",
       "reason": "All 合成の failure-first 修正 (#318) に伴うテストモジュールへの鏡像テスト追記のみ。既存テストは無変更。",
       "ref": "#318"
+    },
+    {
+      "file": "crates/anaden-vision/src/pipeline.rs",
+      "reason": "regression test 追加: cached 側 mtime 不明時に存在するファイルを再読込する修正 (#320) の検証テスト。既存テストの弱体化なし",
+      "ref": "#320"
     }
   ]
 }
