@@ -4,6 +4,7 @@ import { dirname, join } from 'node:path';
 import test from 'node:test';
 import assert from 'node:assert/strict';
 import { classifyDiffKind, isDocsPath } from '../gate-diff-kind.js';
+import { resolveGateLanes } from '../team-gate-protocol.js';
 
 const wfDir = join(dirname(fileURLToPath(import.meta.url)), '..');
 const fpSrc = readFileSync(join(wfDir, 'feature-pipeline.js'), 'utf8');
@@ -68,6 +69,31 @@ test('drift guard: inlined isDocsPath/classifyDiffKind match canonical behavior'
 test('drift guard: inline copy is actually wired (classifyDiffKind called near the gate)', () => {
   const callCount = fpSrc.split('classifyDiffKind(').length - 1;
   assert.ok(callCount >= 2, `classifyDiffKind must be invoked (found ${callCount} occurrences incl. definition)`);
+});
+
+test('drift guard: inline lane resolver matches team-gate-protocol resolveGateLanes semantics', () => {
+  const begin = fpSrc.indexOf('const DOCS_ONLY_SKIP_KEYS');
+  const end = fpSrc.indexOf('function integrationSliceCheckText', begin);
+  assert.ok(begin > 0 && end > begin, 'inline lane-resolver block present');
+  const laneBlock = fpSrc.slice(begin, end);
+  const gateKeys = ['reliability', 'performance', 'extensibility', 'governance', 'security', 'integration'].map((key) => ({ key }));
+  const resolveInline = (diffKind) =>
+    new Function('GATE_DIMENSIONS', 'precheckDiffKind', `${laneBlock}\nreturn GATE_DIFF_KIND_LANES().map((d) => d.key);`)(
+      gateKeys, diffKind
+    );
+  const cases = ['code', 'docs-only', 'mixed', 'bogus', undefined];
+  for (const diffKind of cases) {
+    assert.deepEqual(
+      resolveInline(diffKind),
+      resolveGateLanes({ diffKind }).lanes,
+      `lane resolution diverged from canonical for diffKind=${diffKind}`
+    );
+  }
+  assert.deepEqual(
+    resolveInline('docs-only'),
+    ['governance', 'integration'],
+    'docs-only keep set is exactly governance + integration (canonical semantics)'
+  );
 });
 
 test('short-circuit: expected lane count resolved dynamically, not hard-coded GATE_DIMENSIONS.length', () => {
