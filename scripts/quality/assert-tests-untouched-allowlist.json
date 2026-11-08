@@ -1,4 +1,10 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "scripts/review_gate_eval/tests/reviewer_template_tests.rs",
+      "reason": "ファイルごと削除。3 テストが未追跡の .claude/agents/review/reviewer-*.md (ハーネスから削除済み) を読むため fresh clone では常に失敗する。workspace 組み込みで nextest が初めてこの crate を実行し発覚した",
+      "ref": "#348。同一削除は PR #366 (先にマージされた側が残る)"
+    }
+  ]
 }

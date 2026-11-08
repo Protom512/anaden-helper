@@ -266,9 +266,10 @@ export function main(argv = [], opts = {}) {
         }
         oldSources[file.path] = show.stdout ?? '';
       }
-      if (file.hunks.some((h) => h.newLines.length > 0)) {
+      const newAbsPath = path.join(root, ...file.path.split('/'));
+      if (fs.existsSync(newAbsPath)) {
         try {
-          newSources[file.path] = fs.readFileSync(path.join(root, ...file.path.split('/')), 'utf8');
+          newSources[file.path] = fs.readFileSync(newAbsPath, 'utf8');
         } catch (error) {
           console.error(`tests-untouched: cannot read ${file.path}: ${error.message}`);
           return 2;

@@ -8,6 +8,7 @@ members = [
     "crates/anaden-strategies",
     "crates/anaden-cli",
     "crates/anaden-studio",
+    "scripts/review_gate_eval",
 ]
 
 [workspace.package]

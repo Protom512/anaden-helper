@@ -24,3 +24,4 @@ note: |
        (例外リスト) に関数名を追加し、その根拠をコメントで明記すること。
 files:
   - "crates/anaden-vision/**/*.rs"
+  - "scripts/**/*.rs"
