@@ -96,8 +96,8 @@ jobs:
 
       # The gate scripts themselves are code: run their unit tests first,
       # so a broken gate cannot silently pass everything.
-      - name: Gate script self-tests
-        run: node --test scripts/quality/
+      - name: Node test suite
+        run: node scripts/quality/run_node_tests.mjs
 
       # Fails the job if the PR diff touches existing test code
       # (allowlist: scripts/quality/assert-tests-untouched-allowlist.json).
