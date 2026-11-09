@@ -247,8 +247,9 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
             reason: format!("device_width 実測のための初回キャプチャ失敗: {e}"),
         })?;
     let device_width = probe.width();
+    let device_height = probe.height();
     info!(
-        "routine step '{}': device_width 実測 {device_width}",
+        "routine step '{}': device 解像度実測 {device_width}x{device_height}",
         step.name
     );
 
@@ -262,6 +263,7 @@ async fn run_step_live(step: &RoutineStep, root: &Path) -> Result<LoopOutcome, R
         PipelineState::new(&step.start_task),
         tasks,
         device_width,
+        device_height,
         300,
     )
     .with_verify(true)
