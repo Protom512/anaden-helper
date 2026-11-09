@@ -1,4 +1,15 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "crates/anaden-engine/src/pipeline_driver.rs",
+      "reason": "rescale_command に device_height 引数追加 (既存 rescale テスト 7 本の呼び出し更新 + 新規 portrait 回帰テスト)。アサーション値は無変更",
+      "ref": "#324 item 5"
+    },
+    {
+      "file": "crates/anaden-cli/src/main.rs",
+      "reason": "PipelineDriver::new 呼び出し 2 箇所へ device_height 引数追加。アサーションは無変更",
+      "ref": "#324 item 5"
+    }
+  ]
 }

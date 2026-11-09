@@ -373,20 +373,26 @@ async fn run_with_windows(
         );
     }
 
+    let probe = capture
+        .capture()
+        .await
+        .map_err(|e| anyhow::anyhow!("初回キャプチャ失敗(Win32, デバイス解像度実測不可): {e}"))?;
+    let device_height = probe.height();
     let device_width = match width {
         Some(w) => {
             warn!("device_width 手動指定: {w} (PC版では実測推奨。座標ズレに注意)");
             w
         }
-        None => {
-            let probe = capture.capture().await.map_err(|e| {
-                anyhow::anyhow!("初回キャプチャ失敗(Win32, device_width 実測不可): {e}")
-            })?;
-            let w = probe.width();
-            info!("device_width 実測(PC版): {w}(height={})", probe.height());
-            w
-        }
+        None => probe.width(),
     };
+    info!(
+        "device 解像度(PC版): {device_width}x{device_height}{}",
+        if width.is_some() {
+            " (width 手動指定)"
+        } else {
+            ""
+        }
+    );
 
     let recovery: Option<anaden_engine::RecoveryHook> = if recover_launch {
         Some(escalation_recovery_hook(launcher.clone(), "PC版"))
@@ -410,6 +416,7 @@ async fn run_with_windows(
                 anaden_engine::PipelineState::new(start_task),
                 tasks,
                 device_width,
+                device_height,
                 300,
             )
             .with_verify(verify_after_fire)
@@ -434,6 +441,7 @@ async fn run_with_windows(
                 anaden_engine::PipelineState::new(start_task),
                 tasks,
                 device_width,
+                device_height,
                 300,
             )
             .with_verify(verify_after_fire)
@@ -1309,6 +1317,7 @@ mod tests {
             anaden_engine::PipelineState::new("t"),
             vec![],
             1280,
+            720,
             300,
         );
         run_driver(driver, Duration::ZERO, 3, 1, None, None, &artifacts)
@@ -1340,6 +1349,7 @@ mod tests {
             anaden_engine::PipelineState::new("t"),
             vec![],
             1280,
+            720,
             300,
         );
         run_driver(driver, Duration::ZERO, 3, 1, None, None, &artifacts)

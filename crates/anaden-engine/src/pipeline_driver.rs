@@ -278,14 +278,19 @@ enum GoalMode<'a> {
     Active(GoalLoopCtx<'a>),
 }
 
-pub fn rescale_command(cmd: InputCommand, device_width: u32, crop_info: &CropInfo) -> InputCommand {
+pub fn rescale_command(
+    cmd: InputCommand,
+    device_width: u32,
+    device_height: u32,
+    crop_info: &CropInfo,
+) -> InputCommand {
     let to_real = |x_1280: u32, y_1280: u32| -> (u32, u32) {
         let s = (crop_info.width as f64) / (BASE_WIDTH as f64);
         let x_real = (x_1280 as f64 * s).round() as u64 + crop_info.offset_x as u64;
         let y_real = (y_1280 as f64 * s).round() as u64 + crop_info.offset_y as u64;
         (
             x_real.min(device_width as u64) as u32,
-            y_real.min(device_width as u64) as u32,
+            y_real.min(device_height as u64) as u32,
         )
     };
     match cmd {
@@ -373,6 +378,7 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     state: PipelineState,
     tasks: Vec<TaskDef>,
     device_width: u32,
+    device_height: u32,
     swipe_duration_ms: u64,
     verify_after_fire: bool,
     last_match: Option<(String, f32, ScreenRegion)>,
@@ -395,6 +401,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         state: PipelineState,
         tasks: Vec<TaskDef>,
         device_width: u32,
+        device_height: u32,
         swipe_duration_ms: u64,
     ) -> Self {
         Self {
@@ -404,6 +411,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             state,
             tasks,
             device_width,
+            device_height,
             swipe_duration_ms,
             verify_after_fire: false,
             last_match: None,
@@ -532,7 +540,12 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 Some(j) => j.jitter_command(cmd),
                 None => cmd,
             };
-            let device_cmd = rescale_command(cmd, self.device_width, &self.last_crop_info);
+            let device_cmd = rescale_command(
+                cmd,
+                self.device_width,
+                self.device_height,
+                &self.last_crop_info,
+            );
             if let Err(e) = self.execute_command(&device_cmd).await {
                 warn!("pipeline execute error: {e}");
                 return StepOutcome::Error {
@@ -590,7 +603,12 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                         Some(j) => j.jitter_command(cmd),
                         None => cmd,
                     };
-                    let device_cmd = rescale_command(cmd, self.device_width, &self.last_crop_info);
+                    let device_cmd = rescale_command(
+                        cmd,
+                        self.device_width,
+                        self.device_height,
+                        &self.last_crop_info,
+                    );
                     match self.execute_command(&device_cmd).await {
                         Ok(()) => {
                             debug!("watch fired: {name} -> {device_cmd:?}");
@@ -1470,7 +1488,7 @@ mod tests {
     #[test]
     fn rescale_tap_no_bars_equivalent_to_from_base_2400() {
         let info = CropInfo::full(2400, 1080);
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 2400, &info);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 2400, 1080, &info);
         assert_eq!(out, InputCommand::Tap { x: 1200, y: 675 });
     }
 
@@ -1481,7 +1499,7 @@ mod tests {
             from: (640, 360),
             to: (0, 0),
         };
-        let out = rescale_command(cmd, 2400, &info);
+        let out = rescale_command(cmd, 2400, 1080, &info);
         assert_eq!(
             out,
             InputCommand::Swipe {
@@ -1494,14 +1512,14 @@ mod tests {
     #[test]
     fn rescale_identity_when_device_width_equals_base_no_bars() {
         let info = CropInfo::full(1280, 720);
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 1280, &info);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 1280, 720, &info);
         assert_eq!(out, InputCommand::Tap { x: 640, y: 360 });
     }
 
     #[test]
     fn rescale_downscale_small_device_width_no_bars() {
         let info = CropInfo::full(640, 360);
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 640, &info);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 640, 360, &info);
         assert_eq!(out, InputCommand::Tap { x: 320, y: 180 });
     }
 
@@ -1513,7 +1531,7 @@ mod tests {
             width: 1678,
             height: 888,
         };
-        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 1918, &info);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 360 }, 1918, 888, &info);
         assert_eq!(out, InputCommand::Tap { x: 959, y: 552 });
     }
 
@@ -1529,7 +1547,7 @@ mod tests {
             from: (640, 360),
             to: (0, 0),
         };
-        let out = rescale_command(cmd, 1918, &info);
+        let out = rescale_command(cmd, 1918, 888, &info);
         assert_eq!(
             out,
             InputCommand::Swipe {
@@ -1537,6 +1555,13 @@ mod tests {
                 to: (120, 80),
             }
         );
+    }
+
+    #[test]
+    fn rescale_portrait_y_clamps_to_height_not_width() {
+        let info = CropInfo::full(1080, 1920);
+        let out = rescale_command(InputCommand::Tap { x: 640, y: 1900 }, 1080, 1920, &info);
+        assert_eq!(out, InputCommand::Tap { x: 540, y: 1603 });
     }
 
     struct FakeCapture {
@@ -1626,6 +1651,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -1676,6 +1702,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -1722,6 +1749,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -1760,6 +1788,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -1786,6 +1815,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![],
             2400,
+            708,
             300,
         );
 
@@ -1843,6 +1873,7 @@ mod tests {
             PipelineState::new("LoginTapTitlePc"),
             vec![real_login_tap_title_task()],
             1952,
+            1098,
             300,
         );
 
@@ -1889,6 +1920,7 @@ mod tests {
             PipelineState::new("LoginTapTitlePc"),
             vec![real_login_tap_title_task()],
             1952,
+            1098,
             300,
         );
 
@@ -1954,6 +1986,7 @@ mod tests {
             PipelineState::new("Title"),
             tasks,
             2400,
+            708,
             300,
         );
 
@@ -1989,6 +2022,7 @@ mod tests {
             PipelineState::new("Title"),
             tasks,
             2400,
+            708,
             300,
         );
 
@@ -2024,6 +2058,7 @@ mod tests {
             PipelineState::new("Title"),
             tasks,
             2400,
+            708,
             300,
         );
 
@@ -2051,6 +2086,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![],
             2400,
+            708,
             300,
         );
 
@@ -2084,6 +2120,7 @@ mod tests {
                 Some(vec!["LoadGame"]),
             )],
             2400,
+            708,
             300,
         );
 
@@ -2133,6 +2170,7 @@ mod tests {
                 Some(vec!["LoadGame"]),
             )],
             2400,
+            708,
             300,
         );
 
@@ -2182,6 +2220,7 @@ mod tests {
                 Some(vec!["LoadGame"]),
             )],
             2400,
+            708,
             300,
         );
 
@@ -2245,6 +2284,7 @@ mod tests {
                 Some(vec!["LoadGame"]),
             )],
             2400,
+            708,
             300,
         )
         .with_recovery_grace(grace)
@@ -2481,6 +2521,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![],
             2400,
+            708,
             300,
         )
         .with_recovery_grace(Duration::from_secs(90))
@@ -2585,6 +2626,7 @@ mod tests {
                 Some(vec!["LoadGame"]),
             )],
             2400,
+            708,
             300,
         );
 
@@ -2678,6 +2720,7 @@ mod tests {
             PipelineState::new("t"),
             vec![],
             1280,
+            708,
             300,
         );
         let out = driver
@@ -2766,6 +2809,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -2813,6 +2857,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -2858,6 +2903,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -2892,6 +2938,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -2935,6 +2982,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         )
         .with_verify(true);
@@ -2995,6 +3043,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -3033,6 +3082,7 @@ mod tests {
                 Some(vec!["LoadGame"]),
             )],
             2400,
+            708,
             300,
         );
 
@@ -3108,6 +3158,7 @@ mod tests {
             PipelineState::new("Title"),
             tasks,
             2400,
+            708,
             300,
         );
 
@@ -3162,6 +3213,7 @@ mod tests {
             PipelineState::new("Title"),
             tasks,
             2400,
+            708,
             300,
         );
 
@@ -3476,6 +3528,7 @@ mod tests {
                 Some(vec!["LoadGame"]),
             )],
             2400,
+            708,
             300,
         );
         (driver, fired)
@@ -4085,6 +4138,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -4150,6 +4204,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -4272,6 +4327,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task],
             2400,
+            708,
             300,
         );
 
@@ -4433,6 +4489,7 @@ mod tests {
                 Some(vec!["LoadGame"]),
             )],
             2400,
+            708,
             300,
         );
         let out = driver.run_once().await;
@@ -4489,6 +4546,7 @@ mod tests {
                 Some(vec!["LoadGame"]),
             )],
             2400,
+            708,
             300,
         );
         let out = driver.run_once().await;
@@ -4551,6 +4609,7 @@ mod tests {
             PipelineState::new("TapToStart"),
             vec![task],
             1258,
+            708,
             300,
         );
 
@@ -4604,6 +4663,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task_nobar],
             1458,
+            708,
             300,
         );
         let out_nobar = driver_nobar.run_once().await;
@@ -4638,6 +4698,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![task_bar],
             1458,
+            708,
             300,
         );
         let out_bar = driver_bar.run_once().await;
@@ -4688,6 +4749,7 @@ mod tests {
             PipelineState::new("Title"),
             tasks,
             2400,
+            708,
             300,
         )
     }
@@ -4946,6 +5008,7 @@ mod tests {
                 Some(vec![]),
             )],
             FULL_W,
+            FULL_H,
             300,
         );
         (driver, fired)
@@ -5122,6 +5185,7 @@ mod tests {
                 task_with_template("Popup", popup_tpl, POPUP_MATCH_ROI, None),
             ],
             FULL_W,
+            FULL_H,
             300,
         );
         (driver, fired)
