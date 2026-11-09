@@ -1,4 +1,10 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "crates/anaden-cli/src/template_tool.rs",
+      "reason": "新規 mod tests 追加のみ (validate_match_scale の 3 unit test)。既存テストの変更・削除なし",
+      "ref": "issue #324 item 3 の --scale 0 panic / 0-size resize 修正 PR のテスト追加"
+    }
+  ]
 }

@@ -93,6 +93,11 @@ fn main() -> anyhow::Result<()> {
         } => {
             let haystack_orig = image::open(&screenshot)?;
             let needle_orig = image::open(&template)?;
+            validate_match_scale(
+                scale,
+                (haystack_orig.width(), haystack_orig.height()),
+                (needle_orig.width(), needle_orig.height()),
+            )?;
 
             println!(
                 "Screenshot: {}x{}",
@@ -357,4 +362,54 @@ fn run_pipeline(
     }
 
     Ok(())
+}
+
+fn validate_match_scale(
+    scale: u32,
+    haystack: (u32, u32),
+    needle: (u32, u32),
+) -> anyhow::Result<()> {
+    if scale == 0 {
+        return Err(anyhow::anyhow!("--scale must be >= 1 (got 0)"));
+    }
+    for (label, (w, h)) in [("screenshot", haystack), ("template", needle)] {
+        if w / scale == 0 || h / scale == 0 {
+            return Err(anyhow::anyhow!(
+                "--scale {} reduces the {label} dimensions {}x{} to zero; use a smaller scale",
+                scale,
+                w,
+                h
+            ));
+        }
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn match_scale_zero_is_rejected() {
+        let err = validate_match_scale(0, (1280, 720), (60, 30)).unwrap_err();
+        assert!(err.to_string().contains(">= 1"), "{err}");
+    }
+
+    #[test]
+    fn match_scale_zeroing_dimensions_is_rejected() {
+        assert!(validate_match_scale(1000, (1280, 720), (60, 30)).is_err());
+        assert!(validate_match_scale(31, (1280, 720), (60, 30)).is_err());
+        assert!(validate_match_scale(61, (1280, 720), (60, 30)).is_err());
+        assert!(validate_match_scale(721, (1280, 720), (60, 30)).is_err());
+    }
+
+    #[test]
+    fn match_scale_identity_and_divisible_scales_pass() {
+        assert!(validate_match_scale(1, (1280, 720), (60, 30)).is_ok());
+        assert!(validate_match_scale(2, (1280, 720), (60, 30)).is_ok());
+        assert!(validate_match_scale(30, (1280, 720), (60, 30)).is_ok());
+    }
 }
