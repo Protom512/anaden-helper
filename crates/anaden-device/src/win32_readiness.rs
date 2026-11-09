@@ -4,6 +4,7 @@ use std::mem::size_of;
 use std::time::Duration;
 
 use tracing::{info, warn};
+use windows::Win32::Foundation::ERROR_INSUFFICIENT_BUFFER;
 use windows::Win32::NetworkManagement::IpHelper::{
     GetExtendedTcpTable, MIB_TCP6ROW_OWNER_PID, MIB_TCPROW_OWNER_PID, TCP_TABLE_OWNER_PID_ALL,
 };
@@ -118,22 +119,7 @@ fn count_tcp_table(pids: &[u32], af: u32, row_size: usize) -> Result<u32, Device
     if size == 0 {
         return Ok(0);
     }
-    let mut buf = vec![0u8; size as usize];
-    let rc = unsafe {
-        GetExtendedTcpTable(
-            Some(buf.as_mut_ptr().cast()),
-            &mut size,
-            false,
-            af,
-            TCP_TABLE_OWNER_PID_ALL,
-            0,
-        )
-    };
-    if rc != 0 {
-        return Err(DeviceError::CommandFailed {
-            message: format!("readiness probe: GetExtendedTcpTable 失敗 (rc={rc}, af={af})"),
-        });
-    }
+    let buf = fetch_tcp_table_with_retry(af, size)?;
     let rows = buf.get(4..).unwrap_or(&[]);
     let mut count = 0u32;
     for row in rows.chunks_exact(row_size) {
@@ -146,7 +132,63 @@ fn count_tcp_table(pids: &[u32], af: u32, row_size: usize) -> Result<u32, Device
     Ok(count)
 }
 
+const TCP_TABLE_FETCH_ATTEMPTS: usize = 3;
+const TCP_TABLE_RETRY_DELAY: Duration = Duration::from_millis(10);
+
+fn fetch_tcp_table_with_retry(af: u32, mut size: u32) -> Result<Vec<u8>, DeviceError> {
+    let mut attempts = 0;
+    loop {
+        let mut buf = vec![0u8; size as usize];
+        let rc = unsafe {
+            GetExtendedTcpTable(
+                Some(buf.as_mut_ptr().cast()),
+                &mut size,
+                false,
+                af,
+                TCP_TABLE_OWNER_PID_ALL,
+                0,
+            )
+        };
+        if rc == 0 {
+            return Ok(buf);
+        }
+        if rc != ERROR_INSUFFICIENT_BUFFER.0 {
+            return Err(DeviceError::CommandFailed {
+                message: format!("readiness probe: GetExtendedTcpTable 失敗 (rc={rc}, af={af})"),
+            });
+        }
+        attempts += 1;
+        if attempts >= TCP_TABLE_FETCH_ATTEMPTS {
+            return Err(DeviceError::CommandFailed {
+                message: format!(
+                    "readiness probe: GetExtendedTcpTable が {TCP_TABLE_FETCH_ATTEMPTS} 回試行後も rc=122 (テーブル成長レースが継続, af={af})"
+                ),
+            });
+        }
+        std::thread::sleep(TCP_TABLE_RETRY_DELAY);
+    }
+}
+
 fn read_u32(buf: &[u8], offset: usize) -> Option<u32> {
     let bytes = buf.get(offset..offset.checked_add(4)?)?;
     Some(u32::from_ne_bytes([bytes[0], bytes[1], bytes[2], bytes[3]]))
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fetch_tcp_table_recovers_from_forced_insufficient_buffer() {
+        let bytes = fetch_tcp_table_with_retry(AF_INET.0 as u32, 4)
+            .expect("retry must recover from forced rc=122");
+        assert!(
+            bytes.len() >= 4,
+            "table header must be present after retry, got {} bytes",
+            bytes.len()
+        );
+    }
 }
