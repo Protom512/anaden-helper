@@ -2324,6 +2324,7 @@ mod tests {
                 None,
             )],
             2400,
+            708,
             300,
         );
 
@@ -2363,6 +2364,7 @@ mod tests {
                 None,
             )],
             2400,
+            708,
             300,
         )
         .with_recovery_grace(Duration::from_secs(90))
