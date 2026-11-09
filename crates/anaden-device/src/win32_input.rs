@@ -14,12 +14,11 @@ use windows::Win32::UI::Input::KeyboardAndMouse::{
     MOUSEEVENTF_LEFTUP, MOUSEEVENTF_MOVE, MOUSEEVENTF_VIRTUALDESK, MOUSEINPUT, SendInput,
 };
 use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId,
-    IsIconic, IsWindowVisible, PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN,
-    SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN, SW_RESTORE, SetCursorPos, SetForegroundWindow,
-    SetProcessDPIAware, ShowWindow, WM_LBUTTONDOWN, WM_LBUTTONUP, WM_MOUSEMOVE,
+    GetForegroundWindow, GetSystemMetrics, GetWindowRect, GetWindowThreadProcessId, IsIconic,
+    PostMessageW, SM_CXVIRTUALSCREEN, SM_CYVIRTUALSCREEN, SM_XVIRTUALSCREEN, SM_YVIRTUALSCREEN,
+    SW_RESTORE, SetCursorPos, SetForegroundWindow, SetProcessDPIAware, ShowWindow, WM_LBUTTONDOWN,
+    WM_LBUTTONUP, WM_MOUSEMOVE,
 };
-use windows::core::BOOL;
 
 use anaden_core::InputAction;
 
@@ -297,51 +296,18 @@ pub(crate) fn find_pid_by_name(name: &str) -> Option<u32> {
     super::win32_proc::find_pid_by_name(name)
 }
 
-struct HwndSearchState {
-    target_pid: u32,
-    found: Option<HWND>,
-}
-
-pub(crate) fn find_main_window(pid: u32) -> Option<HWND> {
-    let mut state = HwndSearchState {
-        target_pid: pid,
-        found: None,
-    };
-    let lparam = LPARAM(&mut state as *mut HwndSearchState as isize);
-    unsafe {
-        let _ = EnumWindows(Some(enum_proc), lparam);
-    }
-    state.found
-}
-
-unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> BOOL {
-    unsafe {
-        let state = &mut *(lparam.0 as *mut HwndSearchState);
-        if state.found.is_some() {
-            return BOOL(0);
-        }
-        if !IsWindowVisible(hwnd).as_bool() {
-            return BOOL(1);
-        }
-        let mut wpid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut wpid as *mut u32));
-        if wpid == state.target_pid {
-            state.found = Some(hwnd);
-            return BOOL(0);
-        }
-        BOOL(1)
-    }
-}
-
 fn resolve_pid_and_hwnd(process: &str) -> Result<(u32, HWND), DeviceError> {
     let pid = find_pid_by_name(process).ok_or_else(|| DeviceError::CommandFailed {
         message: format!(
             "プロセスが見つかりません ({process})。ゲームを起動してから再実行してください。"
         ),
     })?;
-    let hwnd = find_main_window(pid).ok_or_else(|| DeviceError::CommandFailed {
-        message: format!("PID {pid} に紐づく可視ウィンドウが見つかりません ({process})。ウィンドウが最小化/非表示の可能性。"),
-    })?;
+    let hwnd = super::win32_proc::find_visible_top_level_window(pid)
+        .ok_or_else(|| DeviceError::CommandFailed {
+            message: format!(
+                "PID {pid} に紐づく可視ウィンドウが見つかりません ({process})。ウィンドウが最小化/非表示の可能性。"
+            ),
+        })?;
     Ok((pid, hwnd))
 }
 

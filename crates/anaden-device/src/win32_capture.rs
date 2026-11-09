@@ -3,7 +3,7 @@
 use std::sync::Mutex;
 
 use image::{DynamicImage, ImageBuffer, RgbaImage};
-use windows::Win32::Foundation::{HWND, LPARAM, RECT};
+use windows::Win32::Foundation::{HWND, RECT};
 use windows::Win32::Graphics::Gdi::{
     BI_RGB, BITMAPINFO, BITMAPINFOHEADER, CreateCompatibleBitmap, CreateCompatibleDC,
     DIB_RGB_COLORS, DeleteDC, DeleteObject, GetDC, GetDIBits, HDC, HGDIOBJ, SelectObject,
@@ -12,9 +12,6 @@ use windows::Win32::Storage::Xps::{PRINT_WINDOW_FLAGS, PrintWindow};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, PROCESS_PER_MONITOR_DPI_AWARE,
     SetProcessDpiAwareness, SetProcessDpiAwarenessContext,
-};
-use windows::Win32::UI::WindowsAndMessaging::{
-    EnumWindows, GetParent, GetWindowThreadProcessId, IsWindowVisible,
 };
 
 use crate::error::DeviceError;
@@ -154,58 +151,17 @@ pub fn set_process_dpi_aware() {
     }
 }
 
-struct HwndSearchState {
-    target_pid: u32,
-    found: Option<HWND>,
-}
-
 fn resolve_hwnd(process: &str) -> Result<HWND, DeviceError> {
     let pid = super::win32_proc::find_pid_by_name(process).ok_or_else(|| DeviceError::CommandFailed {
         message: format!(
             "プロセス \"{process}\" が見つかりません(タスクマネージャで exe 名を確認してください)"
         ),
     })?;
-    find_visible_hwnd_for_pid(pid).ok_or_else(|| DeviceError::CommandFailed {
+    super::win32_proc::find_visible_top_level_window(pid).ok_or_else(|| DeviceError::CommandFailed {
         message: format!(
             "PID {pid} に紐づく可視トップレベルウィンドウが見つかりません(最小化/非表示の可能性)"
         ),
     })
-}
-
-pub(crate) fn find_visible_hwnd_for_pid(pid: u32) -> Option<HWND> {
-    let mut state = HwndSearchState {
-        target_pid: pid,
-        found: None,
-    };
-    let lparam = LPARAM(&mut state as *mut HwndSearchState as isize);
-    unsafe {
-        let _ = EnumWindows(Some(enum_proc), lparam);
-    }
-    state.found
-}
-
-unsafe extern "system" fn enum_proc(hwnd: HWND, lparam: LPARAM) -> windows::core::BOOL {
-    unsafe {
-        let state = &mut *(lparam.0 as *mut HwndSearchState);
-        if state.found.is_some() {
-            return windows::Win32::Foundation::TRUE;
-        }
-        if !IsWindowVisible(hwnd).as_bool() {
-            return windows::Win32::Foundation::TRUE;
-        }
-        match GetParent(hwnd) {
-            Ok(parent) if !parent.is_invalid() => {
-                return windows::Win32::Foundation::TRUE;
-            }
-            _ => {}
-        }
-        let mut wpid: u32 = 0;
-        GetWindowThreadProcessId(hwnd, Some(&mut wpid as *mut u32));
-        if wpid == state.target_pid {
-            state.found = Some(hwnd);
-        }
-    }
-    windows::Win32::Foundation::TRUE
 }
 
 pub(crate) fn client_size(hwnd: HWND) -> Result<(u32, u32), i32> {
