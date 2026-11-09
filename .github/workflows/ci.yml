@@ -125,10 +125,12 @@ jobs:
         with:
           node-version: 20
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Install metrics tools
         run: |
-          cargo install --locked cccc-rs-cli
-          cargo install --locked similarity-rs
+          cargo install --locked --version 0.4.0 cccc-rs-cli
+          cargo install --locked --version 0.5.0 similarity-rs
 
       - name: Complexity gate
         run: node scripts/quality/complexity_gate.mjs
