@@ -4,7 +4,7 @@ import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
 const CCCC_BIN = 'cccc-rs';
-const CCCC_ARGS = ['crates', '--ext', 'rs'];
+const CCCC_ARGS = ['crates', 'scripts', '--ext', 'rs'];
 const DEFAULT_MAX_CYCLOMATIC = 15;
 const DEFAULT_MAX_COGNITIVE = 20;
 
