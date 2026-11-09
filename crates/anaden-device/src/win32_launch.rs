@@ -355,7 +355,7 @@ mod tests {
                         .into_iter()
                         .filter(|e| e.name.eq_ignore_ascii_case(&launcher_name))
                     {
-                        let _ = terminate_pid(e.pid);
+                        let _ = terminate_pid(e.pid, &launcher_name);
                     }
                 }
                 break;
