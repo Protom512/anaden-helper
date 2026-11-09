@@ -1,10 +1,4 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": [
-    {
-      "file": "crates/anaden-cli/src/pipeline.rs",
-      "reason": "run47 PR A (#319): try_start を単一クリティカルセクション化 + 完了側 reset を lock().await 化 + state() contention を RunState::Unknown 化の回帰テスト3件を in-src test mod に追加",
-      "ref": "#319"
-    }
-  ]
+  "entries": []
 }
