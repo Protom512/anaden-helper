@@ -69,6 +69,7 @@ impl StrategyPanel {
 
     pub fn load_toml(&mut self, s: &str) -> Result<(), toml::de::Error> {
         self.selection = toml::from_str(s)?;
+        self.selection.retain_known_options(&self.catalog);
         Ok(())
     }
 
@@ -290,6 +291,23 @@ mod tests {
     fn load_toml_invalid_string_is_err() {
         let mut panel = StrategyPanel::default();
         assert!(panel.load_toml("not = valid = toml").is_err());
+    }
+
+    #[test]
+    fn load_toml_prunes_stale_option_keys() {
+        let mut panel = StrategyPanel::default();
+        panel
+            .load_toml(
+                "strategy = \"field_loop_pc\"\n\n[options]\n\"field_loop_pc.stale\" = true\n",
+            )
+            .expect("parse");
+        assert_eq!(panel.selection().strategy.as_deref(), Some("field_loop_pc"));
+        assert!(
+            !panel
+                .selection()
+                .options
+                .contains_key("field_loop_pc.stale")
+        );
     }
 
     #[test]

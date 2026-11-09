@@ -147,14 +147,35 @@ impl StrategySelection {
         {
             return Err(SelectionError::UnknownStrategy { id: id.clone() });
         }
+        for key in self.options.keys() {
+            if !is_known_option_key(catalog, key) {
+                return Err(SelectionError::UnknownOption { key: key.clone() });
+            }
+        }
         Ok(())
     }
+
+    pub fn retain_known_options(&mut self, catalog: &StrategyCatalog) {
+        self.options
+            .retain(|key, _| is_known_option_key(catalog, key));
+    }
+}
+
+fn is_known_option_key(catalog: &StrategyCatalog, key: &str) -> bool {
+    let Some((strategy_id, option_id)) = key.split_once('.') else {
+        return false;
+    };
+    catalog
+        .find(strategy_id)
+        .is_some_and(|def| def.options.iter().any(|o| o.id == option_id))
 }
 
 #[derive(Debug, Clone, PartialEq, thiserror::Error)]
 pub enum SelectionError {
     #[error("unknown strategy: {id}")]
     UnknownStrategy { id: String },
+    #[error("unknown option key: {key}")]
+    UnknownOption { key: String },
 }
 
 #[cfg(test)]
@@ -386,5 +407,67 @@ mod tests {
         assert!(sel.validate(&catalog).is_ok());
         sel = StrategySelection::default();
         assert!(sel.validate(&catalog).is_ok());
+    }
+
+    fn catalog_with_one_option() -> StrategyCatalog {
+        let mut def = pipeline_def(
+            "field_loop_pc",
+            "ラベル",
+            "templates/pipelines/field_loop_pc",
+            "TapBottomStablePc",
+            "ccoeff",
+            Some("windows"),
+        );
+        def.options.push(StrategyOptionDef {
+            id: "skip_first".to_string(),
+            label: "最初の1回をスキップ".to_string(),
+            default: false,
+        });
+        StrategyCatalog {
+            strategies: vec![def],
+        }
+    }
+
+    #[test]
+    fn validate_accepts_defined_option_key() {
+        let catalog = catalog_with_one_option();
+        let mut sel = StrategySelection::default();
+        sel.set_option("field_loop_pc", "skip_first", true);
+        assert!(sel.validate(&catalog).is_ok());
+    }
+
+    #[test]
+    fn validate_rejects_undefined_option_key() {
+        let catalog = catalog_with_one_option();
+        let mut sel = StrategySelection::default();
+        sel.set_option("field_loop_pc", "not_defined", true);
+        assert!(matches!(
+            sel.validate(&catalog),
+            Err(SelectionError::UnknownOption { .. })
+        ));
+    }
+
+    #[test]
+    fn validate_rejects_option_key_of_removed_strategy() {
+        let catalog = StrategyCatalog::builtin();
+        let mut sel = StrategySelection::default();
+        sel.set_option("field_loop_pc", "skip_first", true);
+        assert!(matches!(
+            sel.validate(&catalog),
+            Err(SelectionError::UnknownOption { .. })
+        ));
+    }
+
+    #[test]
+    fn retain_known_options_drops_stale_and_keeps_defined() {
+        let catalog = catalog_with_one_option();
+        let mut sel = StrategySelection::default();
+        sel.set_option("field_loop_pc", "skip_first", true);
+        sel.set_option("nav_to_field_pc", "stale", false);
+        sel.options.insert("no_dot".to_string(), true);
+        sel.retain_known_options(&catalog);
+        assert_eq!(sel.option("field_loop_pc", "skip_first"), Some(true));
+        assert!(!sel.options.contains_key("nav_to_field_pc.stale"));
+        assert!(!sel.options.contains_key("no_dot"));
     }
 }
