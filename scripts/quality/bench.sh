@@ -77,7 +77,7 @@ if command -v hyperfine >/dev/null 2>&1; then
   echo "bench: hyperfine reference for routine-dry-run"
   hyperfine -N --warmup 1 --runs 5 \
     --export-json "$OUT/hyperfine-routine.json" \
-    "target/release/anaden.exe routine $OUT/routine-bench.toml --dry-run"
+    "$CLI routine $OUT/routine-bench.toml --dry-run"
 else
   echo "bench: hyperfine not installed — skipping reference timing"
 fi
