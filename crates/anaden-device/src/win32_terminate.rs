@@ -1,14 +1,18 @@
 #![cfg(windows)]
 
+use std::path::Path;
 use std::time::{Duration, Instant};
 
 use tracing::{info, warn};
-use windows::Win32::Foundation::{CloseHandle, HWND, LPARAM, WPARAM};
-use windows::Win32::System::Threading::{OpenProcess, PROCESS_TERMINATE, TerminateProcess};
+use windows::Win32::Foundation::{CloseHandle, HANDLE, HWND, LPARAM, WPARAM};
+use windows::Win32::System::Threading::{
+    OpenProcess, PROCESS_NAME_WIN32, PROCESS_QUERY_LIMITED_INFORMATION, PROCESS_TERMINATE,
+    QueryFullProcessImageNameW, TerminateProcess,
+};
 use windows::Win32::UI::WindowsAndMessaging::{
     EnumWindows, GetWindowThreadProcessId, PostMessageW, WM_CLOSE,
 };
-use windows::core::BOOL;
+use windows::core::{BOOL, PWSTR};
 
 use crate::error::DeviceError;
 
@@ -92,7 +96,7 @@ fn force_terminate_until_gone(child: &str, exit_wait: Duration) -> Result<(), De
             "Win32Terminate: stage 2/2 — {child} へ TerminateProcess (pids={pids:?}, exit_code={FORCE_EXIT_CODE})"
         );
         for pid in pids {
-            if let Err(e) = terminate_pid(pid) {
+            if let Err(e) = terminate_pid(pid, child) {
                 warn!("Win32Terminate: TerminateProcess({pid}) 失敗 (次ポーリングで再試行): {e}");
             }
         }
@@ -108,13 +112,64 @@ fn force_terminate_until_gone(child: &str, exit_wait: Duration) -> Result<(), De
     }
 }
 
-pub(crate) fn terminate_pid(pid: u32) -> windows::core::Result<()> {
-    unsafe {
-        let handle = OpenProcess(PROCESS_TERMINATE, false, pid)?;
-        let result = TerminateProcess(handle, FORCE_EXIT_CODE);
-        let _ = CloseHandle(handle);
-        result
+pub(crate) fn terminate_pid(pid: u32, child: &str) -> Result<(), DeviceError> {
+    let handle = unsafe {
+        OpenProcess(
+            PROCESS_TERMINATE | PROCESS_QUERY_LIMITED_INFORMATION,
+            false,
+            pid,
+        )
     }
+    .map_err(|e| DeviceError::CommandFailed {
+        message: format!("Win32Terminate: OpenProcess(pid={pid}) 失敗: {e}"),
+    })?;
+    let outcome = terminate_handle_if_matches(handle, pid, child);
+    unsafe {
+        let _ = CloseHandle(handle);
+    }
+    outcome
+}
+
+fn terminate_handle_if_matches(handle: HANDLE, pid: u32, child: &str) -> Result<(), DeviceError> {
+    let Some(image) = process_image_name(handle) else {
+        warn!(
+            "Win32Terminate: pid={pid} のイメージ名取得に失敗 — 終了対象を特定できず terminate を見送り (fail-closed)"
+        );
+        return Ok(());
+    };
+    if !image_name_matches(child, &image) {
+        warn!(
+            "Win32Terminate: pid={pid} のイメージ名 {image} は {child} と不一致 — pid 再利用の可能性、terminate を見送り"
+        );
+        return Ok(());
+    }
+    unsafe { TerminateProcess(handle, FORCE_EXIT_CODE) }.map_err(|e| DeviceError::CommandFailed {
+        message: format!("Win32Terminate: TerminateProcess(pid={pid}) 失敗: {e}"),
+    })
+}
+
+fn process_image_name(handle: HANDLE) -> Option<String> {
+    let mut buf = [0u16; 1024];
+    let mut len = buf.len() as u32;
+    let result = unsafe {
+        QueryFullProcessImageNameW(
+            handle,
+            PROCESS_NAME_WIN32,
+            PWSTR(buf.as_mut_ptr()),
+            &mut len,
+        )
+    };
+    if result.is_err() {
+        return None;
+    }
+    let len = (len as usize).min(buf.len());
+    Some(String::from_utf16_lossy(&buf[..len]))
+}
+
+fn image_name_matches(child: &str, image_path: &str) -> bool {
+    Path::new(image_path)
+        .file_name()
+        .is_some_and(|name| name.eq_ignore_ascii_case(child))
 }
 
 fn post_wm_close_to_pids(pids: &[u32]) -> usize {
@@ -161,5 +216,59 @@ unsafe extern "system" fn collect_windows_proc(hwnd: HWND, lparam: LPARAM) -> BO
             state.hwnds.push(hwnd);
         }
         BOOL(1)
+    }
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used)]
+#[allow(clippy::panic)]
+mod tests {
+    use std::process::{Command, Stdio};
+
+    use super::*;
+
+    #[test]
+    fn image_name_matches_bare_file_name_case_insensitively() {
+        assert!(image_name_matches(
+            "anaden.exe",
+            r"C:\apps\Anaden\anaden.EXE"
+        ));
+        assert!(image_name_matches(
+            "ANADEN.EXE",
+            r"C:\apps\Anaden\anaden.exe"
+        ));
+    }
+
+    #[test]
+    fn image_name_matches_rejects_other_names_and_extensions() {
+        assert!(!image_name_matches(
+            "anaden.exe",
+            r"C:\Windows\System32\cmd.exe"
+        ));
+        assert!(!image_name_matches("anaden.exe", r"C:\apps\anaden.exe.bak"));
+    }
+
+    #[test]
+    fn terminate_pid_skips_pid_whose_image_does_not_match_child() {
+        let mut probe = Command::new("powershell.exe")
+            .args(["-NoProfile", "-Command", "Start-Sleep -Seconds 30"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn probe powershell");
+        let pid = probe.id();
+
+        let absent = format!("anaden_t111_absent_{}.exe", std::process::id());
+        terminate_pid(pid, &absent).expect("image-name mismatch must skip, not error");
+        assert!(
+            probe.try_wait().expect("try_wait probe").is_none(),
+            "mismatched image name must not terminate the probe"
+        );
+
+        terminate_pid(pid, "powershell.exe").expect("matching image name must terminate");
+        let status = probe.wait().expect("wait probe after terminate");
+        assert_eq!(status.code(), Some(FORCE_EXIT_CODE as i32));
     }
 }
