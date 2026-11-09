@@ -139,7 +139,7 @@ test('formatEvidenceForReviewers produces capped plain-text blob', () => {
   const blob = api.formatEvidenceForReviewers({ ...GOOD, outputTail: 'x'.repeat(5000) });
   if (typeof blob !== 'string' || blob.length === 0) throw new Error('blob must be string');
   if (blob.includes('x'.repeat(2001))) throw new Error('outputTail must be capped');
-  if (!blob.includes('120') || !blob.includes('build exit=0')) throw new Error('blob must include pass count and exit codes');
+  if (!blob.includes(`passed=${GOOD.passed},`) || !blob.includes('build exit=0')) throw new Error('blob must include pass count and exit codes');
   if (!blob.includes('collectedAt')) throw new Error('blob must include collectedAt');
   const missing = api.formatEvidenceForReviewers(null);
   if (!/not collected|missing/i.test(missing)) throw new Error('null evidence must say missing');

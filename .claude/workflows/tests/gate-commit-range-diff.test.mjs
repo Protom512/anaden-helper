@@ -87,7 +87,7 @@ test('feature-pipeline keeps R8 caps 28000/24000/30000 after commit-range additi
   assert.ok(body.includes('28000'), '28000 threshold in prompt');
   assert.ok(body.includes('24000'), '24000 DIFF cut in prompt');
   const after = fpSrc.slice(idx, idx + 2500);
-  assert.ok(after.includes('30000'), '30000 total cap on GATE_DIFF');
+  assert.ok(after.includes('.slice(0, 30000)'), 'GATE_DIFF capped via .slice(0, 30000)');
 });
 
 test('feature-pipeline: fail-closed uses unified T1 helper and short-circuits before reviewer prompts', () => {
