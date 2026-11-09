@@ -79,6 +79,7 @@ impl TaskKind {
 }
 
 #[derive(Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
 struct RawTaskDefinition {
     id: String,
     title: String,

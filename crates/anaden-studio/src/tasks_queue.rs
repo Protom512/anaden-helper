@@ -245,7 +245,7 @@ impl QueueExec {
                 self.state = QueueState::PausedAfterBudgetExhausted { current };
                 QueueAction::WaitForExit
             }
-            RunOutcome::Failed | RunOutcome::Cancelled => {
+            RunOutcome::Failed | RunOutcome::Cancelled | RunOutcome::Unknown => {
                 self.state = QueueState::PausedAfterFailure { current, exit_code };
                 QueueAction::WaitForExit
             }
