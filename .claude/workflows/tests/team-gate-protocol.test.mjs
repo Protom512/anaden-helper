@@ -10,7 +10,7 @@ import {
   buildReviewerTeammatePrompt,
   buildConsensusJudgePrompt,
   decideReviewRoute,
-} from './team-gate-protocol.js';
+} from '../team-gate-protocol.js';
 
 test('parseStructuredEnvelope: valid JSON envelope yields structured verdict', () => {
   const text = 'review done\n```json\n{"verdict":"GO","dimension":"reliability","findings":[],"summary":"ok"}\n```';
