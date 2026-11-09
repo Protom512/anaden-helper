@@ -20,6 +20,7 @@ const runTimestamp = argsObj.runTimestamp || 'unknown';
 const runId = argsObj.runId || 'run-manual';
 const PHASES = argsObj.phases || PIPELINE_PHASES;
 const ISO_8601_TZ_RE = /^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}(\.\d+)?(Z|[+-]\d{2}:\d{2})$/;
+const RUN_ID_PATH_SEGMENT_RE = /^[A-Za-z0-9_-]+$/;
 function isIso8601WithTimezone(value) {
   return typeof value === 'string' && ISO_8601_TZ_RE.test(value);
 }
@@ -32,6 +33,7 @@ function buildRunMetadata(input) {
   else if (!isIso8601WithTimezone(input.runTimestamp)) errors.push('runTimestamp: not ISO 8601 with timezone');
   if (input.runId == null) errors.push('runId: missing');
   else if (typeof input.runId !== 'string') errors.push('runId: not a string');
+  else if (!RUN_ID_PATH_SEGMENT_RE.test(input.runId)) errors.push('runId: not a safe path segment (allowed: A-Za-z0-9 _ -)');
   if (input.issue == null) errors.push('issue: missing');
   else if (typeof input.issue !== 'number') errors.push('issue: not a number');
   if (input.title == null) errors.push('title: missing');
