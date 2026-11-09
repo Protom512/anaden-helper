@@ -1,6 +1,7 @@
 use std::path::{Path, PathBuf};
 
 use async_trait::async_trait;
+use serde::Serialize;
 use tracing::{info, warn};
 
 use anaden_engine::{
@@ -110,6 +111,24 @@ pub(crate) fn summary_exit_code(summary: &RoutineSummary) -> i32 {
     if summary.all_ok() { 0 } else { 2 }
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct RoutineMeta<'a> {
+    run_id: &'a str,
+    run_timestamp: String,
+    command: &'a str,
+    routine: &'a str,
+    steps: usize,
+    completed: usize,
+    failed: usize,
+    skipped: usize,
+    aborted: bool,
+    total_iterations: u64,
+    total_fired: usize,
+    exit_code: i32,
+    recorded_at_unix: u64,
+}
+
 pub(crate) fn write_routine_evidence(
     dir: &Path,
     routine_name: &str,
@@ -125,25 +144,25 @@ pub(crate) fn write_routine_evidence(
     let summary_path = dir.join(ROUTINE_SUMMARY_FILE);
     std::fs::write(&summary_path, &summary_text)?;
 
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let meta = format!(
-        "{{\n  \"runId\": \"{}\",\n  \"runTimestamp\": \"{}\",\n  \"command\": \"{}\",\n  \"routine\": \"{}\",\n  \"steps\": {},\n  \"completed\": {},\n  \"failed\": {},\n  \"skipped\": {},\n  \"aborted\": {},\n  \"totalIterations\": {},\n  \"totalFired\": {},\n  \"exitCode\": {},\n  \"recordedAtUnix\": {}\n}}\n",
-        esc(&run_id_of(dir)),
-        crate::e2e::iso8601_utc(crate::e2e::unix_now()),
-        esc(command),
-        esc(routine_name),
-        summary.results.len(),
-        summary.completed,
-        summary.failed,
-        summary.skipped,
-        summary.aborted,
-        summary.total_iterations,
-        summary.total_fired,
+    let meta = RoutineMeta {
+        run_id: &run_id_of(dir),
+        run_timestamp: crate::e2e::iso8601_utc(crate::e2e::unix_now()),
+        command,
+        routine: routine_name,
+        steps: summary.results.len(),
+        completed: summary.completed,
+        failed: summary.failed,
+        skipped: summary.skipped,
+        aborted: summary.aborted,
+        total_iterations: summary.total_iterations,
+        total_fired: summary.total_fired,
         exit_code,
-        crate::e2e::unix_now(),
-    );
+        recorded_at_unix: crate::e2e::unix_now(),
+    };
+    let json = serde_json::to_string_pretty(&meta)
+        .map_err(|e| std::io::Error::other(format!("routine metadata の JSON 化に失敗: {e}")))?;
     let meta_path = dir.join(ROUTINE_META_FILE);
-    std::fs::write(&meta_path, &meta)?;
+    std::fs::write(&meta_path, format!("{json}\n"))?;
     Ok((summary_path, meta_path))
 }
 
@@ -417,6 +436,25 @@ mod tests {
         ] {
             assert!(meta.contains(required), "missing {required} in:\n{meta}");
         }
+    }
+
+    #[test]
+    fn routine_metadata_stays_valid_json_with_control_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let s = summary_of(vec![StepStatus::Completed(LoopStopReason::Stop)]);
+        let (_, meta_path) = write_routine_evidence(
+            dir.path().join("run-x").as_path(),
+            "routine\u{7}name",
+            "cmd\nwith\tcontrol",
+            &s,
+            0,
+        )
+        .expect("evidence write");
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("routine metadata must stay valid JSON");
+        assert_eq!(parsed["routine"], "routine\u{7}name");
+        assert_eq!(parsed["command"], "cmd\nwith\tcontrol");
     }
 
     fn workspace_root() -> PathBuf {

@@ -1,4 +1,15 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "crates/anaden-cli/src/e2e.rs",
+      "reason": "スクリーンショット一意名化 (#304 item 2) に伴う旧連番ピンの更新 + drive-prefix/制御文字テスト追加。主張する契約は不変 (一意性・有効 JSON)",
+      "ref": "#304 items 1-3"
+    },
+    {
+      "file": "crates/anaden-cli/src/routine.rs",
+      "reason": "制御文字混じり routine metadata が有効 JSON であり続けることをピンするテスト追加",
+      "ref": "#304 item 3"
+    }
+  ]
 }
