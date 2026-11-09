@@ -282,11 +282,9 @@ fn run_pipeline(
     algorithm_override: Option<&str>,
 ) -> anyhow::Result<()> {
     let override_algo: Option<anaden_vision::Algorithm> = match algorithm_override {
-        Some("sse") => Some(anaden_vision::Algorithm::Sse),
-        Some("ccoeff") => Some(anaden_vision::Algorithm::Ccoeff),
-        Some(other) => {
-            anyhow::bail!("--algorithm は `sse` または `ccoeff` です（指定値: {other}）")
-        }
+        Some(a) => Some(
+            anaden_cli_contract::pipeline::resolve_algorithm(a).map_err(|e| anyhow::anyhow!(e))?,
+        ),
         None => None,
     };
 
