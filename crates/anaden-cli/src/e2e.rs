@@ -1,7 +1,9 @@
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::{Component, Path, PathBuf};
+use std::sync::atomic::{AtomicU32, Ordering};
 
 use async_trait::async_trait;
+use serde::Serialize;
 
 pub const EVIDENCE_LOG_FILE: &str = "uc2-e2e-evidence.log";
 
@@ -17,6 +19,12 @@ pub fn e2e_run_dir(evidence_dir: &Path, run_id: &str) -> Option<PathBuf> {
         || run_id.contains('/')
         || run_id.contains('\\')
     {
+        return None;
+    }
+    if matches!(
+        Path::new(run_id).components().next(),
+        Some(Component::Prefix(_))
+    ) {
         return None;
     }
     Some(evidence_dir.join(run_id))
@@ -87,23 +95,23 @@ pub fn append_evidence_line(dir: &Path, line: &str) -> std::io::Result<()> {
     writeln!(f, "{line}")
 }
 
+static SCREENSHOT_SEQ: AtomicU32 = AtomicU32::new(0);
+
 pub fn save_screenshot(dir: &Path, image: &image::DynamicImage) -> std::io::Result<PathBuf> {
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
     }
-    let mut seq: u32 = 0;
-    loop {
-        let path = dir.join(format!("{SCREENSHOT_PREFIX}-{seq:03}.png"));
-        if !path.exists() {
-            image
-                .save_with_format(&path, image::ImageFormat::Png)
-                .map_err(|e| {
-                    std::io::Error::other(format!("PNG 保存失敗 {}: {e}", path.display()))
-                })?;
-            return Ok(path);
-        }
-        seq = seq.saturating_add(1);
-    }
+    let seq = SCREENSHOT_SEQ.fetch_add(1, Ordering::SeqCst);
+    let name = format!(
+        "{SCREENSHOT_PREFIX}-{}-{}-{seq:03}.png",
+        unix_now_millis(),
+        std::process::id()
+    );
+    let path = dir.join(name);
+    image
+        .save_with_format(&path, image::ImageFormat::Png)
+        .map_err(|e| std::io::Error::other(format!("PNG 保存失敗 {}: {e}", path.display())))?;
+    Ok(path)
 }
 
 #[must_use]
@@ -121,6 +129,18 @@ pub fn count_screenshots(dir: &Path) -> usize {
         .unwrap_or(0)
 }
 
+#[derive(Serialize)]
+#[serde(rename_all = "camelCase")]
+struct EvidenceMeta<'a> {
+    run_id: &'a str,
+    run_timestamp: &'a str,
+    command: &'a str,
+    tree_hash: &'a str,
+    screenshots: usize,
+    evidence_log_file: &'static str,
+    recorded_at_unix: u64,
+}
+
 pub fn write_metadata(
     dir: &Path,
     run_id: &str,
@@ -132,19 +152,19 @@ pub fn write_metadata(
     if !dir.exists() {
         std::fs::create_dir_all(dir)?;
     }
-    let esc = |s: &str| s.replace('\\', "\\\\").replace('"', "\\\"");
-    let json = format!(
-        "{{\n  \"runId\": \"{}\",\n  \"runTimestamp\": \"{}\",\n  \"command\": \"{}\",\n  \"treeHash\": \"{}\",\n  \"screenshots\": {},\n  \"evidenceLogFile\": \"{}\",\n  \"recordedAtUnix\": {}\n}}\n",
-        esc(run_id),
-        esc(run_timestamp),
-        esc(command),
-        esc(tree_hash),
+    let meta = EvidenceMeta {
+        run_id,
+        run_timestamp,
+        command,
+        tree_hash,
         screenshots,
-        EVIDENCE_LOG_FILE,
-        unix_now()
-    );
+        evidence_log_file: EVIDENCE_LOG_FILE,
+        recorded_at_unix: unix_now(),
+    };
+    let json = serde_json::to_string_pretty(&meta)
+        .map_err(|e| std::io::Error::other(format!("evidence metadata の JSON 化に失敗: {e}")))?;
     let path = dir.join(EVIDENCE_META_FILE);
-    std::fs::write(&path, json)?;
+    std::fs::write(&path, format!("{json}\n"))?;
     Ok(path)
 }
 
@@ -243,6 +263,13 @@ mod tests {
         assert!(e2e_run_dir(Path::new(".omc/logs"), "a\\b").is_none());
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn e2e_run_dir_rejects_drive_prefix_escape() {
+        assert!(e2e_run_dir(Path::new(".omc/logs"), "D:").is_none());
+        assert!(e2e_run_dir(Path::new(".omc/logs"), "D:logs").is_none());
+    }
+
     #[test]
     fn iso8601_known_epoch() {
         assert_eq!(iso8601_utc(0), "1970-01-01T00:00:00Z");
@@ -288,8 +315,9 @@ mod tests {
         let img = image::DynamicImage::new_rgb8(4, 4);
         let p1 = save_screenshot(d, &img).unwrap();
         let p2 = save_screenshot(d, &img).unwrap();
-        assert!(p1.to_string_lossy().contains("uc2-shot-000.png"));
-        assert!(p2.to_string_lossy().contains("uc2-shot-001.png"));
+        assert_ne!(p1, p2, "screenshots must never overwrite each other");
+        assert!(p1.to_string_lossy().contains("uc2-shot-"));
+        assert!(p1.to_string_lossy().ends_with(".png"));
         assert_eq!(count_screenshots(d), 2);
     }
 
@@ -347,6 +375,25 @@ mod tests {
     }
 
     #[test]
+    fn metadata_stays_valid_json_with_control_characters() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = write_metadata(
+            dir.path(),
+            "run-\u{1}id",
+            "2026-09-01T00:00:00Z",
+            "cmd\nwith\tcontrol\u{7}",
+            "h",
+            0,
+        )
+        .unwrap();
+        let content = std::fs::read_to_string(&path).unwrap();
+        let parsed: serde_json::Value =
+            serde_json::from_str(&content).expect("metadata must stay valid JSON");
+        assert_eq!(parsed["runId"], "run-\u{1}id");
+        assert_eq!(parsed["command"], "cmd\nwith\tcontrol\u{7}");
+    }
+
+    #[test]
     fn tree_hash_is_deterministic_and_content_sensitive() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::write(dir.path().join("a.toml"), b"task_a").unwrap();
@@ -394,14 +441,9 @@ mod tests {
         assert_eq!(deco.cycle_count(), 2);
         assert_eq!(count_screenshots(dir.path()), 2);
         let log = std::fs::read_to_string(dir.path().join(EVIDENCE_LOG_FILE)).unwrap();
-        assert!(
-            log.contains("cycle=0 screenshot=uc2-shot-000.png size=2x2"),
-            "{log}"
-        );
-        assert!(
-            log.contains("cycle=1 screenshot=uc2-shot-001.png size=2x2"),
-            "{log}"
-        );
+        assert!(log.contains("cycle=0 screenshot=uc2-shot-"), "{log}");
+        assert!(log.contains("size=2x2"), "{log}");
+        assert!(log.contains("cycle=1 screenshot=uc2-shot-"), "{log}");
     }
 
     #[tokio::test]
