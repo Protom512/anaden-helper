@@ -248,8 +248,35 @@ pub enum TaskDefError {
     #[error("TOML parse failed {path}: {reason}")]
     ParseFailed { path: PathBuf, reason: String },
 
+    #[error("invalid task name in {path}: {name:?} ({issue})")]
+    InvalidTaskName {
+        path: PathBuf,
+        name: String,
+        issue: &'static str,
+    },
+
     #[error("save failed: {reason}")]
     SaveFailed { reason: String },
+}
+
+#[must_use]
+pub fn task_name_issue(name: &str) -> Option<&'static str> {
+    if name.trim().is_empty() {
+        return Some("name must not be empty");
+    }
+    if name != name.trim() {
+        return Some("name must not have leading/trailing whitespace");
+    }
+    if name.contains('/') || name.contains('\\') {
+        return Some("name must not contain path separators");
+    }
+    if name.contains("..") {
+        return Some("name must not contain `..`");
+    }
+    if name.starts_with('.') {
+        return Some("name must not start with a dot");
+    }
+    None
 }
 
 pub(crate) struct PreparedTemplate {
@@ -376,6 +403,14 @@ pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
             path: path.clone(),
             reason: e.to_string(),
         })?;
+
+        if let Some(issue) = task_name_issue(&def.name) {
+            return Err(TaskDefError::InvalidTaskName {
+                path: path.clone(),
+                name: def.name.clone(),
+                issue,
+            });
+        }
 
         if !def.template.is_absolute() && path.parent().is_some() {
             let parent = path.parent().expect("parent exists");
@@ -676,6 +711,45 @@ mod tests {
 
         let err = load_pipeline(tmp.path()).expect_err("unknown variant must reject");
         assert!(matches!(err, TaskDefError::ParseFailed { .. }));
+    }
+
+    #[test]
+    fn load_pipeline_rejects_path_unsafe_task_name() {
+        for name in ["../../evil", "C:\\abs\\path", ".hidden", " padded ", ""] {
+            let tmp = tempfile::tempdir().expect("tempdir");
+            let toml_body = format!(
+                r#"
+                name      = '{name}'
+                state     = "X"
+                algorithm = "ccoeff"
+                template  = "t.png"
+            "#
+            );
+            write_toml(tmp.path(), "bad.toml", &toml_body);
+
+            let err = load_pipeline(tmp.path())
+                .expect_err(&format!("unsafe task name {name:?} must be rejected"));
+            assert!(
+                err.to_string().contains("invalid task name"),
+                "unexpected error for {name:?}: {err:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn load_pipeline_accepts_cjk_task_name() {
+        let tmp = tempfile::tempdir().expect("tempdir");
+        let toml_body = r#"
+            name      = "秘境巡回"
+            state     = "X"
+            algorithm = "ccoeff"
+            template  = "t.png"
+        "#;
+        write_toml(tmp.path(), "cjk.toml", toml_body);
+
+        let defs = load_pipeline(tmp.path()).expect("CJK task name must load");
+        assert_eq!(defs.len(), 1);
+        assert_eq!(defs[0].name, "秘境巡回");
     }
 
     #[test]
