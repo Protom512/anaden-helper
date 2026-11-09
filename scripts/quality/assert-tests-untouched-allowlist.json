@@ -1,15 +1,4 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": [
-    {
-      "file": "crates/anaden-strategies/src/catalog.rs",
-      "reason": "テスト領域への純追加のみ (新規テスト4件+ヘルパー1件、既存行の削除・変更なし) — validate の options キー検証と retain_known_options の新契約をピン止め",
-      "ref": "#324 item 9"
-    },
-    {
-      "file": "crates/anaden-studio/src/strategy_ui.rs",
-      "reason": "テスト領域への純追加のみ (新規テスト1件、既存行の削除・変更なし) — load_toml が stale オプションキーを除去することのピン止め",
-      "ref": "#324 item 9"
-    }
-  ]
+  "entries": []
 }
