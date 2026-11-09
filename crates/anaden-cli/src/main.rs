@@ -658,7 +658,6 @@ impl std::io::Write for DualWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut stdout = std::io::stdout();
         let _ = stdout.write(buf);
-        let _ = stdout.flush();
         self.file.write(buf)
     }
 
