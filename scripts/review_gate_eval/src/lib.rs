@@ -279,9 +279,11 @@ pub enum EvalError {
     },
 }
 
-pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
-    let golden_ids: HashSet<&str> = input.golden_issues.iter().map(|g| g.id.as_str()).collect();
-    for f in &input.findings {
+fn validate_golden_matches(
+    findings: &[Finding],
+    golden_ids: &HashSet<&str>,
+) -> Result<(), EvalError> {
+    for f in findings {
         if let Some(id) = &f.matched_golden
             && !golden_ids.is_empty()
             && !golden_ids.contains(id.as_str())
@@ -289,21 +291,23 @@ pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
             return Err(EvalError::UnknownGoldenId(id.clone()));
         }
     }
+    Ok(())
+}
 
+fn build_recall_per_pr(golden_issues: &[GoldenIssue], findings: &[Finding]) -> Vec<PrRecall> {
     let mut per_pr: HashMap<u64, PrRecall> = HashMap::new();
-    for g in &input.golden_issues {
-        per_pr.entry(g.pr).or_insert(PrRecall {
-            pr: g.pr,
-            total_golden: 0,
-            detected_golden: 0,
-        });
-        let e = per_pr
-            .get_mut(&g.pr)
-            .ok_or(EvalError::UnknownGoldenId(g.id.clone()))?;
-        e.total_golden += 1;
+    for g in golden_issues {
+        per_pr
+            .entry(g.pr)
+            .or_insert(PrRecall {
+                pr: g.pr,
+                total_golden: 0,
+                detected_golden: 0,
+            })
+            .total_golden += 1;
     }
     let mut detected_ids: HashSet<(u64, &str)> = HashSet::new();
-    for f in &input.findings {
+    for f in findings {
         if let Some(id) = &f.matched_golden {
             detected_ids.insert((f.pr, id.as_str()));
         }
@@ -313,18 +317,10 @@ pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
             e.detected_golden += 1;
         }
     }
-    let mut recall_per_pr: Vec<PrRecall> = per_pr.into_values().collect();
-    recall_per_pr.sort_by_key(|r| r.pr);
-    let total_golden: u64 = recall_per_pr.iter().map(|r| r.total_golden).sum();
-    let detected_golden: u64 = recall_per_pr.iter().map(|r| r.detected_golden).sum();
+    per_pr.into_values().collect()
+}
 
-    let total_findings = input.findings.len() as u64;
-    let false_positives = input
-        .findings
-        .iter()
-        .filter(|f| f.matched_golden.is_none())
-        .count() as u64;
-
+fn build_consensus_validity(consensus: &[ConsensusRecord]) -> ConsensusValidity {
     let mut cv = ConsensusValidity {
         tp: 0,
         fp: 0,
@@ -332,7 +328,7 @@ pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
         false_negatives: 0,
         nogo_merged_prs: Vec::new(),
     };
-    for r in &input.consensus {
+    for r in consensus {
         let has_problem = !r.post_merge_issue_ids.is_empty();
         let effective = r
             .split_info
@@ -348,6 +344,24 @@ pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
             cv.nogo_merged_prs.push(r.clone());
         }
     }
+    cv
+}
+
+pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
+    let golden_ids: HashSet<&str> = input.golden_issues.iter().map(|g| g.id.as_str()).collect();
+    validate_golden_matches(&input.findings, &golden_ids)?;
+
+    let mut recall_per_pr = build_recall_per_pr(&input.golden_issues, &input.findings);
+    recall_per_pr.sort_by_key(|r| r.pr);
+    let total_golden: u64 = recall_per_pr.iter().map(|r| r.total_golden).sum();
+    let detected_golden: u64 = recall_per_pr.iter().map(|r| r.detected_golden).sum();
+
+    let total_findings = input.findings.len() as u64;
+    let false_positives = input
+        .findings
+        .iter()
+        .filter(|f| f.matched_golden.is_none())
+        .count() as u64;
 
     Ok(Metrics {
         recall: Recall {
@@ -359,7 +373,7 @@ pub fn aggregate(input: &EvalInput) -> Result<Metrics, EvalError> {
             total_findings,
             false_positives,
         },
-        consensus: cv,
+        consensus: build_consensus_validity(&input.consensus),
     })
 }
 

@@ -133,14 +133,6 @@ fn routine_artifacts_base_dir(routine_path: &Path) -> &Path {
         .unwrap_or(Path::new("."))
 }
 
-fn resolve_algorithm(value: &str) -> Result<anaden_vision::Algorithm> {
-    match value {
-        "sse" => Ok(anaden_vision::Algorithm::Sse),
-        "ccoeff" => Ok(anaden_vision::Algorithm::Ccoeff),
-        other => anyhow::bail!("--algorithm は `sse` または `ccoeff` です(指定値: {other})"),
-    }
-}
-
 fn parse_goal_flag(
     goal: Option<&str>,
     goal_file: Option<&std::path::Path>,
@@ -324,7 +316,8 @@ async fn run_with_windows(
     }
 
     if let Some(a) = algorithm {
-        let algo = resolve_algorithm(a)?;
+        let algo =
+            anaden_cli_contract::pipeline::resolve_algorithm(a).map_err(|e| anyhow::anyhow!(e))?;
         for t in tasks.iter_mut() {
             if t.name == start_task {
                 t.algorithm = algo;
@@ -658,7 +651,6 @@ impl std::io::Write for DualWriter {
     fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
         let mut stdout = std::io::stdout();
         let _ = stdout.write(buf);
-        let _ = stdout.flush();
         self.file.write(buf)
     }
 

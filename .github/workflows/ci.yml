@@ -29,7 +29,7 @@ concurrency:
 
 jobs:
   check:
-    name: check (fmt / clippy, Linux, windows target check-only)
+    name: check (fmt, Linux)
     runs-on: ubuntu-latest
     timeout-minutes: 20
     steps:
@@ -79,6 +79,14 @@ jobs:
       - name: Test
         run: cargo nextest run --workspace
 
+      # The repo's pre-commit rules (pre-commit-rust.md) mandate
+      # clippy --all-targets -D warnings, and #385's Linux reduction
+      # could not carry it (windows-only deps need MSVC lib.exe).
+      # The windows job is the only place clippy can run, so it runs here,
+      # after Test so the warm build is reused.
+      - name: Lint
+        run: cargo clippy --workspace --all-targets -- -D warnings
+
   quality-gates:
     name: quality-gates (test tampering / gate self-tests)
     runs-on: ubuntu-latest
@@ -96,8 +104,8 @@ jobs:
 
       # The gate scripts themselves are code: run their unit tests first,
       # so a broken gate cannot silently pass everything.
-      - name: Gate script self-tests
-        run: node --test scripts/quality/
+      - name: Node test suite
+        run: node scripts/quality/run_node_tests.mjs
 
       # Fails the job if the PR diff touches existing test code
       # (allowlist: scripts/quality/assert-tests-untouched-allowlist.json).
@@ -125,10 +133,12 @@ jobs:
         with:
           node-version: 20
 
+      - uses: Swatinem/rust-cache@v2
+
       - name: Install metrics tools
         run: |
-          cargo install --locked cccc-rs-cli
-          cargo install --locked similarity-rs
+          cargo install --locked --version 0.4.0 cccc-rs-cli
+          cargo install --locked --version 0.5.0 similarity-rs
 
       - name: Complexity gate
         run: node scripts/quality/complexity_gate.mjs
