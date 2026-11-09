@@ -203,6 +203,7 @@ impl HistoryPanel {
 
 fn record_label(r: &RunRecord) -> String {
     let outcome = match r.outcome {
+        RunOutcome::Unknown => "不明",
         RunOutcome::Success => "完了",
         RunOutcome::Failed => "異常終了",
         RunOutcome::Cancelled => "中止",
