@@ -16,22 +16,7 @@ pub struct TemplateSpec {
 
 #[must_use]
 pub(crate) fn save_name_issue(name: &str) -> Option<&'static str> {
-    if name.trim().is_empty() {
-        return Some("name must not be empty");
-    }
-    if name != name.trim() {
-        return Some("name must not have leading/trailing whitespace");
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Some("name must not contain path separators");
-    }
-    if name.contains("..") {
-        return Some("name must not contain `..`");
-    }
-    if name.starts_with('.') {
-        return Some("name must not start with a dot");
-    }
-    None
+    anaden_vision::task_name_issue(name)
 }
 
 pub fn save_template(
