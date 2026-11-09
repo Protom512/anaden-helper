@@ -79,9 +79,10 @@ test('matchRunByTimestamp returns null for unknown or unmatched timestamp', () =
   assert.equal(matchRunByTimestamp(index, null), null);
 });
 
-test('real-world: existing .omc/logs run dirs without run-metadata.json classify as unknown', () => {
+test('real-world: existing .omc/logs run dirs without run-metadata.json classify as unknown', (t) => {
   const { RUN_TIMESTAMP_UNKNOWN, buildRunTimestampIndex } = loadInlineHelper();
   const logsDir = join(repoRoot, '.omc', 'logs');
+  if (!existsSync(logsDir)) return t.skip('machine-local .omc/logs runtime dir absent on fresh clones');
   assert.ok(existsSync(logsDir), '.omc/logs must exist');
   const runDirs = readdirSync(logsDir, { withFileTypes: true })
     .filter((d) => d.isDirectory())
