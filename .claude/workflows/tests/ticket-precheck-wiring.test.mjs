@@ -60,7 +60,7 @@ test('FAIL short-circuit is a return (resumable status, resolveReleaseAbort ã¨å
   const failIdx = block.lastIndexOf("'precheck-failed'");
   assert.ok(failIdx > 0, "status 'precheck-failed' literal present");
   const failBlock = block.slice(Math.max(0, failIdx - 300), failIdx + 300);
-  assert.ok(failBlock.includes('return {'),
+  assert.match(failBlock, /return\s*\{[^}]{0,240}'precheck-failed'/,
     'return statement carries the precheck-failed status');
   assert.match(block.slice(failIdx, failIdx + 600), /reason|undeclared|missing/,
     'FAIL return includes reason/mismatch details');
@@ -184,7 +184,8 @@ test('issuePremise wiring: FAIL short-circuits to precheck-failed before Estimat
   const failIdx = block.indexOf("'precheck-failed'");
   assert.ok(failIdx > 0, "status 'precheck-failed' literal present");
   const failBlock = block.slice(Math.max(0, failIdx - 300), failIdx + 400);
-  assert.ok(failBlock.includes('return {'), 'FAIL branch returns resumable status object');
+  assert.match(failBlock, /return\s*\{[^}]{0,240}'precheck-failed'/,
+    'FAIL branch returns a resumable status object carrying precheck-failed');
   assert.match(block, /issuePremise\.reason/, 'FAIL return carries reason');
 });
 

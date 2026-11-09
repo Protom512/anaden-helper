@@ -132,7 +132,8 @@ test('UC-2: dep committed=false (working-tree only) → blocked dep-not-committe
   assert.equal(r.ready, false, JSON.stringify(r));
   assert.equal(r.verdict, 'dep-not-committed');
   assert.equal(r.deps[0].verdict, 'dep-not-committed');
-  assert.ok(typeof r.reason === 'string' && r.reason.includes('T1'));
+  assert.ok(typeof r.reason === 'string' && r.reason.startsWith('dep T1:'),
+    'reason names the blocking dep id as the leading field');
 });
 
 test('UC-2 variant: committed but reachable=false (stranded snapshot) → blocked dep-not-committed', () => {
@@ -431,7 +432,8 @@ test('wiring: blocked → persist rationale + status dependency-not-ready WITHOU
   assert.match(w, /buildDependencyReadinessRationale\(/, 'rationale payload built');
   assert.match(w, /precheckScope && precheckScope\.treeHash/, 'treeHash sourced from precheck scope');
   const ret = w.slice(Math.max(0, blocked - 500), blocked + 300);
-  assert.ok(ret.includes('return {'), 'blocked branch returns per-task non-fatal status object');
+  assert.match(ret, /return\s*\{[^}]{0,240}'dependency-not-ready'/,
+    'blocked branch returns a status object literal carrying dependency-not-ready');
   assert.match(w, /readiness\.reason/, 'reason surfaced in blocked return/log');
 });
 
