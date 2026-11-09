@@ -78,6 +78,7 @@ fn main() -> anyhow::Result<()> {
             output,
         } => {
             let img = image::open(&screenshot)?;
+            validate_crop_bounds((img.width(), img.height()), x, y, width, height)?;
             let sub_img = img.crop_imm(x, y, width, height);
             sub_img.save(&output)?;
             println!(
@@ -357,4 +358,62 @@ fn run_pipeline(
     }
 
     Ok(())
+}
+
+fn validate_crop_bounds(
+    image: (u32, u32),
+    x: u32,
+    y: u32,
+    width: u32,
+    height: u32,
+) -> anyhow::Result<()> {
+    if width == 0 || height == 0 {
+        anyhow::bail!("crop width/height must be >= 1 (got {width}x{height})");
+    }
+    let Some(right) = x.checked_add(width) else {
+        anyhow::bail!("crop rect overflows u32 (x={x}, width={width})");
+    };
+    let Some(bottom) = y.checked_add(height) else {
+        anyhow::bail!("crop rect overflows u32 (y={y}, height={height})");
+    };
+    let (image_width, image_height) = image;
+    if right > image_width || bottom > image_height {
+        anyhow::bail!(
+            "crop rect ({x},{y}) {width}x{height} exceeds image bounds {image_width}x{image_height}"
+        );
+    }
+    Ok(())
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::expect_used)]
+#[allow(clippy::panic)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn crop_bounds_accept_in_bounds_rect() {
+        assert!(validate_crop_bounds((1280, 720), 0, 0, 1280, 720).is_ok());
+        assert!(validate_crop_bounds((1280, 720), 10, 20, 300, 200).is_ok());
+    }
+
+    #[test]
+    fn crop_bounds_reject_rect_exceeding_image() {
+        let err = validate_crop_bounds((12, 12), 5, 5, 20, 20).unwrap_err();
+        assert!(
+            err.to_string().contains("exceeds image bounds 12x12"),
+            "{err}"
+        );
+        assert!(validate_crop_bounds((100, 100), 50, 0, 51, 10).is_err());
+        assert!(validate_crop_bounds((100, 100), 0, 50, 10, 51).is_err());
+    }
+
+    #[test]
+    fn crop_bounds_reject_zero_dimensions_and_u32_overflow() {
+        assert!(validate_crop_bounds((100, 100), 0, 0, 0, 10).is_err());
+        assert!(validate_crop_bounds((100, 100), 0, 0, 10, 0).is_err());
+        assert!(validate_crop_bounds((100, 100), u32::MAX, 0, 1, 1).is_err());
+        assert!(validate_crop_bounds((100, 100), 0, u32::MAX, 1, 1).is_err());
+    }
 }
