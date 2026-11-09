@@ -306,8 +306,8 @@ impl StudioApp {
 
     pub(crate) fn load_positives(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            let imgs = load_folder(&dir);
-            self.status = format!("正例: {} 枚読込", imgs.len());
+            let (imgs, detected) = load_folder(&dir);
+            self.status = folder_load_status("正例", imgs.len(), detected);
             self.positives = imgs;
             self.scored_roi = None;
         }
@@ -315,8 +315,8 @@ impl StudioApp {
 
     pub(crate) fn load_negatives(&mut self) {
         if let Some(dir) = rfd::FileDialog::new().pick_folder() {
-            let imgs = load_folder(&dir);
-            self.status = format!("負例: {} 枚読込", imgs.len());
+            let (imgs, detected) = load_folder(&dir);
+            self.status = folder_load_status("負例", imgs.len(), detected);
             self.negatives = imgs;
             self.scored_roi = None;
         }
@@ -454,19 +454,35 @@ impl StudioApp {
     }
 }
 
-fn load_folder(path: &Path) -> Vec<Arc<DynamicImage>> {
+const MAX_FOLDER_IMAGES: usize = 50;
+
+fn load_folder(path: &Path) -> (Vec<Arc<DynamicImage>>, usize) {
     let mut out = vec![];
+    let mut detected = 0usize;
     if let Ok(entries) = std::fs::read_dir(path) {
         for entry in entries.flatten() {
             let p: PathBuf = entry.path();
-            if is_image(&p)
-                && let Ok(img) = image::open(&p)
-            {
-                out.push(Arc::new(img));
+            if is_image(&p) {
+                detected += 1;
+                if out.len() < MAX_FOLDER_IMAGES
+                    && let Ok(img) = image::open(&p)
+                {
+                    out.push(Arc::new(img));
+                }
             }
         }
     }
-    out
+    (out, detected)
+}
+
+fn folder_load_status(label: &str, loaded: usize, detected: usize) -> String {
+    if detected > MAX_FOLDER_IMAGES {
+        format!(
+            "{label}: {loaded} 枚読込 (検出 {detected} 枚 — 上限 {MAX_FOLDER_IMAGES} 枚超過分をスキップ)"
+        )
+    } else {
+        format!("{label}: {loaded} 枚読込")
+    }
 }
 
 fn is_image(path: &Path) -> bool {
@@ -487,6 +503,33 @@ mod tests {
     use super::*;
     use crate::scoring::Discrimination;
     use image::{GrayImage, Luma};
+
+    #[test]
+    fn load_folder_caps_images_and_reports_detected_count() {
+        let dir = tempfile::tempdir().unwrap();
+        let extra = 5;
+        for i in 0..(MAX_FOLDER_IMAGES + extra) {
+            let p = dir.path().join(format!("img{i:03}.png"));
+            image::save_buffer(&p, &[7u8], 1, 1, image::ColorType::L8).unwrap();
+        }
+        std::fs::write(dir.path().join("note.txt"), b"x").unwrap();
+        let (imgs, detected) = load_folder(dir.path());
+        assert_eq!(imgs.len(), MAX_FOLDER_IMAGES);
+        assert_eq!(detected, MAX_FOLDER_IMAGES + extra);
+        assert!(folder_load_status("正例", imgs.len(), detected).contains("スキップ"));
+        let (small, small_detected) = {
+            let d2 = tempfile::tempdir().unwrap();
+            let p = d2.path().join("one.png");
+            image::save_buffer(&p, &[9u8], 1, 1, image::ColorType::L8).unwrap();
+            load_folder(d2.path())
+        };
+        assert_eq!(small.len(), 1);
+        assert_eq!(small_detected, 1);
+        assert_eq!(
+            folder_load_status("正例", small.len(), small_detected),
+            "正例: 1 枚読込"
+        );
+    }
 
     fn textured_needle(w: u32, h: u32) -> GrayImage {
         let mut img = GrayImage::new(w, h);
