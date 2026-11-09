@@ -293,7 +293,7 @@ test('ownershipRelevantTasks filters to tdd-lane tasks (Issue #134)', () => {
   assert.equal(relevant[0].id, 'T1');
 });
 
-test('ownershipRelevantTasks treats lane-less tasks as tdd (fail-closed side)', () => {
+test('ownershipRelevantTasks defaults lane-less tasks to tdd (dispatch gate owns the fail-closed side)', () => {
   const eval2 = loadApi().ownershipRelevantTasks;
   const tasks = [
     { id: 'T1', files: ['a.js'] },

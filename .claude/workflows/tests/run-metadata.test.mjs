@@ -232,6 +232,27 @@ test('buildRunMetadata edge: non-string runId / title rejected', () => {
   assert.ok(buildRunMetadata({ ...base, runId: 'run-1', title: null }).errors.some((e) => e.startsWith('title:')));
 });
 
+test('buildRunMetadata edge: runId that is not a safe path segment rejected (Issue #305 item 8)', () => {
+  const { buildRunMetadata } = loadRunMetadataHelpers();
+  const base = {
+    runTimestamp: '2026-08-28T10:00:00Z',
+    issue: 97,
+    title: 't',
+    phases: ['Coordinate'],
+  };
+  const hostile = ['../evil', '..\\evil', 'a/b', 'a\\b', 'a b', 'a:b', 'run.id', ''];
+  for (const runId of hostile) {
+    const result = buildRunMetadata({ ...base, runId });
+    assert.ok(
+      result.errors.some((e) => e.startsWith('runId:')),
+      `runId ${JSON.stringify(runId)} must be rejected`
+    );
+  }
+  assert.equal(buildRunMetadata({ ...base, runId: 'run-1770000000000' }).errors.length, 0);
+  assert.equal(buildRunMetadata({ ...base, runId: '2026-11-04-poteto-sweep' }).errors.length, 0);
+  assert.equal(buildRunMetadata({ ...base, runId: 'issue210-verify3' }).errors.length, 0);
+});
+
 test('docs: pipeline-evidence-verification.md mentions runTimestamp as evidence requirement', (t) => {
   const docPath = join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md');
   if (!existsSync(docPath)) return t.skip('machine-local rules doc absent on fresh clones (gitignored .claude/rules/)');
