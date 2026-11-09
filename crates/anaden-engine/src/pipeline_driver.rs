@@ -12,7 +12,7 @@ use tracing::{debug, info, warn};
 use anaden_core::InputAction;
 use anaden_core::ScreenRegion;
 use anaden_device::DeviceError;
-use anaden_vision::{BASE_WIDTH, CropInfo, ScreenScaler, TaskDef};
+use anaden_vision::{Action, BASE_WIDTH, CropInfo, ScreenScaler, TaskDef};
 
 use crate::jitter::Jitter;
 use crate::pipeline_runner::{InputCommand, PipelineState};
@@ -363,6 +363,7 @@ pub enum StepOutcome {
     WatchFired {
         task: String,
         fired: Option<InputCommand>,
+        stop: bool,
     },
 }
 
@@ -578,6 +579,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     });
                 }
             };
+            let stop = matches!(step.action, Action::Stop);
             let command = crate::pipeline_runner::action_to_command(
                 &step.action,
                 Some(step.matched_region),
@@ -607,7 +609,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 }
                 None => None,
             };
-            return Some(StepOutcome::WatchFired { task: name, fired });
+            return Some(StepOutcome::WatchFired {
+                task: name,
+                fired,
+                stop,
+            });
         }
         None
     }
@@ -1117,16 +1123,37 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         }
     }
 
-    fn step_watch_fired(
+    async fn step_watch_fired(
         &mut self,
         state: &mut LoopState,
+        goal_mode: &mut GoalMode<'_>,
+        recover: &mut Option<RecoveryHook>,
         task: &str,
         fired: Option<InputCommand>,
+        stop: bool,
     ) -> StepFlow {
-        state.record_match_tick(task);
-        if let Some(cmd) = fired {
-            state.fired.push(cmd);
+        if stop {
+            return StepFlow::stop(self.build_outcome(
+                state.iterations,
+                std::mem::take(&mut state.fired),
+                LoopStopReason::Stop,
+                &format!("watch stop: {task}"),
+                state.ctx(),
+            ));
         }
+        let Some(cmd) = fired else {
+            return self
+                .step_no_match(
+                    state,
+                    goal_mode,
+                    recover,
+                    "watch observe streak >= threshold",
+                    None,
+                )
+                .await;
+        };
+        state.fired.push(cmd);
+        state.record_match_tick(task);
         StepFlow::Continue
     }
 
@@ -1247,8 +1274,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 StepOutcome::Error { kind, message } => {
                     self.step_error(&mut state, recover, kind, message).await
                 }
-                StepOutcome::WatchFired { task, fired } => {
-                    self.step_watch_fired(&mut state, &task, fired)
+                StepOutcome::WatchFired { task, fired, stop } => {
+                    self.step_watch_fired(&mut state, goal_mode, recover, &task, fired, stop)
+                        .await
                 }
             };
             match flow {
@@ -5090,8 +5118,20 @@ mod tests {
         }
     }
 
+    fn popup_click_rect_action() -> Action {
+        Action::ClickRect {
+            roi: ScreenRegion::new(
+                POPUP_MATCH_ROI[0],
+                POPUP_MATCH_ROI[1],
+                POPUP_MATCH_ROI[2],
+                POPUP_MATCH_ROI[3],
+            ),
+        }
+    }
+
     fn build_watch_driver(
         frames: Vec<DynamicImage>,
+        popup_action: Action,
     ) -> (
         PipelineDriver<FakeCapture, FakeInput>,
         Arc<Mutex<Vec<InputCommand>>>,
@@ -5105,6 +5145,8 @@ mod tests {
             }
         }
         let popup_tpl = write_template_persisted(&needle);
+        let mut popup_task = task_with_template("Popup", popup_tpl, POPUP_MATCH_ROI, None);
+        popup_task.action = Some(popup_action);
 
         let fired = new_fired();
         let driver = PipelineDriver::new(
@@ -5119,7 +5161,7 @@ mod tests {
             PipelineState::new("Title"),
             vec![
                 task_with_template("Title", crop_needle_template(), MATCH_ROI, Some(vec![])),
-                task_with_template("Popup", popup_tpl, POPUP_MATCH_ROI, None),
+                popup_task,
             ],
             FULL_W,
             300,
@@ -5130,12 +5172,15 @@ mod tests {
     #[tokio::test]
     async fn watch_match_fires_and_keeps_current() {
         let popup_only = frame_with_region_masked(MATCH_ROI);
-        let (mut d, fired) = build_watch_driver(vec![popup_only.clone(), popup_only]);
+        let (mut d, fired) = build_watch_driver(
+            vec![popup_only.clone(), popup_only],
+            popup_click_rect_action(),
+        );
         d = d.with_watch(vec!["Popup".into()]);
 
         let outcome = d.run_once().await;
         match &outcome {
-            StepOutcome::WatchFired { task, fired: f } => {
+            StepOutcome::WatchFired { task, fired: f, .. } => {
                 assert_eq!(task, "Popup");
                 assert!(f.is_some(), "watch ClickRect must fire a command");
             }
@@ -5152,7 +5197,8 @@ mod tests {
     #[tokio::test]
     async fn watch_takes_priority_over_current_task() {
         let both = luma_dyn(raw_feature());
-        let (mut d, fired) = build_watch_driver(vec![both.clone(), both]);
+        let (mut d, fired) =
+            build_watch_driver(vec![both.clone(), both], popup_click_rect_action());
         d = d.with_watch(vec!["Popup".into()]);
 
         let outcome = d.run_once().await;
@@ -5167,7 +5213,10 @@ mod tests {
     #[tokio::test]
     async fn watch_no_match_falls_through_to_current() {
         let title_only = frame_with_region_masked(POPUP_MATCH_ROI);
-        let (mut d, _) = build_watch_driver(vec![title_only.clone(), title_only]);
+        let (mut d, _) = build_watch_driver(
+            vec![title_only.clone(), title_only],
+            popup_click_rect_action(),
+        );
         d = d.with_watch(vec!["Popup".into()]);
 
         let outcome = d.run_once().await;
@@ -5183,7 +5232,8 @@ mod tests {
     async fn run_loop_completes_through_watch_interruption() {
         let popup_only = frame_with_region_masked(MATCH_ROI);
         let title_only = frame_with_region_masked(POPUP_MATCH_ROI);
-        let (mut d, fired) = build_watch_driver(vec![popup_only, title_only]);
+        let (mut d, fired) =
+            build_watch_driver(vec![popup_only, title_only], popup_click_rect_action());
         d = d.with_watch(vec!["Popup".into()]);
 
         let outcome = d.run_loop(Duration::ZERO, 10).await;
@@ -5209,9 +5259,80 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn watch_stop_action_ends_loop_with_stop_reason() {
+        let popup = frame_with_region_masked(MATCH_ROI);
+        let (mut d, fired) = build_watch_driver(vec![popup.clone(), popup], Action::Stop);
+        d = d.with_watch(vec!["Popup".into()]);
+
+        let outcome = d.run_loop_with_recovery(Duration::ZERO, 5, 0, None).await;
+        assert_eq!(outcome.reason, LoopStopReason::Stop);
+        assert_eq!(outcome.terminal, "watch stop: Popup");
+        assert_eq!(outcome.iterations, 1);
+        assert_eq!(
+            fired.lock().expect("lock").len(),
+            0,
+            "Stop watch はコマンドを発火しない"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_observe_streak_reaches_recovery_hook() {
+        let popup = frame_with_region_masked(MATCH_ROI);
+        let frames: Vec<DynamicImage> = (0..8).map(|_| popup.clone()).collect();
+        let (mut d, fired) = build_watch_driver(frames, Action::DoNothing);
+        d = d
+            .with_recovery_grace(Duration::from_secs(90))
+            .with_recovery_clock(Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))));
+        d = d.with_watch(vec!["Popup".into()]);
+        let (calls, hook) = counting_hook();
+
+        let outcome = d
+            .run_loop_with_recovery(Duration::ZERO, 6, 2, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::MaxIterations);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "watch observe 連続で miss streak が閾値に達し recovery hook が起動する"
+        );
+        assert_eq!(outcome.iterations, 6);
+        assert_eq!(
+            fired.lock().expect("lock").len(),
+            0,
+            "observe watch は main tick を抑制し続ける"
+        );
+    }
+
+    #[tokio::test]
+    async fn watch_observe_brief_then_main_resumes_without_recovery() {
+        let popup = frame_with_region_masked(MATCH_ROI);
+        let cleared = frame_with_region_masked(POPUP_MATCH_ROI);
+        let (mut d, _fired) = build_watch_driver(vec![popup, cleared], Action::DoNothing);
+        d = d
+            .with_recovery_grace(Duration::from_secs(90))
+            .with_recovery_clock(Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))));
+        d = d.with_watch(vec!["Popup".into()]);
+        let (calls, hook) = counting_hook();
+
+        let outcome = d
+            .run_loop_with_recovery(Duration::ZERO, 5, 2, Some(hook))
+            .await;
+        assert_eq!(outcome.reason, LoopStopReason::TerminalTask);
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            0,
+            "短い observe は streak を積むが閾値には達しない"
+        );
+        assert_eq!(outcome.iterations, 2);
+    }
+
+    #[tokio::test]
     async fn no_watch_config_preserves_nomatch_behavior() {
         let popup_only = frame_with_region_masked(MATCH_ROI);
-        let (mut d, fired) = build_watch_driver(vec![popup_only.clone(), popup_only]);
+        let (mut d, fired) = build_watch_driver(
+            vec![popup_only.clone(), popup_only],
+            popup_click_rect_action(),
+        );
 
         let outcome = d.run_once().await;
         assert!(

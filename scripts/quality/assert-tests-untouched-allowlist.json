@@ -1,4 +1,10 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "crates/anaden-engine/src/pipeline_driver.rs",
+      "reason": "既存 mod tests 内の修正: build_watch_driver に popup_action 引数を追加 (既存 5 呼び出し箇所は popup_click_rect_action() で同挙動)、WatchFired の stop フィールド対応で分割代入に .. を追加、watch stop/observe 挙動テスト 3 件を新規追加",
+      "ref": "issue #314 (watch が main state machine を毎サイクル短絡し stop 意味論も消失) の修正 PR"
+    }
+  ]
 }
