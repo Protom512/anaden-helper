@@ -9,12 +9,15 @@ const HISTORY_ENV_VAR: &str = "ANADEN_STUDIO_HISTORY";
 pub const DEFAULT_MAX_RECORDS: usize = 50;
 pub const LOG_TAIL_MAX_LINES: usize = 20;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Default, Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub enum RunOutcome {
     Success,
     Failed,
     Cancelled,
     BudgetExhausted,
+    #[default]
+    #[serde(other)]
+    Unknown,
 }
 
 #[must_use]
@@ -43,10 +46,15 @@ pub fn load_run_report(path: &Path) -> Option<anaden_engine::ProgressReport> {
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunRecord {
+    #[serde(default)]
     pub started_at_unix: u64,
+    #[serde(default)]
     pub strategy: String,
+    #[serde(default)]
     pub outcome: RunOutcome,
+    #[serde(default)]
     pub exit_code: Option<i32>,
+    #[serde(default)]
     pub log_tail: Vec<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub evidence_run_id: Option<String>,
@@ -107,17 +115,19 @@ pub struct RunHistory {
     path: PathBuf,
     max_records: usize,
     records: Vec<RunRecord>,
+    unparsed: Vec<String>,
 }
 
 impl RunHistory {
     pub fn open(path: impl Into<PathBuf>, max_records: usize) -> Self {
         let path = path.into();
-        let mut records = Self::read_file(&path);
+        let (mut records, unparsed) = Self::read_file(&path);
         truncate_oldest(&mut records, max_records);
         Self {
             path,
             max_records,
             records,
+            unparsed,
         }
     }
 
@@ -173,26 +183,35 @@ impl RunHistory {
 
         let mut buf = String::new();
         for r in &self.records {
-            match serde_json::to_string(r) {
-                Ok(line) => {
-                    buf.push_str(&line);
-                    buf.push('\n');
-                }
-                Err(_) => continue,
-            }
+            let line = serde_json::to_string(r).map_err(|_| {
+                io::Error::new(
+                    io::ErrorKind::InvalidData,
+                    "record failed to serialize; history file left unwritten",
+                )
+            })?;
+            buf.push_str(&line);
+            buf.push('\n');
+        }
+        for raw in &self.unparsed {
+            buf.push_str(raw);
+            buf.push('\n');
         }
         std::fs::write(&self.path, buf)
     }
 
-    fn read_file(path: &std::path::Path) -> Vec<RunRecord> {
+    fn read_file(path: &std::path::Path) -> (Vec<RunRecord>, Vec<String>) {
         let Ok(content) = std::fs::read_to_string(path) else {
-            return Vec::new();
+            return (Vec::new(), Vec::new());
         };
-        content
-            .lines()
-            .filter(|l| !l.trim().is_empty())
-            .filter_map(|l| serde_json::from_str(l).ok())
-            .collect()
+        let mut records = Vec::new();
+        let mut unparsed = Vec::new();
+        for line in content.lines().filter(|l| !l.trim().is_empty()) {
+            match serde_json::from_str::<RunRecord>(line) {
+                Ok(r) => records.push(r),
+                Err(_) => unparsed.push(line.to_string()),
+            }
+        }
+        (records, unparsed)
     }
 }
 
