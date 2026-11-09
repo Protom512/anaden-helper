@@ -164,7 +164,10 @@ struct LoopState {
     started: Instant,
     guard: RecoveryGuard,
     recovery_enabled: bool,
+    execute_error_streak: u32,
 }
+
+const EXECUTE_ERROR_ABSORB_LIMIT: u32 = 2;
 
 impl LoopState {
     fn new(
@@ -180,6 +183,7 @@ impl LoopState {
             started: Instant::now(),
             guard: RecoveryGuard::new(recover_nomatch_threshold, grace, max_recovery_attempts),
             recovery_enabled: recover_nomatch_threshold > 0 && recover_present,
+            execute_error_streak: 0,
         }
     }
 
@@ -194,6 +198,12 @@ impl LoopState {
     fn record_match_tick(&mut self, current_before: &str) {
         self.guard.record_match();
         bump_task_match(current_before, &mut self.per_task_matches);
+    }
+
+    fn note_step_outcome(&mut self, step: &StepOutcome) {
+        if !matches!(step, StepOutcome::Error { .. }) {
+            self.execute_error_streak = 0;
+        }
     }
 
     fn goal_eval_inputs(&self) -> GoalEvalInputs<'_> {
@@ -339,7 +349,10 @@ pub enum StepErrorKind {
 }
 
 pub fn is_recoverable_io_error(kind: StepErrorKind) -> bool {
-    matches!(kind, StepErrorKind::Capture | StepErrorKind::VerifyCapture)
+    matches!(
+        kind,
+        StepErrorKind::Capture | StepErrorKind::VerifyCapture | StepErrorKind::Execute
+    )
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1084,7 +1097,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         kind: StepErrorKind,
         message: String,
     ) -> StepFlow {
-        if !is_recoverable_io_error(kind) {
+        if matches!(kind, StepErrorKind::Other) {
             return StepFlow::stop(self.build_outcome(
                 state.iterations - 1,
                 std::mem::take(&mut state.fired),
@@ -1093,24 +1106,41 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 state.ctx(),
             ));
         }
+        if matches!(kind, StepErrorKind::Execute) {
+            state.execute_error_streak = state.execute_error_streak.saturating_add(1);
+            let streak = state.execute_error_streak;
+            if streak < EXECUTE_ERROR_ABSORB_LIMIT {
+                warn!(
+                    "transient execute error (streak {streak}/{EXECUTE_ERROR_ABSORB_LIMIT}): absorbed, skipping cycle: {message}"
+                );
+                return StepFlow::Continue;
+            }
+        }
         let now = self.recovery_clock.elapsed();
         if state.guard.in_grace(now) {
-            warn!("pipeline capture error during boot grace (game restarting): {message}");
+            warn!("pipeline io error ({kind:?}) during boot grace (game restarting): {message}");
             StepFlow::Continue
         } else if state.recovery_enabled {
-            info!("capture error outside grace (game presumed dead): {message}");
-            match self
-                .run_recovery_or_stop("capture error outside grace", state, recover)
-                .await
-            {
+            info!("io error outside grace (environment presumed dead): {message}");
+            let cause = if matches!(kind, StepErrorKind::Execute) {
+                "execute error outside grace"
+            } else {
+                "capture error outside grace"
+            };
+            match self.run_recovery_or_stop(cause, state, recover).await {
                 Some(stop) => StepFlow::stop(stop),
                 None => StepFlow::Continue,
             }
         } else {
+            let reason = if matches!(kind, StepErrorKind::Execute) {
+                LoopStopReason::ExecuteError
+            } else {
+                LoopStopReason::CaptureError
+            };
             StepFlow::stop(self.build_outcome(
                 state.iterations - 1,
                 std::mem::take(&mut state.fired),
-                LoopStopReason::CaptureError,
+                reason,
                 "io_error",
                 state.ctx(),
             ))
@@ -1188,6 +1218,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             } else {
                 self.run_once().await
             };
+            state.note_step_outcome(&step);
             let match_info = match (&*goal_mode, &step) {
                 (GoalMode::Active(_), StepOutcome::Fired { .. } | StepOutcome::NoFire { .. }) => {
                     self.last_match.take()
@@ -1594,6 +1625,39 @@ mod tests {
 
     fn frames_of(images: Vec<DynamicImage>) -> Arc<Mutex<VecDeque<DynamicImage>>> {
         Arc::new(Mutex::new(images.into_iter().collect()))
+    }
+
+    struct FlakyInput {
+        fired: Arc<Mutex<Vec<InputCommand>>>,
+        remaining_failures: AtomicU32,
+    }
+
+    #[async_trait]
+    impl Input for FlakyInput {
+        async fn execute(&self, action: &InputAction) -> Result<(), DeviceError> {
+            let remaining = self.remaining_failures.load(Ordering::SeqCst);
+            if remaining > 0 {
+                self.remaining_failures
+                    .store(remaining - 1, Ordering::SeqCst);
+                return Err(DeviceError::CommandFailed {
+                    message: "flaky execute failure".into(),
+                });
+            }
+            let cmd = match action {
+                InputAction::Tap(p) => InputCommand::Tap { x: p.x, y: p.y },
+                InputAction::Swipe {
+                    from,
+                    to,
+                    duration_ms: _,
+                } => InputCommand::Swipe {
+                    from: (from.x, from.y),
+                    to: (to.x, to.y),
+                },
+                other => panic!("unexpected action in fake: {:?}", other),
+            };
+            self.fired.lock().expect("fired lock").push(cmd);
+            Ok(())
+        }
     }
 
     fn new_fired() -> Arc<Mutex<Vec<InputCommand>>> {
@@ -2200,6 +2264,92 @@ mod tests {
         assert_eq!(outcome.terminal, "recovery_failed");
     }
 
+    #[tokio::test]
+    async fn transient_execute_error_is_absorbed_once() {
+        let (matched, _tpl) = matched_frame();
+        let frames = frames_of(vec![matched.clone(), matched]);
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames,
+                fail: false,
+            },
+            FlakyInput {
+                fired,
+                remaining_failures: AtomicU32::new(1),
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                None,
+            )],
+            2400,
+            300,
+        );
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 5, 0, None)
+            .await;
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::TerminalTask,
+            "1 回目の execute 失敗は吸収され、次サイクルで terminal に到達する"
+        );
+        assert_eq!(outcome.iterations, 2);
+        assert_eq!(outcome.fired_commands.len(), 1);
+    }
+
+    #[tokio::test]
+    async fn sustained_execute_errors_reach_recovery_not_immediate_stop() {
+        let (matched, _tpl) = matched_frame();
+        let frames = frames_of((0..8).map(|_| matched.clone()).collect());
+        let fired = new_fired();
+
+        let mut driver = PipelineDriver::new(
+            FakeCapture {
+                frames,
+                fail: false,
+            },
+            FlakyInput {
+                fired,
+                remaining_failures: AtomicU32::new(99),
+            },
+            PipelineState::new("Title"),
+            vec![click_rect_task(
+                "Title",
+                Action::ClickRect {
+                    roi: ScreenRegion::new(520, 320, 240, 80),
+                },
+                None,
+            )],
+            2400,
+            300,
+        )
+        .with_recovery_grace(Duration::from_secs(90))
+        .with_recovery_clock(Box::new(SteppingRecoveryClock::new(Duration::from_secs(5))));
+        let (calls, hook) = counting_hook();
+
+        let outcome = driver
+            .run_loop_with_recovery(Duration::ZERO, 6, 1, Some(hook))
+            .await;
+
+        assert_eq!(
+            outcome.reason,
+            LoopStopReason::MaxIterations,
+            "連続 execute 失敗は吸収限界を超えると recovery hook 経路に流れる (即停止しない)"
+        );
+        assert_eq!(
+            calls.load(Ordering::SeqCst),
+            1,
+            "吸収限界到達後、最初の recovery 起動で 1 回"
+        );
+        assert_eq!(outcome.iterations, 6);
+    }
+
     struct SteppingRecoveryClock {
         next: Duration,
         step: Duration,
@@ -2459,7 +2609,7 @@ mod tests {
         let cases = [
             (StepErrorKind::Capture, true),
             (StepErrorKind::VerifyCapture, true),
-            (StepErrorKind::Execute, false),
+            (StepErrorKind::Execute, true),
             (StepErrorKind::Other, false),
         ];
         for (kind, expected) in cases {
