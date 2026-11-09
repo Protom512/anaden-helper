@@ -1,15 +1,4 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": [
-    {
-      "file": "crates/anaden-device/src/win32_terminate.rs",
-      "reason": "新規 mod tests 追加のみ (image_name_matches 契約 2 件 + pid 再利用 skip ライブテスト 1 件)。既存テストの変更・削除なし",
-      "ref": "issue #305 item 1 pid-reuse race 修正 PR のテスト追加"
-    },
-    {
-      "file": "crates/anaden-device/src/win32_launch.rs",
-      "reason": "既存テスト内 cleanup 1 行のシグネチャ追従 (terminate_pid に launcher 名を渡す)。テストの意味は不変",
-      "ref": "issue #305 item 1 修正による terminate_pid(pid, child) シグネチャ変更への追従"
-    }
-  ]
+  "entries": []
 }
