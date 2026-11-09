@@ -1,10 +1,4 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": [
-    {
-      "file": "crates/anaden-studio/src/app.rs",
-      "reason": "load_folder 上限テスト 1 本追加 (枚数上限 + 検出数)。既存テストの削除・弱化なし",
-      "ref": "#326 item 6"
-    }
-  ]
+  "entries": []
 }
