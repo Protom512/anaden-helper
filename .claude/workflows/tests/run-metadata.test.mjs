@@ -225,8 +225,10 @@ test('buildRunMetadata edge: non-string runId / title rejected', () => {
   assert.ok(buildRunMetadata({ ...base, runId: 'run-1', title: null }).errors.some((e) => e.startsWith('title:')));
 });
 
-test('docs: pipeline-evidence-verification.md mentions runTimestamp as evidence requirement', () => {
-  const doc = readFileSync(join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md'), 'utf8');
+test('docs: pipeline-evidence-verification.md mentions runTimestamp as evidence requirement', (t) => {
+  const docPath = join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md');
+  if (!existsSync(docPath)) return t.skip('machine-local rules doc absent on fresh clones (gitignored .claude/rules/)');
+  const doc = readFileSync(docPath, 'utf8');
   assert.ok(doc.includes('runTimestamp'), 'doc must mention runTimestamp');
   assert.ok(/runTimestamp/.test(doc.split('| 実行コマンド全文|')[1] ?? doc), 'sanity');
 });

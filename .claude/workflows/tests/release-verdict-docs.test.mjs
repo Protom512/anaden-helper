@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -9,17 +9,18 @@ const s2doc = readFileSync(
   join(repoRoot, '.claude', 'workflows', 'S2-GATE-FALSE-POSITIVE-FIX-PROPOSAL.md'),
   'utf8',
 );
-const rules = readFileSync(
-  join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md'),
-  'utf8',
-);
+const RULES_SKIP_REASON = 'machine-local rules doc absent on fresh clones (gitignored .claude/rules/)';
+const rulesPath = join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md');
+const rules = existsSync(rulesPath) ? readFileSync(rulesPath, 'utf8') : null;
 
 const fp2 =
   s2doc.split('## FP-2:')[1]?.split('## FP-3:')[0] ??
   assert.fail('S2 doc must have an FP-2 section followed by an FP-3 section');
 const sect11 =
-  rules.split('### 1.1')[1]?.split('### 1.2')[0] ??
-  assert.fail('rules doc must have a §1.1 section followed by §1.2');
+  rules === null
+    ? null
+    : rules.split('### 1.1')[1]?.split('### 1.2')[0] ??
+      assert.fail('rules doc must have a §1.1 section followed by §1.2');
 
 test('S2 doc: FP-2 heading carries applied status (Issue #152)', () => {
   assert.match(s2doc, /## FP-2:[^\n]*applied \(Issue #152\)/,
@@ -56,7 +57,8 @@ test('S2 doc: FP-2 applied note records approval trail (estimate approval)', () 
     'approval context must be recorded in the FP-2 applied note (same shape as FP-1)');
 });
 
-test('rules §1.1: Release Review / Commit Gate verdict evidence row exists', () => {
+test('rules §1.1: Release Review / Commit Gate verdict evidence row exists', (t) => {
+  if (sect11 === null) return t.skip(RULES_SKIP_REASON);
   const row =
     sect11.split('\n').find((l) => l.includes('Release Review verdict')) ?? '';
   assert.notEqual(row, '', '§1.1 table must have a Release Review verdict row');
@@ -72,7 +74,8 @@ test('rules §1.1: Release Review / Commit Gate verdict evidence row exists', ()
     'the row must carry the Issue #152 applied pointer');
 });
 
-test('rules §1.1: release prompt gate description must interpolate consensus verdicts', () => {
+test('rules §1.1: release prompt gate description must interpolate consensus verdicts', (t) => {
+  if (sect11 === null) return t.skip(RULES_SKIP_REASON);
   assert.ok(/interpolation/.test(sect11),
     '§1.1 must codify consensus-actual-verdict interpolation for the release prompt');
   assert.ok(/固定文字列/.test(sect11),
@@ -81,7 +84,8 @@ test('rules §1.1: release prompt gate description must interpolate consensus ve
     '§1.1 must restrict "all GO" output to the all-lanes-GO case');
 });
 
-test('rules §1.1: fail-closed fallback when PR review posting fails', () => {
+test('rules §1.1: fail-closed fallback when PR review posting fails', (t) => {
+  if (sect11 === null) return t.skip(RULES_SKIP_REASON);
   assert.ok(/fallback/.test(sect11) && /fail-closed/.test(sect11),
     '§1.1 must state the persistent-log fallback so evidence is never lost (fail-closed)');
 });
