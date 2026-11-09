@@ -1,4 +1,4 @@
-import { readFileSync } from 'node:fs';
+import { existsSync, readFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { dirname, join } from 'node:path';
 import test from 'node:test';
@@ -9,10 +9,9 @@ const s2doc = readFileSync(
   join(repoRoot, '.claude', 'workflows', 'S2-GATE-FALSE-POSITIVE-FIX-PROPOSAL.md'),
   'utf8',
 );
-const rules = readFileSync(
-  join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md'),
-  'utf8',
-);
+const RULES_SKIP_REASON = 'machine-local rules doc absent on fresh clones (gitignored .claude/rules/)';
+const rulesPath = join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md');
+const rules = existsSync(rulesPath) ? readFileSync(rulesPath, 'utf8') : null;
 
 test('S2 doc: Issue #102 applied block exists (same shape as P-007/#91 note)', () => {
   assert.ok(s2doc.includes('#102'), 'S2 doc must reference Issue #102');
@@ -35,12 +34,14 @@ test('S2 doc: applied block records approval trail (estimate approval)', () => {
   assert.ok(/承認/.test(s2doc), 'approval context must be recorded in the applied block');
 });
 
-test('rules §2: references gate-diff.json single-source persistence', () => {
+test('rules §2: references gate-diff.json single-source persistence', (t) => {
+  if (rules === null) return t.skip(RULES_SKIP_REASON);
   assert.ok(rules.includes('gate-diff.json'),
     'pipeline-evidence-verification.md §2 must mention gate-diff.json persistence');
 });
 
-test('rules §2: no longer claims the fix is documentation-only', () => {
+test('rules §2: no longer claims the fix is documentation-only', (t) => {
+  if (rules === null) return t.skip(RULES_SKIP_REASON);
   const sect2 = rules.split('## 2.')[1]?.split('## 3.')[0] ?? '';
   assert.ok(!/文書化済み。/.test(sect2) || sect2.includes('#102'),
     '§2 must not leave the fix as "documented only" without the #102 applied pointer');

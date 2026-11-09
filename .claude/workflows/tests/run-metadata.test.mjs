@@ -79,14 +79,21 @@ test('matchRunByTimestamp returns null for unknown or unmatched timestamp', () =
   assert.equal(matchRunByTimestamp(index, null), null);
 });
 
-test('real-world: existing .omc/logs run dirs without run-metadata.json classify as unknown', () => {
+test('real-world: existing .omc/logs run dirs without run-metadata.json classify as unknown', (t) => {
   const { RUN_TIMESTAMP_UNKNOWN, buildRunTimestampIndex } = loadInlineHelper();
   const logsDir = join(repoRoot, '.omc', 'logs');
+  if (!existsSync(logsDir)) return t.skip('machine-local .omc/logs runtime dir absent on fresh clones');
   assert.ok(existsSync(logsDir), '.omc/logs must exist');
   const runDirs = readdirSync(logsDir, { withFileTypes: true })
     .filter((d) => d.isDirectory())
     .map((d) => d.name);
   assert.ok(runDirs.length > 0, 'at least one run dir expected');
+  const hasMetadataLess = runDirs.some(
+    (name) => !existsSync(join(logsDir, name, 'run-metadata.json'))
+  );
+  if (!hasMetadataLess) {
+    return t.skip('no metadata-less run dirs in this checkout (CI carries only the 2 tracked fixtures, both with metadata)');
+  }
   const entries = runDirs.map((runId) => {
     const metaPath = join(logsDir, runId, 'run-metadata.json');
     let metadata = null;
@@ -225,8 +232,10 @@ test('buildRunMetadata edge: non-string runId / title rejected', () => {
   assert.ok(buildRunMetadata({ ...base, runId: 'run-1', title: null }).errors.some((e) => e.startsWith('title:')));
 });
 
-test('docs: pipeline-evidence-verification.md mentions runTimestamp as evidence requirement', () => {
-  const doc = readFileSync(join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md'), 'utf8');
+test('docs: pipeline-evidence-verification.md mentions runTimestamp as evidence requirement', (t) => {
+  const docPath = join(repoRoot, '.claude', 'rules', 'pipeline-evidence-verification.md');
+  if (!existsSync(docPath)) return t.skip('machine-local rules doc absent on fresh clones (gitignored .claude/rules/)');
+  const doc = readFileSync(docPath, 'utf8');
   assert.ok(doc.includes('runTimestamp'), 'doc must mention runTimestamp');
   assert.ok(/runTimestamp/.test(doc.split('| 実行コマンド全文|')[1] ?? doc), 'sanity');
 });
