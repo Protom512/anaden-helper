@@ -88,6 +88,12 @@ test('real-world: existing .omc/logs run dirs without run-metadata.json classify
     .filter((d) => d.isDirectory())
     .map((d) => d.name);
   assert.ok(runDirs.length > 0, 'at least one run dir expected');
+  const hasMetadataLess = runDirs.some(
+    (name) => !existsSync(join(logsDir, name, 'run-metadata.json'))
+  );
+  if (!hasMetadataLess) {
+    return t.skip('no metadata-less run dirs in this checkout (CI carries only the 2 tracked fixtures, both with metadata)');
+  }
   const entries = runDirs.map((runId) => {
     const metaPath = join(logsDir, runId, 'run-metadata.json');
     let metadata = null;
