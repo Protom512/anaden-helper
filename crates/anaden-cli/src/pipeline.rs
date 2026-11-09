@@ -73,6 +73,7 @@ pub enum RunState {
     Idle,
     Running,
     Finished,
+    Unknown,
 }
 
 #[derive(Debug)]
@@ -132,7 +133,7 @@ impl PipelineController {
     pub fn state(&self) -> RunState {
         match self.slot.try_lock() {
             Ok(slot) => slot_state(&slot),
-            Err(_) => RunState::Running,
+            Err(_) => RunState::Unknown,
         }
     }
 
@@ -148,7 +149,7 @@ impl PipelineController {
         if let Err(e) = opts.validate() {
             return Err(StartError::InvalidOptions(e));
         }
-        {
+        let (slot_arc, cancel) = {
             let mut slot = self
                 .slot
                 .try_lock()
@@ -160,27 +161,15 @@ impl PipelineController {
             slot.cancel = Some(cancel.clone());
             slot.running = true;
             slot.finished = false;
-        }
-        let slot_arc = Arc::clone(&self.slot);
-        let cancel = {
-            match self.slot.try_lock() {
-                Ok(s) => s.cancel.clone(),
-                Err(_) => None,
-            }
-        };
-        let cancel = match cancel {
-            Some(c) => c,
-            None => {
-                return Err(StartError::AlreadyRunning);
-            }
+            let slot_arc = Arc::clone(&self.slot);
+            (slot_arc, cancel)
         };
         let jh = tokio::spawn(async move {
             let result = run(opts, cancel).await;
-            if let Ok(mut slot) = slot_arc.try_lock() {
-                slot.running = false;
-                slot.finished = true;
-                slot.cancel = None;
-            }
+            let mut slot = slot_arc.lock().await;
+            slot.running = false;
+            slot.finished = true;
+            slot.cancel = None;
             result
         });
         Ok(jh)
@@ -216,4 +205,102 @@ pub fn is_pipeline_dir(dir: &Path) -> bool {
                     .any(|e| e.path().extension().is_some_and(|x| x == "toml"))
             })
             .unwrap_or(false)
+}
+
+#[cfg(test)]
+#[allow(clippy::unwrap_used)]
+#[allow(clippy::panic)]
+#[allow(clippy::expect_used)]
+mod tests {
+    use super::*;
+    use std::time::Duration;
+
+    fn short_run(
+        opts: RunOptions,
+        cancel: CancellationToken,
+    ) -> std::pin::Pin<
+        Box<
+            dyn std::future::Future<Output = Result<anaden_engine::LoopOutcome, anyhow::Error>>
+                + Send,
+        >,
+    > {
+        Box::pin(async move {
+            tokio::select! {
+                _ = cancel.cancelled() => {}
+                _ = tokio::time::sleep(Duration::from_millis(50)) => {}
+            }
+            Ok(anaden_engine::LoopOutcome {
+                iterations: opts.max_iters,
+                fired_commands: vec![],
+                terminal: "max_iterations".to_string(),
+                reason: anaden_engine::LoopStopReason::MaxIterations,
+                progress_report: anaden_engine::ProgressReport::default(),
+            })
+        })
+    }
+
+    fn local_opts() -> RunOptions {
+        RunOptions {
+            pipeline_dir: PathBuf::from("../../templates/pipelines/field_loop_pc"),
+            start_task: "TapBottomStablePc".to_string(),
+            algorithm: None,
+            interval_secs: 1,
+            max_iters: 2,
+            width: None,
+            ensure_open: false,
+            ensure_open_wait_secs: 30,
+            recover_launch: false,
+            recover_nomatch_threshold: 5,
+            verify_after_fire: true,
+            goal: None,
+        }
+    }
+
+    #[tokio::test]
+    async fn state_returns_unknown_while_slot_lock_is_contended() {
+        let ctrl = PipelineController::new();
+        {
+            let _guard = ctrl.slot.lock().await;
+            assert_eq!(ctrl.state(), RunState::Unknown);
+        }
+        assert_eq!(ctrl.state(), RunState::Idle);
+    }
+
+    #[tokio::test]
+    async fn start_side_contention_returns_already_running_without_latching_running() {
+        let ctrl = PipelineController::new();
+        {
+            let _guard = ctrl.slot.lock().await;
+            let err = ctrl.try_start(local_opts(), short_run).unwrap_err();
+            assert!(err.is_already_running(), "got: {err:?}");
+        }
+        assert_eq!(ctrl.state(), RunState::Idle);
+        let jh = ctrl.try_start(local_opts(), short_run).unwrap();
+        let _ = jh.await;
+        assert_eq!(ctrl.state(), RunState::Finished);
+    }
+
+    #[tokio::test]
+    async fn controller_recovers_across_concurrent_observer_pressure() {
+        let ctrl = Arc::new(PipelineController::new());
+        let opts = local_opts();
+        for _cycle in 0..4 {
+            let jh = ctrl.try_start(opts.clone(), short_run).unwrap();
+            let mut hammers = Vec::new();
+            for _ in 0..4 {
+                let observer = Arc::clone(&ctrl);
+                hammers.push(tokio::spawn(async move {
+                    for _ in 0..25 {
+                        let _ = observer.state();
+                        observer.cancel().await;
+                    }
+                }));
+            }
+            for h in hammers {
+                h.await.unwrap();
+            }
+            let _ = jh.await;
+            assert_eq!(ctrl.state(), RunState::Finished);
+        }
+    }
 }
