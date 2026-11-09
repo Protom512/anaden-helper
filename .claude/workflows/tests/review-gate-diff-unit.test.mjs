@@ -9,7 +9,7 @@ import {
   buildDiffSection,
   withDiffContext,
   buildUnifiedGateDiff,
-} from './review-gate-diff.js';
+} from '../review-gate-diff.js';
 
 const here = dirname(fileURLToPath(import.meta.url));
 
@@ -51,12 +51,12 @@ test('withDiffContext: appends R8 instruction + diff section to prompt', () => {
   assert.ok(out.includes('+foo'));
 });
 
-const src = readFileSync(join(here, 'review-gate.js'), 'utf8');
+const src = readFileSync(join(here, '..', 'review-gate.js'), 'utf8');
 
 test('review-gate.js: fetches diff via R8-style agent before reviews', () => {
   assert.ok(src.includes('review:fetch-diff'));
   assert.ok(src.includes('DIFF_FETCH_PROMPT'));
-  const mod = readFileSync(join(here, 'review-gate-diff.js'), 'utf8');
+  const mod = readFileSync(join(here, '..', 'review-gate-diff.js'), 'utf8');
   assert.ok(mod.includes('git --no-pager diff HEAD'));
   assert.ok(mod.includes('24000'));
   assert.ok(mod.includes('28000'));
