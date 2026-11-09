@@ -1,10 +1,4 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": [
-    {
-      "file": "crates/anaden-engine/src/pipeline_driver.rs",
-      "reason": "#324 item 8: dead API format_progress_report deleted together with its 2 in-src tests",
-      "ref": "https://github.com/Protom512/anaden-helper/issues/324"
-    }
-  ]
+  "entries": []
 }
