@@ -830,37 +830,6 @@ pub fn bump_task_match(current: &str, list: &mut Vec<TaskMatchCount>) {
     }
 }
 
-pub fn format_progress_report(outcome: &LoopOutcome) -> String {
-    let pr = &outcome.progress_report;
-    let iterations = pr.iterations.max(outcome.iterations);
-    let fired_count = pr.fired_count.max(outcome.fired_commands.len() as u64);
-    let terminal_task: &str = pr
-        .terminal_task
-        .as_deref()
-        .or(Some(outcome.terminal.as_str()))
-        .unwrap_or("(unknown)");
-    let mut lines: Vec<String> = Vec::new();
-    lines.push(format!(
-        "progress: iterations: {iterations}, fired: {fired_count}, elapsed: {}ms",
-        pr.elapsed_ms
-    ));
-    lines.push(format!("terminal: {terminal_task}"));
-    if let Some(goal) = &pr.reached_goal {
-        lines.push(format!("reached_goal: {goal}"));
-    }
-    if pr.per_task_matches.is_empty() {
-        lines.push("per_task_matches: (none)".to_string());
-    } else {
-        let summary: Vec<String> = pr
-            .per_task_matches
-            .iter()
-            .map(|m| format!("{}={}", m.task, m.matches))
-            .collect();
-        lines.push(format!("per_task_matches: {}", summary.join(", ")));
-    }
-    lines.join("\n")
-}
-
 #[must_use]
 pub fn stop_reason_label(reason: LoopStopReason) -> &'static str {
     match reason {
@@ -3175,63 +3144,6 @@ mod tests {
         assert_eq!(by_name.get("Title"), Some(&1));
         assert_eq!(by_name.get("LoadGame"), Some(&1));
         assert_eq!(by_name.get("Terminal"), Some(&1));
-    }
-
-    #[test]
-    fn format_progress_report_is_human_readable() {
-        let outcome = LoopOutcome {
-            iterations: 7,
-            fired_commands: vec![
-                InputCommand::Tap { x: 1, y: 2 },
-                InputCommand::Tap { x: 3, y: 4 },
-            ],
-            terminal: "Terminal".to_string(),
-            reason: LoopStopReason::TerminalTask,
-            progress_report: ProgressReport {
-                jitter_seed: None,
-                verify: Default::default(),
-                iterations: 7,
-                fired_count: 2,
-                per_task_matches: vec![
-                    TaskMatchCount {
-                        task: "Title".to_string(),
-                        matches: 1,
-                    },
-                    TaskMatchCount {
-                        task: "LoadGame".to_string(),
-                        matches: 1,
-                    },
-                ],
-                elapsed_ms: 1234,
-                terminal_task: Some("Terminal".to_string()),
-                reached_goal: Some("loop_count=7".to_string()),
-                stop_reason: None,
-                recovery_attempts: 0,
-                max_consecutive_recovery: 0,
-            },
-        };
-        let s = format_progress_report(&outcome);
-        assert!(s.contains("iterations: 7"), "got: {s}");
-        assert!(s.contains("fired: 2"), "got: {s}");
-        assert!(s.contains("elapsed"), "got: {s}");
-        assert!(s.contains("1234"), "got: {s}");
-        assert!(s.contains("Terminal"), "got: {s}");
-        assert!(s.contains("Title"), "got: {s}");
-        assert!(s.contains("loop_count=7"), "got: {s}");
-    }
-
-    #[test]
-    fn format_progress_report_handles_default() {
-        let outcome = LoopOutcome {
-            iterations: 0,
-            fired_commands: vec![],
-            terminal: "io_error".to_string(),
-            reason: LoopStopReason::CaptureError,
-            progress_report: ProgressReport::default(),
-        };
-        let s = format_progress_report(&outcome);
-        assert!(s.contains("iterations: 0"), "got: {s}");
-        assert!(s.contains("fired: 0"), "got: {s}");
     }
 
     #[test]

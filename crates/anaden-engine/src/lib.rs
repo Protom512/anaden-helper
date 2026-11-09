@@ -12,8 +12,8 @@ pub use pipeline_dir::resolve_pipeline_dir;
 pub use pipeline_driver::{
     Capture, GoalClock, Input, LoopOutcome, LoopStopReason, PipelineDriver, ProgressReport,
     RecoveryClock, RecoveryContext, RecoveryHook, StepErrorKind, StepOutcome, SystemClock,
-    SystemRecoveryClock, TaskMatchCount, VerifyReport, format_progress_report,
-    is_recoverable_io_error, rescale_command, stop_reason_label,
+    SystemRecoveryClock, TaskMatchCount, VerifyReport, is_recoverable_io_error, rescale_command,
+    stop_reason_label,
 };
 pub use pipeline_runner::{
     InputCommand, PipelineState, TickResult, action_to_command, advance_next,
@@ -23,6 +23,6 @@ pub use routine::{
     RoutineStep, load_routine,
 };
 pub use routine_runner::{
-    PipelineInvoker, RoutineStepResult, RoutineSummary, StepStatus, classify_reason,
-    format_dry_run, interrupted_summary, reason_label, run_routine, step_status_label,
+    PipelineInvoker, RoutineStepResult, RoutineSummary, StepStatus, format_dry_run,
+    interrupted_summary, reason_label, run_routine, step_status_label,
 };

@@ -104,7 +104,7 @@ impl RoutineSummary {
 }
 
 #[must_use]
-pub fn classify_reason(reason: &LoopStopReason) -> StepStatus {
+fn classify_reason(reason: &LoopStopReason) -> StepStatus {
     match reason {
         LoopStopReason::Stop
         | LoopStopReason::TerminalTask
