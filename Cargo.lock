@@ -254,7 +254,6 @@ dependencies = [
 name = "anaden-strategies"
 version = "0.1.0"
 dependencies = [
- "anaden-core",
  "serde",
  "thiserror 2.0.18",
  "toml",
