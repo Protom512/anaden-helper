@@ -1,10 +1,4 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": [
-    {
-      "file": "crates/anaden-studio/tests/scenario_uc4_roundtrip_tests.rs",
-      "reason": "fixture premise constant follows retuned TapHudTrPc threshold 0.70->0.80 (2026-11-10 live retuning, measured discrimination); roundtrip behavior under test unchanged",
-      "ref": "same-branch field_loop_pc live retuning (test(vision) commit)"
-    }
-  ]
+  "entries": []
 }
