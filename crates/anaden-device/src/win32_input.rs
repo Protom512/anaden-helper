@@ -4,7 +4,9 @@ use std::mem;
 use std::time::Duration;
 
 use windows::Win32::Foundation::{HWND, LPARAM, POINT, RECT, WPARAM};
-use windows::Win32::Graphics::Gdi::ClientToScreen;
+use windows::Win32::Graphics::Gdi::{
+    ClientToScreen, GetMonitorInfoW, MONITOR_DEFAULTTONEAREST, MONITORINFO, MonitorFromPoint,
+};
 use windows::Win32::System::Threading::{AttachThreadInput, GetCurrentThreadId};
 use windows::Win32::UI::HiDpi::{
     DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2, SetProcessDpiAwarenessContext,
@@ -160,6 +162,15 @@ fn click(
                     ),
                 });
             }
+            if !point_on_any_monitor(fire_x, fire_y) {
+                return Err(DeviceError::CommandFailed {
+                    message: format!(
+                        "発火座標({fire_x},{fire_y})がモニタ矩形外 (process={process})。\
+                         ウィンドウがモニタからはみ出す配置だと SendInput は OS にクランプされ\
+                         ゲーム無効の幽霊発火になる (DEF-009)。注入中止。"
+                    ),
+                });
+            }
             let sent = sendinput_click(fire_x, fire_y, hold_ms);
             if sent != 2 {
                 return Err(DeviceError::CommandFailed {
@@ -216,15 +227,7 @@ fn swipe(
 
             let (start_x, start_y) = (origin_x + x1, origin_y + y1);
             let (end_x, end_y) = (origin_x + x2, origin_y + y2);
-            if !point_in_window_rect(hwnd, start_x, start_y)
-                || !point_in_window_rect(hwnd, end_x, end_y)
-            {
-                return Err(DeviceError::CommandFailed {
-                    message: format!(
-                        "Swipe 端点(start={start_x},{start_y} end={end_x},{end_y})が対象ウィンドウ画面矩形外 (process={process})。誤操作防止のため注入中止。"
-                    ),
-                });
-            }
+            ensure_swipe_endpoints_fireable(hwnd, process, (start_x, start_y), (end_x, end_y))?;
 
             let (vw, vh, ox, oy) = virtual_screen();
             let base = MOUSEEVENTF_ABSOLUTE | MOUSEEVENTF_VIRTUALDESK | MOUSEEVENTF_MOVE;
@@ -315,6 +318,35 @@ fn rect_contains(rect: &RECT, x: i32, y: i32) -> bool {
     x >= rect.left && x <= rect.right && y >= rect.top && y <= rect.bottom
 }
 
+fn all_points_on_any_monitor(points: &[(i32, i32)]) -> bool {
+    points.iter().all(|(x, y)| point_on_any_monitor(*x, *y))
+}
+
+fn ensure_swipe_endpoints_fireable(
+    hwnd: HWND,
+    process: &str,
+    (start_x, start_y): (i32, i32),
+    (end_x, end_y): (i32, i32),
+) -> Result<(), DeviceError> {
+    if !point_in_window_rect(hwnd, start_x, start_y) || !point_in_window_rect(hwnd, end_x, end_y) {
+        return Err(DeviceError::CommandFailed {
+            message: format!(
+                "Swipe 端点(start={start_x},{start_y} end={end_x},{end_y})が対象ウィンドウ画面矩形外 (process={process})。誤操作防止のため注入中止。"
+            ),
+        });
+    }
+    if !all_points_on_any_monitor(&[(start_x, start_y), (end_x, end_y)]) {
+        return Err(DeviceError::CommandFailed {
+            message: format!(
+                "Swipe 端点(start={start_x},{start_y} end={end_x},{end_y})がモニタ矩形外 (process={process})。\
+                 ウィンドウがモニタからはみ出す配置だと SendInput は OS にクランプされ\
+                 ゲーム無効の幽霊発火になる (DEF-009)。注入中止。"
+            ),
+        });
+    }
+    Ok(())
+}
+
 fn point_in_window_rect(hwnd: HWND, sx: i32, sy: i32) -> bool {
     unsafe {
         if hwnd.0.is_null() {
@@ -325,6 +357,23 @@ fn point_in_window_rect(hwnd: HWND, sx: i32, sy: i32) -> bool {
             return false;
         }
         rect_contains(&rect, sx, sy)
+    }
+}
+
+pub fn point_on_any_monitor(x: i32, y: i32) -> bool {
+    unsafe {
+        let hmon = MonitorFromPoint(POINT { x, y }, MONITOR_DEFAULTTONEAREST);
+        if hmon.is_invalid() {
+            return false;
+        }
+        let mut info = MONITORINFO {
+            cbSize: u32::try_from(mem::size_of::<MONITORINFO>()).unwrap_or_default(),
+            ..Default::default()
+        };
+        if !GetMonitorInfoW(hmon, &mut info).as_bool() {
+            return false;
+        }
+        rect_contains(&info.rcMonitor, x, y)
     }
 }
 

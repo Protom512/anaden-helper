@@ -22,7 +22,7 @@ pub use readiness::{
 #[cfg(windows)]
 pub use win32_capture::{DEFAULT_PROCESS_NAME, Win32Capture};
 #[cfg(windows)]
-pub use win32_input::{InputMethod, Win32InputExecutor};
+pub use win32_input::{InputMethod, Win32InputExecutor, point_on_any_monitor};
 #[cfg(windows)]
 pub use win32_launch::{
     DEFAULT_CHILD, DEFAULT_LAUNCHER, DEFAULT_WAIT, DEFAULT_WORKDIR, Win32Launch,
