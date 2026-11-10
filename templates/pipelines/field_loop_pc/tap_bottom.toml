@@ -2,7 +2,7 @@ name      = "TapBottomStablePc"
 state     = "Field"
 algorithm = "ccoeff"
 template  = "bottom_stable.png"
-roi       = [230, 580, 130, 120]
+roi       = [400, 600, 120, 108]
 threshold = 0.80
 action    = { type = "click_self" }
 next      = []

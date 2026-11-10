@@ -229,8 +229,8 @@ fn edit_threshold_and_next_changes_only_edited_fields() {
         .find(|d| d.name == "TapHudTrPc")
         .expect("TapHudTrPc");
     assert!(
-        (hud_before.threshold - 0.70).abs() < 1e-6,
-        "前提: 編集前 threshold=0.70"
+        (hud_before.threshold - 0.80).abs() < 1e-6,
+        "前提: 編集前 threshold=0.80 (2026-11-10 再調整、真陽性>=0.85 / menu 誤陽性 0.7774 との識別)"
     );
 
     let mut state = load_scenario_from_dir(&dir).expect("load");
