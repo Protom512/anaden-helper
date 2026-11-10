@@ -34,13 +34,37 @@ Canonical tracker: canonical_feature_stories.csv (markdown 版は凡例のみ)�
   ゲート: nextest 1020 passed, 10 skipped / clippy -D warnings / fmt /
   ast-grep すべて green。CSV は 73 stories: 69 Pass / 4 Blocked。
 
+## Done (live session, 2026-11-10)
+
+実機ライブセッション (ツールブート + スプラッシュクリック復旧のゲームで検証):
+
+- **field_loop_pc ライブ検証 (US-PIP-02 Pass 化)**: bottom_stable 再ターゲット
+  (ROI [400,600,120,110]→[400,600,120,108]、710>708 の構造ゲート違反修正) +
+  hud_tr.png をライブ fixture から再切断 (trio needle 62x30、ROI [1080,90,76,44]、
+  threshold 0.80、menu 誤陽性 0.7774 との識別)。tracked fixture
+  `field_live_20261110_3783x2128.png` + 回帰テスト
+  `field_loop_pc_live_regression.rs` (production preprocessing 経由の detect ≥0.85
+  buffer + cross-screen negatives)。
+- **ライブ実行証明**: `anaden run --goal-file LoopCount=1` → Tap(1357,1957) 発火 →
+  ワールドマップ実オープン → verify-after-fire 1/1 PASS → goal 停止 exit 0
+  (report: `.anaden-run/20261110-080226528/report.json`)。
+  ゴール停止機構のライブ実証 (US-GOAL-01 の機構部分)。
+- **新規欠陥 DEF-008/009/010** (詳細は defects_log.md): 街 field に FieldHudTopPc
+  通貨バー無し / ウィンドウ画面外はみ出し時の発火座標が画面外へ (verify failed=1
+  でも exit 0) / PrintWindow 取得モード切り替え (chrome 混入 DWM フォールバック、
+  signature: キャプチャ内にタイトルバー)。
+- **運用知見**: (1) ツールブートの splash-hang はスプラッシュパネルへの実クリック
+  1 回で復旧可能 (過去 0/5 諦め前例を覆す)。(2) ウィンドウリサイズ
+  (SetWindowPos) でレンダラが停滞しキャプチャが chrome 混入モードへ落ちる
+  (D1/D2 実験系列)。(3) 発火前にウィンドウ位置がモニタ内に収まっていることの
+  確認が必要 (DEF-009)。
+
 ## Open (次回ループ)
 
-1. Blocked 4 ストーリーの実機検証 (US-PIP-01/02/03/05): 実ゲーム環境で
-   nav_to_field_pc コールドスタート・field_loop_pc probe・login・
-   title_live_regression を実行して Pass 化する。
-2. US-GOAL-01 のライブゲーム確認: manifest goal でライブ run が停止する実機
-   検証は未実施 (コード+テスト証拠のみ)。実機環境で login シナリオ実行。
+1. Blocked 実機検証の残り (US-PIP-01/03/05): タイトル画面到達に再ログインが必要
+   (attach-only セッションでは不可能) + US-PIP-01 は DEF-008 によりロード後の
+   到達判定自体が街で不能。DEF-008 修正 (街用アンカー再選定、候補: 下部バー
+   Map ボタン領域) が先決。
 3. routine --report-file / 既定永続化の実 GUI・実機確認: studio から routine
    を spawn しレポート読込が履歴/ステータスバーへ反映されることを実機で確認
    (unit テスト済み・GUI 操作は未実施)。CLI 直実行の既定永続化

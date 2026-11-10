@@ -2,7 +2,7 @@ name      = "TapHudTrPc"
 state     = "Field"
 algorithm = "ccoeff"
 template  = "hud_tr.png"
-roi       = [1038, 0, 218, 120]
-threshold = 0.70
+roi       = [1080, 90, 76, 44]
+threshold = 0.80
 action    = { type = "click_self" }
 next      = []
