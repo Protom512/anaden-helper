@@ -466,6 +466,12 @@ pub fn load_pipeline_manifest(dir: &Path) -> Result<PipelineManifest, TaskDefErr
     Ok(manifest)
 }
 
+const WATCH_DIRNAME: &str = "watch";
+
+pub fn load_watch_defs(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
+    load_pipeline(&dir.join(WATCH_DIRNAME))
+}
+
 pub fn save_task_def(def: &TaskDef, path: &Path) -> Result<(), TaskDefError> {
     if is_pipeline_manifest_path(path) {
         return Err(TaskDefError::SaveFailed {

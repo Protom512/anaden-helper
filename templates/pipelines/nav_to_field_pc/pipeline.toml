@@ -1,3 +1,2 @@
-
 start_task = "TapToStartPc"
-
+watch = ["FieldTownBarPc"]

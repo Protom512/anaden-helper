@@ -314,6 +314,9 @@ async fn run_with_windows(
     if tasks.is_empty() {
         anyhow::bail!("パイプラインが空です: {pipeline_dir:?}");
     }
+    let watch_defs = anaden_vision::load_watch_defs(pipeline_dir)
+        .map_err(|e| anyhow::anyhow!("watch タスク読込失敗 {pipeline_dir:?}/watch: {e}"))?;
+    tasks.extend(watch_defs);
 
     if let Some(a) = algorithm {
         let algo =
