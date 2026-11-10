@@ -13,8 +13,8 @@ pub use ccoeff::CcoeffVisionEngine;
 pub use diagnose::{DiagnoseEntry, diagnose_all, diagnose_task, format_diagnose_report};
 pub use engine::{SseVisionEngine, VisionEngine};
 pub use letterbox::{
-    CANVAS_ASPECT, CANVAS_ASPECT_TOLERANCE, CropInfo, crop_to_canvas_with_info, crop_to_content,
-    crop_to_content_with_info,
+    CANVAS_ASPECT, CANVAS_ASPECT_TOLERANCE, CHROME_BAND_WIDTH_PX, CaptureModeVerdict, CropInfo,
+    capture_mode_verdict, crop_to_canvas_with_info, crop_to_content, crop_to_content_with_info,
 };
 pub use matcher::{MatchResult, TemplateMatcher};
 pub use pipeline::{

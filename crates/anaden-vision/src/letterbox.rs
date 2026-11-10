@@ -78,6 +78,21 @@ pub fn crop_to_content_with_info(img: &DynamicImage) -> (DynamicImage, CropInfo)
     (DynamicImage::ImageRgb8(cropped), info)
 }
 
+pub const CHROME_BAND_WIDTH_PX: u32 = 100;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CaptureModeVerdict {
+    Clean,
+    Chromed,
+}
+
+pub fn capture_mode_verdict(raw_width: u32, crop_width: u32) -> CaptureModeVerdict {
+    if raw_width > 0 && crop_width + CHROME_BAND_WIDTH_PX <= raw_width {
+        return CaptureModeVerdict::Chromed;
+    }
+    CaptureModeVerdict::Clean
+}
+
 #[derive(Clone, Copy)]
 enum Axis {
     Row,

@@ -406,6 +406,7 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     jitter: Option<Jitter>,
     verify_stats: VerifyStats,
     watch: Vec<String>,
+    capture_mode: anaden_vision::CaptureModeVerdict,
 }
 
 impl<C: Capture, I: Input> PipelineDriver<C, I> {
@@ -439,6 +440,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             jitter: None,
             verify_stats: VerifyStats::default(),
             watch: Vec::new(),
+            capture_mode: anaden_vision::CaptureModeVerdict::Clean,
         }
     }
 
@@ -505,6 +507,19 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         self.last_crop_info = crop_info;
         let crop_w = crop_info.width;
         let crop_h = crop_info.height;
+        let mode = anaden_vision::capture_mode_verdict(raw_w, crop_w);
+        if mode != self.capture_mode {
+            self.capture_mode = mode;
+            if mode == anaden_vision::CaptureModeVerdict::Chromed {
+                warn!(
+                    "capture mode flipped to Chromed (raw={raw_w} content={crop_w}): \
+                     PrintWindow DWM fallback with title-bar pollution + shifted content; \
+                     templates cut in clean mode will mismatch (DEF-010 signature)"
+                );
+            } else {
+                info!("capture mode back to Clean (raw={raw_w} content={crop_w})");
+            }
+        }
         if (crop_w, crop_h) != (raw_w, raw_h) {
             debug!(
                 "letterbox crop: raw={raw_w}x{raw_h} -> content={crop_w}x{crop_h} \

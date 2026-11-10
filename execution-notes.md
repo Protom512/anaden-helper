@@ -34,6 +34,37 @@ DEF-008 を実機込みで修正:
   load→save で損失なく保持 (studio 86 tests green)。studio は watch/ subdir
   の def を表示・編集対象にしない (チェーン外レイヤーのまま)。
 
+## Done (live session 2 続き — DEF-009/010, 同日)
+
+無人継続 (人の手ゼロ)。window 操作と実機発火を伴う実験系列:
+
+- **DEF-009 修正**: win32_input の SendInput 経路 (click/swipe) に
+  `point_on_any_monitor` ゲート (MONITOR_DEFAULTTONEAREST + rcMonitor 判定)。
+  実機陽性: ウィンドウ (2500,100) (右縁 6299 > 3840) で発火座標 (3865,2088)
+  が gate 拒否 → 発火 0 / exit 1 (RecoveryExhausted) / log に DEF-009 メッセージ。
+  同一実験の gate 前バイナリでは幽霊発火 1 (report 20261110-130613612:
+  fired=1, verify.failed=1) — before/after が同一手順で対照証明。
+  実機陰性: (0,0) 配置で同発火が gate 通過 → World Map 実オープン (発火 1,
+  verify は map 遷移アニメ中の capture で failed=1 — 朝の live run は passed
+  でタイミング揺らぎあり)。geometry tests `offscreen_fire_gate_tests.rs`。
+- **DEF-010 検出器**: `capture_mode_verdict` (letterbox crop 幅基準,
+  閾値 100px) を anaden-vision に追加、driver が Clean↔Chromed 遷移を warn。
+  ライブ計測: (a) clean は content 3773/3783 固定、(b) chrome は 3646
+  (黒帯 ~137px + タイトルバー混入 + 座標系の縦横比変化 norm 722→694)。
+  chrome は recovery 再起動直後 2/2 で発生、移動で解消しない例も観測
+  (停滞は非決定的)。chrome 下では針 mismatch が連鎖するため、chrome 空間の
+  針を scratch pipeline で切って発火すれば操作可能 (実機で load-click 成功)。
+  自動復帰は後続 (relaunch は chrome を再誘発するため要設計)。
+- **新規欠陥 DEF-011/012**: nav コールドスタート (recovery がロード中に
+  再起動する無限ループ、LoadGamePc 座標は June 時代の疑い) と
+  recovery 再起動によるゲーム状態破壊 (town→title, 既定配置 (442,442)
+  が DEF-009 状態を再現)。details は defects_log.md。
+- **運用知見**: (1) ゲームの再起動で window 位置は前回終了位置を引き継ぐ
+  (restart 2 では (442,442), 3 では (0,0))。(2) `--goal-file` は Goal 単体
+  TOML (name + [stop]) を取る ([[goal]] 配列でない)。(3) PrintWindow の
+  キャプチャは window の画面外移動に非依存 (移動前後で variance 同値)。
+  (4) LoopCount ゴールは発火前に到達判定される場合がある (fire 前に stop)。
+
 ## Done (ai-coding-loop, 2026-10-10)
 
 - loop 01-05 (前回): StepOutcome enum 構造化 / recovery budget / report channel /
