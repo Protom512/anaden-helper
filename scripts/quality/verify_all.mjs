@@ -33,6 +33,7 @@ export const STAGES = buildStages();
 
 export function resolveMergeBase() {
   const result = spawnSync('git', ['merge-base', 'HEAD', 'origin/master'], {
+    cwd: repoRoot,
     encoding: 'utf8',
     shell: process.platform === 'win32',
     stdio: 'pipe',
