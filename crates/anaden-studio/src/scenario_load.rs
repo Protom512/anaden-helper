@@ -33,11 +33,15 @@ pub fn load_scenario_from_dir(dir: &Path) -> Result<ScenarioEditorState, Scenari
 
     let stems = task_file_stems(dir);
     let manifest_exists = dir.join(anaden_vision::PIPELINE_MANIFEST_FILENAME).exists();
-    let (start_task, goals) = if manifest_exists {
+    let (start_task, goals, watch) = if manifest_exists {
         let m = anaden_vision::load_pipeline_manifest(dir)?;
-        (m.start_task, m.goals)
+        (m.start_task, m.goals, m.watch)
     } else {
-        (derive_start_task_name(dir, &defs, &stems)?, Vec::new())
+        (
+            derive_start_task_name(dir, &defs, &stems)?,
+            Vec::new(),
+            Vec::new(),
+        )
     };
 
     defs.sort_by(|a, b| a.name.cmp(&b.name));
@@ -46,6 +50,7 @@ pub fn load_scenario_from_dir(dir: &Path) -> Result<ScenarioEditorState, Scenari
         name,
         start_task,
         goals,
+        watch,
         tasks: defs,
         loaded_task_names,
         loaded_task_files: stems,

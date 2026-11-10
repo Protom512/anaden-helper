@@ -11,12 +11,22 @@
 | DEF-001 | US-T02 | TC-T02-02 | Logic | `field_loop_pc` の `TapBottomStablePc` / `TapHudTrPc` が `field_pc_probe.png` 上で threshold 0.80 未満（ccoeff）。`scenes/field_pc` は conf=1.0 でマッチするが、パイプライン用 ROI/テンプレが実キャプチャとずれている。 | 1. `anaden-tool run-pipeline templates/captures/field_pc_probe.png templates/pipelines/field_loop_pc TapBottomStablePc --algorithm ccoeff` | High | Fixed |
 | DEF-002 | US-P02 | TC-P02-02 | UX | `--target windows` で AnotherEden 未起動時、Win32 エラーが `AdbError::CommandFailed` 経由で **「ADB command failed」** と表示され原因特定が混乱する。 | 1. AnotherEden.exe を終了 2. `anaden run ... --target windows` | Medium | Verified |
 | DEF-003 | US-C03 | TC-C03-01 | UX | `run-pipeline` の非マッチメッセージが「未知タスク名」を列挙するが、実際は閾値下のみ。誤解を招く。 | 1. 存在する task 名で閾値下の probe を指定 | Low | Verified |
-| DEF-008 | US-PIP-01 | TC-PIP-01 | Logic | `FieldHudTopPc` 到達アンカー（通貨バー `scenes/field_pc/hud_top.png` ROI [400,0,480,100]）が街 field 状態では画面に存在しない。2026-11-10 の実キャプチャ2枚（朝: クリーン、復旧後: chrome混入モード）のいずれでも ROI 内に通貨バー無し。nav_to_field_pc のロード後到達判定が街で発火不能。 | 1. 実機で field（街）表示 2. `cargo nextest run -p anaden-vision -E 'test(FieldHudTopPc)'` 相当の detect が field_live_20261110_3783x2128.png 上で NoMatch | High | Open |
+| DEF-008 | US-PIP-01 | TC-PIP-01 | Logic | `FieldHudTopPc` 到達アンカー（通貨バー `scenes/field_pc/hud_top.png` ROI [400,0,480,100]）が街 field 状態では画面に存在しない。2026-11-10 の実キャプチャ2枚（朝: クリーン、復旧後: chrome混入モード）のいずれでも ROI 内に通貨バー無し。nav_to_field_pc のロード後到達判定が街で発火不能。 | 1. 実機で field（街）表示 2. `cargo nextest run -p anaden-vision -E 'test(FieldHudTopPc)'` 相当の detect が field_live_20261110_3783x2128.png 上で NoMatch | High | Fixed |
 | DEF-009 | US-CLI-02 | TC-CLI-02 | Logic | ゲームウィンドウがモニタ矩形を超えて配置されていると（実測: window 3799x2167 at (442,442) on 3840x2160）、発火座標が画面外へ出る。`point_in_window_rect` はウィンドウ矩形（不可視領域を含む）で判定するため通過し、SendInput は OS にクランプ/無視されて game effect 無しで「発火成功」になる。verify-after-fire はこれを report.json `verify.failed=1` として記録するが、run の exit code は 0 のまま（goal 到達が exit を決める）。 | 1. ウィンドウを画面外にはみ出す位置へ置く 2. `anaden run` で発火 3. report.json verify.failed=1 かつ exit 0 | High | Open |
 | DEF-010 | US-PIP-05 | TC-PIP-05 | Env | PrintWindow の取得モードが (a) クリーンクライアント（レンダラ健在・WM_PRINTCLIENT 経由）と (b) chrome 混入 DWM フォールバック（レンダラ停滞時、ウィンドウ全体をクライアントサイズ DC に描画・内容が ~(8,30)px シフト）で切り替わる。テンプレート資産はモード依存で、(b) で切ったテンプレは (a) でズレる。signature: キャプチャ内にタイトルバー/ウィンドウボタンが見える = (b)。 | 1. ゲームをリサイズまたは停滞させる 2. probe_windows_capture を2回実行 3. バイト一致 + タイトルバー混入で (b) 判定 | Medium | Open |
 
 ## 修正メモ
 
+- **DEF-008**: nav_to_field_pc に街到達 watch レイヤーを追加 (`watch = ["FieldTownBarPc"]`、
+  needle `town_bar.png` は 2026-11-10 実機タウンキャプチャの Map ボタン領域から
+  cut_needle で切断・バッジ非含有)。walk 単一チェーン契約 (next.len()<=1) は維持し、
+  watch をチェーン外の到達 OR レイヤーとして構造テストに登録
+  (`pc_nav_to_field_cold_start_chain_is_walkable_to_field`: watch タスクは start/
+  reachability 判定から免除 + action=stop を構造保証)。実機証明: タウン attach 状態から
+  `anaden run templates/pipelines/nav_to_field_pc TapToStartPc` → cycle 1 で
+  `watch stop: FieldTownBarPc` → exit 0 (report: nav_to_field_pc/.anaden-run/20261110-124028579)。
+  回帰: `nav_town_arrival_live_regression.rs` (production preprocessing 経由 ≥0.85 buffer +
+  menu/title クロススクリーン負 + 通貨バー無しの負記録)。
 - **DEF-001**: `field_loop_pc` ROI/テンプレを `field_pc_probe.png` 上の実マッチ領域（`FieldPcTemplate01` / `FieldPcHudTopRight`）に合わせ再オーサリング。契約テスト `pc_field_loop_pc_templates_match_real_capture_above_threshold` を追加。
 - **DEF-002**: `AdbError::CommandFailed` の表示を `Device I/O failed` に変更（Win32/ADB 共通）。
 - **DEF-003**: 非マッチメッセージから「未知タスク名」を除去。

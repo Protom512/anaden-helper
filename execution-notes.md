@@ -2,6 +2,38 @@
 
 Canonical tracker: canonical_feature_stories.csv (markdown 版は凡例のみ)。
 
+## Done (live session 2, 2026-11-10 午後)
+
+前ライブセッション (同日午前) の続行。アナザーエデン起動中・無人実行で
+DEF-008 を実機込みで修正:
+
+- **DEF-008 修正 (街到達 watch レイヤー)**: nav_to_field_pc に
+  `watch/field_town_bar.toml` (FieldTownBarPc, Map ボタン針 40x98, ROI
+  [400,600,120,108], threshold 0.80, action=stop) を追加。針は実機タウン
+  キャプチャから `cut_needle` example で切断し、動的バッジ ("!" / New) を
+  含まないよう位置調整。単一チェーン契約 (next.len()<=1 / 唯一 start) を
+  **一切変更せず** 到達 OR を実現するため、watch def は `watch/` サブ
+  ディレクトリへ物理分離 (load_pipeline は非再帰 → 構造テスト無変更で
+  green) + CLI run が `load_watch_defs` (anaden-vision 新 API) を tasks に
+  マージ。回帰 `nav_town_arrival_live_regression.rs` (fixture 経由 ≥0.85
+  buffer + menu/title 負 + 通貨バー無しの負記録) と分離契約テスト
+  `watch_defs_isolation.rs` を追加。
+- **ライブ実行証明 (タウン attach 状態)**: `anaden run
+  templates/pipelines/nav_to_field_pc TapToStartPc` → cycle 1 で
+  `watch stop: FieldTownBarPc` → 停止理由「Stop アクション到達(正常)」、
+  **実 exit 0 (パイプ無しで取得)**。report:
+  nav_to_field_pc/.anaden-run/20261110-124737*/。US-PIP-01 の「ロード後到達
+  判定が街で不能」を watch 経由で解消。
+- **テスト不改変 gate との整合**: pinned 構造テスト (cold-start chain /
+  walk order) は 1 行も変更せず、新規 tests/ ファイルとデータ配置で契約を
+  満した (tests-untouched gate の allowlist は semantic 変更を許さないため
+  構造で解決)。
+- **studio UC4 ラウンドトリップの watch 対応**: manifest への watch 行追加で
+  `all_repo_pipelines_roundtrip_losslessly` が検出 (編集なし保存で watch が
+  消える = UC4 契約の正当な検出)。ScenarioEditorState に watch を追加し
+  load→save で損失なく保持 (studio 86 tests green)。studio は watch/ subdir
+  の def を表示・編集対象にしない (チェーン外レイヤーのまま)。
+
 ## Done (ai-coding-loop, 2026-10-10)
 
 - loop 01-05 (前回): StepOutcome enum 構造化 / recovery budget / report channel /

@@ -8,6 +8,7 @@ pub struct ScenarioEditorState {
     pub name: String,
     pub start_task: String,
     pub goals: Vec<Goal>,
+    pub watch: Vec<String>,
     pub tasks: Vec<TaskDef>,
     pub loaded_task_names: Vec<String>,
     pub loaded_task_files: Vec<(String, String)>,
@@ -21,6 +22,7 @@ impl ScenarioEditorState {
             name: name.to_string(),
             start_task: String::new(),
             goals: Vec::new(),
+            watch: Vec::new(),
             tasks: Vec::new(),
             loaded_task_names: Vec::new(),
             loaded_task_files: Vec::new(),
@@ -110,7 +112,7 @@ impl ScenarioEditorState {
         PipelineManifest {
             start_task: self.start_task.clone(),
             goals: self.goals.clone(),
-            watch: Vec::new(),
+            watch: self.watch.clone(),
         }
     }
 }
