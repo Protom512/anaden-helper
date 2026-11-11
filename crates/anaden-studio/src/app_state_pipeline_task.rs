@@ -91,8 +91,7 @@ pub fn save_pipeline_task(
     }
     std::fs::create_dir_all(dir)?;
     template.save(&png_path).map_err(std::io::Error::other)?;
-    let toml_str = toml::to_string(spec).map_err(std::io::Error::other)?;
-    std::fs::write(&toml_path, toml_str)?;
+    anaden_vision::save_task_def(spec, &toml_path).map_err(std::io::Error::other)?;
     Ok(toml_path)
 }
 
