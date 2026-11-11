@@ -113,6 +113,13 @@ impl RecoveryGuard {
         self.recovered_at = Some(now);
     }
 
+    /// Recovery succeeded without a restart: clear the streak but do not open a
+    /// boot window, because nothing is booting.
+    fn rearmed(&mut self) {
+        self.streak = 0;
+        self.recovered_at = None;
+    }
+
     fn consume_attempt(&mut self) -> Option<u32> {
         if self.attempts >= self.max_attempts {
             return None;
@@ -373,6 +380,46 @@ pub enum RecoveryCause {
     PlacementFault,
 }
 
+impl RecoveryCause {
+    /// A placement clamp does not restart the game, so there is no boot to wait
+    /// for. Arming the boot grace here would suppress every recovery (and all
+    /// fire diagnostics) for the whole grace window (DEF-012 live run).
+    pub fn arms_boot_grace(self) -> bool {
+        matches!(self, RecoveryCause::Transient)
+    }
+}
+
+/// What the recovery hook should do for one recovery attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryPlan {
+    /// Move the game window back inside its monitor; never kill the process.
+    ClampWindow,
+    /// Start the game if it is not running; never kill the process.
+    Launch,
+    /// The process is alive and probably loading: wait instead of restarting.
+    WaitForExisting,
+    /// The process is gone: restart it and then re-clamp.
+    Restart,
+}
+
+/// One decision table for recovery. Kept pure so the policy is testable without
+/// Win32, a running game, or an async driver.
+pub fn plan_recovery(cause: RecoveryCause, attempt: u32, app_alive: bool) -> RecoveryPlan {
+    match cause {
+        RecoveryCause::PlacementFault => RecoveryPlan::ClampWindow,
+        RecoveryCause::Transient if attempt <= 1 => RecoveryPlan::Launch,
+        RecoveryCause::Transient if app_alive => RecoveryPlan::WaitForExisting,
+        RecoveryCause::Transient => RecoveryPlan::Restart,
+    }
+}
+
+pub fn recovery_cause_for(kind: StepErrorKind) -> RecoveryCause {
+    match kind {
+        StepErrorKind::GateRejected => RecoveryCause::PlacementFault,
+        _ => RecoveryCause::Transient,
+    }
+}
+
 pub fn classify_device_error(e: &DeviceError) -> StepErrorKind {
     match e {
         DeviceError::PlacementFault { .. } => StepErrorKind::GateRejected,
@@ -582,7 +629,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         };
         let recognize_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
         if let (Some(region), Some(confidence)) = (tick.matched_region, tick.matched_confidence) {
-            self.last_match = Some((matched_task_name, confidence, region));
+            self.last_match = Some((matched_task_name.clone(), confidence, region));
         }
         if let Some(cmd) = tick.command {
             let cmd = match self.jitter.as_mut() {
@@ -598,6 +645,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             if let Err(e) = self.execute_command(&device_cmd).await {
                 let kind = classify_device_error(&e);
                 warn!("pipeline execute error ({kind:?}): {e}");
+                // `tick` advances `current` before the action runs. If the action
+                // never reaches the game (GateRejected / Execute), keeping the
+                // advance would desync the state machine: every later cycle would
+                // match the task we never reached.
+                self.state.set_current(matched_task_name.clone());
                 return StepOutcome::Error {
                     kind,
                     message: format!("execute: {e}"),
@@ -712,6 +764,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             Ok(img) => img,
             Err(e) => {
                 warn!("verify capture error: {e}");
+                // The fire itself may have landed; we cannot prove it either way,
+                // so retry from the same task instead of advancing on faith.
+                self.state.set_current(task_name.to_string());
                 return StepOutcome::Error {
                     kind: StepErrorKind::VerifyCapture,
                     message: format!("verify_capture: {e}"),
@@ -988,12 +1043,20 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         .await
         {
             Ok(()) => {
-                let recovered_at = self.recovery_clock.elapsed();
-                info!(
-                    "recovery hook succeeded; resetting streak + boot grace {:?} (Issue #210)",
-                    self.recovery_grace
-                );
-                guard.recovered(recovered_at);
+                if cause_class.arms_boot_grace() {
+                    let recovered_at = self.recovery_clock.elapsed();
+                    info!(
+                        "recovery hook succeeded; resetting streak + boot grace {:?} (Issue #210)",
+                        self.recovery_grace
+                    );
+                    guard.recovered(recovered_at);
+                } else {
+                    info!(
+                        "recovery hook succeeded without restart; streak cleared, \
+                         no boot grace armed (DEF-012)"
+                    );
+                    guard.rearmed();
+                }
                 RecoveryStep::Recovered
             }
             Err(e) => RecoveryStep::HookFailed(e),
@@ -1164,13 +1227,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             StepFlow::Continue
         } else if state.recovery_enabled {
             info!("io error outside grace (environment presumed dead): {message}");
-            let (cause, cause_class) = match kind {
-                StepErrorKind::GateRejected => (
-                    "placement fault (gate rejection)",
-                    RecoveryCause::PlacementFault,
-                ),
-                StepErrorKind::Execute => ("execute error outside grace", RecoveryCause::Transient),
-                _ => ("capture error outside grace", RecoveryCause::Transient),
+            let cause_class = recovery_cause_for(kind);
+            let cause = match kind {
+                StepErrorKind::GateRejected => "placement fault (gate rejection)",
+                StepErrorKind::Execute => "execute error outside grace",
+                _ => "capture error outside grace",
             };
             match self
                 .run_recovery_or_stop(cause, cause_class, state, recover)
