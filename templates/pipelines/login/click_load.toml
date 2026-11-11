@@ -1,0 +1,8 @@
+name      = "LoginClickLoadPc"
+state     = "title_pc"
+algorithm = "ccoeff"
+template  = "../../scenes/title_pc/load_game_button.png"
+roi       = [500, 480, 300, 140]
+threshold = 0.80
+action    = { type = "click_self" }
+next      = ["LoginWaitFieldPc"]

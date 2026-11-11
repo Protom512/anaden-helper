@@ -51,6 +51,10 @@ impl Win32Launch {
         Self::new(DEFAULT_LAUNCHER, DEFAULT_WORKDIR, DEFAULT_CHILD)
     }
 
+    pub fn child(&self) -> &str {
+        &self.child
+    }
+
     pub async fn ensure_open(&self, wait: Duration) -> Result<EnsureOutcome, DeviceError> {
         let launcher = self.launcher.clone();
         let workdir = self.workdir.clone();
