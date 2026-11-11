@@ -21,6 +21,8 @@ use crate::pipeline_runner::{InputCommand, PipelineState};
 pub struct RecoveryContext {
     pub attempt: u32,
     pub streak: u32,
+    #[serde(default)]
+    pub cause: RecoveryCause,
 }
 
 pub type RecoveryHook = Box<
@@ -351,13 +353,31 @@ pub enum StepErrorKind {
     Execute,
     VerifyCapture,
     Other,
+    GateRejected,
 }
 
 pub fn is_recoverable_io_error(kind: StepErrorKind) -> bool {
     matches!(
         kind,
-        StepErrorKind::Capture | StepErrorKind::VerifyCapture | StepErrorKind::Execute
+        StepErrorKind::Capture
+            | StepErrorKind::VerifyCapture
+            | StepErrorKind::Execute
+            | StepErrorKind::GateRejected
     )
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecoveryCause {
+    #[default]
+    Transient,
+    PlacementFault,
+}
+
+pub fn classify_device_error(e: &DeviceError) -> StepErrorKind {
+    match e {
+        DeviceError::PlacementFault { .. } => StepErrorKind::GateRejected,
+        DeviceError::CommandFailed { .. } => StepErrorKind::Execute,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -576,9 +596,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 &self.last_crop_info,
             );
             if let Err(e) = self.execute_command(&device_cmd).await {
-                warn!("pipeline execute error: {e}");
+                let kind = classify_device_error(&e);
+                warn!("pipeline execute error ({kind:?}): {e}");
                 return StepOutcome::Error {
-                    kind: StepErrorKind::Execute,
+                    kind,
                     message: format!("execute: {e}"),
                 };
             }
@@ -645,9 +666,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                             Some(device_cmd)
                         }
                         Err(e) => {
-                            warn!("watch execute error ({name}): {e}");
+                            let kind = classify_device_error(&e);
+                            warn!("watch execute error ({kind:?}) ({name}): {e}");
                             return Some(StepOutcome::Error {
-                                kind: StepErrorKind::Execute,
+                                kind,
                                 message: format!("execute: {e}"),
                             });
                         }
@@ -940,6 +962,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     async fn run_recovery_step(
         &mut self,
         cause: &str,
+        cause_class: RecoveryCause,
         guard: &mut RecoveryGuard,
         recover: &mut Option<RecoveryHook>,
     ) -> RecoveryStep {
@@ -957,7 +980,13 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let Some(hook) = recover.as_mut() else {
             return RecoveryStep::Exhausted;
         };
-        match hook(RecoveryContext { attempt, streak }).await {
+        match hook(RecoveryContext {
+            attempt,
+            streak,
+            cause: cause_class,
+        })
+        .await
+        {
             Ok(()) => {
                 let recovered_at = self.recovery_clock.elapsed();
                 info!(
@@ -974,11 +1003,12 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     async fn run_recovery_or_stop(
         &mut self,
         cause: &str,
+        cause_class: RecoveryCause,
         state: &mut LoopState,
         recover: &mut Option<RecoveryHook>,
     ) -> Option<LoopOutcome> {
         match self
-            .run_recovery_step(cause, &mut state.guard, recover)
+            .run_recovery_step(cause, cause_class, &mut state.guard, recover)
             .await
         {
             RecoveryStep::Recovered => None,
@@ -1069,7 +1099,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
             return StepFlow::stop(stop);
         }
-        if due && let Some(stop) = self.run_recovery_or_stop(miss_cause, state, recover).await {
+        if due
+            && let Some(stop) = self
+                .run_recovery_or_stop(miss_cause, RecoveryCause::Transient, state, recover)
+                .await
+        {
             return StepFlow::stop(stop);
         }
         StepFlow::Continue
@@ -1130,17 +1164,23 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             StepFlow::Continue
         } else if state.recovery_enabled {
             info!("io error outside grace (environment presumed dead): {message}");
-            let cause = if matches!(kind, StepErrorKind::Execute) {
-                "execute error outside grace"
-            } else {
-                "capture error outside grace"
+            let (cause, cause_class) = match kind {
+                StepErrorKind::GateRejected => (
+                    "placement fault (gate rejection)",
+                    RecoveryCause::PlacementFault,
+                ),
+                StepErrorKind::Execute => ("execute error outside grace", RecoveryCause::Transient),
+                _ => ("capture error outside grace", RecoveryCause::Transient),
             };
-            match self.run_recovery_or_stop(cause, state, recover).await {
+            match self
+                .run_recovery_or_stop(cause, cause_class, state, recover)
+                .await
+            {
                 Some(stop) => StepFlow::stop(stop),
                 None => StepFlow::Continue,
             }
         } else {
-            let reason = if matches!(kind, StepErrorKind::Execute) {
+            let reason = if matches!(kind, StepErrorKind::Execute | StepErrorKind::GateRejected) {
                 LoopStopReason::ExecuteError
             } else {
                 LoopStopReason::CaptureError

@@ -163,7 +163,7 @@ fn click(
                 });
             }
             if !point_on_any_monitor(fire_x, fire_y) {
-                return Err(DeviceError::CommandFailed {
+                return Err(DeviceError::PlacementFault {
                     message: format!(
                         "発火座標({fire_x},{fire_y})がモニタ矩形外 (process={process})。\
                          ウィンドウがモニタからはみ出す配置だと SendInput は OS にクランプされ\
@@ -336,7 +336,7 @@ fn ensure_swipe_endpoints_fireable(
         });
     }
     if !all_points_on_any_monitor(&[(start_x, start_y), (end_x, end_y)]) {
-        return Err(DeviceError::CommandFailed {
+        return Err(DeviceError::PlacementFault {
             message: format!(
                 "Swipe 端点(start={start_x},{start_y} end={end_x},{end_y})がモニタ矩形外 (process={process})。\
                  ウィンドウがモニタからはみ出す配置だと SendInput は OS にクランプされ\
