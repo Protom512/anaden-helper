@@ -1,0 +1,7 @@
+name      = "LoginFieldTownBarPc"
+state     = "Field"
+algorithm = "ccoeff"
+template  = "../../nav_to_field_pc/watch/town_bar.png"
+roi       = [400, 600, 120, 108]
+threshold = 0.80
+action    = { type = "stop" }
