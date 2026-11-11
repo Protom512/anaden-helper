@@ -107,6 +107,14 @@
   → 13 iters / 0 fires / `goal_timeout`。U3・U4 の原因を産んだ。
 - 試行 2 (未実行): `LoginClickLoadPc` から開始する E2E。実ゲームへのクリック注入を
   含む不可逆操作のため、ユーザー承認待ち。
+- 到着判定 (試行 2 の合否条件): `hud_top` (通貨バー) は街に存在しない (DEF-008) ため、
+  `login/watch/field_town_bar.toml` (`LoginFieldTownBarPc`, action=stop) を
+  nav の実機検証済み town bar 針への相対参照で追加した。街/フィールド到着で
+  `watch stop` → `Stop アクション到達(正常)` → exit 0。
+  合否は (a) `report.json` の `fired_count >= 1` かつ `per_task_matches` に
+  `LoginClickLoadPc`、(b) 実行後フレームで `LoginClickLoadPc` と
+  `LoginTapTitlePc` が NoMatch (タイトルから離脱した)、(c) 可能なら
+  `watch stop: LoginFieldTownBarPc` の 3 点で判定する。
 
 ---
 
@@ -116,7 +124,8 @@
 |---|---|
 | `node scripts/quality/complexity_gate.mjs` | violations: 0 |
 | `node scripts/quality/duplication_gate.mjs` | violations: 0 |
-| `node scripts/quality/assert_tests_untouched.mjs master` | OK (9 .rs, no test code touched) |
-| `CARGO_BUILD_JOBS=4 cargo nextest run --workspace` | 生ログ `.omc/logs/final-gates/nextest.log` |
+| `node scripts/quality/assert_tests_untouched.mjs master` | OK (no test code touched) |
+| `CARGO_BUILD_JOBS=4 cargo nextest run --workspace` | 1252 passed / 0 failed (`.omc/logs/final-gates/nextest3.log`) |
 | `cargo clippy --all-targets -- -D warnings` | clean |
 | `cargo fmt --all --check` | clean |
+| `ast-grep scan` | exit 0 |

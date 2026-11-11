@@ -19,6 +19,7 @@
 - 実機フレームは `tests/fixtures/` に追跡下で置く — 回帰はその 1 枚を production preprocessing に通して判定する。
 - 新規ボタンは `click_self` で押す — `click_rect` の固定 rect は解像度・レイアウト変更で外れる。
 - `scenes/title_pc` の scene def ROI は 180px 以下 (`pc_title_pc_scene_templates_load_and_validate`) — 実ラベル幅 192px の針は def にできない。def を諦めて pipeline task 側に ROI を持つ (DEF-013)。
+- 到達判定は `watch/` の sentinel (`action = stop`) で行う — `hud_top` のような固定 HUD アンカーは街に存在しない (DEF-008)。チェーンに足すと単一チェーン契約が壊れるので物理分離する。
 
 ## 進め方 / ゲート
 
