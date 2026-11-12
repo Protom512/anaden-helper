@@ -2,13 +2,11 @@ use std::path::PathBuf;
 
 use image::DynamicImage;
 
-use anaden_core::{MatchConfidence, ScreenRegion};
+use anaden_core::ScreenRegion;
 
-use crate::ccoeff::CcoeffVisionEngine;
-use crate::engine::{SseVisionEngine, VisionEngine};
-use crate::matcher::TemplateMatcher;
-use crate::pipeline::{Algorithm, TaskDef};
-use crate::scale::{PC_CLIENT_HEIGHT_MEASURED, PC_CLIENT_WIDTH_MEASURED, roi_to_normalized};
+use crate::pipeline::{
+    Algorithm, TaskDef, cmp_confidence_desc, diagnose_def, sort_by_confidence_desc,
+};
 
 #[derive(Debug, Clone)]
 pub struct DiagnoseEntry {
@@ -25,116 +23,18 @@ pub struct DiagnoseEntry {
 }
 
 pub fn diagnose_task(task: &TaskDef, screenshot: &DynamicImage) -> DiagnoseEntry {
-    let norm_w = screenshot.width();
-    let norm_h = screenshot.height();
-    let sx = if PC_CLIENT_WIDTH_MEASURED == 0 {
-        1.0
-    } else {
-        norm_w as f32 / PC_CLIENT_WIDTH_MEASURED as f32
-    };
-    let sy = if PC_CLIENT_HEIGHT_MEASURED == 0 {
-        1.0
-    } else {
-        norm_h as f32 / PC_CLIENT_HEIGHT_MEASURED as f32
-    };
-
-    let scaled_roi = task.roi.and_then(|r| {
-        let (w, h) = (r[2], r[3]);
-        if w == 0 || h == 0 {
-            return None;
-        }
-        let s = roi_to_normalized(r, norm_w, norm_h);
-        Some(ScreenRegion::new(s[0], s[1], s[2], s[3]))
-    });
-
-    let mut entry = DiagnoseEntry {
-        task: task.name.clone(),
-        template_path: task.template.clone(),
-        algorithm: task.algorithm,
-        threshold: task.threshold,
-        best_confidence: None,
-        best_region: None,
-        scaled_roi,
-        scale_factors: (sx, sy),
-        needle_scaled_size: None,
-        error: None,
-    };
-
-    let prepared = match crate::pipeline::prepared_template(&task.template, norm_w, norm_h) {
-        Ok(p) => p,
-        Err(e) => {
-            entry.error = Some(e.to_string());
-            return entry;
-        }
-    };
-    entry.needle_scaled_size = Some((prepared.needle.width(), prepared.needle.height()));
-
-    let work = match entry.scaled_roi {
-        Some(r) => crop_clamped(screenshot, r),
-        None => screenshot.clone(),
-    };
-
-    let thr = MatchConfidence::new(0.0);
-    let result = match task.algorithm {
-        Algorithm::Sse => SseVisionEngine::new(TemplateMatcher::threshold_only(thr))
-            .match_template(&work, &prepared.needle),
-        Algorithm::Ccoeff => {
-            CcoeffVisionEngine::threshold_only(thr).match_template_prepared(&work, &prepared.ccoeff)
-        }
-    };
-
-    match result {
-        Some(mut m) => {
-            if let Some(r) = entry.scaled_roi {
-                m.region = ScreenRegion::new(
-                    m.region.x + r.x,
-                    m.region.y + r.y,
-                    m.region.width,
-                    m.region.height,
-                );
-            }
-            entry.best_confidence = Some(m.confidence.0);
-            entry.best_region = Some(m.region);
-        }
-        None => {
-            entry.error = Some("needle larger than haystack (or empty scan space)".to_string());
-        }
-    }
-
-    entry
+    diagnose_def(task, &task.template, screenshot)
 }
 
 pub fn diagnose_all(tasks: &[TaskDef], screenshot: &DynamicImage) -> Vec<DiagnoseEntry> {
     let mut entries: Vec<DiagnoseEntry> =
         tasks.iter().map(|t| diagnose_task(t, screenshot)).collect();
-    entries.sort_by(|a, b| match (a.best_confidence, b.best_confidence) {
-        (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    });
+    sort_by_confidence_desc(&mut entries);
     entries
-}
-
-fn crop_clamped(img: &DynamicImage, r: ScreenRegion) -> DynamicImage {
-    let x = r.x.min(img.width().saturating_sub(1));
-    let y = r.y.min(img.height().saturating_sub(1));
-    let w = r.width.min(img.width().saturating_sub(x));
-    let h = r.height.min(img.height().saturating_sub(y));
-    img.crop_imm(x, y, w, h)
 }
 
 fn threshold_diff(entry: &DiagnoseEntry) -> Option<f32> {
     entry.best_confidence.map(|c| c - entry.threshold)
-}
-
-fn compare_conf_desc(a: &DiagnoseEntry, b: &DiagnoseEntry) -> std::cmp::Ordering {
-    match (a.best_confidence, b.best_confidence) {
-        (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
-        (Some(_), None) => std::cmp::Ordering::Less,
-        (None, Some(_)) => std::cmp::Ordering::Greater,
-        (None, None) => std::cmp::Ordering::Equal,
-    }
 }
 
 pub fn format_diagnose_report(
@@ -143,7 +43,7 @@ pub fn format_diagnose_report(
     entries: &[DiagnoseEntry],
 ) -> String {
     let mut sorted: Vec<&DiagnoseEntry> = entries.iter().collect();
-    sorted.sort_by(|a, b| compare_conf_desc(a, b));
+    sorted.sort_by(|a, b| cmp_confidence_desc(a, b));
 
     let mut out = String::new();
     out.push_str("# NoMatch Diagnose Report\n\n");

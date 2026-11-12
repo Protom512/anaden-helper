@@ -238,11 +238,11 @@ $ node scripts/quality/duplication_gate.mjs
 
 ## 6. このレビューを取った時点の作業ツリー
 
-> 追記 (2026-11-11 同日): 下記の未コミット差分は `9744e9a` (fix(engine): recovery
-> cause classification) として commit 済み。以降の差分は別コミット。
-
 `fix/recovery-cause-classification` ブランチ。**未コミット変更あり**（本レビューは
 触れていない）:
+
+> 追記 (2026-11-11 同日): 下記の未コミット差分は `9744e9a` (fix(engine): recovery
+> cause classification) として commit 済み。以降の差分は別コミット。
 
 ```
 M crates/anaden-cli/src/main.rs               (+61/-?  recovery hook)
@@ -359,3 +359,72 @@ M crates/anaden-engine/src/pipeline_driver.rs (+76 line)
 3. テンプレートキャッシュをプロセス全体 `static` のままにするか、`Pipeline` の
    インスタンスにするか（後者は「ファイル削除後も一致する」テスト 1 本を壊す）。
 4. 名前引きを線形走査のままにするか `HashMap` 索引にするか（内部判断でよい）。
+
+---
+
+## 8. 決定: 候補 1 の実装 (2026-11-11)
+
+7.1 の推奨をそのまま採った。ブランチ `refactor/vision-pipeline-module`。
+
+### 8.1 決定事項
+
+| 論点 | 決定 | 理由 |
+|---|---|---|
+| `TaskDef` の `Serialize` | 落とす | 相対化しない第 2 の書き手 (`app_state_pipeline_task.rs:94`) がコンパイルエラーになり、`save_task_def` に統合された |
+| 書き込み型 | `TaskRow`（private, `Serialize` のみ） | フィールド順・属性を `TaskDef` と一致させ、TOML 出力はバイト同一 |
+| `watch/` の所有 | `Pipeline` が持つ | 呼び出し側は `watch` サブディレクトリを知らない |
+| テンプレートキャッシュ | プロセス全体 `static` のまま | インスタンス化は「ファイル削除後も一致する」テスト 1 本を壊す。別変更 |
+| `Cursor` | 見送り | 唯一の利用者が候補 3 の実行ループ。今入れると生産コードから呼ばれない死んだ API になる |
+| `Pipeline::save` | 見送り | studio の stem マッピング（既存タスクのファイル名が name と異なる）を扱う必要があり、今の `save_task_def` を置き換えると別の書き手を作る。書き込みの depth は `TaskRow` の強制で達成済み |
+| `Algorithm` の trait 化 | 却下 | TOML スキーマが凍結した 2 値 enum。第 3 の値はスキーマ変更なしに存在しない |
+
+### 8.2 構造
+
+```
+crates/anaden-vision/src/pipeline.rs        facade + run_step + 既存テスト（無変更）
+crates/anaden-vision/src/pipeline/
+  schema.rs     TaskDef(Deserialize) / TaskRow(Serialize) / Action / Algorithm / manifest
+  task.rs       Task（テンプレート解決済みの実行単位）
+  cache.rs      準備済みテンプレートの static キャッシュ
+  recognize.rs  照合の唯一の実装（ROI 正規化・クロップ・アルゴリズム分岐・領域オフセット）
+  io.rs         読み書き（相対→絶対の解決はここだけ、絶対→相対は save_task_def だけ）
+  runner.rs     Pipeline（load/step/inspect）+ StepOutcome + 診断行の生成
+```
+
+`Pipeline` の Interface:
+
+- `load(dir)` — チェーン + `watch/` + マニフェストを 1 回で読む
+- `step(screenshot, current)` — 名前で引き、照合してアクションと次タスクを返す
+- `inspect(screenshot)` — 閾値 0 で全タスクを診断（`diagnose.rs` の重複実装を削除）
+- `task(name)` / `tasks()` / `watch_tasks()` / `watch_names()` / `start_task()`
+- `from_defs(root, defs)` — I/O なしの組み立て（`run_step` 互換ラッパが使う）
+
+### 8.3 テスト改変ゼロの担保
+
+`assert_tests_untouched.mjs` の制約により、既存テストは 1 行も変えていない。
+新しい継ぎ目の検証は新規ファイル `crates/anaden-vision/tests/pipeline_module.rs`
+（`tests/` の新規ファイルは `oldLines` が空なので gate の対象外）に置いた。
+
+`load_pipeline` / `save_task_def` / `run_step` は薄いラッパとして残し、76 の
+`TaskDef { .. }` リテラルと 3614 行のテストが無変更でコンパイルされるようにした。
+
+### 8.4 既知の限界（正直な申告）
+
+`Pipeline::step` / `Pipeline::inspect` は現時点で**生産コードから呼ばれていない**。
+生産経路は従来どおり `run_step`（`anaden-engine/src/pipeline_driver.rs:612,700`）と
+`diagnose_all`（`anaden-engine/src/diagnostics.rs:40`）で、どちらも `&[TaskDef]` を
+受け取る。driver が `Vec<TaskDef>` を保持している都合上、ここを `Pipeline` に
+差し替えると driver のテスト（`TaskDef` リテラルで組み立てている）に波及する。
+
+したがって今回の depth の実体は次の 3 点に限られる。
+
+1. 照合実装が `recognize::probe_template` の 1 本になり、`diagnose_task` の重複
+   detect が消えた（`Pipeline::inspect` と `run_step` が同じ関数を通る）
+2. 書き込みが `save_task_def` の 1 経路になり、相対化を忘れた第 2 の書き手が
+   型（`TaskDef` の `Serialize` 削除）でコンパイル不能になった
+3. `watch/` の場所とマニフェストの読み込みが `Pipeline::load` に閉じた
+
+`step` / `inspect` が生産経路に乗るのは候補 3（実行ループの `Cursor` 化）で
+driver が `Pipeline` を保持してからになる。それまでは「Interface は用意済み・
+呼び出し側の移行待ち」という状態で、削除テストは現状 `recognize.rs` と
+`io.rs` に対してのみ通る。

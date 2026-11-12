@@ -1,571 +1,51 @@
-use std::collections::HashMap;
-use std::path::{Path, PathBuf};
-use std::sync::{Arc, LazyLock, Mutex};
-use std::time::SystemTime;
+//! パイプライン。
+//!
+//! 3 つの層に分ける:
+//!
+//! - [`TaskDef`] — ディスクに書かれたタスク 1 行（入力専用）
+//! - [`Task`] — このプロセスが実行するタスク（テンプレート解決済み）
+//! - [`Pipeline`] — タスク集合 + 名前索引 + マニフェスト + watch 層
+//!
+//! 呼び出し側は「テンプレートが相対か絶対か」「watch はどのディレクトリか」
+//! 「タスク名はどう引くか」を知らない。既存の自由関数
+//! （[`load_pipeline`] / [`save_task_def`] / [`run_step`]）は互換ラッパとして残す。
+
+mod cache;
+mod io;
+mod recognize;
+mod runner;
+mod schema;
+mod task;
+
+pub use io::{
+    load_pipeline, load_pipeline_manifest, load_watch_defs, save_pipeline_manifest, save_task_def,
+};
+pub use runner::{Pipeline, StepOutcome};
+pub use schema::{
+    Action, Algorithm, PIPELINE_MANIFEST_FILENAME, PipelineManifest, TaskDef, TaskDefError,
+    task_name_issue,
+};
+pub use task::Task;
+
+pub(crate) use runner::{
+    cmp_confidence_desc, diagnose_def, resolved_for_root, sort_by_confidence_desc, step_def,
+};
+
+#[allow(unused_imports)]
+pub(crate) use cache::{file_mtime, mtime_unchanged};
+#[allow(unused_imports)]
+pub(crate) use io::relativize_template;
+#[allow(unused_imports)]
+pub(crate) use schema::is_pipeline_manifest_path;
+
+use std::path::Path;
 
 use image::DynamicImage;
-use serde::{Deserialize, Serialize};
-use thiserror::Error;
-use tracing::{debug, warn};
 
-use anaden_core::{MatchConfidence, ScreenRegion};
-
-use crate::ccoeff::{CcoeffVisionEngine, PreparedCcoeff};
-use crate::engine::{SseVisionEngine, VisionEngine};
-use crate::matcher::{MatchResult, TemplateMatcher};
-use crate::template_quality::{needle_exceeds_roi_warning_for_path, unstructured_warning_for_path};
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "snake_case")]
-pub enum Algorithm {
-    Sse,
-    Ccoeff,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub enum Action {
-    ClickSelf,
-    ClickRect {
-        roi: ScreenRegion,
-    },
-    Swipe {
-        from: ScreenRegion,
-        to: ScreenRegion,
-    },
-    DoNothing,
-    Stop,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct ClickRectDef {
-    roi: ScreenRegion,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct SwipeDef {
-    from: ScreenRegion,
-    to: ScreenRegion,
-}
-
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct BareActionDef {}
-
-impl<'de> Deserialize<'de> for Action {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        use serde::de::Error;
-
-        let raw = toml::Value::deserialize(deserializer)?;
-        let table = raw
-            .as_table()
-            .ok_or_else(|| D::Error::custom("action must be a table with a `type` field"))?;
-
-        let type_str = table
-            .get("type")
-            .and_then(|v| v.as_str())
-            .ok_or_else(|| D::Error::custom("action requires a string `type` field"))?;
-
-        let mut rest = toml::value::Table::new();
-        for (k, v) in table {
-            if k != "type" {
-                rest.insert(k.clone(), v.clone());
-            }
-        }
-        let rest_value = toml::Value::Table(rest);
-
-        match type_str {
-            "click_self" => {
-                let _: BareActionDef = rest_value
-                    .try_into()
-                    .map_err(|e| D::Error::custom(format!("click_self action: {e}")))?;
-                Ok(Action::ClickSelf)
-            }
-            "do_nothing" => {
-                let _: BareActionDef = rest_value
-                    .try_into()
-                    .map_err(|e| D::Error::custom(format!("do_nothing action: {e}")))?;
-                Ok(Action::DoNothing)
-            }
-            "stop" => {
-                let _: BareActionDef = rest_value
-                    .try_into()
-                    .map_err(|e| D::Error::custom(format!("stop action: {e}")))?;
-                Ok(Action::Stop)
-            }
-            "click_rect" => {
-                let def: ClickRectDef = rest_value
-                    .try_into()
-                    .map_err(|e| D::Error::custom(format!("click_rect action: {e}")))?;
-                Ok(Action::ClickRect { roi: def.roi })
-            }
-            "swipe" => {
-                let def: SwipeDef = rest_value
-                    .try_into()
-                    .map_err(|e| D::Error::custom(format!("swipe action: {e}")))?;
-                Ok(Action::Swipe {
-                    from: def.from,
-                    to: def.to,
-                })
-            }
-            other => Err(D::Error::custom(format!("unknown action type `{other}`"))),
-        }
-    }
-}
-
-impl Serialize for Action {
-    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-    where
-        S: serde::Serializer,
-    {
-        use serde::ser::SerializeMap;
-
-        struct RoiArray(ScreenRegion);
-
-        impl Serialize for RoiArray {
-            fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
-            where
-                S: serde::Serializer,
-            {
-                [self.0.x, self.0.y, self.0.width, self.0.height].serialize(serializer)
-            }
-        }
-
-        let len = match self {
-            Action::ClickSelf | Action::DoNothing | Action::Stop => 1,
-            Action::ClickRect { .. } => 2,
-            Action::Swipe { .. } => 3,
-        };
-        let mut map = serializer.serialize_map(Some(len))?;
-        match self {
-            Action::ClickSelf => map.serialize_entry("type", "click_self")?,
-            Action::DoNothing => map.serialize_entry("type", "do_nothing")?,
-            Action::Stop => map.serialize_entry("type", "stop")?,
-            Action::ClickRect { roi } => {
-                map.serialize_entry("type", "click_rect")?;
-                map.serialize_entry("roi", &RoiArray(*roi))?;
-            }
-            Action::Swipe { from, to } => {
-                map.serialize_entry("type", "swipe")?;
-                map.serialize_entry("from", &RoiArray(*from))?;
-                map.serialize_entry("to", &RoiArray(*to))?;
-            }
-        }
-        map.end()
-    }
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct TaskDef {
-    pub name: String,
-    pub state: String,
-    pub algorithm: Algorithm,
-    pub template: PathBuf,
-    #[serde(default)]
-    pub roi: Option<[u32; 4]>,
-    #[serde(default = "default_threshold")]
-    pub threshold: f32,
-
-    #[serde(default)]
-    pub base: Option<String>,
-    #[serde(default)]
-    pub action: Option<Action>,
-    #[serde(default)]
-    pub next: Option<Vec<String>>,
-}
-
-fn default_threshold() -> f32 {
-    MatchConfidence::DEFAULT_THRESHOLD.0
-}
-
-impl TaskDef {
-    pub fn detect(
-        &self,
-        screenshot: &DynamicImage,
-        template_root: &Path,
-    ) -> Result<Option<MatchResult>, TaskDefError> {
-        let norm_w = screenshot.width();
-        let norm_h = screenshot.height();
-
-        let tpl_path = if self.template.is_absolute() {
-            self.template.clone()
-        } else {
-            template_root.join(&self.template)
-        };
-        let prepared = prepared_template(&tpl_path, norm_w, norm_h)?;
-
-        let scaled_roi = self.roi_to_region().map(|r| {
-            let s = crate::scale::roi_to_normalized([r.x, r.y, r.width, r.height], norm_w, norm_h);
-            ScreenRegion::new(s[0], s[1], s[2], s[3])
-        });
-        let work = match &scaled_roi {
-            Some(r) => crop_imm(screenshot, *r),
-            None => screenshot.clone(),
-        };
-
-        let thr = MatchConfidence::new(self.threshold);
-        let result = match self.algorithm {
-            Algorithm::Sse => {
-                let m = TemplateMatcher::threshold_only(thr);
-                SseVisionEngine::new(m).match_template(&work, &prepared.needle)
-            }
-            Algorithm::Ccoeff => CcoeffVisionEngine::threshold_only(thr)
-                .match_template_prepared(&work, &prepared.ccoeff),
-        };
-
-        Ok(result.map(|mut mr| {
-            if let Some(r) = scaled_roi {
-                mr.region = ScreenRegion::new(
-                    mr.region.x + r.x,
-                    mr.region.y + r.y,
-                    mr.region.width,
-                    mr.region.height,
-                );
-            }
-            mr
-        }))
-    }
-
-    fn roi_to_region(&self) -> Option<ScreenRegion> {
-        let [x, y, w, h] = self.roi?;
-        if w == 0 || h == 0 {
-            return None;
-        }
-        Some(ScreenRegion::new(x, y, w, h))
-    }
-}
-
-#[derive(Debug, Error)]
-pub enum TaskDefError {
-    #[error("template load failed {path}: {reason}")]
-    TemplateLoadFailed { path: PathBuf, reason: String },
-
-    #[error("TOML parse failed {path}: {reason}")]
-    ParseFailed { path: PathBuf, reason: String },
-
-    #[error("invalid task name in {path}: {name:?} ({issue})")]
-    InvalidTaskName {
-        path: PathBuf,
-        name: String,
-        issue: &'static str,
-    },
-
-    #[error("save failed: {reason}")]
-    SaveFailed { reason: String },
-}
-
-#[must_use]
-pub fn task_name_issue(name: &str) -> Option<&'static str> {
-    if name.trim().is_empty() {
-        return Some("name must not be empty");
-    }
-    if name != name.trim() {
-        return Some("name must not have leading/trailing whitespace");
-    }
-    if name.contains('/') || name.contains('\\') {
-        return Some("name must not contain path separators");
-    }
-    if name.contains("..") {
-        return Some("name must not contain `..`");
-    }
-    if name.starts_with('.') {
-        return Some("name must not start with a dot");
-    }
-    None
-}
-
-pub(crate) struct PreparedTemplate {
-    pub(crate) needle: DynamicImage,
-    pub(crate) ccoeff: PreparedCcoeff,
-}
-
-struct CachedTemplate {
-    mtime: Option<SystemTime>,
-    prepared: Arc<PreparedTemplate>,
-}
-
-struct TemplateCache {
-    entries: Mutex<HashMap<(PathBuf, u32, u32), CachedTemplate>>,
-}
-
-impl Default for TemplateCache {
-    fn default() -> Self {
-        Self {
-            entries: Mutex::new(HashMap::new()),
-        }
-    }
-}
-
-impl TemplateCache {
-    fn get_or_prepare(
-        &self,
-        path: &Path,
-        norm_w: u32,
-        norm_h: u32,
-    ) -> Result<Arc<PreparedTemplate>, TaskDefError> {
-        let key = (path.to_path_buf(), norm_w, norm_h);
-        let mut entries = match self.entries.lock() {
-            Ok(guard) => guard,
-            Err(poisoned) => poisoned.into_inner(),
-        };
-        if let Some(hit) = entries.get(&key) {
-            if mtime_unchanged(path, hit.mtime) {
-                return Ok(hit.prepared.clone());
-            }
-            debug!("template cache invalidated (mtime changed): {path:?}");
-            entries.remove(&key);
-        }
-        let needle = image::open(path).map_err(|e| TaskDefError::TemplateLoadFailed {
-            path: path.to_path_buf(),
-            reason: e.to_string(),
-        })?;
-        let mtime = file_mtime(path);
-        let normalized = crate::scale::needle_to_normalized(&needle, norm_w, norm_h);
-        let ccoeff = PreparedCcoeff::prepare(&normalized);
-        let prepared = Arc::new(PreparedTemplate {
-            needle: normalized,
-            ccoeff,
-        });
-        entries.insert(
-            key,
-            CachedTemplate {
-                mtime,
-                prepared: prepared.clone(),
-            },
-        );
-        Ok(prepared)
-    }
-}
-
-fn file_mtime(path: &Path) -> Option<SystemTime> {
-    std::fs::metadata(path).and_then(|m| m.modified()).ok()
-}
-
-fn mtime_unchanged(path: &Path, cached: Option<SystemTime>) -> bool {
-    match (file_mtime(path), cached) {
-        (Some(current), Some(cached)) => current == cached,
-        (None, _) => true,
-        (Some(_), None) => false,
-    }
-}
-
-static TEMPLATE_CACHE: LazyLock<TemplateCache> = LazyLock::new(TemplateCache::default);
-
-pub(crate) fn prepared_template(
-    path: &Path,
-    norm_w: u32,
-    norm_h: u32,
-) -> Result<Arc<PreparedTemplate>, TaskDefError> {
-    TEMPLATE_CACHE.get_or_prepare(path, norm_w, norm_h)
-}
-
-pub fn load_pipeline(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
-    let mut defs = Vec::new();
-    if !dir.exists() {
-        debug!("Pipeline directory does not exist: {:?}", dir);
-        return Ok(defs);
-    }
-
-    for entry in std::fs::read_dir(dir).map_err(|e| TaskDefError::ParseFailed {
-        path: dir.to_path_buf(),
-        reason: e.to_string(),
-    })? {
-        let entry = entry.map_err(|e| TaskDefError::ParseFailed {
-            path: dir.to_path_buf(),
-            reason: e.to_string(),
-        })?;
-        let path = entry.path();
-
-        let is_toml = path
-            .extension()
-            .and_then(|e| e.to_str())
-            .map(|e| e.eq_ignore_ascii_case("toml"))
-            .unwrap_or(false);
-        if !is_toml {
-            continue;
-        }
-
-        if is_pipeline_manifest_path(&path) {
-            debug!("Skipping pipeline manifest (not a TaskDef): {:?}", path);
-            continue;
-        }
-
-        let content = std::fs::read_to_string(&path).map_err(|e| TaskDefError::ParseFailed {
-            path: path.clone(),
-            reason: e.to_string(),
-        })?;
-        let mut def: TaskDef = toml::from_str(&content).map_err(|e| TaskDefError::ParseFailed {
-            path: path.clone(),
-            reason: e.to_string(),
-        })?;
-
-        if let Some(issue) = task_name_issue(&def.name) {
-            return Err(TaskDefError::InvalidTaskName {
-                path: path.clone(),
-                name: def.name.clone(),
-                issue,
-            });
-        }
-
-        if !def.template.is_absolute() && path.parent().is_some() {
-            let parent = path.parent().expect("parent exists");
-            def.template = parent.join(&def.template);
-        }
-
-        if let Some(warning) = unstructured_warning_for_path(&def.template) {
-            warn!("task '{}': {warning}", def.name);
-        }
-
-        if let Some(warning) = needle_exceeds_roi_warning_for_path(&def.template, def.roi) {
-            warn!("task '{}': {warning}", def.name);
-        }
-
-        debug!("Loaded pipeline task '{}' from {:?}", def.name, path);
-        defs.push(def);
-    }
-
-    Ok(defs)
-}
-
-pub const PIPELINE_MANIFEST_FILENAME: &str = "pipeline.toml";
-
-fn is_pipeline_manifest_path(path: &Path) -> bool {
-    path.file_name()
-        .and_then(|n| n.to_str())
-        .map(|n| n == PIPELINE_MANIFEST_FILENAME)
-        .unwrap_or(false)
-}
-
-#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
-#[serde(deny_unknown_fields)]
-pub struct PipelineManifest {
-    pub start_task: String,
-    #[serde(default, rename = "goal", skip_serializing_if = "Vec::is_empty")]
-    pub goals: Vec<anaden_core::Goal>,
-    #[serde(default, skip_serializing_if = "Vec::is_empty")]
-    pub watch: Vec<String>,
-}
-
-pub fn load_pipeline_manifest(dir: &Path) -> Result<PipelineManifest, TaskDefError> {
-    let manifest_path = dir.join(PIPELINE_MANIFEST_FILENAME);
-    let content =
-        std::fs::read_to_string(&manifest_path).map_err(|e| TaskDefError::ParseFailed {
-            path: manifest_path.clone(),
-            reason: format!("manifest read failed: {e}"),
-        })?;
-    let manifest: PipelineManifest =
-        toml::from_str(&content).map_err(|e| TaskDefError::ParseFailed {
-            path: manifest_path,
-            reason: e.to_string(),
-        })?;
-    Ok(manifest)
-}
-
-const WATCH_DIRNAME: &str = "watch";
-
-pub fn load_watch_defs(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
-    load_pipeline(&dir.join(WATCH_DIRNAME))
-}
-
-pub fn save_task_def(def: &TaskDef, path: &Path) -> Result<(), TaskDefError> {
-    if is_pipeline_manifest_path(path) {
-        return Err(TaskDefError::SaveFailed {
-            reason: format!(
-                "refusing to save a TaskDef into the manifest convention path {path:?} \
-                 (load_pipeline skips it; save the manifest via save_pipeline_manifest instead)"
-            ),
-        });
-    }
-    let base = path.parent().unwrap_or_else(|| Path::new(""));
-    let mut savable = def.clone();
-    savable.template = PathBuf::from(relativize_template(&def.template, base));
-    let content = to_pretty_toml(&savable).map_err(|e| TaskDefError::SaveFailed {
-        reason: e.to_string(),
-    })?;
-    std::fs::write(path, content).map_err(|e| TaskDefError::SaveFailed {
-        reason: format!("write {path:?}: {e}"),
-    })
-}
-
-pub fn save_pipeline_manifest(manifest: &PipelineManifest, dir: &Path) -> Result<(), TaskDefError> {
-    let content = to_pretty_toml(manifest).map_err(|e| TaskDefError::SaveFailed {
-        reason: e.to_string(),
-    })?;
-    let path = dir.join(PIPELINE_MANIFEST_FILENAME);
-    std::fs::write(&path, content).map_err(|e| TaskDefError::SaveFailed {
-        reason: format!("write {path:?}: {e}"),
-    })
-}
-
-fn to_pretty_toml<T: Serialize + ?Sized>(value: &T) -> Result<String, toml::ser::Error> {
-    let mut v = toml::Value::try_from(value)?;
-    normalize_f32_floats(&mut v);
-    toml::to_string(&v)
-}
-
-fn normalize_f32_floats(value: &mut toml::Value) {
-    match value {
-        toml::Value::Float(f) => {
-            if let Ok(shortest) = format!("{}", *f as f32).parse::<f64>() {
-                *f = shortest;
-            }
-        }
-        toml::Value::Array(items) => {
-            for item in items {
-                normalize_f32_floats(item);
-            }
-        }
-        toml::Value::Table(table) => {
-            for (_, v) in table.iter_mut() {
-                normalize_f32_floats(v);
-            }
-        }
-        _ => {}
-    }
-}
-
-fn relativize_template(template: &Path, base: &Path) -> String {
-    let forward = |p: &Path| p.to_string_lossy().replace('\\', "/");
-    if !template.is_absolute() || base.as_os_str().is_empty() {
-        return forward(template);
-    }
-    let target: Vec<_> = template.components().collect();
-    let base_components: Vec<_> = base.components().collect();
-    let common = target
-        .iter()
-        .zip(base_components.iter())
-        .take_while(|(t, b)| t == b)
-        .count();
-    if common == 0 {
-        return forward(template);
-    }
-    let mut rel = PathBuf::new();
-    for _ in common..base_components.len() {
-        rel.push("..");
-    }
-    for c in &target[common..] {
-        rel.push(c.as_os_str());
-    }
-    if rel.as_os_str().is_empty() {
-        return forward(template);
-    }
-    forward(&rel)
-}
-
-#[derive(Debug, Clone, PartialEq)]
-pub struct StepOutcome {
-    pub matched_task: String,
-    pub action: Action,
-    pub next: Vec<String>,
-    pub matched_region: ScreenRegion,
-    pub matched_confidence: f32,
-}
-
+/// 現在タスクを 1 回照合する互換ラッパ。
+///
+/// `tasks` の `template` が相対なら、リポジトリの作業ディレクトリ基準で
+/// 解決する（従来と同じ）。新しいコードは [`Pipeline::step`] を使う。
 pub fn run_step(
     tasks: &[TaskDef],
     screenshot: &DynamicImage,
@@ -574,33 +54,14 @@ pub fn run_step(
     let Some(task) = tasks.iter().find(|t| t.name == current_name) else {
         return Ok(None);
     };
-    match task.detect(screenshot, Path::new("")) {
-        Ok(Some(matched)) => {
-            let action = task.action.clone().unwrap_or(Action::DoNothing);
-            let next = task.next.clone().unwrap_or_default();
-            Ok(Some(StepOutcome {
-                matched_task: task.name.clone(),
-                action,
-                next,
-                matched_region: matched.region,
-                matched_confidence: matched.confidence.0,
-            }))
-        }
-        Ok(None) => Ok(None),
-        Err(e) => {
-            warn!("task '{current_name}' detect failed: {e}");
-            Err(e)
-        }
-    }
+    let template = resolved_for_root(task, Path::new(""));
+    step_def(task, &template, screenshot)
 }
 
-fn crop_imm(img: &DynamicImage, r: ScreenRegion) -> DynamicImage {
-    let x = r.x.min(img.width().saturating_sub(1));
-    let y = r.y.min(img.height().saturating_sub(1));
-    let w = r.width.min(img.width().saturating_sub(x));
-    let h = r.height.min(img.height().saturating_sub(y));
-    img.crop_imm(x, y, w, h)
-}
+#[allow(unused_imports)]
+use anaden_core::{MatchConfidence, ScreenRegion};
+#[allow(unused_imports)]
+use std::time::SystemTime;
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
