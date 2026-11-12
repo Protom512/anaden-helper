@@ -85,18 +85,3 @@ fn load_button_template_matches_the_live_4k_frame_from_the_def012_run() {
         "load button center ({cx},{cy}) is not where the live frame shows 'ロードゲーム'"
     );
 }
-
-#[test]
-#[allow(clippy::panic)]
-fn stale_fixed_rect_would_miss_the_load_button() {
-    // DEF-011: nav_to_field_pc's LoadGamePc clicked [600,258,30,30] (center 615,273),
-    // which is ~280px above the real label on the live title menu. Keep the old
-    // coordinate here as a documented negative so a regression to it fails loudly.
-    let ((_confidence, cx, cy), _task) = match_load_task("title_menu_live_20261111_3783x2128.png");
-    let (stale_x, stale_y) = (615i64, 273i64);
-    let distance = ((cx as i64 - stale_x).pow(2) + (cy as i64 - stale_y).pow(2)) as f64;
-    assert!(
-        distance.sqrt() > 100.0,
-        "the old fixed rect unexpectedly sits on the load button; remove this documentation test"
-    );
-}

@@ -21,7 +21,7 @@ fn command_failure_stays_a_generic_execute_error() {
 }
 
 #[test]
-fn gate_rejection_is_recoverable_but_other_errors_are_not() {
+fn only_unknown_errors_are_not_recoverable() {
     assert!(is_recoverable_io_error(StepErrorKind::GateRejected));
     assert!(is_recoverable_io_error(StepErrorKind::Execute));
     assert!(is_recoverable_io_error(StepErrorKind::Capture));
