@@ -1,3 +1,8 @@
+---
+name: plateau-auditor
+description: 監査役サブエージェント (plateau auditor) パターン。run / pipeline / 実装ループが停滞 (plateau) したときに、記録を「過去に効いた手」の観点台帳と突き合わせて未着手観点を抽出する。停滞の判定 (ばらつき帯付き)・観点台帳の解析・監査プロンプト生成・レポート回収は scripts/plateau-auditor.js を使う。トリガー例: "停滞してる""頭打ち""plateau""監査役""未着手の観点""観点台帳"
+---
+
 # Plateau Auditor — 停滞時の監査役サブエージェント
 
 出典: ISUCON2026 優勝チームの準備編
@@ -20,8 +25,12 @@ run 記録を「観点台帳」と突き合わせて **未着手の観点** を�
 
 ## モジュール
 
-実装: `plateau-auditor.js` / テスト: `tests/plateau-auditor.test.mjs`
-(いずれも本ディレクトリ。feature-pipeline 本体は変更しない — opt-in 部品)。
+実装: `scripts/plateau-auditor.js` / テスト: `tests/plateau-auditor.test.mjs`
+(ともに本 SKILL.md と同じディレクトリ配下。feature-pipeline 本体からは独立 — opt-in)。
+
+```bash
+node --test .claude/skills/plateau-auditor/tests/plateau-auditor.test.mjs
+```
 
 | 関数 | 役割 | fail-closed 挙動 |
 | --- | --- | --- |
@@ -54,7 +63,7 @@ run 記録を「観点台帳」と突き合わせて **未着手の観点** を�
 
 | 記事の教訓 | 本リポジトリでの状態 |
 | --- | --- |
-| 監査役サブエージェント (plateau 時の観点突き合わせ) | **本 PR で導入** (`plateau-auditor.js`) |
+| 監査役サブエージェント (plateau 時の観点突き合わせ) | **本 skill で導入** (`scripts/plateau-auditor.js`) |
 | verdict は実 verdict の interpolation で PR 本文へ (固定文字列 "all GO" 禁止) | 適用済み — Issue #152 |
 | 空 diff / 未収集 evidence は fail-closed | 適用済み — evidence 規約 §2・§3 |
 | 同一構成再測定のばらつきで説明できない更新だけを改善と数える | 適用済み — ablation program の negative control (`isBeyondVariance` はその判定ヘルパー) |
