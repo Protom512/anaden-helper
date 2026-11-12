@@ -241,6 +241,9 @@ $ node scripts/quality/duplication_gate.mjs
 `fix/recovery-cause-classification` ブランチ。**未コミット変更あり**（本レビューは
 触れていない）:
 
+> 追記 (2026-11-11 同日): 下記の未コミット差分は `9744e9a` (fix(engine): recovery
+> cause classification) として commit 済み。以降の差分は別コミット。
+
 ```
 M crates/anaden-cli/src/main.rs               (+61/-?  recovery hook)
 M crates/anaden-device/src/error.rs           (+PlacementFault)

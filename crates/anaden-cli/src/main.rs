@@ -216,20 +216,50 @@ pub(crate) fn escalation_recovery_hook(
     Box::new(move |ctx: anaden_engine::RecoveryContext| {
         let l = launcher.clone();
         Box::pin(async move {
-            if ctx.attempt == 1 {
-                info!(
-                    "NoMatch 継続({label}): ゲームを起動します \
-                     (attempt 1・kill なし・Issue #210)"
-                );
-                l.launch_app().await
-            } else {
-                info!(
-                    "NoMatch 継続({label}): ゲームを kill+再起動します \
-                     (attempt {}・Issue #210)",
-                    ctx.attempt
-                );
-                l.restart_app(Duration::from_secs(RECOVERY_EXIT_WAIT_SECS))
-                    .await
+            let child = l.child().to_string();
+            let alive = l.is_alive().await;
+            match anaden_engine::plan_recovery(ctx.cause, ctx.attempt, alive) {
+                anaden_engine::RecoveryPlan::ClampWindow => {
+                    info!(
+                        "placement fault({label}): ウィンドウをモニタ内へ移動します \
+                         (kill なし・DEF-012)"
+                    );
+                    anaden_device::clamp_window_into_monitor(&child).map(|v| {
+                        info!("配置補正完了: {v:?} (DEF-012)");
+                    })
+                }
+                anaden_engine::RecoveryPlan::Launch => {
+                    info!(
+                        "NoMatch 継続({label}): ゲームを起動します \
+                         (attempt 1・kill なし・Issue #210)"
+                    );
+                    l.launch_app().await
+                }
+                anaden_engine::RecoveryPlan::WaitForExisting => {
+                    info!(
+                        "NoMatch 継続({label}): ゲームプロセス生存を確認 → kill せず監視継続 \
+                         (attempt {}・DEF-011/012)",
+                        ctx.attempt
+                    );
+                    Ok(())
+                }
+                anaden_engine::RecoveryPlan::Restart => {
+                    info!(
+                        "NoMatch 継続({label}): ゲームプロセス不在を確認 → kill+再起動します \
+                         (attempt {}・Issue #210)",
+                        ctx.attempt
+                    );
+                    let result = l
+                        .restart_app(Duration::from_secs(RECOVERY_EXIT_WAIT_SECS))
+                        .await;
+                    if result.is_ok() {
+                        match anaden_device::clamp_window_into_monitor(&child) {
+                            Ok(v) => info!("再起動後の配置補正: {v:?} (DEF-012)"),
+                            Err(e) => warn!("再起動後の配置補正失敗: {e} (DEF-012)"),
+                        }
+                    }
+                    result
+                }
             }
         })
     })

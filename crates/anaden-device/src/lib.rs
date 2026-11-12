@@ -13,6 +13,8 @@ mod win32_proc;
 mod win32_readiness;
 #[cfg(windows)]
 mod win32_terminate;
+#[cfg(windows)]
+mod win32_window;
 
 pub use ensure::EnsureOutcome;
 pub use error::DeviceError;
@@ -34,3 +36,5 @@ pub use win32_readiness::{
 };
 #[cfg(windows)]
 pub use win32_terminate::{DEFAULT_CLOSE_WAIT, TerminateStages, terminate_child_staged};
+#[cfg(windows)]
+pub use win32_window::{ClampVerdict, clamp_window_into_monitor, clamped_top_left};

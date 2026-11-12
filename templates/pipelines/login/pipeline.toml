@@ -1,5 +1,6 @@
 
 start_task = "LoginTapTitlePc"
+watch      = ["LoginFieldTownBarPc"]
 
 [[goal]]
 name = "login_field_reached"

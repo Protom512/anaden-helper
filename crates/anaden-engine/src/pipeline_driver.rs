@@ -21,6 +21,8 @@ use crate::pipeline_runner::{InputCommand, PipelineState};
 pub struct RecoveryContext {
     pub attempt: u32,
     pub streak: u32,
+    #[serde(default)]
+    pub cause: RecoveryCause,
 }
 
 pub type RecoveryHook = Box<
@@ -109,6 +111,13 @@ impl RecoveryGuard {
     fn recovered(&mut self, now: Duration) {
         self.streak = 0;
         self.recovered_at = Some(now);
+    }
+
+    /// Recovery succeeded without a restart: clear the streak but do not open a
+    /// boot window, because nothing is booting.
+    fn rearmed(&mut self) {
+        self.streak = 0;
+        self.recovered_at = None;
     }
 
     fn consume_attempt(&mut self) -> Option<u32> {
@@ -351,13 +360,71 @@ pub enum StepErrorKind {
     Execute,
     VerifyCapture,
     Other,
+    GateRejected,
 }
 
 pub fn is_recoverable_io_error(kind: StepErrorKind) -> bool {
     matches!(
         kind,
-        StepErrorKind::Capture | StepErrorKind::VerifyCapture | StepErrorKind::Execute
+        StepErrorKind::Capture
+            | StepErrorKind::VerifyCapture
+            | StepErrorKind::Execute
+            | StepErrorKind::GateRejected
     )
+}
+
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub enum RecoveryCause {
+    #[default]
+    Transient,
+    PlacementFault,
+}
+
+impl RecoveryCause {
+    /// A placement clamp does not restart the game, so there is no boot to wait
+    /// for. Arming the boot grace here would suppress every recovery (and all
+    /// fire diagnostics) for the whole grace window (DEF-012 live run).
+    pub fn arms_boot_grace(self) -> bool {
+        matches!(self, RecoveryCause::Transient)
+    }
+}
+
+/// What the recovery hook should do for one recovery attempt.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RecoveryPlan {
+    /// Move the game window back inside its monitor; never kill the process.
+    ClampWindow,
+    /// Start the game if it is not running; never kill the process.
+    Launch,
+    /// The process is alive and probably loading: wait instead of restarting.
+    WaitForExisting,
+    /// The process is gone: restart it and then re-clamp.
+    Restart,
+}
+
+/// One decision table for recovery. Kept pure so the policy is testable without
+/// Win32, a running game, or an async driver.
+pub fn plan_recovery(cause: RecoveryCause, attempt: u32, app_alive: bool) -> RecoveryPlan {
+    match cause {
+        RecoveryCause::PlacementFault => RecoveryPlan::ClampWindow,
+        RecoveryCause::Transient if attempt <= 1 => RecoveryPlan::Launch,
+        RecoveryCause::Transient if app_alive => RecoveryPlan::WaitForExisting,
+        RecoveryCause::Transient => RecoveryPlan::Restart,
+    }
+}
+
+pub fn recovery_cause_for(kind: StepErrorKind) -> RecoveryCause {
+    match kind {
+        StepErrorKind::GateRejected => RecoveryCause::PlacementFault,
+        _ => RecoveryCause::Transient,
+    }
+}
+
+pub fn classify_device_error(e: &DeviceError) -> StepErrorKind {
+    match e {
+        DeviceError::PlacementFault { .. } => StepErrorKind::GateRejected,
+        DeviceError::CommandFailed { .. } => StepErrorKind::Execute,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -562,7 +629,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         };
         let recognize_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
         if let (Some(region), Some(confidence)) = (tick.matched_region, tick.matched_confidence) {
-            self.last_match = Some((matched_task_name, confidence, region));
+            self.last_match = Some((matched_task_name.clone(), confidence, region));
         }
         if let Some(cmd) = tick.command {
             let cmd = match self.jitter.as_mut() {
@@ -576,9 +643,15 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 &self.last_crop_info,
             );
             if let Err(e) = self.execute_command(&device_cmd).await {
-                warn!("pipeline execute error: {e}");
+                let kind = classify_device_error(&e);
+                warn!("pipeline execute error ({kind:?}): {e}");
+                // `tick` advances `current` before the action runs. If the action
+                // never reaches the game (GateRejected / Execute), keeping the
+                // advance would desync the state machine: every later cycle would
+                // match the task we never reached.
+                self.state.set_current(matched_task_name.clone());
                 return StepOutcome::Error {
-                    kind: StepErrorKind::Execute,
+                    kind,
                     message: format!("execute: {e}"),
                 };
             }
@@ -645,9 +718,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                             Some(device_cmd)
                         }
                         Err(e) => {
-                            warn!("watch execute error ({name}): {e}");
+                            let kind = classify_device_error(&e);
+                            warn!("watch execute error ({kind:?}) ({name}): {e}");
                             return Some(StepOutcome::Error {
-                                kind: StepErrorKind::Execute,
+                                kind,
                                 message: format!("execute: {e}"),
                             });
                         }
@@ -690,6 +764,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             Ok(img) => img,
             Err(e) => {
                 warn!("verify capture error: {e}");
+                // The fire itself may have landed; we cannot prove it either way,
+                // so retry from the same task instead of advancing on faith.
+                self.state.set_current(task_name.to_string());
                 return StepOutcome::Error {
                     kind: StepErrorKind::VerifyCapture,
                     message: format!("verify_capture: {e}"),
@@ -940,6 +1017,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     async fn run_recovery_step(
         &mut self,
         cause: &str,
+        cause_class: RecoveryCause,
         guard: &mut RecoveryGuard,
         recover: &mut Option<RecoveryHook>,
     ) -> RecoveryStep {
@@ -957,14 +1035,28 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         let Some(hook) = recover.as_mut() else {
             return RecoveryStep::Exhausted;
         };
-        match hook(RecoveryContext { attempt, streak }).await {
+        match hook(RecoveryContext {
+            attempt,
+            streak,
+            cause: cause_class,
+        })
+        .await
+        {
             Ok(()) => {
-                let recovered_at = self.recovery_clock.elapsed();
-                info!(
-                    "recovery hook succeeded; resetting streak + boot grace {:?} (Issue #210)",
-                    self.recovery_grace
-                );
-                guard.recovered(recovered_at);
+                if cause_class.arms_boot_grace() {
+                    let recovered_at = self.recovery_clock.elapsed();
+                    info!(
+                        "recovery hook succeeded; resetting streak + boot grace {:?} (Issue #210)",
+                        self.recovery_grace
+                    );
+                    guard.recovered(recovered_at);
+                } else {
+                    info!(
+                        "recovery hook succeeded without restart; streak cleared, \
+                         no boot grace armed (DEF-012)"
+                    );
+                    guard.rearmed();
+                }
                 RecoveryStep::Recovered
             }
             Err(e) => RecoveryStep::HookFailed(e),
@@ -974,11 +1066,12 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     async fn run_recovery_or_stop(
         &mut self,
         cause: &str,
+        cause_class: RecoveryCause,
         state: &mut LoopState,
         recover: &mut Option<RecoveryHook>,
     ) -> Option<LoopOutcome> {
         match self
-            .run_recovery_step(cause, &mut state.guard, recover)
+            .run_recovery_step(cause, cause_class, &mut state.guard, recover)
             .await
         {
             RecoveryStep::Recovered => None,
@@ -1069,7 +1162,11 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
         if let Some(stop) = self.eval_goal_stop(goal_mode, match_info, state.goal_eval_inputs()) {
             return StepFlow::stop(stop);
         }
-        if due && let Some(stop) = self.run_recovery_or_stop(miss_cause, state, recover).await {
+        if due
+            && let Some(stop) = self
+                .run_recovery_or_stop(miss_cause, RecoveryCause::Transient, state, recover)
+                .await
+        {
             return StepFlow::stop(stop);
         }
         StepFlow::Continue
@@ -1130,17 +1227,21 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             StepFlow::Continue
         } else if state.recovery_enabled {
             info!("io error outside grace (environment presumed dead): {message}");
-            let cause = if matches!(kind, StepErrorKind::Execute) {
-                "execute error outside grace"
-            } else {
-                "capture error outside grace"
+            let cause_class = recovery_cause_for(kind);
+            let cause = match kind {
+                StepErrorKind::GateRejected => "placement fault (gate rejection)",
+                StepErrorKind::Execute => "execute error outside grace",
+                _ => "capture error outside grace",
             };
-            match self.run_recovery_or_stop(cause, state, recover).await {
+            match self
+                .run_recovery_or_stop(cause, cause_class, state, recover)
+                .await
+            {
                 Some(stop) => StepFlow::stop(stop),
                 None => StepFlow::Continue,
             }
         } else {
-            let reason = if matches!(kind, StepErrorKind::Execute) {
+            let reason = if matches!(kind, StepErrorKind::Execute | StepErrorKind::GateRejected) {
                 LoopStopReason::ExecuteError
             } else {
                 LoopStopReason::CaptureError
