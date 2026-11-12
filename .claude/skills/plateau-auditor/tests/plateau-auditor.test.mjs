@@ -8,7 +8,7 @@ import {
   detectPlateau,
   buildAuditorPrompt,
   parseAuditorReport,
-} from '../plateau-auditor.js';
+} from '../scripts/plateau-auditor.js';
 
 test('redactionViolations flags PR refs, code paths, and branch names', () => {
   assert.deepEqual(redactionViolations('PR #214 を再現'), ['PR #214 を再現'.match(/#\d{2,}/)[0]]);
