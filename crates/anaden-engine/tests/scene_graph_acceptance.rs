@@ -217,30 +217,62 @@ fn units_reproduce_declared_confidences_and_nothing_else() {
     let spec = load_spec();
     let index = task_index(&spec);
     let names = expect_names(&spec);
+    let mut drift: Vec<String> = Vec::new();
+    let mut below_floor: Vec<String> = Vec::new();
     for unit in &spec.unit {
         let matched = matches_for(&unit.fixture, &names, &index, false);
         let declared: BTreeSet<String> = unit.expect.iter().map(|(n, _)| n.clone()).collect();
         let observed: BTreeSet<String> = matched.keys().cloned().collect();
-        assert_eq!(
-            observed, declared,
-            "unit {} ({}): matched anchor set drifted from the spec — the fixture must \
-             resolve to exactly its declared anchors (observed confs: {matched:?})",
-            unit.name, unit.fixture
-        );
+        if observed != declared {
+            drift.push(format!(
+                "unit {} ({}): matched anchor set drifted from the spec — the fixture must \
+                 resolve to exactly its declared anchors (observed confs: {matched:?})",
+                unit.name, unit.fixture
+            ));
+            continue;
+        }
         for (name, min_conf) in &unit.expect {
             let observed = matched
                 .get(name)
                 .copied()
                 .expect("declared anchor is in the matched set");
-            assert!(
-                observed >= *min_conf,
-                "unit {}: {name} conf {observed:.4} below declared floor {min_conf:.2} \
-                 on {}",
-                unit.name,
-                unit.fixture
-            );
+            if observed < *min_conf {
+                below_floor.push(format!(
+                    "unit {}: {name} conf {observed:.4} below declared floor {min_conf:.2} on {}",
+                    unit.name, unit.fixture
+                ));
+            }
         }
     }
+    let mut report = String::new();
+    if !drift.is_empty() {
+        report.push_str(&drift.join("\n"));
+    }
+    if !below_floor.is_empty() {
+        if !report.is_empty() {
+            report.push('\n');
+        }
+        report.push_str(&below_floor.join("\n"));
+    }
+    if !report.is_empty() {
+        report.push_str("\n\nfull observed matrix (environment fingerprint for cross-machine drift):\n");
+        for unit in &spec.unit {
+            let matched = matches_for(&unit.fixture, &names, &index, false);
+            let normalized = normalize(&unit.fixture);
+            report.push_str(&format!(
+                "unit {} ({}): normalized={}x{} observed={:?}\n",
+                unit.name,
+                unit.fixture,
+                normalized.width(),
+                normalized.height(),
+                matched
+            ));
+        }
+    }
+    assert!(
+        report.is_empty(),
+        "confidence matrix diverged from the spec (full run, no fail-fast):\n{report}"
+    );
 }
 
 #[test]
