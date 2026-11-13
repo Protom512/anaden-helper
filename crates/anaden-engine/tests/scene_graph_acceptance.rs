@@ -255,7 +255,9 @@ fn units_reproduce_declared_confidences_and_nothing_else() {
         report.push_str(&below_floor.join("\n"));
     }
     if !report.is_empty() {
-        report.push_str("\n\nfull observed matrix (environment fingerprint for cross-machine drift):\n");
+        report.push_str(
+            "\n\nfull observed matrix (environment fingerprint for cross-machine drift):\n",
+        );
         for unit in &spec.unit {
             let matched = matches_for(&unit.fixture, &names, &index, false);
             let normalized = normalize(&unit.fixture);
