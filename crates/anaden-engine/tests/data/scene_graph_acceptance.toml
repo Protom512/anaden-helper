@@ -1,0 +1,182 @@
+schema = 1
+note = "Offline scene-graph acceptance spec. Every unit is one (fixture, expected anchors) pair; a fixture is covered only if the production preprocessing + template matching reproduce the declared confidences. Blocked units are declared with the reason they cannot be accepted yet. Replays mirror production PipelineDriver wiring (pipeline tasks + watch/ manifest names)."
+task_dir = [
+  "scenes/title_pc",
+  "scenes/field_pc",
+  "scenes/menu_pc",
+  "scenes/neko_pc",
+  "pipelines/login",
+  "pipelines/nav_to_field_pc",
+  "pipelines/ticket_digest",
+  "pipelines/field_loop_pc",
+]
+
+[[unit]]
+name = "title_cold_start_1080p"
+fixture = "title_live_1952x1098.png"
+expect = [
+  ["TitlePcLogoCorner", 0.99],
+  ["TitlePcVersionLabel", 0.95],
+  ["LoginTapTitlePc", 0.99],
+  ["LoginClickLoadPc", 0.95],
+  ["TapToStartPc", 0.99],
+  ["LoadGamePc", 0.99],
+]
+
+[[unit]]
+name = "title_cold_start_4k"
+fixture = "title_menu_live_20261111_3783x2128.png"
+expect = [
+  ["TitlePcLogoCorner", 0.99],
+  ["LoginTapTitlePc", 0.99],
+  ["LoginClickLoadPc", 0.98],
+  ["TapToStartPc", 0.99],
+  ["LoadGamePc", 0.99],
+]
+
+[[unit]]
+name = "town_arrived_1080p"
+fixture = "field_live_2880x1620.png"
+expect = [
+  ["FieldTownBarPc", 0.97],
+  ["TapBottomStablePc", 0.97],
+  ["TapHudTrPc", 0.82],
+]
+
+[[unit]]
+name = "town_arrived_4k"
+fixture = "field_live_20261110_3783x2128.png"
+expect = [
+  ["FieldTownBarPc", 0.96],
+  ["TapBottomStablePc", 0.97],
+  ["TapHudTrPc", 0.97],
+]
+
+[[unit]]
+name = "town_arrived_hud"
+fixture = "field_hud_live_2880x1620.png"
+expect = [
+  ["FieldTownBarPc", 0.97],
+  ["TapBottomStablePc", 0.97],
+  ["TapHudTrPc", 0.80],
+]
+
+[[unit]]
+name = "menu_open"
+fixture = "menu_panel_live_2880x1620.png"
+expect = [
+  ["MenuPcParty", 0.99],
+  ["MenuPcGrasta", 0.98],
+  ["MenuPcBoard", 0.99],
+  ["MenuPcGacha", 0.99],
+  ["MenuPcBag", 0.99],
+  ["MenuPcRecord", 0.99],
+  ["MenuPcInfo", 0.99],
+]
+
+[[unit]]
+name = "world_map_open"
+fixture = "world_map_live_2880x1620.png"
+expect = [
+  ["WorldMapDetectPc", 0.97],
+]
+
+[[unit]]
+name = "ad_select_open"
+fixture = "ad_select_live_1918x1048.png"
+expect = [
+  ["AdSelectDetectPc", 0.99],
+  ["HardRowDetectPc", 0.96],
+  ["VeryHardRowDetectPc", 0.98],
+]
+
+[[unit]]
+name = "reward_congrats_open"
+fixture = "reward_congrats_live_1918x1048.png"
+expect = [
+  ["ResultCongratsDetectPc", 0.96],
+]
+
+[[unit]]
+name = "neko_diary_open"
+fixture = "neko_diary_live_2880x1620.png"
+expect = [
+  ["NekoHintMiparuPc", 0.98],
+]
+
+[[blocked]]
+name = "record_open"
+fixture = "record_open_live_2880x1620.png"
+reason = "no detection anchor exists for the open adventure-record panel: templates/scenes has no record task and no pipeline task matches this capture, so the menu->record edge is unverifiable offline"
+
+[[blocked]]
+name = "title_cold_boot_before_logo"
+fixture = "title_boot_degenerate_1952x1098.png"
+degenerate = true
+reason = "cold boot frame renders before the title logo, so by design nothing matches; the driver survives on NoMatch retry instead of a boot-state anchor, which needs a dedicated loading/boot template"
+
+[[blocked]]
+name = "ad_difficulty_and_skip"
+fixture = "ad_select_live_1918x1048.png"
+reason = "the difficulty dialog and the skip (tokkyu-ken) button have no capture in the corpus; ad_select hardware rows are detected but the click chain past row selection is unverified"
+
+[[gap]]
+name = "def_008_login_goal_unreachable_in_town"
+tasks = ["LoginWaitFieldPc", "FieldHudTopPc"]
+fixtures = [
+  "field_live_2880x1620.png",
+  "field_live_20261110_3783x2128.png",
+  "field_hud_live_2880x1620.png",
+]
+reason = "hud_top (currency bar) is absent in town field frames (DEF-008), so the login/nav terminal task never matches on arrival; town arrival is carried by the FieldTownBarPc watch instead of the pipeline goal"
+
+[[replay]]
+name = "nav_cold_start_to_town"
+pipeline = "pipelines/nav_to_field_pc"
+start_task = "TapToStartPc"
+watch_task = "FieldTownBarPc"
+frames = [
+  "title_live_1952x1098.png",
+  "title_live_1952x1098.png",
+  "field_live_2880x1620.png",
+]
+
+[[replay.step]]
+outcome = "fired"
+current = "TapToStartPc"
+next_current = "LoadGamePc"
+
+[[replay.step]]
+outcome = "fired"
+current = "LoadGamePc"
+next_current = "FieldHudTopPc"
+
+[[replay.step]]
+outcome = "watch_stop"
+current = "FieldHudTopPc"
+watch_task = "FieldTownBarPc"
+
+[[replay]]
+name = "login_cold_start_to_town"
+pipeline = "pipelines/login"
+start_task = "LoginTapTitlePc"
+watch_task = "LoginFieldTownBarPc"
+frames = [
+  "title_live_1952x1098.png",
+  "title_live_1952x1098.png",
+  "field_live_2880x1620.png",
+]
+
+[[replay.step]]
+outcome = "fired"
+current = "LoginTapTitlePc"
+next_current = "LoginWaitFieldPc"
+
+[[replay.step]]
+outcome = "no_match"
+current = "LoginWaitFieldPc"
+
+[[replay.step]]
+outcome = "watch_stop"
+current = "LoginWaitFieldPc"
+watch_task = "LoginFieldTownBarPc"
