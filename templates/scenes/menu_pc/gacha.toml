@@ -2,5 +2,5 @@ name      = "MenuPcGacha"
 state     = "menu_pc"
 algorithm = "sse"
 template  = "gacha.png"
-roi       = [998, 579, 68, 73]
+roi       = [365, 567, 92, 93]
 threshold = 0.95
