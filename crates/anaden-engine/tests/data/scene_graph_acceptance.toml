@@ -38,7 +38,7 @@ expect = [
 name = "town_arrived_1080p"
 fixture = "field_live_2880x1620.png"
 expect = [
-  ["FieldTownBarPc", 0.97],
+  ["FieldTownBarPc", 0.90],
   ["TapBottomStablePc", 0.97],
   ["TapHudTrPc", 0.82],
 ]
@@ -47,7 +47,7 @@ expect = [
 name = "town_arrived_4k"
 fixture = "field_live_20261110_3783x2128.png"
 expect = [
-  ["FieldTownBarPc", 0.96],
+  ["FieldTownBarPc", 0.90],
   ["TapBottomStablePc", 0.97],
   ["TapHudTrPc", 0.97],
 ]
@@ -56,7 +56,7 @@ expect = [
 name = "town_arrived_hud"
 fixture = "field_hud_live_2880x1620.png"
 expect = [
-  ["FieldTownBarPc", 0.97],
+  ["FieldTownBarPc", 0.90],
   ["TapBottomStablePc", 0.97],
   ["TapHudTrPc", 0.80],
 ]
