@@ -4,5 +4,5 @@ algorithm = "ccoeff"
 template  = "../../scenes/title_pc/title_logo_corner.png"
 roi       = [604, 223, 160, 180]
 threshold = 0.80
-action    = { type = "click_rect", roi = [600, 258, 30, 30] }
+action    = { type = "click_rect", roi = [534, 527, 191, 52] }
 next      = ["FieldHudTopPc"]
