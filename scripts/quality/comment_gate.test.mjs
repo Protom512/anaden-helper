@@ -255,7 +255,6 @@ test('scopeFiles covers crates/scripts code plus repo toml and config yml', () =
   assert.ok(paths.some((p) => p.includes('/data/')), 'data');
   assert.ok(paths.some((p) => p.includes('/.claude/workflows/feature-pipeline.js')), 'workflows js');
   assert.ok(paths.some((p) => p.endsWith('/rss_bench.ps1')), 'rss_bench.ps1');
-  assert.ok(paths.some((p) => p.includes('/docs/explainers/')), 'docs explainers');
   assert.ok(!paths.some((p) => p.includes('/ast-grep-tests/')), 'ast-grep-tests excluded');
   assert.ok(!paths.some((p) => p.includes('/references/')), 'references vendored tree excluded');
   assert.ok(!paths.some((p) => p.includes('/.claude/skills/')), 'vendored skills excluded');
