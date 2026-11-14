@@ -16,7 +16,7 @@
         "id": "vision-and-state",
         "label": "画像認識とゴール判定",
         "focus": ["driver", "vision", "template_store", "core_models"],
-        "note": "テンプレート照合、Lanczos3 座標スケーリング、純粋ゴール評価の連携。"
+        "note": "テンプレート照合、幅 1280 基準 Triangle 正規化、純粋ゴール評価の連携。"
       },
       {
         "id": "pc-platform",
@@ -67,7 +67,7 @@
       "id": "vision",
       "type": "backend",
       "label": "画像認識エンジン",
-      "sublabel": "SSE / Ccoeff / Lanczos3",
+      "sublabel": "SSE / Ccoeff / Triangle (needle: Lanczos3)",
       "tag": "anaden-vision",
       "pos": [470, 110],
       "size": [140, 60]
@@ -221,7 +221,7 @@
       "title": "Sense → Think → Act エンジン",
       "items": [
         "PipelineDriver がキャプチャ・照合・発火・誠実検証（発火後確認）ループを駆動",
-        "VisionEngine は SSE / TM_CCOEFF_NORMD と Lanczos3 720p 基準スケーリングを提供"
+        "VisionEngine は SSE / TM_CCOEFF_NORMD と 幅1280基準 Triangle スケーリング (needle は Lanczos3) を提供"
       ]
     },
     {
