@@ -1,0 +1,13 @@
+[advisories]
+ignore = [
+    # RUSTSEC-2026-0194 / RUSTSEC-2026-0195 (quick-xml < 0.41)
+    # quick-xml 0.39.4 は wayland-scanner (Linux のみの target dependency,
+    # smithay-client-toolkit -> winit -> eframe) が要求する。default target
+    # (windows-msvc) の依存グラフには quick-xml は到達しない
+    # (実測 2026-11-14: `cargo tree -i quick-xml` = "nothing to print",
+    #  `--target all` で初めて wayland 経由が出現)。
+    # 本プロジェクトは Linux ビルドを produce しないため未到達。
+    # wayland スタックの major bump (eframe/winit) を待って解消する。
+    "RUSTSEC-2026-0194",
+    "RUSTSEC-2026-0195",
+]

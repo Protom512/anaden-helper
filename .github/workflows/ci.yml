@@ -77,10 +77,9 @@ jobs:
         run: node scripts/quality/assert_tests_untouched.mjs "${{ github.event.before }}"
 
   metrics-gates:
-    name: metrics-gates (complexity / duplication) - advisory for now
+    name: metrics-gates (complexity / duplication)
     runs-on: ubuntu-latest
     timeout-minutes: 30
-    continue-on-error: true
     steps:
       - uses: actions/checkout@v4
 

@@ -33,7 +33,7 @@
       "dot": "cyan",
       "title": "SENSE（認識フェーズ）",
       "items": [
-        "ScreenScaler で 720p 基準へ Lanczos3 正規化し、VisionEngine で照合スコアを算出"
+        "ScreenScaler で幅 1280 基準へ Triangle 補間で正規化し、VisionEngine で照合スコアを算出 (needle リサイズのみ Lanczos3)"
       ]
     },
     {

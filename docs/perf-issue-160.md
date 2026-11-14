@@ -1,5 +1,14 @@
 # Issue #160 UC-5 (Shard 6) — GUI 毎フレーム経路のパフォーマンス実測とホットスポット解消
 
+> **時点注記 (2026-11-14)**: 本書は 2026-11-08 時点の実測記録で、file:line は
+> **実装時点**の所在。以降のリファクタリングで (1) #312 が buffer コアを
+> `log_view.rs` から `log_buffer.rs` へ移動し、(2) その後のリファクタリングで
+> revision カウンタ / `changed_entries` 差分 API 自体が現行コードからは除去
+> されている(2026-11-14 実測: `changed_entries` の定義・呼び出し 0 件)。
+> §4/§5 の所在表記は当時の記録として読むこと。計測数値とベンチは再現可能な
+> evidence として有効。ベンチ名は #312 で `after_gated` → `after_delta` に
+> 改名済み(§3 の生出力は計測時点のラベルを保持)。
+
 Issue #160 受け入れ基準 5: 「perf — before/after 計測 evidence (例: 毎フレーム
 log snapshot 全行 clone の解消、計測方法明記)」に対する実測記録。
 本書の数値はすべて生コマンド出力のコピーであり、計測条件を明記して再現可能にする。
@@ -105,13 +114,13 @@ frame_burst10/after_gated         (新パターン: 変更ありフレーム)
 
 ## 4. 解消内容 (コード箇所)
 
-| 変更 | 箇所 |
+| 変更 | 箇所 (実装時点。#312 以降 log_buffer.rs へ移動、変更箇所 API はその後除去) |
 |------|------|
 | `LogBuffer::revision` 改訂番号カウンタ (push/clear で増分) | `crates/anaden-studio/src/log_view.rs:214` (`push_entry` での増分 :253、`clear` での増分 :288、アクセサ :263) |
 | `SharedLogBuffer::changed_entries` — 変化時のみ全行複製を返す差分 API | `crates/anaden-studio/src/log_view.rs:369` |
-| `drain_channel_into` のロック 1 回化 (旧: 行ごとに lock) | `crates/anaden-studio/src/log_view.rs:394` |
-| `StudioApp::refresh_task_log_snapshot` 差分化 (`task_log_revision` キャッシュ) | `crates/anaden-studio/src/app.rs:762` (フィールド :401) |
-| `PipelineRunnerApp::refresh_snapshot` 差分化 (`log_revision` キャッシュ) | `crates/anaden-studio/src/runner.rs:531` (フィールド :237)、`clear_logs` :543 |
+| `drain_channel_into` のロック 1 回化 (旧: 行ごとに lock) | `crates/anaden-studio/src/log_view.rs:394` (後継: `crates/anaden-studio/src/log_buffer.rs:193`) |
+| `StudioApp::refresh_task_log_snapshot` 差分化 (`task_log_revision` キャッシュ) | `crates/anaden-studio/src/app.rs:762` (フィールド :401、後継: app.rs:255/:217) |
+| `PipelineRunnerApp::refresh_snapshot` 差分化 (`log_revision` キャッシュ) | `crates/anaden-studio/src/runner.rs:531` (フィールド :237)、`clear_logs` :543 (後継: runner_ui.rs:83 / runner_exec.rs:817) |
 
 **振る舞い互換性**: `task_log_lines() -> &[LogEntry]` / `log_snapshot() -> &[LogEntry]`
 の公開署名・スナップショット内容 (更新後は全行相当・昇順) は不変。差分化に伴い
@@ -119,6 +128,14 @@ frame_burst10/after_gated         (新パターン: 変更ありフレーム)
 進める。回帰テスト (後述) が行欠けなし・冪等性・クリア挙動を機械検証する。
 
 ## 5. 検証テスト (振る舞い不変の保証)
+
+(所在は実装時点。`changed_entries_*` 系は差分 API の除去に伴い現行ツリーには
+存在しない。後継は `crates/anaden-studio/src/log_buffer.rs:396`
+`drain_channel_into_batches_lines_and_first_exit_wins` /
+`crates/anaden-studio/src/runner_exec.rs:817`
+`test_log_snapshot_idempotent_across_idle_drains` /
+`crates/anaden-studio/src/app.rs:978`
+`task_log_snapshot_idempotent_across_idle_drains_and_keeps_lines`)
 
 - `log_view.rs` 単体テスト (Issue #160 UC-5):
   - `changed_entries_returns_none_when_buffer_unchanged` — 変化なしフレームで
@@ -150,9 +167,10 @@ ast-grep scan                           → exit 0 (error severity なし)
 1. **変更ありフレームの全行再構築**: 上限 5000 行到達後は新着 1 行ごとに最古行が
    破棄されるため差分追記が効かず、変更フレームは O(n) 再構築のまま。行数上限の
    縮小 (テール固定長) か `Arc<Vec<LogEntry>>` 差し替えで更に削減できる見込み。
-2. **`render_task_list` 内の毎フレーム `clone()`** (app.rs:781 `self.task_defs.clone()`
-   / app.rs:838 `self.task_queue.clone()`, 借用制約のため): ログ 5000 行 clone
-   に比べれば小さいが、件数増加時の同一パターンのホットスポット候補。
+2. ~~**`render_task_list` 内の毎フレーム `clone()`**~~ — **#383 (b6641d2,
+   2026-11-08) で解消済み**: `task_defs` は `Option<Arc<TaskListState>>`
+   (`crates/anaden-studio/src/app_state_core.rs:88`) になり、per-frame clone は
+   refcount bump (`crates/anaden-studio/src/app_ui_tasks.rs:17`) へ。
 3. **`run_status_summary()` の毎フレーム String 生成** (runner.rs:675 実行ビュー):
    フォーマット 1 回/フレーム。微小だがキャッシュ可能。
 4. **`append_history_record` の log_tail 構築** (runner.rs): 終了時 1 回のみの
