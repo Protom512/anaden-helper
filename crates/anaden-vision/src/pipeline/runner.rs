@@ -1,11 +1,3 @@
-//! ロード済みのパイプライン。
-//!
-//! [`Pipeline`] は「タスク集合 + 名前索引 + マニフェスト + watch 層」を持ち、
-//! 呼び出し側から名前解決・パス解決・watch ディレクトリの存在を隠す。
-//!
-//! ディスク表現（相対パス）と実行表現（絶対パス）の橋渡しは
-//! [`Task::from_def`] が 1 回だけ行う。
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
@@ -41,10 +33,6 @@ pub struct Pipeline {
 }
 
 impl Pipeline {
-    /// ディレクトリから読む。`watch/` も同時に読み、マニフェストがあれば拾う。
-    ///
-    /// ディレクトリが存在しない場合は空のパイプラインを返す（現行の
-    /// `load_pipeline` と同じ規約）。
     pub fn load(dir: &Path) -> Result<Self, TaskDefError> {
         let manifest = if dir.join(PIPELINE_MANIFEST_FILENAME).is_file() {
             Some(load_pipeline_manifest(dir)?)
@@ -56,7 +44,6 @@ impl Pipeline {
         Ok(Self::build(dir, chain, watch, manifest))
     }
 
-    /// I/O なしでタスク列から組み立てる。`root` は相対テンプレートの基準。
     #[must_use]
     pub fn from_defs(root: &Path, defs: Vec<TaskDef>) -> Self {
         Self::build(root, defs, Vec::new(), None)
@@ -94,34 +81,26 @@ impl Pipeline {
         self.manifest.as_ref()
     }
 
-    /// マニフェストの `start_task`。マニフェストが無ければ `None`。
     pub fn start_task(&self) -> Option<&str> {
         self.manifest.as_ref().map(|m| m.start_task.as_str())
     }
 
-    /// チェーン層のタスク（`watch/` を含まない）。
     pub fn tasks(&self) -> &[Task] {
         &self.all[..self.chain_len]
     }
 
-    /// `watch/` 配下のタスク。
     pub fn watch_tasks(&self) -> &[Task] {
         &self.all[self.chain_len..]
     }
 
-    /// マニフェストが宣言した watch 名。
     pub fn watch_names(&self) -> &[String] {
         self.manifest.as_ref().map_or(&[], |m| m.watch.as_slice())
     }
 
-    /// チェーン層と watch 層の両方から名前で引く。
     pub fn task(&self, name: &str) -> Option<&Task> {
         self.index.get(name).and_then(|i| self.all.get(*i))
     }
 
-    /// 現在タスクを 1 回照合し、一致したらアクションと次タスクを返す。
-    ///
-    /// 未知の名前は `Ok(None)`（現行 `run_step` と同じ）。
     pub fn step(
         &self,
         screenshot: &DynamicImage,
@@ -133,9 +112,6 @@ impl Pipeline {
         step_def(task.def(), task.template(), screenshot)
     }
 
-    /// 閾値 0 で全タスクを照合し、信頼度の降順で返す。
-    ///
-    /// チェーン層と watch 層の両方を対象にする。
     pub fn inspect(&self, screenshot: &DynamicImage) -> Vec<DiagnoseEntry> {
         let mut entries: Vec<DiagnoseEntry> = self
             .all
@@ -146,7 +122,6 @@ impl Pipeline {
         entries
     }
 
-    /// チェーン層の TOML 行。テンプレートは読み込んだときの表現のまま。
     pub fn defs(&self) -> impl Iterator<Item = &TaskDef> {
         self.all[..self.chain_len].iter().map(Task::def)
     }
@@ -155,14 +130,12 @@ impl Pipeline {
         self.all.into_iter().map(Task::into_def).collect()
     }
 
-    /// チェーン層だけを TOML 行として取り出す。
     pub fn into_chain_defs(mut self) -> Vec<TaskDef> {
         self.all.truncate(self.chain_len);
         self.into_defs()
     }
 }
 
-/// タスク 1 つを照合して [`StepOutcome`] にする唯一の実装。
 pub(crate) fn step_def(
     def: &TaskDef,
     template: &Path,
@@ -186,7 +159,6 @@ pub(crate) fn step_def(
     }
 }
 
-/// 閾値 0 の診断 1 行。`Pipeline::inspect` と `diagnose_task` の共通経路。
 pub(crate) fn diagnose_def(
     def: &TaskDef,
     template: &Path,
@@ -243,7 +215,6 @@ pub(crate) fn diagnose_def(
     entry
 }
 
-/// 信頼度の降順。`None`（照合不能）は末尾。
 pub(crate) fn cmp_confidence_desc(a: &DiagnoseEntry, b: &DiagnoseEntry) -> std::cmp::Ordering {
     match (a.best_confidence, b.best_confidence) {
         (Some(x), Some(y)) => y.partial_cmp(&x).unwrap_or(std::cmp::Ordering::Equal),
@@ -257,9 +228,6 @@ pub(crate) fn sort_by_confidence_desc(entries: &mut [DiagnoseEntry]) {
     entries.sort_by(cmp_confidence_desc);
 }
 
-/// 相対テンプレートを、呼び出し側が渡した基準で解決する。
-///
-/// `run_step` の互換ラッパが使う。
 pub(crate) fn resolved_for_root(def: &TaskDef, root: &Path) -> PathBuf {
     resolve_template(&def.template, root)
 }

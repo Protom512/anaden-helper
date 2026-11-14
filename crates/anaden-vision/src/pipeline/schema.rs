@@ -1,12 +1,3 @@
-//! パイプライン TOML のワイヤ表現。
-//!
-//! ここに置く型は「ディスクに書かれているもの」だけを表す。実行時の意味
-//! （テンプレートの解決、アクションの既定値）は [`super::task::Task`] が持つ。
-//!
-//! [`TaskDef`] は `Deserialize` のみを実装し、`Serialize` は持たない。
-//! 書き込みは [`super::io::save_task_def`] の 1 経路だけにしてあり、
-//! 相対化を忘れた第 2 の書き手はコンパイルできない。
-
 use std::path::PathBuf;
 
 use anaden_core::{MatchConfidence, ScreenRegion};
@@ -156,11 +147,6 @@ impl Serialize for Action {
     }
 }
 
-/// タスク 1 行の入力側。ディスクから読むときだけ使う。
-///
-/// `state` は全 TOML が必須キーとして持つが、実行時には読まれない。
-/// `base` は任意キーで、現状の生産コードでは読まれない。どちらも
-/// ラウンドトリップのために保持する。
 #[derive(Debug, Clone, PartialEq, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct TaskDef {
@@ -181,10 +167,6 @@ pub struct TaskDef {
     pub next: Option<Vec<String>>,
 }
 
-/// タスク 1 行の出力側。フィールド順は [`TaskDef`] と一致させる。
-///
-/// 書き込み専用の型を分けることで、`TaskDef` を直接 serialize する
-/// 第 2 の書き手（相対化も float 正規化もせずに書く経路）を型で禁止する。
 #[derive(Debug, Clone, Serialize)]
 pub(crate) struct TaskRow {
     name: String,

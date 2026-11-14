@@ -1,8 +1,3 @@
-//! テンプレート照合の唯一の実装。
-//!
-//! `TaskDef::detect`、`Task::detect`、`Pipeline::inspect` はすべてここを通る。
-//! ROI の正規化・クロップ・アルゴリズム分岐・領域のオフセットを 1 箇所に閉じる。
-
 use std::path::{Path, PathBuf};
 
 use anaden_core::{MatchConfidence, ScreenRegion};
@@ -15,15 +10,11 @@ use crate::matcher::{MatchResult, TemplateMatcher};
 use super::cache::prepared_template;
 use super::schema::{Algorithm, TaskDef, TaskDefError};
 
-/// 1 テンプレートの照合結果。`Pipeline::inspect` が診断情報を組み立てるのに使う。
 pub(crate) struct Probe {
     pub(crate) matched: Option<MatchResult>,
     pub(crate) needle_size: Option<(u32, u32)>,
 }
 
-/// テンプレート 1 枚を 1 フレームに対して照合する。
-///
-/// `template` は解決済みのパス（絶対、または呼び出し側が決めた基準からの相対）。
 pub(crate) fn probe_template(
     template: &Path,
     roi: Option<[u32; 4]>,
@@ -87,7 +78,6 @@ pub(crate) fn crop_imm(img: &DynamicImage, r: ScreenRegion) -> DynamicImage {
     img.crop_imm(x, y, w, h)
 }
 
-/// `root` が空ならテンプレートの相対パスをそのまま返す（現行挙動）。
 pub(crate) fn resolve_template(template: &Path, root: &Path) -> PathBuf {
     if template.is_absolute() {
         template.to_path_buf()
@@ -97,10 +87,6 @@ pub(crate) fn resolve_template(template: &Path, root: &Path) -> PathBuf {
 }
 
 impl TaskDef {
-    /// ワイヤ行のまま照合する。相対 `template` は `template_root` から解決する。
-    ///
-    /// 既存の呼び出し側（テスト・診断）との互換のために残している。
-    /// 新しいコードは [`super::runner::Pipeline::step`] を使う。
     pub fn detect(
         &self,
         screenshot: &DynamicImage,

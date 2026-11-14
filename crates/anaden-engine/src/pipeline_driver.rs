@@ -113,8 +113,6 @@ impl RecoveryGuard {
         self.recovered_at = Some(now);
     }
 
-    /// Recovery succeeded without a restart: clear the streak but do not open a
-    /// boot window, because nothing is booting.
     fn rearmed(&mut self) {
         self.streak = 0;
         self.recovered_at = None;
@@ -381,29 +379,22 @@ pub enum RecoveryCause {
 }
 
 impl RecoveryCause {
-    /// A placement clamp does not restart the game, so there is no boot to wait
-    /// for. Arming the boot grace here would suppress every recovery (and all
-    /// fire diagnostics) for the whole grace window (DEF-012 live run).
     pub fn arms_boot_grace(self) -> bool {
         matches!(self, RecoveryCause::Transient)
     }
 }
 
-/// What the recovery hook should do for one recovery attempt.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RecoveryPlan {
-    /// Move the game window back inside its monitor; never kill the process.
     ClampWindow,
-    /// Start the game if it is not running; never kill the process.
+
     Launch,
-    /// The process is alive and probably loading: wait instead of restarting.
+
     WaitForExisting,
-    /// The process is gone: restart it and then re-clamp.
+
     Restart,
 }
 
-/// One decision table for recovery. Kept pure so the policy is testable without
-/// Win32, a running game, or an async driver.
 pub fn plan_recovery(cause: RecoveryCause, attempt: u32, app_alive: bool) -> RecoveryPlan {
     match cause {
         RecoveryCause::PlacementFault => RecoveryPlan::ClampWindow,
@@ -645,10 +636,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             if let Err(e) = self.execute_command(&device_cmd).await {
                 let kind = classify_device_error(&e);
                 warn!("pipeline execute error ({kind:?}): {e}");
-                // `tick` advances `current` before the action runs. If the action
-                // never reaches the game (GateRejected / Execute), keeping the
-                // advance would desync the state machine: every later cycle would
-                // match the task we never reached.
+
                 self.state.set_current(matched_task_name.clone());
                 return StepOutcome::Error {
                     kind,
@@ -764,8 +752,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             Ok(img) => img,
             Err(e) => {
                 warn!("verify capture error: {e}");
-                // The fire itself may have landed; we cannot prove it either way,
-                // so retry from the same task instead of advancing on faith.
+
                 self.state.set_current(task_name.to_string());
                 return StepOutcome::Error {
                     kind: StepErrorKind::VerifyCapture,

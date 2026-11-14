@@ -1,15 +1,3 @@
-//! パイプライン。
-//!
-//! 3 つの層に分ける:
-//!
-//! - [`TaskDef`] — ディスクに書かれたタスク 1 行（入力専用）
-//! - [`Task`] — このプロセスが実行するタスク（テンプレート解決済み）
-//! - [`Pipeline`] — タスク集合 + 名前索引 + マニフェスト + watch 層
-//!
-//! 呼び出し側は「テンプレートが相対か絶対か」「watch はどのディレクトリか」
-//! 「タスク名はどう引くか」を知らない。既存の自由関数
-//! （[`load_pipeline`] / [`save_task_def`] / [`run_step`]）は互換ラッパとして残す。
-
 mod cache;
 mod io;
 mod recognize;
@@ -42,10 +30,6 @@ use std::path::Path;
 
 use image::DynamicImage;
 
-/// 現在タスクを 1 回照合する互換ラッパ。
-///
-/// `tasks` の `template` が相対なら、リポジトリの作業ディレクトリ基準で
-/// 解決する（従来と同じ）。新しいコードは [`Pipeline::step`] を使う。
 pub fn run_step(
     tasks: &[TaskDef],
     screenshot: &DynamicImage,

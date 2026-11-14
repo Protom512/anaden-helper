@@ -1,10 +1,3 @@
-//! 準備済みテンプレートのプロセス全体キャッシュ。
-//!
-//! キャッシュは [`super::recognize`] からだけ使われる実装詳細。現状は
-//! プロセス全体の `static` で、mtime が変わったときだけ作り直す。
-//! 「ファイルを消しても一致し続ける」ことを前提にしたテストがあるため、
-//! インスタンス化は別の変更として扱う。
-
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, LazyLock, Mutex};

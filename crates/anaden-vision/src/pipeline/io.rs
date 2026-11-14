@@ -1,8 +1,3 @@
-//! パイプラインの読み書き。
-//!
-//! ディスク上の相対パスはここでだけ絶対パスへ解決する。書き込み側は
-//! [`save_task_def`] の 1 経路で、必ず相対化してから書く。
-
 use std::path::{Path, PathBuf};
 
 use serde::Serialize;
@@ -17,10 +12,6 @@ use super::schema::{
 
 pub(crate) const WATCH_DIRNAME: &str = "watch";
 
-/// `dir` 直下のタスク TOML を読む。`pipeline.toml` はタスクではないので飛ばす。
-///
-/// 相対 `template` はその TOML の親ディレクトリ基準で絶対化する。
-/// これが「ディスク上の相対 / 実行時の絶対」という現行の規約を守っている。
 pub(crate) fn load_tasks(dir: &Path) -> Result<Vec<TaskDef>, TaskDefError> {
     let mut defs = Vec::new();
     if !dir.exists() {

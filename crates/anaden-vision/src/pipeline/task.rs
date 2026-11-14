@@ -1,9 +1,3 @@
-//! 実行時のタスク。
-//!
-//! [`TaskDef`] はディスクに書かれている行、[`Task`] はこのプロセスが実行する
-//! 単位。違いはテンプレートのパス解決だけだが、その 1 点が
-//! 「相対と絶対を同じ型で兼ねる」という元の欠陥だったので型を分けている。
-
 use std::path::{Path, PathBuf};
 
 use image::DynamicImage;
@@ -29,7 +23,6 @@ impl Task {
         self.def
     }
 
-    /// 元の TOML 行。`template` は読み込んだときの表現のまま。
     pub fn def(&self) -> &TaskDef {
         &self.def
     }
@@ -50,7 +43,6 @@ impl Task {
         self.def.algorithm
     }
 
-    /// 解決済みのテンプレートパス。
     pub fn template(&self) -> &Path {
         &self.template
     }
@@ -59,7 +51,6 @@ impl Task {
         self.def.threshold
     }
 
-    /// 省略時の既定は `do_nothing`（`run_step` と同じ規約）。
     pub fn action(&self) -> Action {
         self.def.action.clone().unwrap_or(Action::DoNothing)
     }
