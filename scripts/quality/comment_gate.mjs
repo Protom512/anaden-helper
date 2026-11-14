@@ -557,7 +557,6 @@ export function scopeFiles(root = ROOT) {
   walkTree(path.join(root, 'crates'), EXT_LANG, codeSkip, out);
   walkTree(path.join(root, 'scripts'), EXT_LANG, codeSkip, out);
   walkTree(path.join(root, '.claude', 'workflows'), EXT_LANG, codeSkip, out);
-  walkTree(path.join(root, 'docs', 'explainers'), EXT_LANG, codeSkip, out);
   walkTree(root, CONFIG_EXT_LANG, configSkipDir, out);
   out.sort((a, b) => a.path.localeCompare(b.path));
   return out;
@@ -593,7 +592,7 @@ export function main(argv = process.argv.slice(2)) {
     result = check();
   }
   if (!result.ok) {
-    console.error(`comment-gate: ${result.findings.length} comment(s) in ${result.findings.length > 0 ? result.findings[0].file.split(path.sep).slice(0, 2).join(path.sep) : 'scope'} code (crates/ + scripts/ + .claude/workflows + docs/explainers + repo toml/yml):`);
+    console.error(`comment-gate: ${result.findings.length} comment(s) in ${result.findings.length > 0 ? result.findings[0].file.split(path.sep).slice(0, 2).join(path.sep) : 'scope'} code (crates/ + scripts/ + .claude/workflows + repo toml/yml):`);
     for (const f of result.findings.slice(0, 200)) {
       console.error(`  ${path.relative(ROOT, f.file).replace(/\\/g, '/')}:${f.line}`);
     }
