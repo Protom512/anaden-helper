@@ -60,7 +60,7 @@ anaden-helper/
 
 ### ランタイムアーキテクチャ（4 信頼境界 & 10 コアコンポーネント）
 
-> 💡 **インタラクティブ HTML ダイアグラム**: [`docs/diagrams/runtime-architecture.html`](file:///C:/Users/black/git-repo/anaden-helper/docs/diagrams/runtime-architecture.html)
+> 💡 **アーキテクチャ図 (ソース)**: [`docs/diagrams/runtime-architecture.architecture.json`](./diagrams/runtime-architecture.architecture.json) — 生成 html はリポジトリ外管理 (2026-11-14)
 > （Archify により生成されたダーク／ライトテーマ対応、章別フォーカスビュー、ズーム対応のスタンドアロン SVG/HTML）
 
 ```
@@ -96,7 +96,7 @@ anaden-helper/
 
 ### Sense → Think → Act ループ
 
-> 💡 **インタラクティブ実行シーケンス図**: [`docs/diagrams/sense-think-act.html`](file:///C:/Users/black/git-repo/anaden-helper/docs/diagrams/sense-think-act.html)
+> 💡 **実行シーケンス図 (ソース)**: [`docs/diagrams/sense-think-act.sequence.json`](./diagrams/sense-think-act.sequence.json) — 生成 html はリポジトリ外管理 (2026-11-14)
 > （Archify により生成された Sense / Think / Act / Verify の一連のメッセージパッシング・ライフサイクル詳細図）
 
 ```
