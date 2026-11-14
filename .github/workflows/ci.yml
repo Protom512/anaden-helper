@@ -68,6 +68,9 @@ jobs:
       - name: Node test suite
         run: node scripts/quality/run_node_tests.mjs
 
+      - name: Comment gate
+        run: node scripts/quality/comment_gate.mjs
+
       - name: Assert tests untouched (pull request)
         if: github.event_name == 'pull_request'
         run: node scripts/quality/assert_tests_untouched.mjs "${{ github.event.pull_request.base.sha }}"
