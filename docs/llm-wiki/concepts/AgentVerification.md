@@ -1,12 +1,18 @@
 # Agent Verification (エージェント実動作検証 第1弾)
 
+> **時点注記 (2026-11-14)**: 本書は Issue #69 検証当時 (harness-lean 監査
+> 2026-11-08 より前) の記録。現在 `.claude/agents/` の定義ファイルは 0 件
+> (harness-lean プログラムで 36 → 0、削除単位は `.audit/agents-backup-*/`
+> に保管)。OMC 内蔵 executor も本環境では退役済み。以下は当時の実測報告
+> として読むこと。コード主張 (reexports 検証) のみ現行でも有効。
+
 Issue #69 の検証報告。org 配下エージェント（executor / reviewer 系）へ実タスクを委譲した実動作結果を取りまとめる。
 
 [[index|目次へ戻る]]
 
 ## 検証対象（Task 1 で固定）
 
-- `.claude/agents/` のエージェント定義（10定義）+ OMC 内蔵 executor（`executor` 相当の定義ファイルは存在せず OMC 本体が提供）
+- 当時の `.claude/agents/` のエージェント定義（当時 10定義、現行 0件）+ OMC 内蔵 executor（`executor` 相当の定義ファイルは存在せず OMC 本体が提供）
 - 本検証で直接実動作させた対象:
   - executor（OMC 内蔵） — UC-1
   - reviewer 系（code-reviewer / verifier 相当） — UC-2

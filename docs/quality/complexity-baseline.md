@@ -112,11 +112,15 @@ counts: 56 ペア = 生産 40 + テスト除外 15 + bench 1。advisory (0.80-0.
   mean 30.2 ms ± 10.4 (min 19.6 / max 46.4) — Windows ではノイジーなため
   参考値扱い (承認プランどおり)。
 - criterion `anaden-studio` `log_snapshot_bench` — baseline 名
-  `complexity-phase0` で保存済み (`--save-baseline`)。ベンチライン:
-  - `frame_idle/before_full_clone`, `frame_idle/after_gated` ~59 ns
+  `complexity-phase0` で保存済み (`--save-baseline`)。ベンチライン
+  (2026-10-17 記録時点のラベル。#312 以降 `after_gated` は `after_delta` に
+  改名済み — 現行の再現コマンドは下記):
+  - `frame_idle/before_full_clone`, `frame_idle/after_delta` ~59 ns
   - `frame_burst10/before_full_clone` [397 µs 423 µs 450 µs]
-  - `frame_burst10/after_gated` [383 µs 412 µs 444 µs]
+  - `frame_burst10/after_delta` [383 µs 412 µs 444 µs]
   フェーズ完了時は `--baseline complexity-phase0` で回帰比較。
+  再現: `cargo bench -p anaden-studio --bench log_snapshot_bench --
+  --baseline complexity-phase0 after_delta`
 
 ## 5. Rust テストスイート (リファクタリングの安全網)
 
