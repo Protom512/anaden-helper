@@ -13,7 +13,11 @@
       "Bash(git push --force*)",
       "Bash(git push -f*)",
       "Bash(git push --all*)",
-      "Bash(git push --mirror*)"
+      "Bash(git push --mirror*)",
+      "Bash(git push origin +*)",
+      "Bash(git push * --force*)",
+      "Bash(git push * -f *)",
+      "Bash(git clean *--force*)"
     ]
   },
   "enabledPlugins": {
