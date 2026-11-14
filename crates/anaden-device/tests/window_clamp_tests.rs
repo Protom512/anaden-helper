@@ -42,7 +42,7 @@ fn window_overflowing_top_is_pushed_to_monitor_top() {
 
 #[test]
 fn window_overflowing_right_is_pulled_back_by_its_width() {
-    // width 500 -> right edge lands exactly on the monitor right edge
+    
     assert_eq!(
         clamped_top_left((3500, 100, 4000, 400), MONITOR_4K),
         Some((3340, 100))
@@ -51,7 +51,7 @@ fn window_overflowing_right_is_pulled_back_by_its_width() {
 
 #[test]
 fn window_overflowing_bottom_is_pulled_up_by_its_height() {
-    // height 300 -> bottom edge lands exactly on the monitor bottom edge
+    
     assert_eq!(
         clamped_top_left((100, 2000, 500, 2300), MONITOR_4K),
         Some((100, 1860))
@@ -84,9 +84,9 @@ fn window_on_second_monitor_to_the_right_is_left_alone() {
 
 #[test]
 fn window_wider_than_monitor_is_left_aligned_not_centered() {
-    // A 1400px window cannot fit a 1280px monitor. The left branch wins so the
-    // title/left edge stays readable; the caller must know the right edge still
-    // overflows. This is the documented behaviour, not a claim of fitting.
+    
+    
+    
     assert_eq!(
         clamped_top_left((-100, 0, 1300, 500), (0, 0, 1280, 720)),
         Some((0, 0))
@@ -103,8 +103,8 @@ fn window_taller_than_monitor_is_top_aligned() {
 
 #[test]
 fn the_def012_live_placement_is_clamped_to_the_primary_monitor() {
-    // Test A on 2026-11-11 moved the game to (-2200,-2200) with a 3799x2167
-    // window, which is the exact shape that produced DEF-009 ghost fires.
+    
+    
     assert_eq!(
         clamped_top_left((-2200, -2200, 1599, -33), MONITOR_4K),
         Some((0, 0))

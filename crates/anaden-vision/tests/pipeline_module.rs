@@ -1,8 +1,3 @@
-//! `Pipeline` の Interface を公開 API 越しに固定する。
-//!
-//! 既存テストは触らず、新しい継ぎ目（ディスク表現と実行表現の分離、
-//! watch 層の所有、名前索引）だけをここで検証する。
-
 use std::fs;
 use std::path::Path;
 
@@ -76,7 +71,7 @@ fn load_owns_manifest_and_watch_layer() {
     assert_eq!(pipeline.watch_tasks()[0].name(), "Probe");
     assert_eq!(pipeline.watch_names(), ["Probe".to_string()]);
     assert_eq!(pipeline.start_task(), Some("Main"));
-    // 名前索引は両方の層を引く。
+    
     assert!(pipeline.task("Probe").is_some());
     assert_eq!(
         pipeline.defs().map(|d| d.name.as_str()).collect::<Vec<_>>(),

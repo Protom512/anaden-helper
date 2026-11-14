@@ -1,4 +1,15 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale として exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "crates/anaden-device/tests/window_clamp_tests.rs",
+      "reason": "comment-only removal to satisfy the zero-comment gate; code untouched (gate's normalizeRustSource preserves comments, so this registers as a test change)",
+      "ref": "comment-gate sweep PR (master debt: 7 comments)"
+    },
+    {
+      "file": "crates/anaden-vision/tests/pipeline_module.rs",
+      "reason": "comment-only removal to satisfy the zero-comment gate; code untouched (gate's normalizeRustSource preserves comments, so this registers as a test change)",
+      "ref": "comment-gate sweep PR (master debt: 5 comments)"
+    }
+  ]
 }
