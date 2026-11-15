@@ -1,0 +1,8 @@
+name      = "NekoOpenMenuPc"
+state     = "field_hud"
+algorithm = "sse"
+template  = "../../scenes/neko_pc/menu_btn.png"
+roi       = [41, 662, 86, 36]
+threshold = 0.80
+action    = { type = "click_self" }
+next      = ["NekoOpenDiaryPc"]

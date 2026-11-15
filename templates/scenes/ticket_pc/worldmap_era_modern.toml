@@ -1,0 +1,8 @@
+name      = "TicketPcWorldmapEraModern"
+state     = "world_map"
+algorithm = "ccoeff"
+template  = "worldmap_era_modern.png"
+roi       = [153, 60, 99, 138]
+threshold = 0.85
+action    = { type = "do_nothing" }
+next      = []

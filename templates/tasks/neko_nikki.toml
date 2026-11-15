@@ -1,5 +1,5 @@
 id = "neko_nikki"
 title = "ねこにっき"
 kind = "pipeline_run"
-implemented = false
+implemented = true
 pipeline_dir = "templates/pipelines/neko_nikki"

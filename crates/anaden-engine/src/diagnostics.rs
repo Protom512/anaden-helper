@@ -70,6 +70,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         }
     }
 

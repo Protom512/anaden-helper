@@ -178,6 +178,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: next.map(|v| v.iter().map(|s| s.to_string()).collect()),
+            candidates: None,
         }
     }
 

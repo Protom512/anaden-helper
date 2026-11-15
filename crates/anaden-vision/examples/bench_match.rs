@@ -389,6 +389,7 @@ fn bench_detect_cell(dir: &std::path::Path, label: &str, tw: u32, th: u32, roi: 
         base: None,
         action: None,
         next: None,
+        candidates: None,
     };
 
     let mut cold_ms = f64::NAN;

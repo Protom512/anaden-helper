@@ -53,6 +53,7 @@ pub fn advance_next(outcome: &StepOutcome) -> Option<String> {
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct TickResult {
+    pub matched_task: String,
     pub command: Option<InputCommand>,
     pub next_current: Option<String>,
     pub matched_confidence: Option<f32>,
@@ -84,10 +85,41 @@ impl PipelineState {
         screenshot: &DynamicImage,
         tasks: &[TaskDef],
     ) -> Result<Option<TickResult>, TaskDefError> {
+        if let Some(def) = tasks.iter().find(|t| t.name == self.current)
+            && let Some(candidates) = &def.candidates
+        {
+            for candidate_name in candidates {
+                let outcome = match run_step(tasks, screenshot, candidate_name)? {
+                    Some(o) => o,
+                    None => continue,
+                };
+                let matched_region = outcome.matched_region;
+                let matched_confidence = Some(outcome.matched_confidence);
+                let command = action_to_command(
+                    &outcome.action,
+                    Some(matched_region),
+                    screenshot.width(),
+                    screenshot.height(),
+                );
+                let next_current = advance_next(&outcome);
+                if let Some(next) = &next_current {
+                    self.current = next.clone();
+                }
+                return Ok(Some(TickResult {
+                    matched_task: candidate_name.clone(),
+                    command,
+                    next_current,
+                    matched_confidence,
+                    matched_region: Some(matched_region),
+                }));
+            }
+            return Ok(None);
+        }
         let outcome = match run_step(tasks, screenshot, &self.current)? {
             Some(o) => o,
             None => return Ok(None),
         };
+        let matched_task = self.current.clone();
         let matched_region = outcome.matched_region;
         let matched_confidence = Some(outcome.matched_confidence);
         let command = action_to_command(
@@ -101,6 +133,7 @@ impl PipelineState {
             self.current = next.clone();
         }
         Ok(Some(TickResult {
+            matched_task,
             command,
             next_current,
             matched_confidence,
@@ -296,6 +329,7 @@ mod tests {
                 roi: ScreenRegion::new(520, 320, 240, 80),
             }),
             next: Some(vec!["LoadGame".into()]),
+            candidates: None,
         }];
 
         let mut state = PipelineState::new("Title");
@@ -328,6 +362,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
+            candidates: None,
         }];
 
         let mut state = PipelineState::new("Title");
@@ -354,6 +389,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: None,
+            candidates: None,
         }];
 
         let mut state = PipelineState::new("NoSuch");
@@ -381,6 +417,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: None,
+            candidates: None,
         }];
 
         let mut state = PipelineState::new("Title");
@@ -410,6 +447,7 @@ mod tests {
             base: None,
             action: Some(Action::Stop),
             next: Some(vec!["Ignored".into()]),
+            candidates: None,
         }];
 
         let mut state = PipelineState::new("Title");
@@ -438,6 +476,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
+            candidates: None,
         }];
 
         let mut state = PipelineState::new("Title");

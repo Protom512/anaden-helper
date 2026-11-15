@@ -208,6 +208,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: Some(vec![]),
+            candidates: None,
         }
     }
 

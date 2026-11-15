@@ -179,6 +179,8 @@ pub struct TaskDef {
     pub action: Option<Action>,
     #[serde(default)]
     pub next: Option<Vec<String>>,
+    #[serde(default)]
+    pub candidates: Option<Vec<String>>,
 }
 
 /// タスク 1 行の出力側。フィールド順は [`TaskDef`] と一致させる。
@@ -196,6 +198,7 @@ pub(crate) struct TaskRow {
     base: Option<String>,
     action: Option<Action>,
     next: Option<Vec<String>>,
+    candidates: Option<Vec<String>>,
 }
 
 impl TaskRow {
@@ -210,6 +213,7 @@ impl TaskRow {
             base: def.base.clone(),
             action: def.action.clone(),
             next: def.next.clone(),
+            candidates: def.candidates.clone(),
         }
     }
 }

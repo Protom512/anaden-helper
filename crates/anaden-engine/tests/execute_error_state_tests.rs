@@ -77,6 +77,7 @@ fn fixture() -> (tempfile::TempDir, Vec<TaskDef>, DynamicImage) {
         base: None,
         action: Some(Action::ClickSelf),
         next: Some(vec!["B".into()]),
+        candidates: None,
     }];
     (dir, tasks, DynamicImage::ImageLuma8(frame_with_needle()))
 }

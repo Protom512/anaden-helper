@@ -1,0 +1,8 @@
+name      = "NekoOpenDiaryPc"
+state     = "field_hud"
+algorithm = "sse"
+template  = "../../scenes/neko_pc/diary_tab.png"
+roi       = [330, 673, 64, 31]
+threshold = 0.80
+action    = { type = "click_self" }
+next      = ["NekoDiaryHintDispatchPc"]
