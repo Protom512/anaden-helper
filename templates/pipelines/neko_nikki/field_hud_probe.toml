@@ -1,0 +1,8 @@
+name      = "NekoFieldHudProbePc"
+state     = "field_hud"
+algorithm = "ccoeff"
+template  = "../../scenes/field_pc/hud_top.png"
+roi       = [400, 0, 480, 100]
+threshold = 0.80
+action    = { type = "do_nothing" }
+next      = ["NekoOpenMenuPc"]

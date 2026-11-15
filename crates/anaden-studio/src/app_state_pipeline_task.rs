@@ -65,6 +65,7 @@ pub fn pipeline_task_spec(
         base: None,
         action: Some(action.to_action()),
         next: Some(vec![]),
+        candidates: None,
     })
 }
 

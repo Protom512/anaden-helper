@@ -463,6 +463,7 @@ pub struct PipelineDriver<C: Capture, I: Input> {
     swipe_duration_ms: u64,
     verify_after_fire: bool,
     last_match: Option<(String, f32, ScreenRegion)>,
+    fired_task: Option<String>,
     last_crop_info: CropInfo,
     cancel: Option<CancellationToken>,
     snapshot_counter: u64,
@@ -497,6 +498,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             swipe_duration_ms,
             verify_after_fire: false,
             last_match: None,
+            fired_task: None,
             last_crop_info: CropInfo::default(),
             cancel: None,
             snapshot_counter: 0,
@@ -555,6 +557,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     }
 
     pub async fn run_once(&mut self) -> StepOutcome {
+        self.fired_task = None;
         let t_cycle = std::time::Instant::now();
         let t_cap = std::time::Instant::now();
         let screen = match self.capture.capture().await {
@@ -628,8 +631,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
         };
         let recognize_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
+        self.fired_task = Some(tick.matched_task.clone());
         if let (Some(region), Some(confidence)) = (tick.matched_region, tick.matched_confidence) {
-            self.last_match = Some((matched_task_name.clone(), confidence, region));
+            self.last_match = Some((tick.matched_task, confidence, region));
         }
         if let Some(cmd) = tick.command {
             let cmd = match self.jitter.as_mut() {
@@ -741,12 +745,14 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
     pub async fn run_once_verified(&mut self) -> StepOutcome {
         let pre_task = self.state.current().to_string();
         let fired = self.run_once().await;
+        let fired_task = self.fired_task.take();
         match fired {
             StepOutcome::Fired {
                 next_current,
                 fired: just_fired,
             } => {
-                self.verify_action_effect(&pre_task, just_fired, next_current)
+                let detect_task = fired_task.unwrap_or_else(|| pre_task.clone());
+                self.verify_action_effect(&detect_task, &pre_task, just_fired, next_current)
                     .await
             }
             other => other,
@@ -755,7 +761,8 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
 
     async fn verify_action_effect(
         &mut self,
-        task_name: &str,
+        detect_task: &str,
+        restore_task: &str,
         just_fired: Option<InputCommand>,
         next_current: Option<String>,
     ) -> StepOutcome {
@@ -766,7 +773,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 warn!("verify capture error: {e}");
                 // The fire itself may have landed; we cannot prove it either way,
                 // so retry from the same task instead of advancing on faith.
-                self.state.set_current(task_name.to_string());
+                self.state.set_current(restore_task.to_string());
                 return StepOutcome::Error {
                     kind: StepErrorKind::VerifyCapture,
                     message: format!("verify_capture: {e}"),
@@ -774,18 +781,18 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
         };
         let (normalized, _crop_info) = self.scaler.normalize_capture(&screen);
-        let still_present = match anaden_vision::run_step(&self.tasks, &normalized, task_name) {
+        let still_present = match anaden_vision::run_step(&self.tasks, &normalized, detect_task) {
             Ok(Some(_)) => true,
             Ok(None) => false,
             Err(e) => {
-                warn!("verify detect error (task '{task_name}'): {e}");
+                warn!("verify detect error (task '{detect_task}'): {e}");
                 false
             }
         };
         if still_present {
             self.verify_stats.failed += 1;
-            self.save_snapshot(task_name, &normalized);
-            self.state.set_current(task_name.to_string());
+            self.save_snapshot(detect_task, &normalized);
+            self.state.set_current(restore_task.to_string());
             StepOutcome::FiredUnverified {
                 next_current,
                 fired: just_fired,
@@ -1626,6 +1633,7 @@ mod tests {
             base: None,
             action: Some(action),
             next: next.map(|v| v.into_iter().map(String::from).collect()),
+            candidates: None,
         }
     }
 
@@ -4803,6 +4811,7 @@ mod tests {
                 roi: ScreenRegion::new(900, 466, 30, 30),
             }),
             next: Some(vec!["LoadGamePc".into()]),
+            candidates: None,
         };
 
         let mut driver = PipelineDriver::new(
@@ -4858,6 +4867,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
+            candidates: None,
         };
         let mut driver_nobar = PipelineDriver::new(
             FakeCapture {
@@ -4893,6 +4903,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
+            candidates: None,
         };
         let mut driver_bar = PipelineDriver::new(
             FakeCapture {
@@ -5036,6 +5047,7 @@ mod tests {
                 roi: ScreenRegion::new(520, 320, 240, 80),
             }),
             next: Some(vec!["LoadGame".into()]),
+            candidates: None,
         };
         let tasks = vec![mk_task("Title", 1.1), mk_task("Other", 1.1)];
 
@@ -5107,6 +5119,7 @@ mod tests {
                 roi: ScreenRegion::new(520, 320, 240, 80),
             }),
             next: Some(vec!["LoadGame".into()]),
+            candidates: None,
         };
         let tasks = vec![mk_task("Broken", empty_tpl), mk_task("Oversized", big_tpl)];
 
@@ -5358,6 +5371,7 @@ mod tests {
                 roi: ScreenRegion::new(roi[0], roi[1], roi[2], roi[3]),
             }),
             next: next.map(|v| v.into_iter().map(String::from).collect()),
+            candidates: None,
         }
     }
 

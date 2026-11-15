@@ -346,6 +346,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
 
         let m = task.detect(&screenshot, tmp.path()).expect("detect ok");
@@ -384,6 +385,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
 
         let m = task.detect(&screenshot, tmp.path()).expect("detect ok");
@@ -411,6 +413,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
 
         let m = task.detect(&screenshot, tmp.path()).expect("detect ok");
@@ -451,6 +454,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
 
         let sse_m = mk(Algorithm::Sse)
@@ -510,6 +514,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
         let low = low_task
             .detect(&screenshot, tmp.path())
@@ -552,6 +557,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
 
         let err = task
@@ -754,6 +760,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
+            candidates: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "Title")
@@ -779,6 +786,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "Title")
@@ -808,6 +816,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: None,
+            candidates: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "Title").expect("run_step ok");
@@ -837,6 +846,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: None,
+            candidates: None,
         };
         let probe_match = probe
             .detect(&screenshot, tmp.path())
@@ -872,6 +882,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: None,
+            candidates: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "NoSuchTask").expect("run_step ok");
@@ -898,6 +909,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
 
         let m1 = task
@@ -940,6 +952,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
 
         assert!(
@@ -984,6 +997,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: None,
+            candidates: None,
         }];
 
         let out1 = run_step(&tasks, &frame1, "T").expect("1st run_step must match");
@@ -1012,6 +1026,7 @@ mod tests {
             base: None,
             action: Some(Action::ClickSelf),
             next: None,
+            candidates: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "Title");
@@ -1068,6 +1083,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
         let m = task
             .detect(&screenshot, tmp.path())
@@ -1109,6 +1125,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
         let m = task
             .detect(&screenshot, tmp.path())
@@ -1140,6 +1157,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         };
         let m = task
             .detect(&screenshot, tmp.path())
@@ -3246,6 +3264,7 @@ mod tests {
             base: None,
             action: None,
             next: None,
+            candidates: None,
         }
     }
 
@@ -3264,6 +3283,7 @@ mod tests {
                 roi: anaden_core::ScreenRegion::new(625, 273, 30, 30),
             }),
             next: Some(vec!["LoadGame".into()]),
+            candidates: None,
         };
         let path = tmp.path().join("title.toml");
         save_task_def(&def, &path).expect("save must succeed");

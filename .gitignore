@@ -36,3 +36,7 @@ skills-lock.json
 .anaden-run/
 .anaden-routine/
 .audit/
+
+loop.py
+agent_state.py
+justfile

@@ -141,6 +141,7 @@ fn save_task_def_writes_relative_template_and_reloads_absolute() {
         base: None,
         action: None,
         next: None,
+        candidates: None,
     };
     anaden_vision::save_task_def(&def, &dir.join("T.toml")).expect("save");
 

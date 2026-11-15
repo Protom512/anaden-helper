@@ -1,0 +1,9 @@
+start_task = "NekoFieldHudProbePc"
+
+[[goal]]
+name = "neko_nikki_all_slots_done"
+[goal.stop.Any]
+conditions = [
+  { All = { conditions = [ { TemplateMatch = { task = "NekoDiaryAllPawmarkPc", confidence = 0.80 } } ] } },
+  { Timeout = { secs = 1800 } },
+]
