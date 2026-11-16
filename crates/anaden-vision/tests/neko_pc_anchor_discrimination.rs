@@ -210,3 +210,26 @@ fn neko_worldmap_era_tabs_no_match_on_field_town_diary_and_ad() {
         }
     }
 }
+
+#[test]
+fn neko_diary_slot_frame_matches_diary_fixture_with_margin() {
+    let tasks = load_scene_tasks("neko_pc");
+    let task = find_task(&tasks, "NekoDiarySlotFramePc");
+    assert_positive(task, &normalize_2880_fixture(DIARY_FIXTURE), DIARY_FIXTURE);
+}
+
+#[test]
+fn neko_diary_slot_frame_no_match_on_field_town_ad_and_worldmap() {
+    let tasks = load_scene_tasks("neko_pc");
+    let task = find_task(&tasks, "NekoDiarySlotFramePc");
+    let negatives = [
+        FIELD_FIXTURE,
+        FIELD_HUD_FIXTURE,
+        MENU_PANEL_FIXTURE,
+        AD_SELECT_FIXTURE,
+        WORLD_MAP_FIXTURE,
+    ];
+    for fixture_name in negatives {
+        assert_negative(task, &normalize_capture_fixture(fixture_name), fixture_name);
+    }
+}

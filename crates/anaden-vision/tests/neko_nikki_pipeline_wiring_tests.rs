@@ -60,6 +60,8 @@ const EXPECTED_TEMPLATES: &[(&str, &str)] = &[
     ("NekoOpenDiaryPc", "neko_pc/diary_tab.png"),
     ("NekoDiaryHintDispatchPc", "neko_pc/hint_text_miparu.png"),
     ("NekoHintMiparuRoutePc", "neko_pc/hint_text_miparu.png"),
+    ("NekoDiarySlotFramePc", "neko_pc/diary_slot_frame.png"),
+    ("NekoDiarySlotSelectPc", "neko_pc/diary_slot_frame.png"),
 ];
 
 const T6_PENDING_ANCHORS: &[(&str, &str)] = &[
@@ -210,14 +212,16 @@ fn neko_nikki_diary_dispatch_matches_collected_hint_candidates_in_order() {
     let entry_chain = [
         ("NekoFieldHudProbePc", "NekoOpenMenuPc"),
         ("NekoOpenMenuPc", "NekoOpenDiaryPc"),
-        ("NekoOpenDiaryPc", "NekoDiaryHintDispatchPc"),
+        ("NekoOpenDiaryPc", "NekoDiarySlotFramePc"),
+        ("NekoDiarySlotFramePc", "NekoDiarySlotSelectPc"),
+        ("NekoDiarySlotSelectPc", "NekoDiaryHintDispatchPc"),
     ];
     for (task, next) in entry_chain {
         let def = index.get(task).expect("entry chain task must exist");
         assert_eq!(
             def.next.as_deref(),
             Some(&[next.to_string()][..]),
-            "{task} must chain into {next} (field HUD -> menu -> diary -> hint dispatch)"
+            "{task} must chain into {next} (field HUD -> menu -> diary view -> slot select -> hint dispatch)"
         );
     }
 
