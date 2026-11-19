@@ -1,0 +1,8 @@
+name      = "NekoDiarySlotSelectPc"
+state     = "neko_diary_pc"
+algorithm = "sse"
+template  = "../../scenes/neko_pc/diary_slot_frame.png"
+roi       = [336, 219, 222, 30]
+threshold = 0.90
+action    = { type = "click_self" }
+next      = ["NekoDiaryHintDispatchPc"]

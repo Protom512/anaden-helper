@@ -1,4 +1,10 @@
 {
   "_comment": "tests-untouched gate (scripts/quality/assert_tests_untouched.mjs) の免除リスト。機械的でテストの意味を変えない修正のみ、理由 (reason) と参照 (ref) を添えて登録する。エントリが現 diff の違反にひとつも一致しない場合は gate が stale で exit 1 になるため、master 取り込み後の最初の PR でエントリを削除すること。",
-  "entries": []
+  "entries": [
+    {
+      "file": "crates/anaden-vision/tests/neko_nikki_pipeline_wiring_tests.rs",
+      "reason": "NekoOpenDiaryPc.next の日記ビュー層 (slot frame -> slot select) 向け直しに伴う entry_chain 既存行の追記修正とアサートメッセージの同期。テストの意味は新配線への追従のみ",
+      "ref": ".agent/current.json t4 (日記ビュー配線)"
+    }
+  ]
 }
