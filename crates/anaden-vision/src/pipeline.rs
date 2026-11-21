@@ -347,6 +347,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
 
         let m = task.detect(&screenshot, tmp.path()).expect("detect ok");
@@ -386,6 +387,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
 
         let m = task.detect(&screenshot, tmp.path()).expect("detect ok");
@@ -414,6 +416,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
 
         let m = task.detect(&screenshot, tmp.path()).expect("detect ok");
@@ -455,6 +458,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
 
         let sse_m = mk(Algorithm::Sse)
@@ -515,6 +519,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
         let low = low_task
             .detect(&screenshot, tmp.path())
@@ -558,6 +563,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
 
         let err = task
@@ -761,6 +767,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
             candidates: None,
+            fallback_next: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "Title")
@@ -787,6 +794,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "Title")
@@ -817,6 +825,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: None,
             candidates: None,
+            fallback_next: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "Title").expect("run_step ok");
@@ -847,6 +856,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: None,
             candidates: None,
+            fallback_next: None,
         };
         let probe_match = probe
             .detect(&screenshot, tmp.path())
@@ -883,6 +893,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: None,
             candidates: None,
+            fallback_next: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "NoSuchTask").expect("run_step ok");
@@ -910,6 +921,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
 
         let m1 = task
@@ -953,6 +965,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
 
         assert!(
@@ -998,6 +1011,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: None,
             candidates: None,
+            fallback_next: None,
         }];
 
         let out1 = run_step(&tasks, &frame1, "T").expect("1st run_step must match");
@@ -1027,6 +1041,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: None,
             candidates: None,
+            fallback_next: None,
         }];
 
         let out = run_step(&tasks, &screenshot, "Title");
@@ -1084,6 +1099,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
         let m = task
             .detect(&screenshot, tmp.path())
@@ -1126,6 +1142,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
         let m = task
             .detect(&screenshot, tmp.path())
@@ -1158,6 +1175,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         };
         let m = task
             .detect(&screenshot, tmp.path())
@@ -3265,6 +3283,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         }
     }
 
@@ -3284,6 +3303,7 @@ mod tests {
             }),
             next: Some(vec!["LoadGame".into()]),
             candidates: None,
+            fallback_next: None,
         };
         let path = tmp.path().join("title.toml");
         save_task_def(&def, &path).expect("save must succeed");

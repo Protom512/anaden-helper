@@ -319,6 +319,7 @@ mod tests {
                 iterations: 4,
                 fired_count: 0,
                 per_task_matches: vec![],
+                skips: vec![],
                 elapsed_ms: 3000,
                 terminal_task: None,
                 reached_goal: Some("timeout=3".to_string()),

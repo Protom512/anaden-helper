@@ -62,6 +62,10 @@ const EXPECTED_TEMPLATES: &[(&str, &str)] = &[
     ("NekoHintMiparuRoutePc", "neko_pc/hint_text_miparu.png"),
     ("NekoDiarySlotFramePc", "neko_pc/diary_slot_frame.png"),
     ("NekoDiarySlotSelectPc", "neko_pc/diary_slot_frame.png"),
+    (
+        "NekoNavEraModernClickPc",
+        "ticket_pc/worldmap_era_modern.png",
+    ),
 ];
 
 const T6_PENDING_ANCHORS: &[(&str, &str)] = &[
@@ -319,4 +323,244 @@ fn neko_nikki_walk_reward_watch_layers_stay_unwired_until_anchors_are_collected(
             "watch layer must stay empty until the battle/popup anchors are collected (t6)"
         );
     }
+}
+
+#[derive(serde::Deserialize)]
+struct NavRoute {
+    id: String,
+    #[serde(default)]
+    era: String,
+    #[serde(default)]
+    continent: String,
+    #[serde(default)]
+    region: String,
+    #[serde(default)]
+    area_name: String,
+    #[serde(default)]
+    area_sub: String,
+    #[serde(default)]
+    era_tab: String,
+    #[serde(default)]
+    continent_tab: String,
+    #[serde(default)]
+    region_tab: String,
+    #[serde(default)]
+    area_tab: String,
+    #[serde(default)]
+    loading_detect: String,
+    route_status: String,
+}
+
+#[derive(serde::Deserialize)]
+struct NavRoutes {
+    version: u32,
+    #[serde(default)]
+    route: Vec<NavRoute>,
+}
+
+const NAV_CHAIN_COLUMNS: [&str; 5] = [
+    "era_tab",
+    "continent_tab",
+    "region_tab",
+    "area_tab",
+    "loading_detect",
+];
+
+fn nav_chain_column<'a>(route: &'a NavRoute, column: &str) -> &'a str {
+    match column {
+        "era_tab" => &route.era_tab,
+        "continent_tab" => &route.continent_tab,
+        "region_tab" => &route.region_tab,
+        "area_tab" => &route.area_tab,
+        _ => &route.loading_detect,
+    }
+}
+
+#[test]
+fn neko_nikki_nav_route_data_matches_chain_wiring_fail_closed() {
+    let path = workspace_root().join("data").join("nav_routes.toml");
+    let raw = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("nav_routes.toml must exist at {}: {e}", path.display()));
+    let data: NavRoutes = toml::from_str(&raw).expect("nav_routes.toml must parse");
+    assert!(data.version >= 1, "nav_routes version must be at least 1");
+    assert!(
+        !data.route.is_empty(),
+        "nav_routes must enumerate the design section 6 representative routes"
+    );
+    let mut seen = std::collections::HashSet::new();
+    for r in &data.route {
+        assert!(
+            seen.insert(r.id.as_str()),
+            "nav route id {} must be unique",
+            r.id
+        );
+    }
+    for id in [
+        "r01", "r02", "r05", "r26", "r28", "r29", "r30", "r33", "r38", "r45", "r46",
+    ] {
+        assert!(
+            seen.contains(id),
+            "design section 6 representative route {id} must be present in nav_routes.toml"
+        );
+    }
+
+    let defs = chain_defs();
+    let index = task_index(&defs);
+
+    let miparu = index
+        .get("NekoHintMiparuRoutePc")
+        .expect("miparu route task must exist");
+    assert_eq!(
+        miparu.next.as_deref(),
+        Some(&["NekoNavEraModernClickPc".to_string()][..]),
+        "the miparu hint route must enter the world-map nav chain instead of looping back \
+         to the field probe (design section 3 navigation layer)"
+    );
+
+    let era_click = index
+        .get("NekoNavEraModernClickPc")
+        .expect("nav chain entrance task must exist");
+    assert_eq!(
+        era_click.template,
+        pipeline_dir().join("../../scenes/ticket_pc/worldmap_era_modern.png"),
+        "the era-tab layer must reuse the ticket_pc era anchor, not a copied png"
+    );
+    assert!(
+        era_click.template.is_file(),
+        "era-tab entrance template must exist on disk"
+    );
+    assert_eq!(
+        era_click.action,
+        Some(Action::ClickSelf),
+        "the era-tab entrance must actually click; a nav chain that never taps cannot travel"
+    );
+    assert!(
+        era_click.next.as_deref().unwrap_or(&[]).is_empty(),
+        "the era-tab entrance must stay terminal until the continent/region/area/loading \
+         anchors are collected: a half-wired chain would tap the era tab and strand the \
+         game on a continent view with no follow-up task (fail-closed)"
+    );
+
+    let r46 = data
+        .route
+        .iter()
+        .find(|r| r.id == "r46")
+        .expect("nav route r46 must exist");
+    assert_eq!(r46.era, "現代", "r46 baruoki must be the modern era");
+    assert_eq!(r46.continent, "ミグレイナ大陸");
+    assert_eq!(r46.area_name, "バルオキー");
+    assert_eq!(
+        r46.era_tab, "NekoNavEraModernClickPc",
+        "r46 must enter the nav chain through the wired era-tab task"
+    );
+
+    let by_id = |id: &str| -> &NavRoute {
+        data.route
+            .iter()
+            .find(|r| r.id == id)
+            .unwrap_or_else(|| panic!("nav route {id} must exist"))
+    };
+    for (id, sub) in [
+        ("r26", "エリア2"),
+        ("r33", "2階"),
+        ("r28", "ガンマ区画"),
+        ("r38", "エアポート"),
+    ] {
+        assert_eq!(
+            by_id(id).area_sub,
+            sub,
+            "route {id} must preserve its in-area sub-location from the hint table"
+        );
+    }
+    for r in &data.route {
+        assert_eq!(
+            r.region, "",
+            "route {}: the region layer stays empty until the world-map region-tab \
+             screens are captured; a filled region would promise an unwired click level",
+            r.id
+        );
+    }
+
+    for r in &data.route {
+        let values: Vec<(&str, &str)> = NAV_CHAIN_COLUMNS
+            .iter()
+            .map(|column| (*column, nav_chain_column(r, column)))
+            .collect();
+        let filled: Vec<(&str, &str)> = values
+            .iter()
+            .filter(|(_, v)| !v.is_empty())
+            .copied()
+            .collect();
+        match r.route_status.as_str() {
+            "wired" => assert_eq!(
+                filled.len(),
+                values.len(),
+                "route {} is marked wired but has empty click columns; the whole \
+                 era->continent->region->area->loading column set must be filled first",
+                r.id
+            ),
+            "pending" => {}
+            other => panic!("route {} has unknown route_status {other}", r.id),
+        }
+        for (column, task) in filled {
+            let def = index.get(task).unwrap_or_else(|| {
+                panic!(
+                    "route {} column {column} names task {task} but the chain defines no such task",
+                    r.id
+                )
+            });
+            assert!(
+                def.template.is_file(),
+                "route {} column {column}: template {} must exist (no dangling wired columns)",
+                r.id,
+                def.template.display()
+            );
+        }
+    }
+}
+
+#[test]
+fn neko_nikki_hint_dispatch_fallback_next_advances_to_slot_layer_fail_closed() {
+    let defs = chain_defs();
+    let index = task_index(&defs);
+    let dispatch = index
+        .get("NekoDiaryHintDispatchPc")
+        .copied()
+        .expect("hint dispatcher must exist");
+    let fallback = dispatch
+        .fallback_next
+        .as_deref()
+        .expect(
+            "hint dispatcher must declare fallback_next so an unknown hint (未収集テンプレート) \
+             skips forward instead of stalling as NoMatch until goal timeout (design section 4/8)",
+        )
+        .to_vec();
+    assert!(
+        !fallback.is_empty(),
+        "fallback_next must name at least one task; an empty list would keep the stall"
+    );
+    assert_eq!(
+        fallback,
+        vec!["NekoDiarySlotFramePc".to_string()],
+        "unknown-hint skip must re-enter the diary slot-selection layer (slot frame -> slot select) \
+         so the diary cycle advances toward the next slot"
+    );
+    for target in &fallback {
+        assert!(
+            index.contains_key(target.as_str()),
+            "fallback_next target {target} must resolve like next/candidates targets"
+        );
+    }
+    let slot_frame = index
+        .get("NekoDiarySlotFramePc")
+        .copied()
+        .expect("fallback target task must exist");
+    assert!(
+        slot_frame.template.is_file(),
+        "fallback target template must exist on disk"
+    );
+    assert!(
+        dispatch.action.is_none(),
+        "the dispatcher itself stays detection-only; the skip path must not fire input either"
+    );
 }

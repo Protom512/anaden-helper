@@ -146,14 +146,21 @@ struct RecoveryTelemetry {
 
 struct OutcomeCtx {
     per_task_matches: Vec<TaskMatchCount>,
+    skips: Vec<TaskSkip>,
     started: Instant,
     recovery: RecoveryTelemetry,
 }
 
 impl OutcomeCtx {
-    fn new(per_task_matches: Vec<TaskMatchCount>, started: Instant, guard: &RecoveryGuard) -> Self {
+    fn new(
+        per_task_matches: Vec<TaskMatchCount>,
+        skips: Vec<TaskSkip>,
+        started: Instant,
+        guard: &RecoveryGuard,
+    ) -> Self {
         Self {
             per_task_matches,
+            skips,
             started,
             recovery: guard.telemetry(),
         }
@@ -170,6 +177,7 @@ struct LoopState {
     iterations: u64,
     fired: Vec<InputCommand>,
     per_task_matches: Vec<TaskMatchCount>,
+    skips: Vec<TaskSkip>,
     started: Instant,
     guard: RecoveryGuard,
     recovery_enabled: bool,
@@ -189,6 +197,7 @@ impl LoopState {
             iterations: 0,
             fired: Vec::new(),
             per_task_matches: Vec::new(),
+            skips: Vec::new(),
             started: Instant::now(),
             guard: RecoveryGuard::new(recover_nomatch_threshold, grace, max_recovery_attempts),
             recovery_enabled: recover_nomatch_threshold > 0 && recover_present,
@@ -199,6 +208,7 @@ impl LoopState {
     fn ctx(&mut self) -> OutcomeCtx {
         OutcomeCtx::new(
             std::mem::take(&mut self.per_task_matches),
+            std::mem::take(&mut self.skips),
             self.started,
             &self.guard,
         )
@@ -220,6 +230,7 @@ impl LoopState {
             iterations: self.iterations,
             fired_commands: &self.fired,
             per_task_matches: &self.per_task_matches,
+            skips: &self.skips,
             started: self.started,
             recovery: self.guard.telemetry(),
         }
@@ -282,6 +293,7 @@ struct GoalEvalInputs<'a> {
     iterations: u64,
     fired_commands: &'a [InputCommand],
     per_task_matches: &'a [TaskMatchCount],
+    skips: &'a [TaskSkip],
     started: Instant,
     recovery: RecoveryTelemetry,
 }
@@ -435,6 +447,10 @@ pub enum StepOutcome {
     },
     NoFire {
         next_current: Option<String>,
+    },
+    Skipped {
+        from: String,
+        to: String,
     },
     NoMatch,
     Error {
@@ -603,9 +619,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             "frame raw={raw_w}x{raw_h} normalized={norm_w}x{norm_h} (device_width={})",
             self.device_width
         );
-        if !self.watch.is_empty()
-            && let Some(outcome) = self.check_watch(&normalized, norm_w, norm_h).await
-        {
+        if let Some(outcome) = self.check_watch(&normalized, norm_w, norm_h).await {
             return outcome;
         }
         let t_rec = std::time::Instant::now();
@@ -631,6 +645,20 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             }
         };
         let recognize_ms = t_rec.elapsed().as_secs_f64() * 1000.0;
+        if let Some(from) = &tick.skipped {
+            let to = tick
+                .next_current
+                .clone()
+                .unwrap_or_else(|| self.state.current().to_string());
+            info!(
+                "skip: candidates exhausted on '{from}' (fallback_next) -> \
+                 advancing to '{to}' without input"
+            );
+            return StepOutcome::Skipped {
+                from: from.clone(),
+                to,
+            };
+        }
         self.fired_task = Some(tick.matched_task.clone());
         if let (Some(region), Some(confidence)) = (tick.matched_region, tick.matched_confidence) {
             self.last_match = Some((tick.matched_task, confidence, region));
@@ -906,11 +934,19 @@ pub struct TaskMatchCount {
     pub matches: u64,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TaskSkip {
+    pub from: String,
+    pub to: String,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub struct ProgressReport {
     pub iterations: u64,
     pub fired_count: u64,
     pub per_task_matches: Vec<TaskMatchCount>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub skips: Vec<TaskSkip>,
     pub elapsed_ms: u64,
     pub terminal_task: Option<String>,
     pub reached_goal: Option<String>,
@@ -1398,6 +1434,9 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                     )
                     .await
                 }
+                StepOutcome::Skipped { from, to } => {
+                    self.step_skipped(&mut state, goal_mode, from, to)
+                }
                 StepOutcome::FiredUnverified {
                     next_current: _,
                     fired: just_fired,
@@ -1424,10 +1463,10 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
                 StepFlow::Continue => {}
                 StepFlow::Stop(outcome) => return *outcome,
             }
-            let wait = match self.jitter.as_mut() {
-                Some(j) => j.jitter_interval(interval),
-                None => interval,
-            };
+            let wait = self
+                .jitter
+                .as_mut()
+                .map_or(interval, |j| j.jitter_interval(interval));
             self.sleep_or_cancelled(wait).await;
         }
     }
@@ -1512,12 +1551,32 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             terminal,
             OutcomeCtx {
                 per_task_matches: inputs.per_task_matches.to_vec(),
+                skips: inputs.skips.to_vec(),
                 started: inputs.started,
                 recovery: inputs.recovery,
             },
         );
         outcome.progress_report.reached_goal = Some(goal_descriptor(goal));
         Some(outcome)
+    }
+
+    fn step_skipped(
+        &mut self,
+        state: &mut LoopState,
+        goal_mode: &mut GoalMode<'_>,
+        from: String,
+        to: String,
+    ) -> StepFlow {
+        state.record_match_tick(&from);
+        state.skips.push(TaskSkip {
+            from: from.clone(),
+            to,
+        });
+        debug!("skipped, transitioning from {} via fallback_next", from);
+        if let Some(stop) = self.eval_goal_stop(goal_mode, None, state.goal_eval_inputs()) {
+            return StepFlow::stop(stop);
+        }
+        StepFlow::Continue
     }
 
     fn build_outcome(
@@ -1537,6 +1596,7 @@ impl<C: Capture, I: Input> PipelineDriver<C, I> {
             iterations,
             fired_count: fired_commands.len() as u64,
             per_task_matches: ctx.per_task_matches,
+            skips: ctx.skips,
             elapsed_ms: ctx.started.elapsed().as_millis() as u64,
             terminal_task: terminal_task.clone(),
             reached_goal: None,
@@ -1634,6 +1694,7 @@ mod tests {
             action: Some(action),
             next: next.map(|v| v.into_iter().map(String::from).collect()),
             candidates: None,
+            fallback_next: None,
         }
     }
 
@@ -2931,6 +2992,7 @@ mod tests {
             iterations: 9,
             fired_count: 1,
             per_task_matches: vec![],
+            skips: vec![],
             elapsed_ms: 10,
             terminal_task: None,
             reached_goal: None,
@@ -2962,6 +3024,7 @@ mod tests {
             iterations: 7,
             fired_count: 3,
             per_task_matches: vec![],
+            skips: vec![],
             elapsed_ms: 1200,
             terminal_task: Some("max_iterations".to_string()),
             reached_goal: None,
@@ -3518,6 +3581,7 @@ mod tests {
                     task: "Title".to_string(),
                     matches: 1,
                 }],
+                skips: vec![],
                 elapsed_ms: 500,
                 terminal_task: Some("Terminal".to_string()),
                 reached_goal: None,
@@ -3544,6 +3608,7 @@ mod tests {
                 task: "A".to_string(),
                 matches: 5,
             }],
+            skips: vec![],
             elapsed_ms: 999,
             terminal_task: Some("A".to_string()),
             reached_goal: Some("template_match conf>=0.85".to_string()),
@@ -3572,6 +3637,7 @@ mod tests {
                     task: "Clear".to_string(),
                     matches: 1,
                 }],
+                skips: vec![],
                 elapsed_ms: 4321,
                 terminal_task: Some("GoalTerminal".to_string()),
                 reached_goal: Some("loop_count=5".to_string()),
@@ -3604,6 +3670,7 @@ mod tests {
                 task: "Boss".to_string(),
                 matches: 2,
             }],
+            skips: vec![],
             elapsed_ms: 1500,
             terminal_task: Some("Boss".to_string()),
             reached_goal: Some("template_match conf>=0.85".to_string()),
@@ -4016,6 +4083,7 @@ mod tests {
                     iterations: 5,
                     fired_commands: &[],
                     per_task_matches: &[],
+                    skips: &[],
                     started,
                     recovery: RecoveryTelemetry::default(),
                 },
@@ -4044,6 +4112,7 @@ mod tests {
                         iterations: 3,
                         fired_commands: &[],
                         per_task_matches: &[],
+                        skips: &[],
                         started,
                         recovery: RecoveryTelemetry::default(),
                     },
@@ -4071,6 +4140,7 @@ mod tests {
                     iterations: 0,
                     fired_commands: &[],
                     per_task_matches: &[],
+                    skips: &[],
                     started,
                     recovery: RecoveryTelemetry::default(),
                 },
@@ -4094,6 +4164,7 @@ mod tests {
                         iterations: 0,
                         fired_commands: &[],
                         per_task_matches: &[],
+                        skips: &[],
                         started,
                         recovery: RecoveryTelemetry::default(),
                     },
@@ -4129,6 +4200,7 @@ mod tests {
                     iterations: 1,
                     fired_commands: &[],
                     per_task_matches: &[],
+                    skips: &[],
                     started,
                     recovery: RecoveryTelemetry::default(),
                 },
@@ -4812,6 +4884,7 @@ mod tests {
             }),
             next: Some(vec!["LoadGamePc".into()]),
             candidates: None,
+            fallback_next: None,
         };
 
         let mut driver = PipelineDriver::new(
@@ -4868,6 +4941,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
             candidates: None,
+            fallback_next: None,
         };
         let mut driver_nobar = PipelineDriver::new(
             FakeCapture {
@@ -4904,6 +4978,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
             candidates: None,
+            fallback_next: None,
         };
         let mut driver_bar = PipelineDriver::new(
             FakeCapture {
@@ -5048,6 +5123,7 @@ mod tests {
             }),
             next: Some(vec!["LoadGame".into()]),
             candidates: None,
+            fallback_next: None,
         };
         let tasks = vec![mk_task("Title", 1.1), mk_task("Other", 1.1)];
 
@@ -5120,6 +5196,7 @@ mod tests {
             }),
             next: Some(vec!["LoadGame".into()]),
             candidates: None,
+            fallback_next: None,
         };
         let tasks = vec![mk_task("Broken", empty_tpl), mk_task("Oversized", big_tpl)];
 
@@ -5372,6 +5449,7 @@ mod tests {
             }),
             next: next.map(|v| v.into_iter().map(String::from).collect()),
             candidates: None,
+            fallback_next: None,
         }
     }
 

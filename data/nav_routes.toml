@@ -1,0 +1,166 @@
+version = 1
+
+[[route]]
+id = "r01"
+hint_id = 1
+era = "現代"
+continent = "ガルレア大陸"
+region = ""
+area_name = "薄明の島"
+area_sub = ""
+era_tab = "NekoNavEraModernClickPc"
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r02"
+hint_id = 2
+era = "未来"
+continent = "ガルレア大陸"
+region = ""
+area_name = "猫神神社跡地"
+area_sub = ""
+era_tab = ""
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r05"
+hint_id = 5
+era = "古代"
+continent = "ガルレア大陸"
+region = ""
+area_name = "クンロン山脈"
+area_sub = ""
+era_tab = ""
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r26"
+hint_id = 26
+era = "現代"
+continent = "ミグレイナ大陸"
+region = ""
+area_name = "月影の森"
+area_sub = "エリア2"
+era_tab = "NekoNavEraModernClickPc"
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r28"
+hint_id = 28
+era = "未来"
+continent = "ミグレイナ大陸"
+region = ""
+area_name = "曙光都市エルジオン"
+area_sub = "ガンマ区画"
+era_tab = ""
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r29"
+hint_id = 29
+era = "現代"
+continent = "ミグレイナ大陸"
+region = ""
+area_name = "王都ユニガン"
+area_sub = ""
+era_tab = "NekoNavEraModernClickPc"
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r30"
+hint_id = 30
+era = "古代"
+continent = "ミグレイナ大陸"
+region = ""
+area_name = "火の村ラトル"
+area_sub = ""
+era_tab = ""
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r33"
+hint_id = 33
+era = "現代"
+continent = "ミグレイナ大陸"
+region = ""
+area_name = "ミグランス城"
+area_sub = "2階"
+era_tab = "NekoNavEraModernClickPc"
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r38"
+hint_id = 38
+era = "未来"
+continent = "ミグレイナ大陸"
+region = ""
+area_name = "エルジオン"
+area_sub = "エアポート"
+era_tab = ""
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r45"
+hint_id = 45
+era = "冥峡界"
+continent = ""
+region = ""
+area_name = "影の街ナズリク"
+area_sub = ""
+era_tab = ""
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"
+
+[[route]]
+id = "r46"
+hint_id = 46
+era = "現代"
+continent = "ミグレイナ大陸"
+region = ""
+area_name = "バルオキー"
+area_sub = ""
+era_tab = "NekoNavEraModernClickPc"
+continent_tab = ""
+region_tab = ""
+area_tab = ""
+loading_detect = ""
+route_status = "pending"

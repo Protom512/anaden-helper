@@ -154,6 +154,7 @@ mod tests {
             action: None,
             next: None,
             candidates: None,
+            fallback_next: None,
         }
     }
 

@@ -330,6 +330,7 @@ mod tests {
                 iterations,
                 fired_count: fired as u64,
                 per_task_matches: vec![],
+                skips: vec![],
                 elapsed_ms: 0,
                 terminal_task: None,
                 reached_goal: None,

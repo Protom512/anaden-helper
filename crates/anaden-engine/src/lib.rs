@@ -12,7 +12,7 @@ pub use pipeline_dir::resolve_pipeline_dir;
 pub use pipeline_driver::{
     Capture, GoalClock, Input, LoopOutcome, LoopStopReason, PipelineDriver, ProgressReport,
     RecoveryCause, RecoveryClock, RecoveryContext, RecoveryHook, RecoveryPlan, StepErrorKind,
-    StepOutcome, SystemClock, SystemRecoveryClock, TaskMatchCount, VerifyReport,
+    StepOutcome, SystemClock, SystemRecoveryClock, TaskMatchCount, TaskSkip, VerifyReport,
     classify_device_error, is_recoverable_io_error, plan_recovery, recovery_cause_for,
     rescale_command, stop_reason_label,
 };

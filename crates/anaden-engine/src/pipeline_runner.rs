@@ -58,6 +58,7 @@ pub struct TickResult {
     pub next_current: Option<String>,
     pub matched_confidence: Option<f32>,
     pub matched_region: Option<ScreenRegion>,
+    pub skipped: Option<String>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -111,6 +112,23 @@ impl PipelineState {
                     next_current,
                     matched_confidence,
                     matched_region: Some(matched_region),
+                    skipped: None,
+                }));
+            }
+            if let Some(fallback) = def
+                .fallback_next
+                .as_deref()
+                .and_then(|targets| targets.first())
+            {
+                let skipped = self.current.clone();
+                self.current = fallback.to_string();
+                return Ok(Some(TickResult {
+                    matched_task: fallback.to_string(),
+                    command: None,
+                    next_current: Some(fallback.to_string()),
+                    matched_confidence: None,
+                    matched_region: None,
+                    skipped: Some(skipped),
                 }));
             }
             return Ok(None);
@@ -138,6 +156,7 @@ impl PipelineState {
             next_current,
             matched_confidence,
             matched_region: Some(matched_region),
+            skipped: None,
         }))
     }
 }
@@ -330,6 +349,7 @@ mod tests {
             }),
             next: Some(vec!["LoadGame".into()]),
             candidates: None,
+            fallback_next: None,
         }];
 
         let mut state = PipelineState::new("Title");
@@ -363,6 +383,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
             candidates: None,
+            fallback_next: None,
         }];
 
         let mut state = PipelineState::new("Title");
@@ -390,6 +411,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: None,
             candidates: None,
+            fallback_next: None,
         }];
 
         let mut state = PipelineState::new("NoSuch");
@@ -418,6 +440,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: None,
             candidates: None,
+            fallback_next: None,
         }];
 
         let mut state = PipelineState::new("Title");
@@ -448,6 +471,7 @@ mod tests {
             action: Some(Action::Stop),
             next: Some(vec!["Ignored".into()]),
             candidates: None,
+            fallback_next: None,
         }];
 
         let mut state = PipelineState::new("Title");
@@ -477,6 +501,7 @@ mod tests {
             action: Some(Action::ClickSelf),
             next: Some(vec!["LoadGame".into()]),
             candidates: None,
+            fallback_next: None,
         }];
 
         let mut state = PipelineState::new("Title");

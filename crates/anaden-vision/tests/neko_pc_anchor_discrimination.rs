@@ -233,3 +233,39 @@ fn neko_diary_slot_frame_no_match_on_field_town_ad_and_worldmap() {
         assert_negative(task, &normalize_capture_fixture(fixture_name), fixture_name);
     }
 }
+
+fn load_pipeline_tasks(category: &str) -> Vec<TaskDef> {
+    let dir = workspace_root()
+        .join("templates")
+        .join("pipelines")
+        .join(category);
+    load_pipeline(&dir)
+        .unwrap_or_else(|e| panic!("load {category} pipeline tasks {}: {e}", dir.display()))
+}
+
+#[test]
+fn neko_nav_era_modern_entrance_matches_world_map_fixture_with_margin() {
+    let tasks = load_pipeline_tasks("neko_nikki");
+    let task = find_task(&tasks, "NekoNavEraModernClickPc");
+    assert_positive(
+        task,
+        &normalize_2880_fixture(WORLD_MAP_FIXTURE),
+        WORLD_MAP_FIXTURE,
+    );
+}
+
+#[test]
+fn neko_nav_era_modern_entrance_no_match_on_field_town_diary_and_ad() {
+    let tasks = load_pipeline_tasks("neko_nikki");
+    let task = find_task(&tasks, "NekoNavEraModernClickPc");
+    let negatives = [
+        FIELD_FIXTURE,
+        FIELD_HUD_FIXTURE,
+        MENU_PANEL_FIXTURE,
+        DIARY_FIXTURE,
+        AD_SELECT_FIXTURE,
+    ];
+    for fixture_name in negatives {
+        assert_negative(task, &normalize_capture_fixture(fixture_name), fixture_name);
+    }
+}
