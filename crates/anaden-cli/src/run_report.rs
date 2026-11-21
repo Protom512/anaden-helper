@@ -135,6 +135,7 @@ mod tests {
                 iterations: 7,
                 fired_count: 3,
                 per_task_matches: vec![],
+                skips: vec![],
                 elapsed_ms: 1200,
                 terminal_task: Some("max_iterations".to_string()),
                 reached_goal: None,

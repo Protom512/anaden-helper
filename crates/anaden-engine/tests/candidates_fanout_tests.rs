@@ -124,6 +124,7 @@ fn candidate_task(
         action,
         next: next.map(|v| v.into_iter().map(String::from).collect()),
         candidates: None,
+        fallback_next: None,
     }
 }
 
@@ -141,6 +142,7 @@ fn dispatcher(candidates: Vec<&str>, own_template: PathBuf) -> TaskDef {
         }),
         next: Some(vec!["ViaSelf".into()]),
         candidates: Some(candidates.into_iter().map(String::from).collect()),
+        fallback_next: None,
     }
 }
 
@@ -351,6 +353,115 @@ action = { type = 'do_nothing' }
     assert!(
         saved.contains("candidates"),
         "candidates key must persist: {saved}"
+    );
+
+    let reloaded: TaskDef = toml::from_str(&saved).expect("reload saved TaskDef");
+    assert_eq!(def, reloaded);
+}
+
+#[tokio::test]
+async fn candidates_fallback_next_advances_current_when_all_candidates_unmatched() {
+    let tpl_a = persisted_template(&needle_a());
+    let tpl_b = persisted_template(&needle_b());
+    let tpl_chain = persisted_template(&needle_chain());
+    let mut dispatcher_def = dispatcher(vec!["CandA", "CandB"], tpl_a.clone());
+    dispatcher_def.fallback_next = Some(vec!["FallbackTarget".to_string()]);
+    let tasks = vec![
+        dispatcher_def,
+        candidate_task("CandA", tpl_a, Some(Action::ClickSelf), Some(vec!["A1"])),
+        candidate_task("CandB", tpl_b, Some(Action::ClickSelf), Some(vec!["B1"])),
+        candidate_task(
+            "FallbackTarget",
+            tpl_chain,
+            Some(Action::ClickSelf),
+            Some(vec!["AfterFallback"]),
+        ),
+    ];
+    let frames = vec![canvas(&[])];
+    let (mut driver, fired) = driver_with(frames, tasks);
+
+    let outcome = driver.run_once().await;
+    assert_eq!(
+        outcome,
+        StepOutcome::Skipped {
+            from: "Dispatcher".to_string(),
+            to: "FallbackTarget".to_string(),
+        },
+        "fallback_next 指定時は全候補未一致でも fallback 先へ current が進む (skip 判定)"
+    );
+    assert_eq!(
+        driver.current(),
+        "FallbackTarget",
+        "fallback_next 指定時は全候補未一致でも fallback 先へ current が進む"
+    );
+    assert!(
+        fired.lock().expect("fired lock").is_empty(),
+        "skip は入力を発火しない"
+    );
+}
+
+#[tokio::test]
+async fn candidates_fallback_skip_recorded_in_progress_report() {
+    let tpl_a = persisted_template(&needle_a());
+    let tpl_chain = persisted_template(&needle_chain());
+    let mut dispatcher_def = dispatcher(vec!["CandA"], tpl_a.clone());
+    dispatcher_def.fallback_next = Some(vec!["FallbackTarget".to_string()]);
+    let tasks = vec![
+        dispatcher_def,
+        candidate_task("CandA", tpl_a, Some(Action::ClickSelf), Some(vec!["A1"])),
+        candidate_task("FallbackTarget", tpl_chain, Some(Action::ClickSelf), None),
+    ];
+    let blank = canvas(&[]);
+    let frames = vec![blank.clone(), blank.clone(), blank];
+    let (mut driver, fired) = driver_with(frames, tasks);
+
+    let outcome = driver.run_loop(std::time::Duration::ZERO, 3).await;
+    assert_eq!(
+        outcome.reason,
+        anaden_engine::LoopStopReason::MaxIterations,
+        "skip は停止理由にならず、ループは次タスクの評価へ進む"
+    );
+    assert_eq!(
+        outcome.progress_report.skips,
+        vec![anaden_engine::TaskSkip {
+            from: "Dispatcher".to_string(),
+            to: "FallbackTarget".to_string(),
+        }],
+        "run report に skip 記録 (from/to) が出る"
+    );
+    assert_eq!(
+        driver.current(),
+        "FallbackTarget",
+        "skip 後の current は fallback 先に固定されている"
+    );
+    assert!(fired.lock().expect("fired lock").is_empty());
+}
+
+#[test]
+fn candidates_fallback_next_task_toml_round_trips() {
+    let body = "name = 'Dispatcher'
+state = 'Dispatcher'
+algorithm = 'ccoeff'
+template = 'needle.png'
+threshold = 0.9
+candidates = ['CandA', 'CandB']
+fallback_next = ['FallbackTarget']
+action = { type = 'do_nothing' }
+";
+    let def: TaskDef = toml::from_str(body).expect("parse TaskDef with fallback_next");
+    assert_eq!(
+        def.fallback_next,
+        Some(vec!["FallbackTarget".to_string()]),
+        "fallback_next key must parse"
+    );
+
+    let dir = tempfile::tempdir().expect("tempdir");
+    let path = dir.path().join("Dispatcher.toml");
+    anaden_vision::save_task_def(&def, &path).expect("save TaskDef");
+    let saved = std::fs::read_to_string(&path).expect("read saved toml");
+    assert!(
+        saved.contains("fallback_next"),
+        "fallback_next key must persist through the save path: {saved}"
     );
 
     let reloaded: TaskDef = toml::from_str(&saved).expect("reload saved TaskDef");

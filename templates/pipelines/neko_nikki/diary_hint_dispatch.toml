@@ -4,4 +4,5 @@ algorithm  = "ccoeff"
 template   = "../../scenes/neko_pc/hint_text_miparu.png"
 roi        = [566, 148, 132, 62]
 threshold  = 0.90
-candidates = ["NekoHintMiparuRoutePc"]
+candidates    = ["NekoHintMiparuRoutePc"]
+fallback_next = ["NekoDiarySlotFramePc"]

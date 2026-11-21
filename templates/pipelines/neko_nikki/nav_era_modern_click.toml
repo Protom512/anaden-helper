@@ -1,0 +1,8 @@
+name      = "NekoNavEraModernClickPc"
+state     = "world_map"
+algorithm = "ccoeff"
+template  = "../../scenes/ticket_pc/worldmap_era_modern.png"
+roi       = [153, 60, 99, 138]
+threshold = 0.85
+action    = { type = "click_self" }
+next      = []

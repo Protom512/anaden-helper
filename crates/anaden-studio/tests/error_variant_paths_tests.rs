@@ -24,6 +24,7 @@ fn task_def(name: &str) -> TaskDef {
         action: Some(Action::ClickSelf),
         next: Some(vec![]),
         candidates: None,
+        fallback_next: None,
     }
 }
 
